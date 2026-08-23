@@ -294,80 +294,104 @@ function recordForScenario(scenario, repetition) {
       laterWorkNotAttempted: true,
       operatorEvidence: "operator acknowledged the safe boundary checkpoint",
     };
-  } else if (scenario === "host_sleep_before_deadline" || scenario === "host_sleep_after_deadline") {
-    const afterDeadline = scenario === "host_sleep_after_deadline";
-    if (afterDeadline) {
-      record.executionSuccess = false;
-      record.observedIssueCode = "operation_timed_out";
-      record.stepStates = { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 };
-      record.partialChangesPossible = true;
-      record.authorityInvalidated = true;
-      record.sentinel = {
-        ...record.sentinel,
-        operationFinishedAt: "unix:1785790010",
-        operatorActionAt: null,
-        sleepRequestedAt: "unix:1785790006",
-        sleepEnteredAt: "unix:1785790006",
-        wakeAt: "unix:1785790010",
+    } else if (scenario === "host_sleep_before_deadline" || scenario === "host_sleep_after_deadline") {
+      const afterDeadline = scenario === "host_sleep_after_deadline";
+      if (afterDeadline) {
+        record.executionSuccess = false;
+        record.observedIssueCode = "operation_timed_out";
+        record.stepStates = { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 };
+        record.partialChangesPossible = true;
+        record.authorityInvalidated = true;
+        record.sentinel = {
+          ...record.sentinel,
+          operationFinishedAt: "unix:1785790130",
+          operatorActionAt: null,
+          sleepRequestedAt: "unix:1785790100",
+          sleepEnteredAt: "unix:1785790100",
+          wakeAt: "unix:1785790130",
+        };
+        record.hostSleep = {
+          sleepRequestedAt: "unix:1785790100",
+          sleepEnteredAt: "unix:1785790100",
+          wakeAt: "unix:1785790130",
+          wallElapsedMs: 129000,
+          executorElapsedMs: 129000,
+          deadlineMs: 120000,
+          operationStartedAt: "unix:1785790001",
+          terminalAt: "unix:1785790130",
+          terminalOutcome: "timed_out",
+          hostOs: "macOS",
+          hostVersion: "15.6",
+          timerImplementation: "async_io::Timer",
+          toolchain: "rustc 1.85.0",
+          timerClassification: "suspended_time_included",
+          measurementBasis: "runner_monotonic_elapsed_and_sentinel_timestamps",
+          transportLossBlockedMeasurement: false,
+          elapsedBeforeSleepMs: 99000,
+          ...measuredHostClock({
+            phase: "after_deadline",
+            classification: "suspended_time_included",
+            beforeNs: 99_000_000_000,
+            afterNs: 130_000_000_000,
+            terminalNs: 129_000_000_000,
+            suspendedWallMs: 30_000,
+            remainingBeforeSleepMs: 21_000,
+            remainingAfterWakeMs: 0,
+          }),
+          measurementToleranceMs: 8000,
+          toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
+        };
+      } else {
+        record.executionSuccess = true;
+        record.observedIssueCode = null;
+        record.stepStates = { executed: 2, skipped: 0, failed: 0, cancelled: 0, blocked: 0, notAttempted: 0 };
+        record.sentinel = {
+          ...record.sentinel,
+          operationFinishedAt: "unix:1785790090",
+          sleepRequestedAt: "unix:1785790020",
+          sleepEnteredAt: "unix:1785790022",
+          wakeAt: "unix:1785790080",
+        };
+        record.hostSleep = {
+          sleepRequestedAt: "unix:1785790020",
+          sleepEnteredAt: "unix:1785790022",
+          wakeAt: "unix:1785790080",
+          wallElapsedMs: 90000,
+          executorElapsedMs: 90000,
+          deadlineMs: 120000,
+          operationStartedAt: "unix:1785790000",
+          terminalAt: "unix:1785790090",
+          terminalOutcome: "completed",
+          hostOs: "macOS",
+          hostVersion: "15.6",
+          timerImplementation: "async_io::Timer",
+          toolchain: "rustc 1.85.0",
+          timerClassification: "suspended_time_excluded",
+          measurementBasis: "operator_observed",
+          transportLossBlockedMeasurement: false,
+          elapsedBeforeSleepMs: 20000,
+          ...measuredHostClock({
+            phase: "before_deadline",
+            beforeNs: 20_000_000_000,
+            afterNs: 21_000_000_000,
+            terminalNs: 90_000_000_000,
+            suspendedWallMs: 58_000,
+            remainingBeforeSleepMs: 100_000,
+            remainingAfterWakeMs: 99_000,
+          }),
+          measurementToleranceMs: 8000,
+          toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
+        };
+      }
+      record.activeProcess = {
+        ...record.activeProcess,
+        terminalAt: record.hostSleep.terminalAt,
+        ...(afterDeadline
+          ? { checkedAliveAt: "unix:1785790099", actionAt: "unix:1785790100" }
+          : { checkedAliveAt: "unix:1785790021", actionAt: "unix:1785790022" }),
       };
-      record.hostSleep = {
-        sleepRequestedAt: "unix:1785790006",
-        sleepEnteredAt: "unix:1785790006",
-        wakeAt: "unix:1785790010",
-        wallElapsedMs: 9000,
-        executorElapsedMs: 9000,
-        deadlineMs: 5000,
-        operationStartedAt: "unix:1785790001",
-        terminalAt: "unix:1785790010",
-        terminalOutcome: "timed_out",
-        hostOs: "macOS",
-        hostVersion: "15.6",
-        timerImplementation: "async_io::Timer",
-        toolchain: "rustc 1.85.0",
-        timerClassification: "suspended_time_included",
-        measurementBasis: "runner_monotonic_elapsed_and_sentinel_timestamps",
-        transportLossBlockedMeasurement: false,
-        elapsedBeforeSleepMs: 5000,
-        ...measuredHostClock({
-          phase: "after_deadline",
-          classification: "suspended_time_included",
-          beforeNs: 5_000_000_000,
-          afterNs: 9_000_000_000,
-          terminalNs: 9_000_000_000,
-          suspendedWallMs: 4_000,
-          remainingBeforeSleepMs: 0,
-          remainingAfterWakeMs: 0,
-        }),
-      };
-    } else {
-      record.executionSuccess = true;
-      record.observedIssueCode = null;
-      record.stepStates = { executed: 2, skipped: 0, failed: 0, cancelled: 0, blocked: 0, notAttempted: 0 };
-      record.hostSleep = {
-        sleepRequestedAt: "unix:1785790001",
-        sleepEnteredAt: "unix:1785790002",
-        wakeAt: "unix:1785790004",
-        wallElapsedMs: 5000,
-        executorElapsedMs: 3000,
-        deadlineMs: 5000,
-        operationStartedAt: "unix:1785790000",
-        terminalAt: "unix:1785790005",
-        terminalOutcome: "completed",
-        hostOs: "macOS",
-        hostVersion: "15.6",
-        timerImplementation: "async_io::Timer",
-        toolchain: "rustc 1.85.0",
-        timerClassification: "suspended_time_excluded",
-        measurementBasis: "operator_observed",
-        transportLossBlockedMeasurement: false,
-        elapsedBeforeSleepMs: 1000,
-        ...measuredHostClock({
-          phase: "before_deadline",
-          suspendedWallMs: 2_000,
-        }),
-      };
-    }
-  } else if (scenario === "identity_stability" || scenario === "identity_replacement") {
+      record.trace.lifecycle = hostSleepLifecycle(record);
+    } else if (scenario === "identity_stability" || scenario === "identity_replacement") {
     const stable = scenario === "identity_stability";
     record.identityTransition = {
       initialSerial: "serial-sha256:" + "1".repeat(64),
@@ -420,6 +444,60 @@ function recordForScenario(scenario, repetition) {
   return sealRecord(record);
 }
 
+function hostSleepLifecycle(record) {
+  const host = record.hostSleep;
+  const active = record.activeProcess;
+  const remainingNs = (ms) => `monotonic-ns:${BigInt(ms) * 1_000_000n}`;
+  const entry = (kind, at, extra = {}) => ({
+    kind,
+    runId: record.scenarioFacts.runScope,
+    operationId: active.operationId,
+    childIdentity: active.childIdentity,
+    operationClass: "device_copy",
+    at,
+    ...extra,
+  });
+  const entries = [
+    entry("spawned", active.spawnedAt),
+    entry("mutation_started", active.mutationStartedAt),
+    entry("deadline_clock_started", host.operationStartedAt, {
+      deadlineClockStartNs: host.deadlineClockStartNs,
+      deadlineMs: host.deadlineMs,
+    }),
+    entry("liveness_sampled", active.checkedAliveAt, { alive: true, terminalReported: false }),
+    entry("deadline_clock_sampled", host.sleepRequestedAt, {
+      deadlineClockNs: host.deadlineClockBeforeSleepNs,
+      remainingNs: remainingNs(host.remainingBeforeSleepMs),
+      deadlineReached: false,
+      ownerReported: false,
+    }),
+    entry("deadline_clock_sampled", host.wakeAt, {
+      deadlineClockNs: host.deadlineClockAfterWakeNs,
+      remainingNs: remainingNs(host.remainingAfterWakeMs),
+      deadlineReached: false,
+      ownerReported: false,
+    }),
+  ];
+  if (host.terminalOutcome === "timed_out") {
+    entries.push(entry("deadline_reached", host.terminalAt, { deadlineMs: host.deadlineMs }));
+  }
+  entries.push(entry("terminal", active.terminalAt));
+  entries.push(entry("deadline_clock_sampled", host.terminalAt, {
+    deadlineClockNs: host.deadlineClockTerminalNs,
+    remainingNs: remainingNs(0),
+    deadlineReached: host.terminalOutcome === "timed_out",
+    ownerReported: true,
+  }));
+  return entries;
+}
+
+function withHostSleepLifecycle(record) {
+  return sealRecord({
+    ...record,
+    trace: { ...record.trace, lifecycle: hostSleepLifecycle(record) },
+  });
+}
+
 function uiSmokeRecord(repetition, suffix = String(repetition)) {
   const identity = (label) => Buffer.from(`${suffix}:${label}`).toString("hex").padEnd(64, "0").slice(0, 64);
   const issueByName = {
@@ -470,7 +548,9 @@ function uiSmokeRecord(repetition, suffix = String(repetition)) {
         name,
         subRunId: "ui-subrun-sha256:" + identity(`${name}:subrun`),
         backendRunId,
-        backendTraceDigest: `sha256:${canonicalDigest(physicalTrace(physicalScenario, repetition))}`,
+        backendTraceDigest: `sha256:${canonicalDigest(
+          recordForScenario(physicalScenario, repetition).trace,
+        )}`,
         backendIssueCode: issueByName[name],
         uiState,
         uiArtifact: {
@@ -845,14 +925,14 @@ test("host-sleep qualification requires measured timer evidence and accepts both
   const completed = {
     ...base,
     hostSleep: {
-      sleepRequestedAt: "unix:1785790001",
-      sleepEnteredAt: "unix:1785790002",
-      wakeAt: "unix:1785790004",
-      wallElapsedMs: 4000,
-      executorElapsedMs: 3000,
-      deadlineMs: 5000,
-      operationStartedAt: "unix:1785790001",
-      terminalAt: "unix:1785790005",
+      sleepRequestedAt: "unix:1785790020",
+      sleepEnteredAt: "unix:1785790022",
+      wakeAt: "unix:1785790080",
+      wallElapsedMs: 90000,
+      executorElapsedMs: 90000,
+      deadlineMs: 120000,
+      operationStartedAt: "unix:1785790000",
+      terminalAt: "unix:1785790090",
       terminalOutcome: "completed",
       hostOs: "macOS",
       hostVersion: "15.6",
@@ -861,18 +941,21 @@ test("host-sleep qualification requires measured timer evidence and accepts both
       timerClassification: "suspended_time_excluded",
       measurementBasis: "operator_observed",
       transportLossBlockedMeasurement: false,
-      elapsedBeforeSleepMs: 0,
+      elapsedBeforeSleepMs: 20000,
       ...measuredHostClock({
         phase: "before_deadline",
-        beforeNs: 0,
-        afterNs: 50_000_000,
-        terminalNs: 3_000_000_000,
-        remainingBeforeSleepMs: 5_000,
-        remainingAfterWakeMs: 4_950,
+        beforeNs: 20_000_000_000,
+        afterNs: 21_000_000_000,
+        terminalNs: 90_000_000_000,
+        suspendedWallMs: 58_000,
+        remainingBeforeSleepMs: 100_000,
+        remainingAfterWakeMs: 99_000,
       }),
+      measurementToleranceMs: 8000,
+      toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
     },
   };
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(completed)));
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(completed)));
 
   const timedOut = {
     ...completed,
@@ -881,22 +964,26 @@ test("host-sleep qualification requires measured timer evidence and accepts both
     stepStates: { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 },
     hostSleep: {
       ...completed.hostSleep,
-      terminalAt: "unix:1785790007",
-      wallElapsedMs: 6_000,
+      terminalAt: "unix:1785790120",
+      wallElapsedMs: 120_000,
       terminalOutcome: "timed_out",
-      executorElapsedMs: 6_000,
+      executorElapsedMs: 120_000,
       ...measuredHostClock({
         phase: "before_deadline",
         classification: "suspended_time_included",
-        beforeNs: 0,
-        afterNs: 2_000_000_000,
-        terminalNs: 6_000_000_000,
-        remainingBeforeSleepMs: 5_000,
-        remainingAfterWakeMs: 3_000,
+        beforeNs: 20_000_000_000,
+        afterNs: 80_000_000_000,
+        terminalNs: 120_000_000_000,
+        suspendedWallMs: 58_000,
+        remainingBeforeSleepMs: 100_000,
+        remainingAfterWakeMs: 40_000,
       }),
+      measurementToleranceMs: 8000,
+      toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
     },
   };
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(timedOut)));
+  timedOut.activeProcess = { ...completed.activeProcess, terminalAt: "unix:1785790120" };
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(timedOut)));
 });
 
 test("host-sleep negatives cannot qualify generic or contradictory timing", () => {
@@ -935,75 +1022,25 @@ test("host-sleep negatives cannot qualify generic or contradictory timing", () =
 
 test("post-threshold host sleep accepts a measured suspended-time-included timeout branch", () => {
   const after = recordForScenario("host_sleep_after_deadline", 1);
-  after.executionSuccess = false;
-  after.observedIssueCode = "operation_timed_out";
-  after.stepStates = { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 };
-  after.partialChangesPossible = true;
-  after.authorityInvalidated = true;
-  after.sentinel = {
-    ...after.sentinel,
-    operationFinishedAt: "unix:1785790010",
-    operatorActionAt: null,
-    sleepRequestedAt: "unix:1785790006",
-    sleepEnteredAt: "unix:1785790006",
-    wakeAt: "unix:1785790010",
-  };
-  after.hostSleep = {
-    sleepRequestedAt: "unix:1785790006",
-    sleepEnteredAt: "unix:1785790006",
-    wakeAt: "unix:1785790010",
-    wallElapsedMs: 9000,
-    executorElapsedMs: 9000,
-    deadlineMs: 5000,
-    operationStartedAt: "unix:1785790001",
-    terminalAt: "unix:1785790010",
-    terminalOutcome: "timed_out",
-    hostOs: "macOS",
-    hostVersion: "15.6",
-    timerImplementation: "async_io::Timer",
-    toolchain: "rustc 1.85.0",
-    timerClassification: "suspended_time_included",
-    measurementBasis: "runner_monotonic_elapsed_and_sentinel_timestamps",
-    transportLossBlockedMeasurement: false,
-    elapsedBeforeSleepMs: 5000,
-    ...measuredHostClock({
-      phase: "after_deadline",
-      classification: "suspended_time_included",
-      beforeNs: 5_000_000_000,
-      afterNs: 9_000_000_000,
-      terminalNs: 9_000_000_000,
-      suspendedWallMs: 4_000,
-      remainingBeforeSleepMs: 0,
-      remainingAfterWakeMs: 0,
-    }),
-  };
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(after)));
+  assert.doesNotThrow(() => validateEvidenceRecord(after));
 });
 
 test("host sleep accepts an owner terminal that precedes the retained-basis post-wake sample", () => {
   const after = recordForScenario("host_sleep_after_deadline", 1);
-  after.executionSuccess = false;
-  after.observedIssueCode = "operation_timed_out";
-  after.stepStates = { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 };
-  after.partialChangesPossible = true;
-  after.authorityInvalidated = true;
   after.sentinel = {
     ...after.sentinel,
-    operationFinishedAt: "unix:1785790010",
-    operatorActionAt: null,
-    sleepRequestedAt: "unix:1785790006",
-    sleepEnteredAt: "unix:1785790006",
-    wakeAt: "unix:1785790010",
+    operationFinishedAt: "unix:1785790129",
+    wakeAt: "unix:1785790130",
   };
   after.hostSleep = {
-    sleepRequestedAt: "unix:1785790006",
-    sleepEnteredAt: "unix:1785790006",
-    wakeAt: "unix:1785790010",
-    wallElapsedMs: 8000,
-    executorElapsedMs: 9000,
-    deadlineMs: 5000,
+    sleepRequestedAt: "unix:1785790100",
+    sleepEnteredAt: "unix:1785790100",
+    wakeAt: "unix:1785790130",
+    wallElapsedMs: 128000,
+    executorElapsedMs: 129000,
+    deadlineMs: 120000,
     operationStartedAt: "unix:1785790001",
-    terminalAt: "unix:1785790009",
+    terminalAt: "unix:1785790129",
     terminalOutcome: "timed_out",
     hostOs: "macOS",
     hostVersion: "15.6",
@@ -1012,19 +1049,22 @@ test("host sleep accepts an owner terminal that precedes the retained-basis post
     timerClassification: "suspended_time_included",
     measurementBasis: "owned_process_monotonic_deadline_clock_samples_and_sentinel_timestamps",
     transportLossBlockedMeasurement: false,
-    elapsedBeforeSleepMs: 5000,
+    elapsedBeforeSleepMs: 99000,
     ...measuredHostClock({
       phase: "after_deadline",
       classification: "suspended_time_included",
-      beforeNs: 5_000_000_000,
-      afterNs: 9_050_000_000,
-      terminalNs: 9_000_000_000,
-      suspendedWallMs: 4_000,
-      remainingBeforeSleepMs: 0,
+      beforeNs: 99_000_000_000,
+      afterNs: 130_000_000_000,
+      terminalNs: 129_000_000_000,
+      suspendedWallMs: 30_000,
+      remainingBeforeSleepMs: 21_000,
       remainingAfterWakeMs: 0,
     }),
+    measurementToleranceMs: 8000,
+    toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
   };
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(after)));
+  after.activeProcess = { ...after.activeProcess, terminalAt: "unix:1785790129" };
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(after)));
 });
 
 test("host sleep accepts completion when the owner won before the timer at the deadline boundary", () => {
@@ -1032,22 +1072,30 @@ test("host sleep accepts completion when the owner won before the timer at the d
   before.executionSuccess = true;
   before.observedIssueCode = null;
   before.stepStates = { executed: 2, skipped: 0, failed: 0, cancelled: 0, blocked: 0, notAttempted: 0 };
-  before.sentinel.operationFinishedAt = "unix:1785790006";
+  before.sentinel.operationFinishedAt = "unix:1785790120";
+  before.sentinel.wakeAt = "unix:1785790119";
   before.hostSleep = {
     ...before.hostSleep,
-    terminalAt: "unix:1785790006",
-    wallElapsedMs: 6000,
-    executorElapsedMs: 6000,
+    wakeAt: "unix:1785790119",
+    terminalAt: "unix:1785790120",
+    wallElapsedMs: 120000,
+    executorElapsedMs: 120000,
     terminalOutcome: "completed",
     ...measuredHostClock({
       phase: "before_deadline",
       classification: "suspended_time_excluded",
-      beforeNs: 1_000_000_000,
-      afterNs: 1_050_000_000,
-      terminalNs: 6_000_000_000,
+      beforeNs: 20_000_000_000,
+      afterNs: 21_000_000_000,
+      terminalNs: 120_000_000_000,
+      suspendedWallMs: 97_000,
+      remainingBeforeSleepMs: 100_000,
+      remainingAfterWakeMs: 99_000,
     }),
+    measurementToleranceMs: 8000,
+    toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
   };
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(before)));
+  before.activeProcess = { ...before.activeProcess, terminalAt: "unix:1785790120" };
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(before)));
 });
 
 test("host sleep deadline phase derives from the exact deadline-clock start, not the sentinel progress marker", () => {
@@ -1055,20 +1103,20 @@ test("host sleep deadline phase derives from the exact deadline-clock start, not
   before.sentinel = {
     ...before.sentinel,
     operationStartedAt: "unix:1785790000",
-    operationFinishedAt: "unix:1785790006",
-    sleepRequestedAt: "unix:1785790004",
-    sleepEnteredAt: "unix:1785790004",
-    wakeAt: "unix:1785790005",
+    operationFinishedAt: "unix:1785790121",
+    sleepRequestedAt: "unix:1785790100",
+    sleepEnteredAt: "unix:1785790100",
+    wakeAt: "unix:1785790120",
   };
   before.hostSleep = {
     ...before.hostSleep,
-    operationStartedAt: "unix:1785790004",
-    sleepRequestedAt: "unix:1785790004",
-    sleepEnteredAt: "unix:1785790004",
-    wakeAt: "unix:1785790005",
-    terminalAt: "unix:1785790006",
-    wallElapsedMs: 2000,
-    executorElapsedMs: 2000,
+    operationStartedAt: "unix:1785790100",
+    sleepRequestedAt: "unix:1785790100",
+    sleepEnteredAt: "unix:1785790100",
+    wakeAt: "unix:1785790120",
+    terminalAt: "unix:1785790121",
+    wallElapsedMs: 21000,
+    executorElapsedMs: 21000,
     elapsedBeforeSleepMs: 0,
     terminalOutcome: "completed",
     ...measuredHostClock({
@@ -1076,16 +1124,24 @@ test("host sleep deadline phase derives from the exact deadline-clock start, not
       classification: "suspended_time_excluded",
       beforeNs: 1_000_000_000,
       afterNs: 1_050_000_000,
-      terminalNs: 2_000_000_000,
-      suspendedWallMs: 1_000,
-      remainingBeforeSleepMs: 4_000,
-      remainingAfterWakeMs: 3_950,
+      terminalNs: 21_000_000_000,
+      suspendedWallMs: 20_000,
+      remainingBeforeSleepMs: 119_000,
+      remainingAfterWakeMs: 118_950,
     }),
+    measurementToleranceMs: 8000,
+    toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
   };
-  // The sentinel progress marker alone would place wake at 5 seconds, at the
-  // 5-second deadline; the exact deadline-clock start at 4 seconds leaves
+  before.activeProcess = {
+    ...before.activeProcess,
+    checkedAliveAt: "unix:1785790099",
+    actionAt: "unix:1785790100",
+    terminalAt: "unix:1785790121",
+  };
+  // The sentinel progress marker alone would place wake at 120 seconds, at the
+  // 120-second deadline; the exact deadline-clock start at 100 seconds leaves
   // wake before the deadline, so the before-deadline branch must qualify.
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(before)));
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(before)));
   const after = {
     ...before,
     scenario: "host_sleep_after_deadline",
@@ -1321,6 +1377,139 @@ test("host sleep enforces the manifest phase instead of reusing before-threshold
   assert.throws(() => validateEvidenceRecord(relabelled), /phase|threshold/i);
 });
 
+test("passed host-sleep trace lifecycle is the source for activeProcess and hostSleep projections", () => {
+  const record = recordForScenario("host_sleep_before_deadline", 1);
+  assert.doesNotThrow(() => validateEvidenceRecord(record));
+  const lifecycle = record.trace.lifecycle;
+  const active = record.activeProcess;
+  assert.equal(new Set(lifecycle.map((entry) => entry.operationId)).size, 1);
+  assert.equal(new Set(lifecycle.map((entry) => entry.childIdentity)).size, 1);
+  assert.equal(lifecycle[0].operationId, active.operationId);
+  assert.equal(lifecycle[0].childIdentity, active.childIdentity);
+  const samples = lifecycle.filter((entry) => entry.kind === "deadline_clock_sampled");
+  const watcher = samples.filter((entry) => entry.ownerReported === false);
+  const owner = samples.find((entry) => entry.ownerReported === true);
+  assert.equal(watcher[0].deadlineClockNs, record.hostSleep.deadlineClockBeforeSleepNs);
+  assert.equal(watcher[1].deadlineClockNs, record.hostSleep.deadlineClockAfterWakeNs);
+  assert.equal(owner.deadlineClockNs, record.hostSleep.deadlineClockTerminalNs);
+  assert.equal(
+    lifecycle.find((entry) => entry.kind === "deadline_clock_started").deadlineMs,
+    120000,
+  );
+});
+
+test("passed host-sleep trace lifecycle cannot be missing, rebound, or inconsistent", () => {
+  const record = recordForScenario("host_sleep_after_deadline", 1);
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord({
+      ...record,
+      trace: { ...record.trace, lifecycle: [] },
+    })),
+    /lifecycle/i,
+  );
+
+  const rebound = structuredClone(record);
+  rebound.trace.lifecycle = rebound.trace.lifecycle.map((entry) => ({
+    ...entry,
+    operationId: "operation-sha256:" + "f".repeat(64),
+  }));
+  assert.throws(() => validateEvidenceRecord(sealRecord(rebound)), /bound|operation/i);
+
+  const mismatchedClock = structuredClone(record);
+  const watcherSamples = mismatchedClock.trace.lifecycle.filter(
+    (entry) => entry.kind === "deadline_clock_sampled" && entry.ownerReported === false,
+  );
+  watcherSamples[0].deadlineClockNs = "monotonic-ns:1";
+  assert.throws(() => validateEvidenceRecord(sealRecord(mismatchedClock)), /clock samples|hostSleep/i);
+
+  const misalignedTerminal = structuredClone(record);
+  misalignedTerminal.trace.lifecycle.find((entry) => entry.kind === "terminal").at =
+    "unix:1785790129";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(misalignedTerminal)),
+    /owner terminal sample|terminal event/i,
+  );
+
+  const wrongClass = structuredClone(record);
+  for (const entry of wrongClass.trace.lifecycle) {
+    entry.operationClass = "host_push";
+  }
+  assert.throws(() => validateEvidenceRecord(sealRecord(wrongClass)), /device_copy/i);
+});
+
+test("host-sleep trace lifecycle enforces the owner terminal and deadline authority", () => {
+  const timedOut = recordForScenario("host_sleep_after_deadline", 1);
+  assert.doesNotThrow(() => validateEvidenceRecord(timedOut));
+
+  // The owner records DeadlineReached when the timer fires, before the
+  // terminal path runs, so an earlier canonical second is valid; the retained
+  // one-second resolution may also make it equal to the terminal second.
+  const earlierDeadline = structuredClone(timedOut);
+  earlierDeadline.trace.lifecycle.find((entry) => entry.kind === "deadline_reached").at =
+    "unix:1785790129";
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(earlierDeadline)));
+
+  const lateDeadline = structuredClone(timedOut);
+  lateDeadline.trace.lifecycle.find((entry) => entry.kind === "deadline_reached").at =
+    "unix:1785790131";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(lateDeadline)),
+    /precede or align/i,
+  );
+
+  const missingDeadline = structuredClone(timedOut);
+  missingDeadline.trace.lifecycle = missingDeadline.trace.lifecycle.filter(
+    (entry) => entry.kind !== "deadline_reached",
+  );
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(missingDeadline)),
+    /exactly one owner deadline_reached/i,
+  );
+
+  const completed = recordForScenario("host_sleep_before_deadline", 1);
+  assert.doesNotThrow(() => validateEvidenceRecord(completed));
+  const withDeadline = structuredClone(completed);
+  withDeadline.trace.lifecycle = [
+    ...withDeadline.trace.lifecycle,
+    {
+      kind: "deadline_reached",
+      runId: withDeadline.scenarioFacts.runScope,
+      operationId: withDeadline.activeProcess.operationId,
+      childIdentity: withDeadline.activeProcess.childIdentity,
+      operationClass: "device_copy",
+      at: "unix:1785790090",
+      deadlineMs: 120000,
+    },
+  ];
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(withDeadline)),
+    /must not contain an owner deadline_reached/i,
+  );
+
+  // owned_process emits the owner terminal clock sample and the Terminal
+  // event from one captured SystemTime, so their canonical seconds must match.
+  const shiftedOwner = structuredClone(timedOut);
+  shiftedOwner.trace.lifecycle.find(
+    (entry) => entry.kind === "deadline_clock_sampled" && entry.ownerReported === true,
+  ).at = "unix:1785790131";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(shiftedOwner)),
+    /owner terminal sample must align/i,
+  );
+});
+
+test("blocked host-sleep attempts remain valid without a complete lifecycle trace", () => {
+  const blocked = recordForScenario("host_sleep_before_deadline", 1);
+  blocked.outcome = "blocked";
+  blocked.hostSleep = null;
+  blocked.activeProcess = null;
+  blocked.notes = [
+    "host-sleep pre-suspend handshake or deadline-clock observation was missing or invalid",
+  ];
+  blocked.trace = { ...blocked.trace, lifecycle: [] };
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(blocked)));
+});
+
 test("excluded suspension may time out later from active time without changing classification", () => {
   const record = recordForScenario("host_sleep_before_deadline", 1);
   record.executionSuccess = false;
@@ -1328,25 +1517,26 @@ test("excluded suspension may time out later from active time without changing c
   record.stepStates = { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 };
   record.hostSleep = {
     ...record.hostSleep,
-    terminalAt: "unix:1785790010",
-    wallElapsedMs: 10_000,
+    terminalAt: "unix:1785790120",
+    wallElapsedMs: 120_000,
     terminalOutcome: "timed_out",
-    executorElapsedMs: 6_000,
+    executorElapsedMs: 120_000,
     timerClassification: "suspended_time_excluded",
     deadlineClockStartNs: "monotonic-ns:0",
-    deadlineClockBeforeSleepNs: "monotonic-ns:1000000000",
-    deadlineClockAfterWakeNs: "monotonic-ns:1050000000",
-    deadlineClockTerminalNs: "monotonic-ns:6000000000",
-    suspendedWallMs: 2_000,
-    deadlineClockAdvanceDuringSuspensionMs: 50,
-    remainingBeforeSleepMs: 4_000,
-    remainingAfterWakeMs: 3_950,
-    measurementToleranceMs: 100,
-    toleranceRationale: "One hundred milliseconds bounds marker and scheduler jitter.",
+    deadlineClockBeforeSleepNs: "monotonic-ns:20000000000",
+    deadlineClockAfterWakeNs: "monotonic-ns:21000000000",
+    deadlineClockTerminalNs: "monotonic-ns:120000000000",
+    suspendedWallMs: 58_000,
+    deadlineClockAdvanceDuringSuspensionMs: 1_000,
+    remainingBeforeSleepMs: 100_000,
+    remainingAfterWakeMs: 99_000,
+    measurementToleranceMs: 8_000,
+    toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
     operatorActionPhase: "before_deadline",
   };
-  record.sentinel.operationFinishedAt = "unix:1785790010";
-  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(record)));
+  record.sentinel.operationFinishedAt = "unix:1785790120";
+  record.activeProcess = { ...record.activeProcess, terminalAt: "unix:1785790120" };
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(record)));
 });
 
 test("matrix validation rejects reused run scope and supporting evidence", () => {
@@ -1548,6 +1738,8 @@ function checkedInRecordObjects() {
     "usb_disconnect_boundary-rep2-a59a7f939d79d6a0.json",
     "operation_timeout-rep1-69ce0c5bc594a244.json",
     "operation_timeout-rep2-4baf257a04838450.json",
+    "host_sleep_before_deadline-rep1-18917650add26861.json",
+    "host_sleep_before_deadline-rep2-735aba0b279d4da7.json",
   ];
   return names.map((name) => JSON.parse(readFileSync(path.join(CHECKED_IN_EVIDENCE_DIR, name), "utf8")));
 }
@@ -1579,7 +1771,10 @@ test("ui binding index eligibility is exact and excludes incompatible physical e
   assert.ok(bindings.transport.every((binding) => /be0ba89089556f91|06d326ca5f4a8d14/.test(binding.runId)));
   assert.equal(bindings.root.length, 2);
   assert.equal(bindings.storage.length, 2);
-  assert.equal(bindings.host_sleep.length, 0);
+  assert.equal(bindings.host_sleep.length, 2);
+  assert.ok(bindings.host_sleep.every((binding) => binding.scenario === "host_sleep_before_deadline"));
+  assert.ok(bindings.host_sleep.every((binding) => binding.issueCode === "operation_timed_out"));
+  assert.ok(bindings.host_sleep.every((binding) => /18917650add26861|735aba0b279d4da7/.test(binding.runId)));
   assert.ok(bindings.transport.every((binding) => !binding.evidencePath.includes("boundary")));
   assert.ok(bindings.host_sleep.every((binding) => binding.scenario !== "operation_timeout"));
 });

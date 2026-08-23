@@ -1,0 +1,135 @@
+{
+  "runId": "physical-run-sha256:18917650add268613ac8f3e60f4ef1e187732562ea0ecefe2506b89ccbb54bbd",
+  "scenario": "host_sleep_before_deadline",
+  "repetition": 1,
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:5ef97ddfa4fe7934caf711204e7da4ad3af26273358941f1863feebfea00c875",
+    "nonce": "nonce-sha256:8bdd42d741a732bd7aee4a5eedd472d268ab50b460bfe0390c5838fa95e7cd23",
+    "runId": "physical-run-sha256:18917650add268613ac8f3e60f4ef1e187732562ea0ecefe2506b89ccbb54bbd",
+    "scenario": "host_sleep_before_deadline",
+    "repetition": 1,
+    "armedAt": "unix:1787471254",
+    "operationStartedAt": "unix:1787471254",
+    "boundaryReadyAt": null,
+    "operatorActionAt": null,
+    "operationFinishedAt": "unix:1787471376",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": "unix:1787471269",
+    "sleepEnteredAt": "unix:1787471271",
+    "wakeAt": "unix:1787471300",
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "slot": {
+    "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+    "executionId": "execution-sha256:597b2225622f518f128513ae4b48c85a98773ee3fb3d4d4125f729a7ba0e7072",
+    "acquired": true,
+    "released": true,
+    "acquiredAt": "unix:1787471254",
+    "terminalCleanupAt": "unix:1787471376",
+    "releasedAt": "unix:1787471376"
+  },
+  "terminal": {
+    "outcome": "passed",
+    "issueCode": "operation_timed_out",
+    "stepStates": {
+      "executed": 0,
+      "skipped": 0,
+      "failed": 1,
+      "cancelled": 0,
+      "blocked": 0,
+      "notAttempted": 1
+    }
+  },
+  "lifecycle": [
+    {
+      "kind": "spawned",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471255"
+    },
+    {
+      "kind": "mutation_started",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471255"
+    },
+    {
+      "kind": "deadline_clock_started",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471255",
+      "deadlineClockStartNs": "monotonic-ns:0",
+      "deadlineMs": 120000
+    },
+    {
+      "kind": "liveness_sampled",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471269",
+      "alive": true,
+      "terminalReported": false
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471269",
+      "deadlineClockNs": "monotonic-ns:13526665500",
+      "remainingNs": "monotonic-ns:106473334500",
+      "deadlineReached": false,
+      "ownerReported": false
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471300",
+      "deadlineClockNs": "monotonic-ns:43972000375",
+      "remainingNs": "monotonic-ns:76027999625",
+      "deadlineReached": false,
+      "ownerReported": false
+    },
+    {
+      "kind": "deadline_reached",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471376",
+      "deadlineMs": 120000
+    },
+    {
+      "kind": "terminal",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471376"
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:cfa171dae73b4a208669f15df4b601d26c49a69ba8ded34058eb9b1a08605a72",
+      "operationId": "operation-sha256:8ee4c50049f6a72692b0a2796d58f5d5bbec6260f0607c9f3dcb4ea1a53e804d",
+      "childIdentity": "child-sha256:0f7e503ba92d7a6c683184940341bb317d45ffe869026be0329c35830dcbd72c",
+      "operationClass": "device_copy",
+      "at": "unix:1787471376",
+      "deadlineClockNs": "monotonic-ns:120004675042",
+      "remainingNs": "monotonic-ns:0",
+      "deadlineReached": true,
+      "ownerReported": true
+    }
+  ]
+}

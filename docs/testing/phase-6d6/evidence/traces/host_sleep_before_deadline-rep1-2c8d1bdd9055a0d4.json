@@ -1,0 +1,123 @@
+{
+  "runId": "physical-run-sha256:2c8d1bdd9055a0d4d79c4691d59c27a8867757fc10364f22118e0439dd0f8328",
+  "scenario": "host_sleep_before_deadline",
+  "repetition": 1,
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:297af6f2270ca2c67c262b0f95f112cb559136c3a00e9285cdd5bf8b9c1470f6",
+    "nonce": "nonce-sha256:2d74158fb4f832944a52b0d2d097a9a2b6035877d3ea4e1ddf81dee574f06d7f",
+    "runId": "physical-run-sha256:2c8d1bdd9055a0d4d79c4691d59c27a8867757fc10364f22118e0439dd0f8328",
+    "scenario": "host_sleep_before_deadline",
+    "repetition": 1,
+    "armedAt": "unix:1787470648",
+    "operationStartedAt": "unix:1787470649",
+    "boundaryReadyAt": null,
+    "operatorActionAt": null,
+    "operationFinishedAt": "unix:1787470791",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": "unix:1787470665",
+    "sleepEnteredAt": "unix:1787470672",
+    "wakeAt": "unix:1787470715",
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "slot": {
+    "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+    "executionId": "execution-sha256:0def7e67adfa08781efb305d061861069be60e76006462ff17c560b37fd31c6c",
+    "acquired": true,
+    "released": true,
+    "acquiredAt": "unix:1787470649",
+    "terminalCleanupAt": "unix:1787470791",
+    "releasedAt": "unix:1787470791"
+  },
+  "terminal": {
+    "outcome": "blocked",
+    "issueCode": "operation_timed_out",
+    "stepStates": {
+      "executed": 0,
+      "skipped": 0,
+      "failed": 1,
+      "cancelled": 0,
+      "blocked": 0,
+      "notAttempted": 1
+    }
+  },
+  "lifecycle": [
+    {
+      "kind": "spawned",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470650"
+    },
+    {
+      "kind": "mutation_started",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470650"
+    },
+    {
+      "kind": "deadline_clock_started",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470650",
+      "deadlineClockStartNs": "monotonic-ns:0",
+      "deadlineMs": 120000
+    },
+    {
+      "kind": "liveness_sampled",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470665",
+      "alive": true,
+      "terminalReported": false
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470665",
+      "deadlineClockNs": "monotonic-ns:15264213583",
+      "remainingNs": "monotonic-ns:104735786417",
+      "deadlineReached": false,
+      "ownerReported": false
+    },
+    {
+      "kind": "deadline_reached",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470791",
+      "deadlineMs": 120000
+    },
+    {
+      "kind": "terminal",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470791"
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:cc9a86b01cf35ebc1f8e6e93c51ca22f942ea58b5e0ae41139a73023efad287a",
+      "operationId": "operation-sha256:c489bda25c32741ae48dbacdbedd33e626d610032751290db0e174111c75e5ce",
+      "childIdentity": "child-sha256:3ebe44c29d8434b9560f6aaee342e95a260955df902f4e23f2b5e2c68fa578ee",
+      "operationClass": "device_copy",
+      "at": "unix:1787470791",
+      "deadlineClockNs": "monotonic-ns:120018585375",
+      "remainingNs": "monotonic-ns:0",
+      "deadlineReached": true,
+      "ownerReported": true
+    }
+  ]
+}

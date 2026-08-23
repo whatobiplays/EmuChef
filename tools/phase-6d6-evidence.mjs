@@ -727,6 +727,117 @@ function validateHostSleep(record, contract, passingRecord) {
     if (!rule.allowedTerminalOutcomes.includes(record.hostSleep.terminalOutcome)) fail("host terminal outcome is not allowed by the scenario contract");
     if (record.hostSleep.terminalOutcome === "completed" && (!record.executionSuccess || record.observedIssueCode !== null)) fail("completed host-sleep evidence disagrees with the terminal execution result");
     if (record.hostSleep.terminalOutcome === "timed_out" && (record.executionSuccess || record.observedIssueCode !== "operation_timed_out")) fail("timed-out host-sleep evidence disagrees with the terminal execution result");
+    validateHostSleepTraceLifecycle(record);
+  }
+}
+
+function validateHostSleepTraceLifecycle(record) {
+  const lifecycle = record.trace?.lifecycle;
+  if (!Array.isArray(lifecycle) || lifecycle.length === 0) {
+    fail("passed host-sleep trace must contain lifecycle evidence");
+  }
+  const runScope = record.scenarioFacts.runScope;
+  const expectedOperationId = record.activeProcess?.operationId;
+  const expectedChildIdentity = record.activeProcess?.childIdentity;
+  if (!expectedOperationId || !expectedChildIdentity) {
+    fail("passed host-sleep lifecycle requires activeProcess identity");
+  }
+  for (const entry of lifecycle) {
+    assertString(entry.kind, "trace.lifecycle.kind");
+    assertString(entry.runId, "trace.lifecycle.runId");
+    assertString(entry.operationId, "trace.lifecycle.operationId", /^operation-sha256:[0-9a-f]{64}$/);
+    assertString(entry.childIdentity, "trace.lifecycle.childIdentity", /^child-sha256:[0-9a-f]{64}$/);
+    assertString(entry.operationClass, "trace.lifecycle.operationClass");
+    assertString(entry.at, "trace.lifecycle.at", /^unix:\d+$/);
+    if (
+      entry.runId !== runScope
+      || entry.operationId !== expectedOperationId
+      || entry.childIdentity !== expectedChildIdentity
+    ) {
+      fail("passed host-sleep trace lifecycle is not bound to the projected operation and run");
+    }
+    if (entry.operationClass !== "device_copy") {
+      fail("passed host-sleep trace lifecycle must be the exact device_copy operation");
+    }
+  }
+  const spawned = lifecycle.filter((entry) => entry.kind === "spawned");
+  const mutations = lifecycle.filter((entry) => entry.kind === "mutation_started");
+  const liveness = lifecycle.filter(
+    (entry) => entry.kind === "liveness_sampled" && entry.alive === true && entry.terminalReported === false,
+  );
+  const clockStarts = lifecycle.filter((entry) => entry.kind === "deadline_clock_started");
+  const samples = lifecycle.filter((entry) => entry.kind === "deadline_clock_sampled");
+  const watcherSamples = samples.filter((entry) => entry.ownerReported === false);
+  const ownerSamples = samples.filter((entry) => entry.ownerReported === true);
+  const deadlineReached = lifecycle.filter((entry) => entry.kind === "deadline_reached");
+  const terminals = lifecycle.filter((entry) => entry.kind === "terminal");
+  if (
+    spawned.length !== 1
+    || mutations.length !== 1
+    || liveness.length < 1
+    || clockStarts.length !== 1
+    || watcherSamples.length !== 2
+    || ownerSamples.length !== 1
+    || terminals.length !== 1
+  ) {
+    fail("passed host-sleep trace lifecycle is missing a required exact-child observation");
+  }
+  const [clockStart] = clockStarts;
+  if (
+    clockStart.deadlineMs !== 120000
+    || monotonicNanos(clockStart.deadlineClockStartNs, "trace.lifecycle.deadlineClockStartNs") !== 0n
+  ) {
+    fail("passed host-sleep trace deadline clock must be the 120000 ms qualification basis at run-local origin");
+  }
+  const host = record.hostSleep;
+  const [before, after] = watcherSamples;
+  const [owner] = ownerSamples;
+  if (
+    before.deadlineClockNs !== host.deadlineClockBeforeSleepNs
+    || after.deadlineClockNs !== host.deadlineClockAfterWakeNs
+    || owner.deadlineClockNs !== host.deadlineClockTerminalNs
+  ) {
+    fail("passed host-sleep trace clock samples do not match the projected hostSleep values");
+  }
+  const seconds = (value) => unixSeconds(value, "trace.lifecycle.at");
+  const startSec = seconds(clockStart.at);
+  const beforeSec = seconds(before.at);
+  const afterSec = seconds(after.at);
+  const ownerSec = seconds(owner.at);
+  const spawnSec = seconds(spawned[0].at);
+  const mutationSec = seconds(mutations[0].at);
+  const livenessSec = seconds(liveness[0].at);
+  const terminalSec = seconds(terminals[0].at);
+  if (
+    !(startSec <= beforeSec && beforeSec <= afterSec && beforeSec <= ownerSec
+      && spawnSec <= mutationSec && mutationSec <= livenessSec && livenessSec <= terminalSec)
+  ) {
+    fail("passed host-sleep trace lifecycle ordering is inconsistent");
+  }
+  // `owned_process` emits the owner-reported terminal clock sample and the
+  // `Terminal` event from one captured `SystemTime` (`record_terminal`), so
+  // their canonical unix seconds must be identical. The owner may still reach
+  // terminal before the retained-basis post-wake watcher sample, so no
+  // ordering is imposed between `ownerSec` and `afterSec`.
+  if (ownerSec !== terminalSec) {
+    fail("passed host-sleep owner terminal sample must align with the terminal event");
+  }
+  // `DeadlineReached` is recorded by the owner when the timer fires, before
+  // the terminal path runs; serialized seconds may therefore be equal to or
+  // earlier than the terminal event, never later.
+  if (host.terminalOutcome === "timed_out") {
+    if (deadlineReached.length !== 1) {
+      fail("timed-out host-sleep trace lifecycle must contain exactly one owner deadline_reached event");
+    }
+    const [deadlineEvent] = deadlineReached;
+    if (deadlineEvent.deadlineMs !== 120000) {
+      fail("timed-out host-sleep trace deadline_reached must carry the 120000 ms qualification deadline");
+    }
+    if (seconds(deadlineEvent.at) > terminalSec) {
+      fail("timed-out host-sleep trace deadline_reached must precede or align with the owner terminal event");
+    }
+  } else if (deadlineReached.length !== 0) {
+    fail("completed host-sleep trace lifecycle must not contain an owner deadline_reached event");
   }
 }
 

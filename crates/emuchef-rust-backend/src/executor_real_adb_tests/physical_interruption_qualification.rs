@@ -307,6 +307,22 @@ const fn active_operation_class(scenario: Scenario) -> &'static str {
     }
 }
 
+/// Derive the sanitized operation and child identities used by every lifecycle
+/// projection and by the persisted trace. The raw invocation-local operation
+/// id never enters serialized evidence; only the domain-separated digests do.
+fn operation_identity_digests(run_scope: &str, raw_identity: u64) -> (String, String) {
+    (
+        format!(
+            "operation-sha256:{}",
+            digest(&format!("phase6d6-operation:{run_scope}:{raw_identity}"))
+        ),
+        format!(
+            "child-sha256:{}",
+            digest(&format!("phase6d6-child:{run_scope}:{raw_identity}"))
+        ),
+    )
+}
+
 /// Load the single checked-in scenario contract shared with the host
 /// validator.  A physical record is never evaluated from the observed
 /// `ExecutionRunResult::success` bit alone: this contract defines which
@@ -1450,20 +1466,13 @@ fn active_process_evidence(
     {
         return None;
     }
-    let raw_identity = operation_id.as_u64();
+    let (operation_id_value, child_identity) =
+        operation_identity_digests(run_scope, operation_id.as_u64());
     Some(json!({
         "runId": run_scope,
-        "operationId": format!(
-            "operation-sha256:{}",
-            digest(&format!(
-                "phase6d6-operation:{run_scope}:{raw_identity}"
-            ))
-        ),
+        "operationId": operation_id_value,
         "operationClass": operation_class,
-        "childIdentity": format!(
-            "child-sha256:{}",
-            digest(&format!("phase6d6-child:{run_scope}:{raw_identity}"))
-        ),
+        "childIdentity": child_identity,
         "spawnedAt": system_time_value(Some(spawned)),
         "mutationStartedAt": system_time_value(Some(mutation_started)),
         "checkedAliveAt": system_time_value(Some(checked_alive)),
@@ -1626,18 +1635,13 @@ fn timeout_process_evidence(
     {
         return None;
     }
-    let raw_identity = operation_id.as_u64();
+    let (operation_id_value, child_identity) =
+        operation_identity_digests(run_scope, operation_id.as_u64());
     Some(json!({
         "runId": run_scope,
-        "operationId": format!(
-            "operation-sha256:{}",
-            digest(&format!("phase6d6-operation:{run_scope}:{raw_identity}"))
-        ),
+        "operationId": operation_id_value,
         "operationClass": "device_copy",
-        "childIdentity": format!(
-            "child-sha256:{}",
-            digest(&format!("phase6d6-child:{run_scope}:{raw_identity}"))
-        ),
+        "childIdentity": child_identity,
         "spawnedAt": system_time_value(Some(spawned)),
         "mutationStartedAt": system_time_value(Some(mutation_started)),
         "checkedAliveAt": system_time_value(Some(checked_alive)),
@@ -1927,6 +1931,89 @@ fn host_sleep_events_snapshot(
     observer: &Option<OwnedProcessObservationHandle>,
 ) -> Option<Vec<OwnedProcessLifecycleEvent>> {
     observer.as_ref().map(|observer| observer.events())
+}
+
+/// Serialize one owned-process lifecycle event into sanitized trace evidence.
+///
+/// Only operations with a serializable qualification class (`device_copy` or
+/// `host_push`) are emitted. The raw invocation-local operation id, command
+/// text, PID, serial, and device paths never enter serialized evidence; the
+/// operation and child identities are the same domain-separated digests used
+/// by `activeProcess`. Event-specific payloads are limited to the sanitized
+/// lifecycle facts needed to independently validate the final projections.
+fn lifecycle_event_value(run_scope: &str, event: &OwnedProcessLifecycleEvent) -> Option<Value> {
+    let operation = event.operation();
+    let operation_class = process_operation_class(operation)?;
+    let (operation_id, child_identity) =
+        operation_identity_digests(run_scope, event.operation_id().as_u64());
+    let kind = match event {
+        OwnedProcessLifecycleEvent::Spawned { .. } => "spawned",
+        OwnedProcessLifecycleEvent::MutationStarted { .. } => "mutation_started",
+        OwnedProcessLifecycleEvent::LivenessSampled { .. } => "liveness_sampled",
+        OwnedProcessLifecycleEvent::DeadlineReached { .. } => "deadline_reached",
+        OwnedProcessLifecycleEvent::DeadlineClockStarted { .. } => "deadline_clock_started",
+        OwnedProcessLifecycleEvent::DeadlineClockSampled { .. } => "deadline_clock_sampled",
+        OwnedProcessLifecycleEvent::Terminal { .. } => "terminal",
+    };
+    let mut value = json!({
+        "kind": kind,
+        "runId": run_scope,
+        "operationId": operation_id,
+        "childIdentity": child_identity,
+        "operationClass": operation_class,
+        "at": system_time_value(Some(event.at())),
+    });
+    match event {
+        OwnedProcessLifecycleEvent::LivenessSampled {
+            alive,
+            terminal_reported,
+            ..
+        } => {
+            value["alive"] = json!(alive);
+            value["terminalReported"] = json!(terminal_reported);
+        }
+        OwnedProcessLifecycleEvent::DeadlineReached { deadline, .. } => {
+            value["deadlineMs"] = json!(deadline.as_millis());
+        }
+        OwnedProcessLifecycleEvent::DeadlineClockStarted {
+            deadline_clock_start_ns,
+            deadline_ns,
+            ..
+        } => {
+            value["deadlineClockStartNs"] =
+                json!(format!("monotonic-ns:{deadline_clock_start_ns}"));
+            value["deadlineMs"] = json!(deadline_ns / 1_000_000);
+        }
+        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+            deadline_clock_ns,
+            remaining_ns,
+            deadline_reached,
+            owner_reported,
+            ..
+        } => {
+            value["deadlineClockNs"] = json!(format!("monotonic-ns:{deadline_clock_ns}"));
+            value["remainingNs"] = json!(format!("monotonic-ns:{remaining_ns}"));
+            value["deadlineReached"] = json!(deadline_reached);
+            value["ownerReported"] = json!(owner_reported);
+        }
+        _ => {}
+    }
+    Some(value)
+}
+
+/// Build the sanitized `trace.lifecycle` array from the retained observer
+/// snapshot. The source lifecycle observations are persisted independently of
+/// whether `activeProcess` or `hostSleep` could be projected, so a blocked or
+/// partial attempt never discards the observations that explain it.
+fn lifecycle_trace_events(
+    run_scope: &str,
+    events: Option<&[OwnedProcessLifecycleEvent]>,
+) -> Vec<Value> {
+    events
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|event| lifecycle_event_value(run_scope, event))
+        .collect()
 }
 
 fn wait_for_terminal_cleanup_authority(
@@ -2755,6 +2842,7 @@ fn run_reviewed_plan(
     let checkpoint_failed = Arc::new(AtomicBool::new(false));
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let action_time = Arc::new(std::sync::Mutex::new(None));
+    let host_sleep_checkpoint_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let in_flight = Arc::new(AtomicBool::new(false));
     let active_capture = Arc::new(std::sync::Mutex::new(ActiveCancellationCapture::default()));
     let scenario = invocation.scenario;
@@ -2858,6 +2946,7 @@ fn run_reviewed_plan(
         let watcher_action_time = Arc::clone(&action_time);
         let watcher_checkpoint_failed = Arc::clone(&checkpoint_failed);
         let watcher_cancel_requested = Arc::clone(&cancel_requested);
+        let watcher_checkpoint_error = Arc::clone(&host_sleep_checkpoint_error);
         let watcher_process_observer = process_observer.clone();
         Some(std::thread::spawn(move || {
             if scenario.supports_host_push_active_stimulus() {
@@ -2932,8 +3021,11 @@ fn run_reviewed_plan(
                             capture.requested_at = Some(action_time);
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
                         watcher_checkpoint_failed.store(true, Ordering::Release);
+                        if let Ok(mut slot) = watcher_checkpoint_error.lock() {
+                            *slot = Some(error);
+                        }
                     }
                 }
                 return;
@@ -3169,7 +3261,13 @@ fn run_reviewed_plan(
         }
     });
     let checkpoint_error = if checkpoint_failed.load(Ordering::SeqCst) {
-        Some(checkpoint_failure_message(scenario).to_string())
+        Some(
+            host_sleep_checkpoint_error
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .unwrap_or_else(|| checkpoint_failure_message(scenario).to_string()),
+        )
     } else if invocation.scenario.is_active_checkpoint() && !action_seen.load(Ordering::SeqCst) {
         Some("operator action was not observed before the first operation completed".to_string())
     } else {
@@ -3537,6 +3635,8 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         result,
         host_sleep_events.as_deref().unwrap_or(&[]),
     );
+    let run_scope_id = format!("run-scope-sha256:{}", digest(&invocation.run_scope));
+    let lifecycle = lifecycle_trace_events(&run_scope_id, host_sleep_events.as_deref());
     let identity_transition = identity_transition_evidence(
         &invocation.scenario,
         facts,
@@ -3584,7 +3684,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
                     "partialChangesPossible": partial,
                     "authorityInvalidated": authority,
                     "activeSlotReleased": slot_observation.released,
-                    "runScope": format!("run-scope-sha256:{}", digest(&invocation.run_scope)),
+                    "runScope": run_scope_id,
                     "deviceScope": format!("serial-sha256:{}", digest(&invocation.serial)),
                     "boundaryReadyAt": sentinel.get("boundaryReadyAt").cloned().unwrap_or(Value::Null),
                     "operatorActionAt": sentinel.get("operatorActionAt").cloned().unwrap_or(Value::Null),
@@ -3737,6 +3837,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
             "issueCode": issue_code,
             "stepStates": steps,
         },
+        "lifecycle": lifecycle,
     });
     let trace_digest = format!("sha256:{}", canonical_value_digest(&trace));
     let mut record = json!({
@@ -8195,6 +8296,407 @@ mod tests {
             )
             .is_none(),
             "a pre-suspend liveness sample older than the freshness bound must not qualify"
+        );
+    }
+
+    #[test]
+    fn physical_style_executor_observer_path_captures_exact_device_copy_lifecycle() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("physical-style workspace should exist");
+        let helper = workspace.path().join("sentinel-adb-helper");
+        let release = workspace.path().join("release-device-copy");
+        // The helper stands in for the ADB executable: every non-copy command
+        // returns immediately, and the exact DeviceCopy command stays alive
+        // until the test writes the release marker. The child lifetime is
+        // therefore controlled by marker synchronization, not by a wall-clock
+        // sleep: it is released only after the host-sleep watcher has returned
+        // with its post-wake sample, so the exact child provably outlives the
+        // 1-second ready-latency, 4-second handoff, and 5-second freshness
+        // gates instead of racing them at a scheduling boundary.
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *\" shell cp \"*) while [ ! -f '{}' ]; do sleep 0.02; done ;;\nesac\nexit 0\n",
+                release.to_string_lossy()
+            ),
+        )
+        .expect("physical-style helper script should be written");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))
+            .expect("physical-style helper script should be executable");
+
+        let observer = OwnedProcessObservationHandle::default();
+        let device = RealAdbDevice::new_with_process_observer(
+            helper.to_string_lossy().into_owned(),
+            Some("physical-style-serial".to_string()),
+            observer.clone(),
+        );
+        let sandbox = tempfile::tempdir().expect("physical-style sandbox should exist");
+        let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+            device,
+            sandbox.path().join("runtime"),
+            sandbox.path().join("cache"),
+            sandbox.path().join("fake-device"),
+            vec![fixture_root()],
+            false,
+        ));
+        let mut first = copy_step(
+            "phase6d6/physical-style/first",
+            "file_path",
+            PathBuf::from(TIMEOUT_SOURCE_PATH),
+            TIMEOUT_DESTINATION_PATH,
+        );
+        match first.params.get_mut("source") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                value["location"] = Value::String("device".to_string());
+            }
+            _ => panic!("physical-style source must remain a literal runtime value"),
+        }
+        if let Some(ExecutionParamValue::Literal { value }) = first.params.get_mut("copy_policy") {
+            *value = Value::String("merge".to_string());
+        }
+        let plan = ExecutionPlan {
+            id: "plan.phase6d6.physical-style.host-sleep".to_string(),
+            source: ExecutionPlanSource {
+                device_profile_ref: "fixture.phase6d6".to_string(),
+                device_plan_ref: "fixture.phase6d6".to_string(),
+                selected_recipe_refs: vec!["fixture.phase6d6".to_string()],
+                expanded_recipe_refs: vec!["fixture.phase6d6".to_string()],
+                catalog: None,
+            },
+            recipes: Vec::new(),
+            target_device: None,
+            device_context: DeviceContext {
+                manufacturer: "Physical-style".to_string(),
+                model: "Sentinel helper".to_string(),
+                android_version: 14,
+                android_api_level: Some(34),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: false,
+                shared_storage_write: true,
+                app_launch: false,
+                shell_command: true,
+                package_remove_for_user: false,
+                root_shell: false,
+                app_data_write: false,
+            },
+            inputs: Vec::new(),
+            artifacts: Vec::new(),
+            steps: vec![first],
+            schema_version: 1,
+            kind: "execution_plan",
+        };
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        let watcher_observer = observer.clone();
+        let watcher_sentinel = sentinel.clone();
+        let watcher = std::thread::spawn(move || {
+            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+        });
+        let runner_sentinel = sentinel.clone();
+        let runner_step_id = plan.steps[0].id.clone();
+        let runner = std::thread::spawn(move || {
+            let _deadline =
+                arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_secs(10));
+            runner.run_with_progress_and_cancel_observed(
+                &plan,
+                |_| {},
+                || false,
+                move |lifecycle| match lifecycle {
+                    OperationLifecycle::Started { step_id } if step_id == runner_step_id => {
+                        let _ = runner_sentinel.mark("operation-started", "started\n");
+                    }
+                    OperationLifecycle::Finished { step_id } if step_id == runner_step_id => {
+                        let _ = runner_sentinel.mark("operation-finished", "finished\n");
+                    }
+                    _ => {}
+                },
+            )
+        });
+        let operation_started = wait_for_test_marker(&sentinel, "operation-started");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+        let sleep_ready = wait_for_test_marker(&sentinel, "sleep-ready");
+        assert!(
+            sleep_ready
+                >= sentinel
+                    .marker_time("sleep-requested")
+                    .expect("requested time"),
+            "sleep-ready must follow the operator request"
+        );
+        let sleep_entered = sentinel
+            .mark("sleep-entered", "ack\n")
+            .expect("sleep-entered marker should be created");
+        sentinel
+            .mark("wake", "ack\n")
+            .expect("wake marker should be created");
+        let action_at = watcher
+            .join()
+            .expect("host-sleep watcher should finish")
+            .expect("the pre-suspend handshake should complete");
+        assert_eq!(
+            action_at, sleep_entered,
+            "the action boundary must be the sleep-entered handoff"
+        );
+        assert!(
+            operation_started <= sleep_entered,
+            "the handoff must follow operation start"
+        );
+        // activeProcess requires the serialized action second to be strictly
+        // less than the serialized terminal second. Hold the child until the
+        // canonical second after the sleep-entered handoff so the released
+        // terminal lands in a later second; this is the same canonical-second
+        // boundary rule the physical harness enforces and cannot race the
+        // watcher gates because the child is held alive throughout.
+        wait_until_later_canonical_second(action_at);
+        fs::write(&release, "release\n").expect("release marker should be written");
+        let run_result = runner.join().expect("physical-style runner should finish");
+        assert!(
+            run_result.success,
+            "physical-style copy should complete: {run_result:#?}"
+        );
+
+        let events = observer.events();
+        let operation_id = events
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                    operation_id,
+                    operation: ProcessOperation::DeviceCopy,
+                    ..
+                } => Some(*operation_id),
+                _ => None,
+            })
+            .expect("the exact DeviceCopy must publish a deadline-clock start");
+        let target = |event: &OwnedProcessLifecycleEvent| {
+            event.operation_id() == operation_id
+                && event.operation() == ProcessOperation::DeviceCopy
+        };
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| target(event)
+                    && matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::LivenessSampled {
+                            alive: Some(true),
+                            terminal_reported: false,
+                            ..
+                        }
+                    ))
+                .count(),
+            1,
+            "exactly one live exact-child sample must be recorded"
+        );
+        let requested_samples = events
+            .iter()
+            .filter(|event| {
+                target(event)
+                    && matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                            owner_reported: false,
+                            ..
+                        }
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requested_samples.len(),
+            2,
+            "one before-sleep and one post-wake deadline-clock sample must exist"
+        );
+        assert!(
+            requested_samples[1].at() >= sentinel.marker_time("wake").expect("wake marker time"),
+            "the post-wake sample must follow the wake marker"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| target(event)
+                    && matches!(event, OwnedProcessLifecycleEvent::Terminal { .. }))
+                .count(),
+            1,
+            "exactly one exact-child terminal event must exist"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    target(event)
+                        && matches!(
+                            event,
+                            OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                                owner_reported: true,
+                                ..
+                            }
+                        )
+                })
+                .count(),
+            1,
+            "exactly one owner-reported terminal clock sample must exist"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                target(event) && matches!(event, OwnedProcessLifecycleEvent::DeadlineReached { .. })
+            }),
+            "a completed physical-style copy must not report a deadline transition"
+        );
+
+        let run_scope_id = format!("run-scope-sha256:{}", digest("physical-style-run-scope"));
+        let active = active_process_evidence(
+            &events,
+            Some(action_at),
+            &run_scope_id,
+            ProcessOperation::DeviceCopy,
+        )
+        .expect("the physical-style lifecycle must populate activeProcess");
+        assert_eq!(active["operationClass"], "device_copy");
+        assert_eq!(active["actionKind"], "operator_action");
+        assert_eq!(active["runId"], run_scope_id);
+        let lifecycle = lifecycle_trace_events(&run_scope_id, Some(&events));
+        let device_copy_entries = lifecycle
+            .iter()
+            .filter(|value| value["operationClass"] == "device_copy")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            device_copy_entries.len(),
+            8,
+            "spawn, mutation, clock start, liveness, two samples, terminal, owner sample"
+        );
+        for entry in &device_copy_entries {
+            assert_eq!(entry["runId"], run_scope_id);
+            assert_eq!(entry["operationId"], active["operationId"]);
+            assert_eq!(entry["childIdentity"], active["childIdentity"]);
+        }
+        let serialized = serde_json::to_string(&lifecycle).expect("lifecycle must serialize");
+        assert!(
+            !serialized.contains("physical-style-serial"),
+            "trace lifecycle must not leak the serial"
+        );
+        assert!(
+            !serialized.contains(TIMEOUT_SOURCE_PATH)
+                && !serialized.contains(TIMEOUT_DESTINATION_PATH),
+            "trace lifecycle must not leak stimulus paths"
+        );
+    }
+
+    #[test]
+    fn missing_observer_wiring_stays_blocked_and_null() {
+        assert!(
+            host_sleep_events_snapshot(&None).is_none(),
+            "a missing observer must produce no lifecycle snapshot"
+        );
+        let sentinel = host_sleep_sentinel(0, 1, 2, 4);
+        let run = host_sleep_step(None);
+        assert!(
+            host_sleep_evidence(&Scenario::HostSleepBeforeDeadline, &sentinel, Ok(&run), &[],)
+                .is_null(),
+            "missing lifecycle evidence must keep hostSleep null"
+        );
+        let action = UNIX_EPOCH + Duration::from_secs(3);
+        assert!(
+            active_process_evidence(
+                &[],
+                Some(action),
+                "run-scope-sha256:missing-observer",
+                ProcessOperation::DeviceCopy,
+            )
+            .is_none(),
+            "missing lifecycle evidence must keep activeProcess null"
+        );
+        assert!(
+            lifecycle_trace_events("run-scope-sha256:missing-observer", None).is_empty(),
+            "a missing observer must serialize an empty lifecycle trace"
+        );
+        assert!(
+            lifecycle_trace_events("run-scope-sha256:missing-observer", Some(&[])).is_empty(),
+            "an empty snapshot must serialize an empty lifecycle trace"
+        );
+    }
+
+    #[test]
+    fn trace_lifecycle_serialization_is_sanitized_and_matches_projections() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(940);
+        let base = UNIX_EPOCH + Duration::from_secs(100);
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run_scope_id = "run-scope-sha256:trace-serialization-test";
+        let lifecycle = lifecycle_trace_events(run_scope_id, Some(&events));
+        let by_kind = |kind: &str| {
+            lifecycle
+                .iter()
+                .filter(|value| value["kind"] == kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(by_kind("spawned").len(), 1);
+        assert_eq!(by_kind("mutation_started").len(), 1);
+        assert_eq!(by_kind("liveness_sampled").len(), 1);
+        assert_eq!(by_kind("deadline_clock_started").len(), 1);
+        assert_eq!(by_kind("deadline_clock_sampled").len(), 3);
+        assert_eq!(by_kind("terminal").len(), 1);
+        for entry in &lifecycle {
+            assert_eq!(entry["runId"], run_scope_id);
+            assert_eq!(entry["operationClass"], "device_copy");
+            assert!(
+                entry["at"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("unix:")),
+                "every lifecycle entry must carry a canonical wall timestamp"
+            );
+        }
+        let clock_start = by_kind("deadline_clock_started")[0];
+        assert_eq!(clock_start["deadlineClockStartNs"], "monotonic-ns:0");
+        assert_eq!(clock_start["deadlineMs"], 120_000);
+        let samples = by_kind("deadline_clock_sampled");
+        let watcher_samples = samples
+            .iter()
+            .filter(|value| value["ownerReported"] == false)
+            .collect::<Vec<_>>();
+        let owner_sample = samples
+            .iter()
+            .find(|value| value["ownerReported"] == true)
+            .expect("owner terminal sample must be serialized");
+        assert_eq!(watcher_samples.len(), 2);
+        assert_eq!(
+            watcher_samples[0]["deadlineClockNs"],
+            "monotonic-ns:2050000000"
+        );
+        assert_eq!(
+            watcher_samples[1]["deadlineClockNs"],
+            "monotonic-ns:2250000000"
+        );
+        assert_eq!(owner_sample["deadlineClockNs"], "monotonic-ns:3050000000");
+        let active = active_process_evidence(
+            &events,
+            Some(base + Duration::from_secs(4)),
+            run_scope_id,
+            ProcessOperation::DeviceCopy,
+        )
+        .expect("a complete lifecycle must populate activeProcess");
+        assert_eq!(lifecycle[0]["operationId"], active["operationId"]);
+        assert_eq!(lifecycle[0]["childIdentity"], active["childIdentity"]);
+        let serialized = serde_json::to_string(&lifecycle).expect("lifecycle must serialize");
+        assert!(
+            !serialized.contains("940"),
+            "the raw invocation-local operation id must not be serialized"
+        );
+        assert!(
+            !serialized.contains("/dev/"),
+            "trace lifecycle must not leak stimulus paths"
         );
     }
 

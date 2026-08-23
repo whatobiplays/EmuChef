@@ -170,6 +170,17 @@ post-wake sample. The final host-sleep lifecycle snapshot is taken only after
 the bounded watcher has finished, so that post-wake sample is always present
 in the evidence assembly path.
 
+The retained lifecycle snapshot is sanitized and persisted as
+`trace.lifecycle` before the `activeProcess` and `hostSleep` projections are
+derived. Each entry carries the same domain-separated operation and child
+digests used by the projections, the sanitized event kind, the canonical wall
+timestamp, and event-specific deadline-clock facts; raw operation ids, PIDs,
+commands, serials, and paths never enter evidence. A failed or null projection
+therefore never causes the source observations to be discarded: blocked
+attempts keep the partial lifecycle trace and the exact watcher gate error in
+the record, and the Node validator independently derives the projections from
+`trace.lifecycle` for passing host-sleep records.
+
 `transport_loss` requires zero owner-emitted `DeadlineReached` events.
 `DeadlineClockSampled.deadline_reached` is only a monotonic-clock observation;
 the owner-emitted `DeadlineReached` event is the authority that the timeout
@@ -272,7 +283,7 @@ Calibration is preparation evidence only. It cannot satisfy the active-process c
 7. The harness creates `active-ready` only when the sample proves the child is alive.
 8. The operator creates `operator-action` within five seconds; for transport, offline, and authorization scenarios, the prepared physical transition follows 1.1–3 seconds later.
 9. The owner reaches a normal, failed, disconnected, or timed-out terminal path, performs existing cleanup, and emits `Terminal`.
-10. The harness correlates lifecycle events with the execution-slot run scope and writes sanitized evidence.
+10. The harness sanitizes the retained lifecycle snapshot into `trace.lifecycle`, persists it with the supporting trace, and only then derives the `activeProcess` and `hostSleep` projections and evaluates the scenario contract. A null projection never discards the source lifecycle observations.
 
 ## Concurrency and ownership rules
 

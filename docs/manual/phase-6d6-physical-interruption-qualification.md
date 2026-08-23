@@ -189,6 +189,18 @@ snapshot is taken only after the bounded watcher has finished publishing its
 retained-basis post-wake sample, so the owner may reach terminal immediately
 after resume and terminal may precede that post-wake sample.
 
+Every host-sleep attempt persists the sanitized owned-process lifecycle
+observations in `trace.lifecycle` before the final `activeProcess` and
+`hostSleep` projections are derived. A blocked or partial attempt therefore
+never discards the source observations that explain it, and a blocked record
+also retains the exact watcher gate that failed (for example the four-second
+`sleep-ready` to `sleep-entered` handoff window, the five-second liveness
+freshness bound, or the `ack` marker content) in its notes instead of
+reporting only a generic handshake failure. Operators must create
+`sleep-entered` within four seconds of observing `sleep-ready`; a later
+handoff cannot truthfully claim the exact child was alive immediately before
+physical suspension.
+
 ## Authorization boundary and reconnect handshake
 
 `device_unauthorized` is a safe-boundary scenario. Revoking stored USB-debugging

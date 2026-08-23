@@ -450,6 +450,11 @@ monotonic timer basis, not a later observer-install timestamp. The final
 host-sleep lifecycle snapshot is taken only after the bounded watcher has
 published its retained-basis post-wake sample, so the owner may reach terminal
 immediately after resume and terminal may precede that post-wake sample.
+Host-sleep evidence records persist the sanitized owned-process lifecycle
+observations in `trace.lifecycle` before deriving `activeProcess` and
+`hostSleep`; blocked attempts retain the partial lifecycle trace and the exact
+watcher gate error, so a null projection never discards the source
+observations.
 `transport_loss` requires zero owner-emitted `DeadlineReached` events; the
 owner event is the only authority for whether the timeout branch won, and a
 monotonic clock sample at or beyond the nominal deadline never converts a
