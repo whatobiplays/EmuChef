@@ -99,6 +99,7 @@ export function useDeviceQualificationMode({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transitionRetryRevision, setTransitionRetryRevision] = useState(0);
+  const [reviewBindingRevision, setReviewBindingRevision] = useState(0);
   const busyCountRef = useRef(0);
   const sessionRef = useRef<QualificationSessionSnapshot | null>(null);
   const sessionDeviceHandleRef = useRef<string | null>(null);
@@ -336,6 +337,7 @@ export function useDeviceQualificationMode({
         scheduleTransitionRetry(`review-bind:${key}`);
       } else {
         boundReviewKeysRef.current.add(key);
+        setReviewBindingRevision((revision) => revision + 1);
         clearTransitionRetry(`review-bind:${key}`);
       }
     });
@@ -356,6 +358,8 @@ export function useDeviceQualificationMode({
     }
     const sessionHandle = session.sessionHandle;
     const key = `${sessionHandle}:${executionIdentity}`;
+    const reviewBindingKey = reviewHandle ? `${sessionHandle}:${reviewHandle}` : null;
+    if (!reviewBindingKey || !boundReviewKeysRef.current.has(reviewBindingKey)) return;
     let binding = executionBindingPromisesRef.current.get(key);
     if (!binding) {
       binding = runOperation(
@@ -403,6 +407,8 @@ export function useDeviceQualificationMode({
     productionExecution,
     runOperation,
     scheduleTransitionRetry,
+    reviewBindingRevision,
+    reviewHandle,
     session,
     transitionRetryRevision,
   ]);
@@ -412,11 +418,12 @@ export function useDeviceQualificationMode({
     const sessionHandle = session.sessionHandle;
     const boundDeviceHandle = sessionDeviceHandleRef.current;
     const deviceUnavailable = observedDeviceHandle !== boundDeviceHandle;
+    const factsBecameAvailable = boundDeviceFactsKeyRef.current === "" && observedFactsKey !== "";
     const identityChanged = boundDeviceFactsKeyRef.current !== ""
       && observedFactsKey !== boundDeviceFactsKeyRef.current;
     const planChanged = workflow.devicePlan !== session.devicePlan;
     const driftKey = `${sessionHandle}:${deviceObservationKey}`;
-    if (!deviceUnavailable && !identityChanged && !planChanged) {
+    if (!deviceUnavailable && !factsBecameAvailable && !identityChanged && !planChanged) {
       lastSessionObservationKeyRef.current = driftKey;
       return;
     }
@@ -426,7 +433,12 @@ export function useDeviceQualificationMode({
     if (!refreshSession) {
       refreshSession = runOperation(
         () => api.refreshQualificationSession(sessionHandle, boundDeviceHandle),
-        (nextSession) => applySessionIfCurrent(sessionHandle, nextSession),
+        (nextSession) => {
+          if (sessionRef.current?.sessionHandle === sessionHandle && factsBecameAvailable) {
+            boundDeviceFactsKeyRef.current = observedFactsKey;
+          }
+          applySessionIfCurrent(sessionHandle, nextSession);
+        },
       );
       sessionRefreshPromisesRef.current.set(sessionHandle, refreshSession);
       void refreshSession.then((result) => {

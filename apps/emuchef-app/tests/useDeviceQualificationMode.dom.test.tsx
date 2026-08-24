@@ -292,6 +292,39 @@ test("a failed review bind is retried without duplicate concurrent binds", async
   expect(mockApi.bindQualificationReview).toHaveBeenNthCalledWith(2, "session-opaque", "review-opaque");
 });
 
+test("execution waits for review binding retry success before binding and finalizing", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  let resolveReview: ((snapshot: QualificationSessionSnapshot) => void) | undefined;
+  mockApi.bindQualificationReview
+    .mockRejectedValueOnce(new Error("temporary review bind failure"))
+    .mockImplementationOnce(() => new Promise((resolve) => {
+      resolveReview = resolve;
+    }));
+  mockApi.bindQualificationExecution.mockResolvedValue(sessionSnapshot());
+  mockApi.finalizeQualificationCandidate.mockResolvedValue(sessionSnapshot());
+
+  render(<Harness workflow={realTerminalWorkflow()} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+
+  await waitFor(() => {
+    expect(mockApi.bindQualificationReview).toHaveBeenCalledTimes(2);
+    expect(resolveReview).toBeTypeOf("function");
+  });
+  expect(mockApi.bindQualificationExecution).not.toHaveBeenCalled();
+  expect(mockApi.finalizeQualificationCandidate).not.toHaveBeenCalled();
+
+  resolveReview!(sessionSnapshot());
+
+  await waitFor(() => {
+    expect(mockApi.bindQualificationExecution).toHaveBeenCalledTimes(1);
+    expect(mockApi.finalizeQualificationCandidate).toHaveBeenCalledTimes(1);
+  });
+  expect(mockApi.bindQualificationReview.mock.invocationCallOrder[1])
+    .toBeLessThan(mockApi.bindQualificationExecution.mock.invocationCallOrder[0]);
+});
+
 test("failed terminal execution binding and finalization retry in order", async () => {
   mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
   mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
@@ -339,6 +372,48 @@ test("device availability drift refreshes the bound qualification session", asyn
 
   await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(1));
   expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith("session-opaque", "device-opaque");
+});
+
+test("late device facts refresh the session and establish a later drift baseline", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  mockApi.refreshQualificationSession.mockResolvedValue(sessionSnapshot());
+  const initial = reviewWorkflow();
+  initial.facts = null;
+  const lateFacts = {
+    deviceHandle: "device-opaque",
+    manufacturer: "Example",
+    brand: "Example",
+    model: "Original model",
+    androidVersion: 14,
+    androidApiLevel: 34,
+    firmwareBuild: "firmware-original",
+  };
+
+  const { rerender } = render(<Harness workflow={initial} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await screen.findByText("true");
+  expect(mockApi.refreshQualificationSession).not.toHaveBeenCalled();
+
+  rerender(<Harness workflow={{ ...initial, facts: lateFacts }} />);
+  await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(1));
+  expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith("session-opaque", "device-opaque");
+
+  rerender(<Harness workflow={{
+    ...initial,
+    facts: { ...lateFacts, model: "Replacement model" },
+  }} />);
+  await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(2));
+  expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith("session-opaque", "device-opaque");
+
+  rerender(<Harness workflow={{
+    ...initial,
+    devicePlan: "plan.changed",
+    facts: { ...lateFacts, model: "Replacement model" },
+  }} />);
+  await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(3));
+  expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith("session-opaque", "device-opaque");
 });
 
 test("device identity drift refreshes the bound qualification session", async () => {
