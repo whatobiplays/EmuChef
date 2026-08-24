@@ -1283,7 +1283,24 @@ unsealed record payload and then sealed with canonical `fingerprintDigest` and
 bundles as current evidence; invalid runs remain historical audit evidence and
 cannot replace current qualification state. The current production target
 registry remains empty, so repository validation and matrix generation still
-make no claim that any physical device is qualified.
+make no claim that any physical device is qualified. The production-bound
+harness is implemented and available for future physical runs, but harness
+implementation itself adds no physical target or evidence and does not qualify
+a workflow or device.
+
+The operator workflow begins with
+`npm --prefix apps/emuchef-app run device-qualification`. An unregistered
+device is connected, probed, matched, attested as `usb2` or `usb3`, reviewed,
+and explicitly registered; registration requires stopping, committing the
+registry and matrix, and rebuilding before workflow qualification. The fresh
+build then uses the registered target and canonical workflow, normal EmuChef
+inputs, review, explicit real-execution confirmation, and only
+workflow-declared human checkpoints. The operator inspects terminal candidate
+classification, explicitly records the run when appropriate, commits the
+immutable evidence bundle and matrix, and runs `make device-qualification-check`
+and repository tests before committing or shipping evidence. Daijisho and ES-DE
+remain deferred, and physical matrix work remains in progress until real
+evidence is intentionally recorded.
 
 The development-only qualification mode exposes target-registration status and
 capture through the existing EmuChef application workflow. Its repository is a

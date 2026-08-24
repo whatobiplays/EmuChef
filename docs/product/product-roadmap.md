@@ -964,11 +964,17 @@ Maintain a qualification matrix containing device model, Android version, ABI/So
 
 #### Completion evidence
 
-Phase 6F foundation work is in progress as of 2026-08-21. Versioned workflow,
-device-target, evidence, checkpoint, applicability, and compatibility contracts
-exist under `docs/testing/phase-6f/`, with synthetic-only fixtures, strict Node
-validation and projection, a deterministic generated qualification matrix, an
-operator runbook, and Makefile and CI validation. No physical-device qualification evidence has been added and no device is newly claimed as supported by this foundation work.
+The production-bound device qualification harness is implemented and available
+for future physical runs as of 2026-08-23. Versioned workflow, device-target,
+evidence, checkpoint, applicability, and compatibility contracts exist under
+`docs/testing/device-qualification/`; `tools/device-qualification.mjs` remains
+the sole authority for validation, canonicalization, recording, projection, and
+matrix generation. Synthetic-only fixtures, the deterministic generated matrix,
+the operator runbook, and Makefile/CI validation are in place. No physical
+device targets or evidence are added by harness implementation itself, and no
+workflow or device is qualified merely because the harness exists. Physical
+device matrix work remains in progress until real evidence is intentionally
+recorded. Daijisho and ES-DE remain deferred.
 
 ### 6G — Production Readiness
 

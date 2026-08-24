@@ -1,40 +1,28 @@
-# Phase 6F Physical Qualification Operator Runbook
+# Device Qualification Operator Runbook
 
 ## Purpose
 
-This runbook is the operator procedure for a future physical-device
-qualification run under the Phase 6F evidence model. It does not qualify any
-device today. The repository currently contains no physical evidence records,
-and the Phase 6F foundation does not claim that any device or workflow is
-supported.
+This runbook describes the production-bound workflow for a future
+physical-device qualification run. Implementing the harness does not qualify
+any device or workflow. The repository currently contains no physical target
+or evidence records.
 
 Production EmuChef remains the system under test. The qualification harness
 observes the production workflow; it does not replace planner, executor,
 device-probe, or Tauri authority. A matching authored device profile does not
 itself imply support.
 
-## Before you start
+## Operator flow
 
-1. Choose one canonical workflow from `docs/testing/device-qualification/workflow-catalog.json`.
-2. Verify the device target is registered in `docs/testing/device-qualification/device-targets.json`.
-3. Capture the canonical repository build identity with `node tools/device-qualification.mjs --build-identity`.
-4. Inspect the repository-owned qualification description with `node tools/device-qualification.mjs --describe`.
-5. Confirm the workflow's required capabilities and prerequisites apply to the target.
-
-## Qualification sequence
-
-1. Choose an existing canonical workflow ID.
-2. Register or capture a device target from observed facts and an existing authored profile ID.
-3. Verify prerequisites and production capability applicability.
-4. Capture the current EmuChef build identity, workflow version, exact relevant authored recipe SHA-256 digests, runtime contract version, device facts, root state, and connection type from the repository-owned qualification tool outputs.
-5. Execute the real production EmuChef workflow through its ordinary reviewed execution boundary.
-6. Collect the required automated observations from product outputs and device observations.
-7. Collect only declared human checkpoints using `pass`, `fail`, or `unable_to_verify`.
-8. Distinguish an invalid harness or infrastructure run from a valid product failure.
-9. Create a new immutable evidence JSON record without overwriting an older run.
-10. Run `node tools/device-qualification.mjs --check` after adding evidence.
-11. Regenerate with `node tools/device-qualification.mjs --write-matrix` only after validation succeeds.
-12. Rerun `--check` and repository tests before committing evidence.
+1. Launch a clean qualification build with `npm --prefix apps/emuchef-app run device-qualification`.
+2. If the device is unregistered: connect/probe/match it, choose usb2/usb3, review the captured facts, Register device target, stop, commit the registry/matrix, and rebuild.
+3. On the new clean build: choose the registered target and canonical workflow.
+4. Complete normal EmuChef inputs, review, and explicit real-execution confirmation.
+5. Complete only workflow-declared human checkpoints.
+6. Inspect terminal candidate classification.
+7. Explicitly Record qualification run, including invalid/not_observed audit runs only when intentionally preserving harness history.
+8. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.
+9. Run `make device-qualification-check` and repository tests before committing/shipping evidence.
 
 ## Evidence record rules
 
@@ -92,15 +80,19 @@ safety failure invalidates the target as a whole.
 
 ## Harness boundary
 
-The foundation does not yet automate steps 2 through 8 end to end. Future
-harness work must call production boundaries rather than introducing
-qualification-only planner or executor behavior.
+The harness implements the operator flow by layering target registration,
+candidate persistence, checkpoint capture, terminal classification, and
+explicit recording over the normal production EmuChef workflow. It does not
+add a qualification-only planner, executor, device command, or ADB authority.
+The operator remains responsible for physical observations and must not treat
+the harness being available as physical qualification evidence.
 
 ## Repository validation
 
-Run the full Phase 6F validation before and after adding evidence:
+Run the repository validation before committing or shipping evidence:
 
 ```sh
+npm --prefix apps/emuchef-app run device-qualification
 node --test tools/device-qualification.test.mjs
 node tools/device-qualification.mjs --check
 make device-qualification-check
@@ -108,6 +100,4 @@ make device-qualification-check
 
 `--check` validates the production definitions and evidence, renders the
 expected matrix in memory, and compares it byte-for-byte with
-`docs/qualification/device-qualification-matrix.md`. `--write-matrix` writes only
-the generated matrix, and only after all inputs validate. The generated
-matrix is a projection, not an independent source of truth.
+`docs/qualification/device-qualification-matrix.md`. `node tools/device-qualification.mjs --write-matrix` writes only the generated matrix, and only after all inputs validate. The generated matrix is a projection, not an independent source of truth.

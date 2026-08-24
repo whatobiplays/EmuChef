@@ -1,4 +1,4 @@
-# Phase 6F Physical-Device Qualification Matrix
+# Device Qualification Matrix
 
 Generated from `docs/testing/device-qualification/` definitions and immutable physical evidence.
 

@@ -47,10 +47,64 @@ import {
 } from "./device-qualification.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const APP_ROOT = path.join(REPO_ROOT, "apps/emuchef-app");
 const FIXTURES = path.join(REPO_ROOT, "tests/fixtures/device-qualification");
 const AUTHORED_PROFILES = path.join(REPO_ROOT, "authored/device_profiles");
 const SYNTHETIC_POCKET_S2_PROFILE = "ayaneo.pocket_s2";
 const SYNTHETIC_AIR_MINI_PROFILE = "ayaneo.pocket_air_mini";
+const ACTIVE_PROJECT_MANAGEMENT_NAME = /\b(?:phase|slice)[\s_-]*\d+[a-z0-9-]*\b/i;
+const HISTORICAL_PATHS = [
+  /^docs\/superpowers(?:\/|$)/,
+  /^docs\/product\/product-roadmap\.md$/,
+  /^\.chatgpt(?:\/|$)/,
+];
+const HISTORICAL_TOOL_REFERENCES = [
+  "apps/emuchef-app/src/Phase6d6UiSmoke.tsx",
+  "apps/emuchef-app/src-tauri/src/phase6d6_ui_smoke.rs",
+];
+
+function listFiles(relativeRoot) {
+  const root = path.join(REPO_ROOT, relativeRoot);
+  if (!existsSync(root)) return [];
+  const files = [];
+  const visit = (directory, relativeDirectory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = path.join(relativeDirectory, entry.name);
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolutePath, relativePath);
+      } else if (entry.isFile()) {
+        files.push(relativePath);
+      }
+    }
+  };
+  visit(root, relativeRoot);
+  return files;
+}
+
+function activeQualificationFiles() {
+  const files = [
+    ...listFiles("tools").filter((relativePath) => path.basename(relativePath).startsWith("device-qualification")),
+    ...listFiles("docs/testing/device-qualification"),
+    ...listFiles("tests/fixtures/device-qualification"),
+    ...listFiles("apps/emuchef-app/src").filter((relativePath) => /qualification/i.test(path.basename(relativePath))),
+    ...listFiles("apps/emuchef-app/src-tauri/src").filter((relativePath) => /qualification/i.test(path.basename(relativePath))),
+    ...listFiles("apps/emuchef-app/scripts").filter((relativePath) => /device-qualification/i.test(path.basename(relativePath))),
+    "docs/manual/device-qualification-operator.md",
+    "docs/qualification/device-qualification-matrix.md",
+  ];
+  return [...new Set(files)].filter((relativePath) => !HISTORICAL_PATHS.some((pattern) => pattern.test(relativePath)));
+}
+
+function readActiveQualificationSource(relativePath) {
+  let source = readFileSync(path.join(REPO_ROOT, relativePath), "utf8");
+  if (relativePath === "tools/device-qualification.mjs") {
+    for (const historicalReference of HISTORICAL_TOOL_REFERENCES) {
+      source = source.replaceAll(historicalReference, "");
+    }
+  }
+  return source;
+}
 
 function readJson(relative) {
   return JSON.parse(readFileSync(path.join(FIXTURES, relative), "utf8"));
@@ -463,7 +517,7 @@ test("schema-v2 evidence records require qualification run ids", () => {
   assert.match(record.runId, /^qualification-run-sha256:[0-9a-f]{64}$/);
 
   const oldPrefix = structuredClone(record);
-  oldPrefix.runId = `phase-6f-run-sha256:${"1".repeat(64)}`;
+  oldPrefix.runId = `legacy-run-sha256:${"1".repeat(64)}`;
   oldPrefix.recordDigest = evidenceRecordDigest(oldPrefix);
   assert.throws(
     () => validateEvidenceRecord(oldPrefix, context),
@@ -1645,6 +1699,8 @@ test("production --check exits zero and detects matrix drift", () => {
     "utf8",
   );
   assert.match(committed, /No physical-device qualification targets have been registered yet/);
+  assert.match(committed, /# Device Qualification Matrix/);
+  assert.doesNotMatch(committed, /\bphase[\s_-]*6f\b/i);
   assert.doesNotMatch(committed, /^## /m);
 });
 
@@ -1667,17 +1723,21 @@ test("operator runbook documents the evidence boundary without claiming physical
   assert.match(runbook, /production EmuChef remains the system under test/i);
   assert.match(runbook, /node tools\/device-qualification\.mjs --check/);
   assert.match(runbook, /node tools\/device-qualification\.mjs --write-matrix/);
-  assert.match(runbook, /node tools\/device-qualification\.mjs --build-identity/);
-  assert.match(runbook, /node tools\/device-qualification\.mjs --describe/);
   assert.match(runbook, /unable_to_verify/);
   assert.match(runbook, /does not\s+itself imply support/i);
-  assert.doesNotMatch(runbook, /EMUCHEF_PHASE_6F_BUILD_IDENTITY/);
-  assert.doesNotMatch(runbook, /EMUCHEF_PHASE_6F_RUNTIME_CONTRACT/);
-  assert.match(runbook, /rerun `--check` and repository tests before committing evidence/i);
+  assert.doesNotMatch(runbook, /EMUCHEF_[A-Z0-9_]*(?:BUILD_IDENTITY|RUNTIME_CONTRACT)/);
+  assert.match(runbook, /npm --prefix apps\/emuchef-app run device-qualification/);
+  assert.match(runbook, /Register device target/);
+  assert.match(runbook, /canonical workflow/);
+  assert.match(runbook, /Record qualification run/);
+  assert.match(runbook, /invalid\/not_observed/);
+  assert.match(runbook, /fresh build/);
+  assert.match(runbook, /make device-qualification-check/);
+  assert.match(runbook, /make device-qualification-check.*repository tests before committing\/shipping evidence/i);
   assert.doesNotMatch(runbook, /first qualified device/i);
 });
 
-test("repository validation wires phase 6f without claiming completion", () => {
+test("repository validation wires device qualification without claiming completion", () => {
   const makefile = readFileSync(path.join(REPO_ROOT, "Makefile"), "utf8");
   const workflow = readFileSync(
     path.join(REPO_ROOT, ".github/workflows/emuchef-execution-feature-matrix.yml"),
@@ -1686,6 +1746,8 @@ test("repository validation wires phase 6f without claiming completion", () => {
   const roadmap = readFileSync(path.join(REPO_ROOT, "docs/product/product-roadmap.md"), "utf8");
 
   assert.match(makefile, /device-qualification-check:/);
+  assert.match(makefile, /Validate device qualification definitions, evidence, and matrix/);
+  assert.doesNotMatch(makefile, /Validate Phase/);
   assert.match(makefile, /node --test tools\/device-qualification\.test\.mjs/);
   assert.match(makefile, /node tools\/device-qualification\.mjs --check/);
   assert.match(makefile, /test: ensure-deps device-qualification-check/);
@@ -1693,23 +1755,42 @@ test("repository validation wires phase 6f without claiming completion", () => {
   assert.match(workflow, /docs\/testing\/device-qualification\/\*\*/);
   assert.match(workflow, /node --test tools\/device-qualification\.test\.mjs/);
   assert.match(workflow, /node tools\/device-qualification\.mjs --check/);
+  assert.match(workflow, /Validate device qualification foundation/);
+  assert.doesNotMatch(workflow, /Validate Phase/);
   assert.match(roadmap, /6F \| Physical-device test matrix \| In progress/);
-  assert.match(roadmap, /no physical-device qualification evidence has been added/i);
+  assert.match(roadmap, /No physical\s+device targets or evidence are added by harness implementation itself/i);
+  assert.match(roadmap, /production-bound device qualification harness is implemented and available/i);
+  assert.match(roadmap, /physical\s+device matrix work remains in progress/i);
+  assert.match(roadmap, /Daijisho and ES-DE remain deferred/i);
   assert.doesNotMatch(roadmap, /6F \| Physical-device test matrix \| Completed/);
 });
 
-test("active device qualification artifacts use domain-oriented names", () => {
-  const forbidden = [
-    "tools/phase-6f-qualification.mjs",
-    "tools/phase-6f-qualification.test.mjs",
-    "docs/testing/phase-6f",
-    "tests/fixtures/phase-6f",
-    "docs/qualification/phase-6f-device-matrix.md",
-    "docs/manual/phase-6f-qualification-operator.md",
-  ];
-  for (const relative of forbidden) {
-    assert.equal(existsSync(path.join(REPO_ROOT, relative)), false, relative);
+test("React qualification API contains no filesystem or process authority fields", () => {
+  const apiSource = readFileSync(path.join(APP_ROOT, "src/api.ts"), "utf8");
+  for (const forbidden of [
+    "candidatePath",
+    "repositoryPath",
+    "evidencePath",
+    "toolPath",
+    "executablePath",
+  ]) {
+    assert.equal(apiSource.includes(forbidden), false, forbidden);
   }
-  const makefile = readFileSync(path.join(REPO_ROOT, "Makefile"), "utf8");
-  assert.doesNotMatch(makefile, /phase-6f-qualification-check/);
+});
+
+test("active qualification paths and source use domain-oriented names", () => {
+  for (const relativePath of activeQualificationFiles()) {
+    assert.doesNotMatch(relativePath, ACTIVE_PROJECT_MANAGEMENT_NAME, relativePath);
+    assert.doesNotMatch(
+      readActiveQualificationSource(relativePath),
+      ACTIVE_PROJECT_MANAGEMENT_NAME,
+      relativePath,
+    );
+  }
+});
+
+test("canonical qualification tooling uses domain-oriented output labels", () => {
+  const toolSource = readFileSync(path.join(REPO_ROOT, "tools/device-qualification.mjs"), "utf8");
+  assert.doesNotMatch(toolSource, /\bphase[\s_-]*6f\b/i);
+  assert.doesNotMatch(toolSource, /\bslice[\s_-]*\d+[a-z0-9-]*\b/i);
 });

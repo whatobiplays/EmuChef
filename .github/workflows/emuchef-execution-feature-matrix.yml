@@ -81,7 +81,7 @@ jobs:
           node --test tools/phase-6d6-evidence.test.mjs
           node --test tools/phase-6d6-evidence-regression.test.mjs
           node --test tools/phase-6d6-result.test.mjs
-      - name: Validate Phase 6F qualification foundation
+      - name: Validate device qualification foundation
         run: |
           node --test tools/device-qualification.test.mjs
           node tools/device-qualification.mjs --check

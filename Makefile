@@ -28,7 +28,7 @@ help:
 		'  ensure-deps   Install missing or stale frontend dependencies' \
 		'  build         Build the Rust backend and both frontend applications' \
 		'  test          Run Rust, application, security, typecheck, and lint tests' \
-		'  device-qualification-check    Validate Phase 6F qualification definitions, evidence, and matrix' \
+		'  device-qualification-check    Validate device qualification definitions, evidence, and matrix' \
 		'  emuchef-app   Launch the EmuChef app in development mode' \
 		'  config-editor Launch the Config Editor app in development mode' \
 		'  dev           Launch both applications in development mode'

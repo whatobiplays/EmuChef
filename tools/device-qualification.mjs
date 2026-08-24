@@ -1525,14 +1525,14 @@ function renderTargetSection(entry) {
 
 export function renderQualificationMatrix(projection) {
   const lines = [
-    "# Phase 6F Physical-Device Qualification Matrix",
+    "# Device Qualification Matrix",
     "",
     "Generated from `docs/testing/device-qualification/` definitions and immutable physical evidence.",
     "",
   ];
   if (projection.targets.length === 0) {
     lines.push(
-      "No physical-device qualification targets have been registered yet. Phase 6F foundation infrastructure exists, but no device or workflow is physically qualified by this repository state.",
+      "No physical-device qualification targets have been registered yet. The production-bound harness is available for future physical runs, but no device or workflow is physically qualified by this repository state.",
     );
     lines.push("");
     return lines.join("\n");
@@ -1799,9 +1799,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
         }
         const committed = readFileSync(matrixPath, "utf8");
         if (committed !== rendered) {
-          fail("generated Phase 6F qualification matrix is out of date; run --write-matrix");
+          fail("generated device qualification matrix is out of date; run --write-matrix");
         }
-        process.stdout.write("Phase 6F qualification foundation check passed.\n");
+        process.stdout.write("Device qualification check passed.\n");
       }
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
