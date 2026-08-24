@@ -229,19 +229,28 @@ impl QualificationRepositoryProvider {
 }
 
 impl QualificationRepository {
-    /// Builds the production repository using the compile-time trusted root.
+    /// Builds the qualification repository from the compile-time trusted root
+    /// used by debug qualification runs. Release bundles do not contain the
+    /// source checkout and therefore never resolve this repository.
     ///
     /// Packaged or ordinary builds may not contain the development source
     /// checkout. In that case construction returns `None` without resolving a
     /// path or invoking Node.
     pub fn production() -> Option<Self> {
-        let repo_root = production_repo_root();
-        validate_repository_root(&repo_root).ok()?;
-        qualification_tool_path(&repo_root).ok()?;
-        Some(Self::with_root(
-            repo_root,
-            Box::new(ProcessQualificationToolRunner),
-        ))
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
+        #[cfg(debug_assertions)]
+        {
+            let repo_root = production_repo_root();
+            validate_repository_root(&repo_root).ok()?;
+            qualification_tool_path(&repo_root).ok()?;
+            Some(Self::with_root(
+                repo_root,
+                Box::new(ProcessQualificationToolRunner),
+            ))
+        }
     }
 
     /// Builds a repository with an injected runner for unit tests.
@@ -881,6 +890,7 @@ impl QualificationToolRunner for ProcessQualificationToolRunner {
 }
 
 /// Derives the only production repository root from the trusted manifest path.
+#[cfg(debug_assertions)]
 pub fn production_repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
@@ -1598,9 +1608,17 @@ mod tests {
             temp.path()
                 .join(".emuchef_runtime/qualification-candidates")
         );
+        #[cfg(debug_assertions)]
         assert!(production_repo_root()
             .join("tools/device-qualification.mjs")
             .is_file());
+    }
+
+    #[test]
+    fn release_build_does_not_resolve_the_source_repository() {
+        if !cfg!(debug_assertions) {
+            assert!(QualificationRepository::production().is_none());
+        }
     }
 
     #[test]
