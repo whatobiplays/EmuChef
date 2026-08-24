@@ -39,9 +39,9 @@ qualification-only ADB or planner/executor authority was added.
     labels without changing canonical authority or evidence semantics.
 11. `tools/device-qualification.test.mjs` — added opaque API, active naming,
     runbook, Make/CI, roadmap, and generated-matrix regression guards. The
-    active source scan inspects `tools/device-qualification*` while narrowly
-    excluding only the two pre-existing Phase 6D.6 material-exclusion path
-    literals for historical UI-smoke artifacts.
+    active source scan inspects `tools/device-qualification.mjs` while narrowly
+    excluding only its self-test and the two pre-existing Phase 6D.6
+    material-exclusion path literals for historical UI-smoke artifacts.
 12. `.superpowers/sdd/2026-08-23-device-qualification-harness/task-11-report.md`
     — this validation and handoff record.
 
@@ -76,7 +76,7 @@ no physical qualification claim.
 Every shell command below uses the repository-required `rtk` wrapper. Results
 are exact for the commands completed in this worktree.
 
-1. `rtk node --test tools/device-qualification.test.mjs` — exit 0; 74
+1. `rtk node --test tools/device-qualification.test.mjs` — exit 0; 75
    passed, 0 failed.
 2. `rtk make device-qualification-check` — exit 0; the device-qualification
    Node tests and canonical `--check` completed successfully. RTK truncated
@@ -127,7 +127,7 @@ are exact for the commands completed in this worktree.
    zero findings.
 4. `rtk git diff --check` — exit 0; no whitespace errors.
 
-## Known failures and incomplete checks
+## Known failures and historical validation context
 
 1. The only full-battery failure was
    `rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --features real-execution`.
@@ -162,12 +162,12 @@ are exact for the commands completed in this worktree.
    - `trace_symlink_source_is_rejected` — line 1976; expected an error message
      containing `evidence`.
 
-2. After tightening the active source scan to inspect the canonical tool, the
-   user interrupted `rtk node --test tools/device-qualification.test.mjs`
-   after approximately 3.1 seconds. That invocation has no exit status and is
-   recorded as incomplete; the preceding version of the same focused suite
-   was green with 74 passed tests. A process check found no surviving test
-   process. No further broad validation was run after the interruption.
+2. Historical TDD context from the initial Task 11 work: after tightening the
+   active source scan to inspect the canonical tool, the user interrupted
+   `rtk node --test tools/device-qualification.test.mjs` after approximately
+   3.1 seconds. That invocation had no exit status; a process check found no
+   surviving test process. It is not the final result. The review follow-up
+   reproduced the 73/1 failure, then the completed post-fix run passed 75/75.
 3. An earlier parallel diagnostic attempt ran matrix write and check together;
    the check exited 1 with `generated device qualification matrix is out of
    date; run --write-matrix` while the write exited 0. The required sequential
@@ -176,12 +176,14 @@ are exact for the commands completed in this worktree.
 
 ## Commit and physical-qualification confirmation
 
-1. Implementation/docs/tests commit:
+1. Task 11 implementation/docs/tests commit:
    `47fa261e14e7a266c402b95cadcb0182da0023e6`
-2. The report is committed separately after this implementation commit so the
-   implementation hash can be recorded without a self-referential commit
-   hash. The report commit hash is returned in the handoff.
-3. Confirmed: no physical qualification was performed, no physical evidence
+2. Active-name guard fix commit:
+   `38c69bfcdb0628d835b9e671837b6dadc4723d63`
+3. New report reconciliation commit: the final local commit containing this
+   report-only update; its exact hash is returned in the handoff because a
+   commit cannot contain its own hash without changing that hash.
+4. Confirmed: no physical qualification was performed, no physical evidence
    was added, no physical target was registered, and no evidence was rewritten.
    No push, merge, publish, deploy, connected-hardware action, or other
    external side effect was performed.
