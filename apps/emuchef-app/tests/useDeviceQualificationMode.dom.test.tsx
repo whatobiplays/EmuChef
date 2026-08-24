@@ -60,7 +60,9 @@ function activeStatus(): QualificationModeStatus {
   };
 }
 
-function sessionSnapshot(): QualificationSessionSnapshot {
+function sessionSnapshot(
+  overrides: Partial<QualificationSessionSnapshot> = {},
+): QualificationSessionSnapshot {
   return {
     sessionHandle: "session-opaque",
     targetId: "device-target-sha256:target",
@@ -82,6 +84,7 @@ function sessionSnapshot(): QualificationSessionSnapshot {
       runValidity: "valid",
       qualificationOutcome: "not_observed",
     },
+    ...overrides,
   };
 }
 
@@ -90,8 +93,8 @@ function reviewWorkflow(): WorkflowState {
     ...initialWorkflowState,
     step: "review",
     deviceHandle: "device-opaque",
-    devicePlan: "plan.current",
-    selectedRecipes: ["recipe.current"],
+    devicePlan: "plan.bound",
+    selectedRecipes: ["recipe.one", "recipe.dependency"],
     review: {
       reviewHandle: "review-opaque",
       setup: { name: "Current setup" },
@@ -170,13 +173,21 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
         type="button"
         onClick={() => void controller.beginSession({
           deviceHandle: "device-opaque",
-          devicePlan: "plan.current",
+          devicePlan: workflowRef.current.devicePlan ?? "plan.current",
           targetId: "device-target-sha256:target",
           workflowId: "workflow.one",
         })}
       >
         Begin session
       </button>
+      {controller.session?.candidate && (
+        <button
+          type="button"
+          onClick={() => void controller.recordRun(controller.session!.candidate!.candidateHandle)}
+        >
+          Record session
+        </button>
+      )}
     </>
   );
 }
@@ -263,4 +274,127 @@ test("review and terminal execution observation is deduplicated under StrictMode
   });
   expect(mockApi.createReview).not.toHaveBeenCalled();
   expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+});
+
+test("a failed review bind is retried without duplicate concurrent binds", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  mockApi.bindQualificationReview
+    .mockRejectedValueOnce(new Error("temporary review bind failure"))
+    .mockResolvedValue(sessionSnapshot());
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+
+  await waitFor(() => expect(mockApi.bindQualificationReview).toHaveBeenCalledTimes(2));
+  expect(mockApi.bindQualificationReview).toHaveBeenNthCalledWith(1, "session-opaque", "review-opaque");
+  expect(mockApi.bindQualificationReview).toHaveBeenNthCalledWith(2, "session-opaque", "review-opaque");
+});
+
+test("failed terminal execution binding and finalization retry in order", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  mockApi.bindQualificationReview.mockResolvedValue(sessionSnapshot());
+  mockApi.bindQualificationExecution
+    .mockRejectedValueOnce(new Error("temporary execution bind failure"))
+    .mockResolvedValue(sessionSnapshot());
+  mockApi.finalizeQualificationCandidate
+    .mockRejectedValueOnce(new Error("temporary finalization failure"))
+    .mockResolvedValue(sessionSnapshot());
+
+  render(<Harness workflow={realTerminalWorkflow()} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+
+  await waitFor(() => {
+    expect(mockApi.bindQualificationExecution).toHaveBeenCalledTimes(2);
+    expect(mockApi.finalizeQualificationCandidate).toHaveBeenCalledTimes(2);
+  });
+  expect(mockApi.bindQualificationExecution.mock.invocationCallOrder[1])
+    .toBeLessThan(mockApi.finalizeQualificationCandidate.mock.invocationCallOrder[0]);
+});
+
+test("device availability drift refreshes the bound qualification session", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  mockApi.refreshQualificationSession.mockResolvedValue(sessionSnapshot({
+    runValidity: "invalid",
+    invalidReason: "device_identity_changed",
+  }));
+
+  const { rerender } = render(<Harness workflow={reviewWorkflow()} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await screen.findByText("true");
+
+  rerender(<Harness workflow={{
+    ...reviewWorkflow(),
+    step: "connect",
+    deviceHandle: null,
+    devicePlan: null,
+    facts: null,
+    review: null,
+  }} />);
+
+  await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(1));
+  expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith("session-opaque", "device-opaque");
+});
+
+test("device identity drift refreshes the bound qualification session", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  mockApi.refreshQualificationSession.mockResolvedValue(sessionSnapshot({
+    runValidity: "invalid",
+    invalidReason: "device_identity_changed",
+  }));
+  const initial = reviewWorkflow();
+  initial.facts = {
+    deviceHandle: "device-opaque",
+    manufacturer: "Example",
+    brand: "Example",
+    model: "Original model",
+    androidVersion: 14,
+    androidApiLevel: 34,
+    firmwareBuild: "firmware-original",
+  };
+
+  const { rerender } = render(<Harness workflow={initial} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await screen.findByText("true");
+
+  rerender(<Harness workflow={{
+    ...initial,
+    facts: { ...initial.facts!, model: "Replacement model" },
+  }} />);
+
+  await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(1));
+  expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith("session-opaque", "device-opaque");
+
+  rerender(<Harness workflow={{
+    ...initial,
+    devicePlan: "plan.changed",
+    facts: { ...initial.facts!, model: "Replacement model" },
+  }} />);
+
+  await waitFor(() => expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(2));
+  expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith("session-opaque", "device-opaque");
+});
+
+test("successful run recording clears the active qualification session", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
+  mockApi.recordQualificationRun.mockResolvedValue({ runId: "qualification-run-opaque" });
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await screen.findByText("false");
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await screen.findByText("true");
+
+  fireEvent.click(screen.getByRole("button", { name: "Record session" }));
+
+  await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("false"));
+  expect(screen.queryByRole("button", { name: "Record session" })).toBeNull();
+  expect(mockApi.recordQualificationRun).toHaveBeenCalledTimes(1);
 });

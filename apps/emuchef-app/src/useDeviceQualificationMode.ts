@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { errorMessage } from "./app-helpers";
 import type {
+  DeviceFacts,
   QualificationCheckpointOutcome,
   QualificationConnectionType,
   QualificationModeStatus,
@@ -61,6 +62,27 @@ function candidatePreviewFromSummary(
   };
 }
 
+function deviceFactsKey(facts: DeviceFacts | null): string {
+  if (!facts) return "";
+  return [
+    facts.deviceHandle,
+    facts.manufacturer ?? "",
+    facts.brand ?? "",
+    facts.model ?? "",
+    facts.androidVersion ?? "",
+    facts.androidApiLevel ?? "",
+    facts.firmwareBuild ?? "",
+  ].join("\u0000");
+}
+
+function workflowDeviceObservationKey(workflow: WorkflowState): string {
+  return [
+    workflow.deviceHandle ?? "",
+    workflow.devicePlan ?? "",
+    deviceFactsKey(workflow.facts),
+  ].join("\u0001");
+}
+
 /**
  * Observes production review/execution state and exposes qualification-only
  * operator actions. All repository, device, and evidence authority remains in
@@ -76,17 +98,31 @@ export function useDeviceQualificationMode({
   const [targetCandidate, setTargetCandidate] = useState<QualificationTargetCandidatePreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transitionRetryRevision, setTransitionRetryRevision] = useState(0);
   const busyCountRef = useRef(0);
   const sessionRef = useRef<QualificationSessionSnapshot | null>(null);
-  const targetCandidateRef = useRef<QualificationTargetCandidatePreview | null>(null);
+  const sessionDeviceHandleRef = useRef<string | null>(null);
+  const boundDeviceFactsKeyRef = useRef("");
+  const lastSessionObservationKeyRef = useRef<string | null>(null);
   const boundReviewKeysRef = useRef(new Set<string>());
+  const reviewBindingPromisesRef = useRef(
+    new Map<string, Promise<QualificationSessionSnapshot | null>>(),
+  );
   const executionBindingPromisesRef = useRef(
     new Map<string, Promise<QualificationSessionSnapshot | null>>(),
   );
+  const executionFinalizationPromisesRef = useRef(
+    new Map<string, Promise<QualificationSessionSnapshot | null>>(),
+  );
   const finalizedExecutionKeysRef = useRef(new Set<string>());
+  const sessionRefreshPromisesRef = useRef(
+    new Map<string, Promise<QualificationSessionSnapshot | null>>(),
+  );
+  const transitionRetryAttemptsRef = useRef(new Map<string, number>());
+  const recordingCandidateHandlesRef = useRef(new Set<string>());
+  const recordingCandidateInFlightRef = useRef(new Set<string>());
 
   sessionRef.current = session;
-  targetCandidateRef.current = targetCandidate;
 
   const startBusy = useCallback(() => {
     busyCountRef.current += 1;
@@ -116,15 +152,44 @@ export function useDeviceQualificationMode({
     }
   }, [finishBusy, startBusy]);
 
+  const scheduleTransitionRetry = useCallback((key: string) => {
+    const attempts = transitionRetryAttemptsRef.current.get(key) ?? 0;
+    if (attempts >= 1) return;
+    transitionRetryAttemptsRef.current.set(key, attempts + 1);
+    queueMicrotask(() => setTransitionRetryRevision((revision) => revision + 1));
+  }, []);
+
+  const clearTransitionRetry = useCallback((key: string) => {
+    transitionRetryAttemptsRef.current.delete(key);
+  }, []);
+
+  const applySessionIfCurrent = useCallback((
+    sessionHandle: string,
+    nextSession: QualificationSessionSnapshot,
+  ) => {
+    if (sessionRef.current?.sessionHandle !== sessionHandle) return;
+    setSession(nextSession);
+  }, []);
+
+  const clearActiveSession = useCallback(() => {
+    sessionRef.current = null;
+    sessionDeviceHandleRef.current = null;
+    boundDeviceFactsKeyRef.current = "";
+    lastSessionObservationKeyRef.current = null;
+    setSession(null);
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!enabled) return;
+    transitionRetryAttemptsRef.current.clear();
+    setTransitionRetryRevision((revision) => revision + 1);
     startBusy();
     setError(null);
     try {
       const nextStatus = await api.deviceQualificationModeStatus();
       setStatus(nextStatus);
       if (!nextStatus.enabled) {
-        setSession(null);
+        clearActiveSession();
         setTargetCandidate(null);
         return;
       }
@@ -144,7 +209,7 @@ export function useDeviceQualificationMode({
     } finally {
       finishBusy();
     }
-  }, [enabled, finishBusy, startBusy]);
+  }, [clearActiveSession, enabled, finishBusy, startBusy]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -160,9 +225,15 @@ export function useDeviceQualificationMode({
     if (!enabled || !status?.enabled) return;
     await runOperation(
       () => api.beginQualificationSession(request),
-      (nextSession) => setSession(nextSession),
+      (nextSession) => {
+        sessionDeviceHandleRef.current = request.deviceHandle;
+        boundDeviceFactsKeyRef.current = deviceFactsKey(workflowRef.current.facts);
+        lastSessionObservationKeyRef.current = null;
+        transitionRetryAttemptsRef.current.clear();
+        setSession(nextSession);
+      },
     );
-  }, [enabled, runOperation, status?.enabled]);
+  }, [enabled, runOperation, status?.enabled, workflowRef]);
 
   const createTargetCandidate = useCallback(async (connectionType: QualificationConnectionType) => {
     if (!enabled || !status?.enabled) return;
@@ -199,17 +270,30 @@ export function useDeviceQualificationMode({
     const sessionHandle = sessionRef.current.sessionHandle;
     await runOperation(
       () => api.recordQualificationCheckpoint(sessionHandle, checkpointId, outcome),
-      (nextSession) => setSession(nextSession),
+      (nextSession) => applySessionIfCurrent(sessionHandle, nextSession),
     );
-  }, [enabled, runOperation, status?.enabled]);
+  }, [applySessionIfCurrent, enabled, runOperation, status?.enabled]);
 
   const recordRun = useCallback(async (candidateHandle: string) => {
-    if (!enabled || !status?.enabled) return;
-    const result = await runOperation<QualificationRunRecordingResult>(
-      () => api.recordQualificationRun(candidateHandle),
-    );
-    if (result !== null) await refresh();
-  }, [enabled, refresh, runOperation, status?.enabled]);
+    if (
+      !enabled
+      || !status?.enabled
+      || recordingCandidateHandlesRef.current.has(candidateHandle)
+      || recordingCandidateInFlightRef.current.has(candidateHandle)
+    ) return;
+    recordingCandidateInFlightRef.current.add(candidateHandle);
+    try {
+      const result = await runOperation<QualificationRunRecordingResult>(
+        () => api.recordQualificationRun(candidateHandle),
+      );
+      if (result === null) return;
+      recordingCandidateHandlesRef.current.add(candidateHandle);
+      clearActiveSession();
+      await refresh();
+    } finally {
+      recordingCandidateInFlightRef.current.delete(candidateHandle);
+    }
+  }, [clearActiveSession, enabled, refresh, runOperation, status?.enabled]);
 
   const discardCandidate = useCallback(async (candidateHandle: string) => {
     if (!enabled || !status?.enabled) return;
@@ -218,9 +302,9 @@ export function useDeviceQualificationMode({
     );
     if (result === null) return;
     setTargetCandidate((current) => current?.candidateHandle === candidateHandle ? null : current);
-    setSession((current) => current?.candidate?.candidateHandle === candidateHandle ? null : current);
+    if (sessionRef.current?.candidate?.candidateHandle === candidateHandle) clearActiveSession();
     await refresh();
-  }, [enabled, refresh, runOperation, status?.enabled]);
+  }, [clearActiveSession, enabled, refresh, runOperation, status?.enabled]);
 
   const reviewHandle = workflow.review?.reviewHandle ?? null;
   const productionExecution = workflow.execution.kind === "active" || workflow.execution.kind === "terminal"
@@ -230,51 +314,144 @@ export function useDeviceQualificationMode({
   const executionIdentity = productionExecution && executionHandle
     ? `${productionExecution.generation}:${executionHandle}`
     : null;
+  const observedDeviceHandle = workflow.deviceHandle;
+  const observedFactsKey = deviceFactsKey(workflow.facts);
+  const deviceObservationKey = workflowDeviceObservationKey(workflow);
 
   useEffect(() => {
     if (!enabled || !session || !reviewHandle) return;
-    const key = `${session.sessionHandle}:${reviewHandle}`;
+    const sessionHandle = session.sessionHandle;
+    const key = `${sessionHandle}:${reviewHandle}`;
     if (boundReviewKeysRef.current.has(key)) return;
-    boundReviewKeysRef.current.add(key);
-    void runOperation(
-      () => api.bindQualificationReview(session.sessionHandle, reviewHandle),
-      (nextSession) => setSession(nextSession),
-    ).then((result) => {
-      if (result === null) boundReviewKeysRef.current.delete(key);
+    if (reviewBindingPromisesRef.current.has(key)) return;
+    const binding = runOperation(
+      () => api.bindQualificationReview(sessionHandle, reviewHandle),
+      (nextSession) => applySessionIfCurrent(sessionHandle, nextSession),
+    );
+    reviewBindingPromisesRef.current.set(key, binding);
+    void binding.then((result) => {
+      reviewBindingPromisesRef.current.delete(key);
+      if (result === null) {
+        boundReviewKeysRef.current.delete(key);
+        scheduleTransitionRetry(`review-bind:${key}`);
+      } else {
+        boundReviewKeysRef.current.add(key);
+        clearTransitionRetry(`review-bind:${key}`);
+      }
     });
-  }, [enabled, reviewHandle, runOperation, session]);
+  }, [
+    applySessionIfCurrent,
+    clearTransitionRetry,
+    enabled,
+    reviewHandle,
+    runOperation,
+    scheduleTransitionRetry,
+    session,
+    transitionRetryRevision,
+  ]);
 
   useEffect(() => {
     if (!enabled || !session || !productionExecution || productionExecution.mode !== "real" || !executionIdentity) {
       return;
     }
-    const key = `${session.sessionHandle}:${executionIdentity}`;
+    const sessionHandle = session.sessionHandle;
+    const key = `${sessionHandle}:${executionIdentity}`;
     let binding = executionBindingPromisesRef.current.get(key);
     if (!binding) {
       binding = runOperation(
-        () => api.bindQualificationExecution(session.sessionHandle, executionHandle!),
-        (nextSession) => setSession(nextSession),
+        () => api.bindQualificationExecution(sessionHandle, executionHandle!),
+        (nextSession) => applySessionIfCurrent(sessionHandle, nextSession),
       );
       executionBindingPromisesRef.current.set(key, binding);
       void binding.then((result) => {
-        if (result === null) executionBindingPromisesRef.current.delete(key);
+        if (result === null) {
+          executionBindingPromisesRef.current.delete(key);
+          scheduleTransitionRetry(`execution-bind:${key}`);
+        } else {
+          clearTransitionRetry(`execution-bind:${key}`);
+        }
       });
     }
-    if (productionExecution.kind !== "terminal" || finalizedExecutionKeysRef.current.has(key)) return;
-    finalizedExecutionKeysRef.current.add(key);
-    void binding.then((result) => {
-      if (result === null) {
-        finalizedExecutionKeysRef.current.delete(key);
-        return null;
-      }
+    if (
+      productionExecution.kind !== "terminal"
+      || finalizedExecutionKeysRef.current.has(key)
+      || executionFinalizationPromisesRef.current.has(key)
+    ) return;
+    const finalization = binding.then((result) => {
+      if (result === null || sessionRef.current?.sessionHandle !== sessionHandle) return null;
       return runOperation(
-        () => api.finalizeQualificationCandidate(session.sessionHandle),
-        (nextSession) => setSession(nextSession),
+        () => api.finalizeQualificationCandidate(sessionHandle),
+        (nextSession) => applySessionIfCurrent(sessionHandle, nextSession),
       );
-    }).then((result) => {
-      if (result === null) finalizedExecutionKeysRef.current.delete(key);
     });
-  }, [enabled, executionHandle, executionIdentity, productionExecution, runOperation, session]);
+    executionFinalizationPromisesRef.current.set(key, finalization);
+    void finalization.then((result) => {
+      executionFinalizationPromisesRef.current.delete(key);
+      if (result === null) {
+        scheduleTransitionRetry(`execution-finalize:${key}`);
+      } else {
+        finalizedExecutionKeysRef.current.add(key);
+        clearTransitionRetry(`execution-finalize:${key}`);
+      }
+    });
+  }, [
+    applySessionIfCurrent,
+    clearTransitionRetry,
+    enabled,
+    executionHandle,
+    executionIdentity,
+    productionExecution,
+    runOperation,
+    scheduleTransitionRetry,
+    session,
+    transitionRetryRevision,
+  ]);
+
+  useEffect(() => {
+    if (!enabled || !session || !sessionDeviceHandleRef.current) return;
+    const sessionHandle = session.sessionHandle;
+    const boundDeviceHandle = sessionDeviceHandleRef.current;
+    const deviceUnavailable = observedDeviceHandle !== boundDeviceHandle;
+    const identityChanged = boundDeviceFactsKeyRef.current !== ""
+      && observedFactsKey !== boundDeviceFactsKeyRef.current;
+    const planChanged = workflow.devicePlan !== session.devicePlan;
+    const driftKey = `${sessionHandle}:${deviceObservationKey}`;
+    if (!deviceUnavailable && !identityChanged && !planChanged) {
+      lastSessionObservationKeyRef.current = driftKey;
+      return;
+    }
+    if (lastSessionObservationKeyRef.current === driftKey) return;
+    lastSessionObservationKeyRef.current = driftKey;
+    let refreshSession = sessionRefreshPromisesRef.current.get(sessionHandle);
+    if (!refreshSession) {
+      refreshSession = runOperation(
+        () => api.refreshQualificationSession(sessionHandle, boundDeviceHandle),
+        (nextSession) => applySessionIfCurrent(sessionHandle, nextSession),
+      );
+      sessionRefreshPromisesRef.current.set(sessionHandle, refreshSession);
+      void refreshSession.then((result) => {
+        sessionRefreshPromisesRef.current.delete(sessionHandle);
+        if (result === null) {
+          lastSessionObservationKeyRef.current = null;
+          scheduleTransitionRetry(`session-refresh:${driftKey}`);
+        } else {
+          clearTransitionRetry(`session-refresh:${driftKey}`);
+        }
+      });
+    }
+  }, [
+    applySessionIfCurrent,
+    clearTransitionRetry,
+    deviceObservationKey,
+    enabled,
+    observedDeviceHandle,
+    observedFactsKey,
+    runOperation,
+    scheduleTransitionRetry,
+    session,
+    transitionRetryRevision,
+    workflow.devicePlan,
+  ]);
 
   const intentLock = session
     ? { devicePlan: session.devicePlan, selectedRecipes: [...session.requiredRecipes] }
