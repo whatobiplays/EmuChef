@@ -107,6 +107,49 @@ command completed without hanging.
 
 Review-fix commit: `070d16b` (`fix: harden qualification workflow coordination`).
 
+## Final rereview-fix round
+
+The final bounded rereview addressed the two fresh findings:
+
+- Execution binding now requires a confirmed successful review binding for the
+  same opaque session/review key. A review failure or delay therefore cannot
+  consume execution retry state; execution binding and finalization begin only
+  after review binding succeeds, while the existing request maps preserve
+  StrictMode deduplication.
+- A session that begins before `WorkflowState.facts` is available now treats
+  the first later facts observation as a bound-session refresh. A successful
+  refresh establishes that observation as the identity baseline, so later
+  identity and plan drift continue to refresh through the same bound opaque
+  device handle.
+
+Final rereview changed files:
+
+- `apps/emuchef-app/src/useDeviceQualificationMode.ts` — gated execution on
+  review completion and tracked the first late device-facts observation.
+- `apps/emuchef-app/tests/useDeviceQualificationMode.dom.test.tsx` — added
+  delayed/failed review binding coverage and late-facts, identity-drift, and
+  plan-drift refresh coverage.
+
+## Final rereview verification
+
+All commands below were run from `apps/emuchef-app` unless noted otherwise.
+
+| Command | Result |
+| --- | --- |
+| `rtk npm exec -- vitest run --config tests/vitest.config.ts tests/useDeviceQualificationMode.dom.test.tsx` | Exit 0; 1 test file passed; 11 tests passed. |
+| `rtk npm exec -- vitest run --config tests/vitest.config.ts tests/useDeviceQualificationMode.dom.test.tsx tests/DeviceQualificationOverlay.dom.test.tsx tests/useExecution.dom.test.tsx tests/App.dom.test.tsx` | Exit 0; 4 test files passed; 69 tests passed. |
+| `rtk npm test` | Exit 0; logic suite 83/83 passed; DOM suite 9 files and 94/94 tests passed. |
+| `rtk npm run typecheck` | Exit 0; output `ok`. |
+| `rtk npm run lint` | Exit 0; output `ok`. |
+| `rtk git diff --check` | Exit 0; no whitespace errors. |
+
+The TDD red run before the implementation exited 1 with 11 tests and the 2
+new regressions failing for the expected reasons. The broad frontend test
+command completed without hanging. No physical qualification or device/ADB
+authority was added.
+
+Final rereview implementation commit: `e683e63` (`fix: gate qualification execution on review`).
+
 ## Known non-blocking notes
 
 - The overlay is intentionally available only when the trusted backend reports
