@@ -1189,6 +1189,13 @@ strict Rust-owned envelope around an opaque canonical payload. React receives
 no repository path, candidate path, executable path, or arbitrary process
 arguments.
 
+Qualification-run candidates created when a session starts are provisional and
+remain non-promotable until terminal finalization writes a supported
+`runValidity`/`qualificationOutcome` classification. The Rust `record_run`
+boundary rejects those candidates before invoking Node; a terminal
+`invalid`/`not_observed` candidate remains eligible for canonical audit
+recording.
+
 `docs/testing/device-qualification/device-targets.json` now uses schema
 version 2. Every material target fact is stored as an exact `{ value, source }`
 wrapper, with legal provenance restricted by field: ordinary identity facts use
@@ -1314,7 +1321,12 @@ canonical tool, the command returns a sanitized unavailable projection with no
 workflow, target, or candidate data.
 
 An enabled status uses one serialized repository snapshot containing the
-canonical `--describe` result and restart-safe candidate summaries. It keeps
+canonical `--describe` result, restart-safe candidate summaries, and a
+sanitized resumable snapshot for the persisted non-terminal run session, when
+one exists. The snapshot includes only opaque handles, workflow intent,
+declared checkpoints, and their persisted outcomes/timestamps; it excludes
+device handles and filesystem paths. Status hydration does not re-probe a
+device or assign new checkpoint timestamps. It keeps
 `runtimeContract` separate from the embedded build identity and reports
 recordability only when the current trusted Git `HEAD`, tracked worktree
 cleanliness, embedded build identity, and in-process lifecycle state all agree.
@@ -1360,9 +1372,11 @@ target/workflow binding, target-candidate capture and review, register and
 discard actions, workflow-declared checkpoint recording, terminal
 classification, and explicit run recording. It displays stored typed values
 with their provenance and reconstructs resumable target-registration previews
-from persisted sanitized summaries without recapturing a device. Checkpoint
-controls start with no selected outcome, and persisted outcomes and timestamps
-remain unchanged on reload.
+from persisted sanitized summaries without recapturing a device. The hook also
+hydrates the persisted run-session snapshot into the overlay after restart;
+the overlay renders its stored checkpoint outcomes and timestamps without
+re-probing or retimestamping. Checkpoint controls start with no selected
+outcome, and persisted outcomes and timestamps remain unchanged on reload.
 
 The overlay observes the existing production review and execution state. It
 binds review and real-execution handles only after those normal workflow

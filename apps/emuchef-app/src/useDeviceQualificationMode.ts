@@ -194,6 +194,8 @@ export function useDeviceQualificationMode({
         setTargetCandidate(null);
         return;
       }
+      const recoveredSession = nextStatus.resumableSession ?? null;
+      setSession((current) => current ?? recoveredSession);
       const recoveredCandidate = nextStatus.resumableCandidates
         .map(candidatePreviewFromSummary)
         .find((candidate): candidate is QualificationTargetCandidatePreview => candidate !== null)

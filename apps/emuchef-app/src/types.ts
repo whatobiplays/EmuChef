@@ -520,6 +520,7 @@ export interface QualificationModeStatus {
   workflows: QualificationWorkflow[];
   targets: QualificationTargetSummary[];
   resumableCandidates: QualificationCandidateSummary[];
+  resumableSession?: QualificationSessionSnapshot | null;
 }
 
 export interface BeginQualificationSessionRequest {

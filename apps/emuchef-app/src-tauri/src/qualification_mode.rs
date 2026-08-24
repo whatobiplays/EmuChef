@@ -182,6 +182,8 @@ pub(crate) struct QualificationModeStatus {
     pub(crate) workflows: Vec<QualificationWorkflow>,
     pub(crate) targets: Vec<QualificationTargetSummary>,
     pub(crate) resumable_candidates: Vec<QualificationCandidateSummaryDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resumable_session: Option<QualificationSessionSnapshot>,
 }
 
 /// The validity of a run candidate is monotonic: a session may become invalid,
@@ -1132,6 +1134,7 @@ fn qualification_mode_status(
     let repository_status = repository
         .describe_and_list_candidates()
         .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
+    let resumable_session = resumable_session_snapshot(repository, &repository_status.candidates)?;
     let description = repository_status.description;
     let workflows = workflows_from_description(&description)?;
     let targets = targets_from_description(&description)?;
@@ -1155,6 +1158,7 @@ fn qualification_mode_status(
         workflows,
         targets,
         resumable_candidates: candidates,
+        resumable_session,
     })
 }
 
@@ -1170,6 +1174,7 @@ fn disabled_mode_status() -> QualificationModeStatus {
         workflows: Vec::new(),
         targets: Vec::new(),
         resumable_candidates: Vec::new(),
+        resumable_session: None,
     }
 }
 
@@ -1875,6 +1880,30 @@ fn candidate_summary_from_repository(
     })
 }
 
+fn resumable_session_snapshot(
+    repository: &crate::qualification_repository::QualificationRepository,
+    candidates: &[RepositoryCandidateSummary],
+) -> Result<Option<QualificationSessionSnapshot>, String> {
+    for candidate in candidates {
+        if candidate.kind != CandidateKind::QualificationRun
+            || candidate.run_validity.is_some()
+            || candidate.qualification_outcome.is_some()
+        {
+            continue;
+        }
+        let Ok(persisted) = repository.load_session(&candidate.candidate_handle) else {
+            continue;
+        };
+        let session = QualificationSession::from_persisted(persisted)
+            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        if session.candidate_handle() != candidate.candidate_handle {
+            return Err(safe_qualification_error("qualification_candidate_invalid"));
+        }
+        return session_snapshot(repository, &session).map(Some);
+    }
+    Ok(None)
+}
+
 fn current_timestamp() -> Result<String, String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -2435,6 +2464,85 @@ mod tests {
     }
 
     #[test]
+    fn enabled_status_restores_persisted_run_session_without_reprobing_or_retimestamping() {
+        let build = test_build();
+        let description = json!({
+            "schemaVersion": 1,
+            "runtimeContract": "real-execution-v1",
+            "qualificationContract": 1,
+            "build": serde_json::to_value(&build).expect("build should serialize"),
+            "workflowCatalog": { "schemaVersion": 1, "workflows": [] },
+            "deviceTargets": { "schemaVersion": 2, "targets": [] },
+        });
+        let temp = tempfile::tempdir().expect("test repository directory should be created");
+        let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(DescriptionRunner { description }),
+            build.clone(),
+            crate::qualification_repository::QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        );
+        let candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": serde_json::to_value(&build).expect("build should serialize"),
+                }),
+                None,
+            )
+            .expect("run candidate should be stored");
+        let mut session = QualificationSession::for_test(&["device_behavior_verified"]);
+        session
+            .record_checkpoint_at(
+                "device_behavior_verified",
+                CheckpointOutcome::Pass,
+                "2026-08-23T12:34:56Z",
+            )
+            .expect("checkpoint should be recorded");
+        let mut persisted = session.to_persisted();
+        persisted.session_handle = session_handle_for_candidate(&candidate)
+            .expect("candidate should map to an opaque session handle");
+        persisted.candidate_handle = candidate.clone();
+        repository
+            .save_session(&candidate, &persisted)
+            .expect("session should be persisted");
+        let provider = QualificationRepositoryProvider::for_test(repository);
+
+        let status = qualification_mode_status(
+            &QualificationModeState {
+                enabled: true,
+                build: Some(build),
+            },
+            &provider,
+        )
+        .expect("status should restore the persisted session");
+        let restored = status
+            .resumable_session
+            .as_ref()
+            .expect("run session should be exposed for restart recovery");
+
+        assert_eq!(restored.session_handle, persisted.session_handle);
+        assert_eq!(restored.target_id, "target-test");
+        assert_eq!(
+            restored.recorded_checkpoints[0].observed_at,
+            "2026-08-23T12:34:56Z"
+        );
+        assert_eq!(
+            restored
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.candidate_handle.as_str()),
+            Some(candidate.as_str())
+        );
+        let encoded = serde_json::to_value(status).expect("status should serialize");
+        assert!(encoded["resumableSession"].get("deviceHandle").is_none());
+        assert!(encoded["resumableSession"].get("candidatePath").is_none());
+    }
+
+    #[test]
     fn registration_command_blocks_the_next_lifecycle_operation_until_rebuild() {
         let temp = tempfile::tempdir().expect("temporary repository should be created");
         let runner = RegistrationRunner::default();
@@ -2477,6 +2585,20 @@ mod tests {
     #[derive(Clone, Default)]
     struct RegistrationRunner {
         calls: Arc<Mutex<usize>>,
+    }
+
+    struct DescriptionRunner {
+        description: Value,
+    }
+
+    impl crate::qualification_repository::QualificationToolRunner for DescriptionRunner {
+        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            if args != ["--describe"] {
+                return Err("unexpected test operation".to_string());
+            }
+            serde_json::to_vec(&self.description)
+                .map_err(|_| "test response should serialize".to_string())
+        }
     }
 
     impl crate::qualification_repository::QualificationToolRunner for RegistrationRunner {

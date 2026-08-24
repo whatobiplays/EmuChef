@@ -607,6 +607,19 @@ impl QualificationRepository {
         )?;
         let (promotable, non_promotable_reason) =
             self.candidate_promotion_status(envelope.build.as_ref());
+        let (promotable, non_promotable_reason) = if envelope.kind
+            == CandidateKind::QualificationRun
+            && !is_terminal_run_candidate(&envelope.payload)
+        {
+            (
+                false,
+                Some(
+                    "qualification run candidate has not reached terminal finalization".to_string(),
+                ),
+            )
+        } else {
+            (promotable, non_promotable_reason)
+        };
 
         Ok(StoredQualificationCandidate {
             candidate_handle: handle.to_string(),
@@ -1057,6 +1070,18 @@ fn candidate_report_sha256(candidate: &Value) -> Result<Option<String>, String> 
         report_sha256 = Some(sha256.to_string());
     }
     Ok(report_sha256)
+}
+
+fn is_terminal_run_candidate(candidate: &Value) -> bool {
+    matches!(
+        (
+            candidate.get("runValidity").and_then(Value::as_str),
+            candidate
+                .get("qualificationOutcome")
+                .and_then(Value::as_str),
+        ),
+        (Some("invalid"), Some("not_observed")) | (Some("valid"), Some("passed" | "failed"))
+    )
 }
 
 fn report_metadata_for_candidate(
@@ -1716,6 +1741,85 @@ mod tests {
             calls[1].1,
             vec!["--register-target".to_string(), target_handle]
         );
+    }
+
+    #[test]
+    fn provisional_run_candidate_is_not_promotable_or_recorded() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::with_response(json!({
+            "operation": "record_run",
+            "candidateHandle": "unexpected",
+            "candidateKind": "qualification_run",
+            "payload": { "runId": "unexpected" },
+        }));
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": build_identity_json(),
+                    "workflowId": "retroarch-plus-bios",
+                }),
+                None,
+            )
+            .expect("provisional run candidate should be stored");
+        let candidate_path = repository
+            .candidate_root()
+            .join(&handle)
+            .join(CANDIDATE_FILE);
+        let before = std::fs::read(&candidate_path).expect("candidate should be readable");
+
+        let error = repository
+            .record_run(&handle)
+            .expect_err("provisional run candidates must not be recorded");
+
+        assert!(error.contains("terminal"));
+        assert!(calls.calls().is_empty());
+        assert_eq!(
+            std::fs::read(&candidate_path).expect("candidate should remain readable"),
+            before
+        );
+        let summary = repository
+            .list_candidates()
+            .expect("provisional candidate should remain inspectable");
+        assert!(!summary[0].promotable);
+        assert!(summary[0]
+            .non_promotable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("terminal")));
+    }
+
+    #[test]
+    fn terminal_invalid_not_observed_run_candidate_can_be_recorded() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": build_identity_json(),
+                    "runValidity": "invalid",
+                    "qualificationOutcome": "not_observed",
+                }),
+                None,
+            )
+            .expect("terminal invalid candidate should be stored");
+        calls.set_response(json!({
+            "operation": "record_run",
+            "candidateHandle": handle,
+            "candidateKind": "qualification_run",
+            "payload": { "runId": "qualification-run-opaque" },
+        }));
+
+        repository
+            .record_run(&handle)
+            .expect("terminal invalid candidates remain recordable");
+        assert_eq!(calls.calls()[0].1, vec!["--record-run".to_string(), handle]);
     }
 
     #[test]

@@ -169,6 +169,7 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
       <output data-testid="qualification-plan">{controller.intentLock?.devicePlan ?? ""}</output>
       <output data-testid="qualification-recipes">{controller.intentLock?.selectedRecipes.join(",") ?? ""}</output>
       <output data-testid="qualification-candidate">{controller.targetCandidate?.target.model.value ?? ""}</output>
+      <output data-testid="qualification-checkpoint">{controller.session?.recordedCheckpoints[0]?.observedAt ?? ""}</output>
       <button
         type="button"
         onClick={() => void controller.beginSession({
@@ -238,6 +239,36 @@ test("refresh restores the stored target candidate without recapturing it", asyn
 
   expect((await screen.findByTestId("qualification-candidate")).textContent).toBe("Stored model");
   expect(mockApi.createQualificationTargetCandidate).not.toHaveBeenCalled();
+});
+
+test("refresh restores a persisted run session and checkpoint timestamp without probing", async () => {
+  const recordedAt = "2026-08-23T09:30:00Z";
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    ...activeStatus(),
+    resumableSession: sessionSnapshot({
+      humanCheckpoints: [{
+        id: "clean-reset",
+        instruction: "Reset the device before the first reviewed run.",
+        fact: "The device is clean before execution.",
+        allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+        required: true,
+      }],
+      recordedCheckpoints: [{
+        checkpointId: "clean-reset",
+        outcome: "pass",
+        observedAt: recordedAt,
+      }],
+    }),
+  });
+
+  render(<Harness workflow={initialWorkflowState} />);
+
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-active").textContent).toBe("true");
+  });
+  expect(screen.getByTestId("qualification-checkpoint").textContent).toBe(recordedAt);
+  expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
+  expect(mockApi.refreshQualificationSession).not.toHaveBeenCalled();
 });
 
 test("an active session exposes only its bound plan and recipes without starting product work", async () => {
