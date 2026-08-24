@@ -84,7 +84,7 @@ function listFiles(relativeRoot) {
 
 function activeQualificationFiles() {
   const files = [
-    ...listFiles("tools").filter((relativePath) => path.basename(relativePath).startsWith("device-qualification")),
+    ...listFiles("tools").filter((relativePath) => path.basename(relativePath) === "device-qualification.mjs"),
     ...listFiles("docs/testing/device-qualification"),
     ...listFiles("tests/fixtures/device-qualification"),
     ...listFiles("apps/emuchef-app/src").filter((relativePath) => /qualification/i.test(path.basename(relativePath))),
@@ -92,6 +92,8 @@ function activeQualificationFiles() {
     ...listFiles("apps/emuchef-app/scripts").filter((relativePath) => /device-qualification/i.test(path.basename(relativePath))),
     "docs/manual/device-qualification-operator.md",
     "docs/qualification/device-qualification-matrix.md",
+    "Makefile",
+    ".github/workflows/emuchef-execution-feature-matrix.yml",
   ];
   return [...new Set(files)].filter((relativePath) => !HISTORICAL_PATHS.some((pattern) => pattern.test(relativePath)));
 }
@@ -103,7 +105,19 @@ function readActiveQualificationSource(relativePath) {
       source = source.replaceAll(historicalReference, "");
     }
   }
+  if (relativePath === ".github/workflows/emuchef-execution-feature-matrix.yml") {
+    const marker = "      - name: Validate device qualification foundation";
+    const start = source.indexOf(marker);
+    assert.notEqual(start, -1, relativePath);
+    const nextStep = source.indexOf("\n      - name:", start + marker.length);
+    source = source.slice(start, nextStep === -1 ? source.length : nextStep);
+  }
   return source;
+}
+
+function assertActiveQualificationSourceUsesDomainNames(relativePath, source = readActiveQualificationSource(relativePath)) {
+  assert.doesNotMatch(relativePath, ACTIVE_PROJECT_MANAGEMENT_NAME, relativePath);
+  assert.doesNotMatch(source, ACTIVE_PROJECT_MANAGEMENT_NAME, relativePath);
 }
 
 function readJson(relative) {
@@ -1780,13 +1794,25 @@ test("React qualification API contains no filesystem or process authority fields
 
 test("active qualification paths and source use domain-oriented names", () => {
   for (const relativePath of activeQualificationFiles()) {
-    assert.doesNotMatch(relativePath, ACTIVE_PROJECT_MANAGEMENT_NAME, relativePath);
-    assert.doesNotMatch(
-      readActiveQualificationSource(relativePath),
-      ACTIVE_PROJECT_MANAGEMENT_NAME,
-      relativePath,
-    );
+    assertActiveQualificationSourceUsesDomainNames(relativePath);
   }
+});
+
+test("active name guard excludes only its self-test and still rejects production terms", () => {
+  const activeFiles = activeQualificationFiles();
+  assert.equal(activeFiles.includes("tools/device-qualification.test.mjs"), false);
+  assert.equal(activeFiles.includes("tools/device-qualification.mjs"), true);
+  const productionPath = "apps/emuchef-app/src/DeviceQualificationOverlay.tsx";
+  assert.equal(activeFiles.includes(productionPath), true);
+  assert.equal(activeFiles.includes("Makefile"), true);
+  assert.equal(activeFiles.includes(".github/workflows/emuchef-execution-feature-matrix.yml"), true);
+  assert.throws(
+    () => assertActiveQualificationSourceUsesDomainNames(
+      productionPath,
+      `${readActiveQualificationSource(productionPath)}\nconst legacyLabel = "phase-7";\n`,
+    ),
+    (error) => error?.code === "ERR_ASSERTION",
+  );
 });
 
 test("canonical qualification tooling uses domain-oriented output labels", () => {
