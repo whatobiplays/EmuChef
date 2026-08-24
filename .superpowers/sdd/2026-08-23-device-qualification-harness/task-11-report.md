@@ -231,3 +231,69 @@ Follow-up TDD and validation results:
 The review-fix implementation commit is
 `38c69bfcdb0628d835b9e671837b6dadc4723d63`. The separate report commit is
 returned in the final handoff.
+
+## Final bounded fix wave: terminal promotion and restart recovery
+
+This follow-up closes two review findings without changing the canonical Node
+authority or the physical-evidence boundary. Provisional qualification-run
+candidates are now non-promotable and are rejected before Rust can invoke
+`--record-run`. Terminal `invalid`/`not_observed` candidates remain recordable.
+Enabled qualification status now loads the persisted non-terminal run session
+from `session.json` and returns a sanitized `resumableSession` snapshot. The
+React hook hydrates that snapshot, and the existing overlay renders its opaque
+session/checkpoint data without device re-probing or assigning new timestamps.
+
+### Fix-wave changed files
+
+1. `apps/emuchef-app/src-tauri/src/qualification_repository.rs` — blocks
+   provisional/non-terminal run promotion and adds no-mutation plus terminal
+   invalid-record regressions.
+2. `apps/emuchef-app/src-tauri/src/qualification_mode.rs` — exposes a
+   sanitized persisted run-session snapshot and adds restart/checkpoint
+   timestamp coverage.
+3. `apps/emuchef-app/src/types.ts` — adds the optional `resumableSession`
+   status DTO field.
+4. `apps/emuchef-app/src/useDeviceQualificationMode.ts` — hydrates the stored
+   run-session snapshot without refresh observation.
+5. `apps/emuchef-app/tests/useDeviceQualificationMode.dom.test.tsx` — adds the
+   restart/resume DOM regression and asserts checkpoint timestamp preservation.
+6. `CONTEXT.md` — records the current terminal-promotion and restart semantics.
+
+### Fix-wave validation results
+
+All commands below completed in the isolated worktree and exited 0 unless
+otherwise stated:
+
+1. `rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_repository` — 30 passed, 290 filtered.
+2. `rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode` — 28 passed, 292 filtered.
+3. `rtk cargo check --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --features real-execution` — 0 errors; two existing dead-code warnings for `report_bytes`, `candidate_root`, and `list_candidates` in `qualification_repository.rs`.
+4. `rtk npm exec -- vitest run tests/useDeviceQualificationMode.dom.test.tsx tests/DeviceQualificationOverlay.dom.test.tsx --config tests/vitest.config.ts` (from `apps/emuchef-app`) — 2 files passed, 17 tests passed.
+5. `rtk npm run typecheck` (from `apps/emuchef-app`) — `ok`.
+6. `rtk npm run lint` (from `apps/emuchef-app`) — `ok`.
+7. `rtk npm run test:security` (from `apps/emuchef-app`) — 29 security tests passed; nested runtime-retirement suite 12 passed; coverage 100.00% lines, 97.92% branches, 100.00% functions.
+8. `rtk cargo fmt --manifest-path apps/emuchef-app/src-tauri/Cargo.toml -- --check` — no output.
+9. `rtk git diff --check` — no whitespace errors.
+10. `rtk node --test tools/device-qualification.test.mjs` — 75 passed, 0 failed.
+11. `rtk node tools/device-qualification.mjs --check` — `Device qualification check passed.`
+
+The focused TDD red check initially failed to compile because the new
+`resumable_session` field had not yet been added; the focused Rust regressions
+and DOM regression passed after the implementation. The final battery above
+is the authoritative post-fix result. Broad unrelated commands were not
+rerun in this bounded wave: the prior full battery and its historical
+real-execution Tauri results remain recorded above without rewriting the
+historical UI-smoke source or evidence.
+
+### Fix-wave commits and boundary confirmation
+
+1. Task 11 implementation: `47fa261e14e7a266c402b95cadcb0182da0023e6`.
+2. Active-name guard fix: `38c69bfcdb0628d835b9e671837b6dadc4723d63`.
+3. Final bounded implementation: `7f22bdba38abace21bde1127330dbd32358f0b95`.
+4. New report-only commit: the final local commit containing this report
+   update; its full hash is returned in the handoff because a commit cannot
+   contain its own hash without changing that hash.
+
+No physical qualification or physical evidence was added. No physical target
+was registered, no qualification-only ADB or new authority was introduced,
+and no matrix/evidence artifact was changed. No push, merge, publish,
+deploy, connected-hardware action, or other external side effect was performed.
