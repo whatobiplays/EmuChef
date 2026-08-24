@@ -185,3 +185,47 @@ are exact for the commands completed in this worktree.
    was added, no physical target was registered, and no evidence was rewritten.
    No push, merge, publish, deploy, connected-hardware action, or other
    external side effect was performed.
+
+## Review follow-up: active-name scan self-test exclusion
+
+The review finding was reproduced: the original
+`rtk node --test tools/device-qualification.test.mjs` run exited 1 with 73
+passed and 1 failed because the active-name scan included its own test source,
+whose intentional forbidden-term regex literals matched the scan.
+
+The fix changes only the active implementation file set and its narrowly
+scoped source selection:
+
+1. `tools/device-qualification.mjs` remains included; only
+   `tools/device-qualification.test.mjs` is excluded.
+2. The active set retains qualification files under
+   `apps/emuchef-app/src`, `apps/emuchef-app/src-tauri/src`,
+   `tests/fixtures/device-qualification`, and
+   `docs/testing/device-qualification`, plus the operator runbook, generated
+   matrix, `Makefile`, and the workflow file.
+3. The workflow scan is limited to its active `Validate device qualification
+   foundation` step so unrelated historical Phase 6C/6D6 workflow entries are
+   not rewritten or broadly exempted.
+4. A regression asserts the self-test is absent, the canonical tool and
+   production paths remain present, and an injected `phase-7` term in
+   `apps/emuchef-app/src/DeviceQualificationOverlay.tsx` is rejected.
+   Opaque React API guards were not weakened or changed.
+
+Follow-up TDD and validation results:
+
+1. `rtk node --test tools/device-qualification.test.mjs` after adding the
+   regression but before the file-set fix — exit 1; 73 passed, 2 failed (the
+   original self-test scan failure and the new expected self-test exclusion
+   assertion).
+2. `rtk node --test tools/device-qualification.test.mjs` after the fix — exit
+   0; 75 passed, 0 failed.
+3. `rtk npm --prefix apps/emuchef-app run test:security` — exit 0; 29
+   security tests and 12 runtime-retirement tests passed; coverage remained
+   100.00% lines, 97.92% branches, and 100.00% functions.
+4. `rtk node tools/device-qualification.mjs --check` — exit 0;
+   `Device qualification check passed.`
+5. `rtk git diff --check` — exit 0; no whitespace errors.
+
+The review-fix implementation commit is
+`38c69bfcdb0628d835b9e671837b6dadc4723d63`. The separate report commit is
+returned in the final handoff.
