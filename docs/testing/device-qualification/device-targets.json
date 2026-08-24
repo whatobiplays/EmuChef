@@ -1,4 +1,49 @@
 {
   "schemaVersion": 2,
-  "targets": []
+  "targets": [
+    {
+      "profileId": {
+        "value": "ayaneo.pocket_air_mini",
+        "source": "production_observation"
+      },
+      "manufacturer": {
+        "value": "ARBOR",
+        "source": "production_observation"
+      },
+      "model": {
+        "value": "GT78-VN",
+        "source": "production_observation"
+      },
+      "androidVersion": {
+        "value": "11",
+        "source": "production_observation"
+      },
+      "androidApi": {
+        "value": 30,
+        "source": "production_observation"
+      },
+      "abiSocClass": {
+        "value": "arm64",
+        "source": "production_observation"
+      },
+      "rootState": {
+        "value": "non_root",
+        "source": "explicit_root_check"
+      },
+      "connectionType": {
+        "value": "usb2",
+        "source": "operator_attestation"
+      },
+      "firmwareBuild": {
+        "value": "ARBOR/GT78-VN/GT78-VN:11/RP1A.200720.011/mp1V95182:user/release-keys",
+        "source": "production_observation"
+      },
+      "capabilities": [
+        "apk_install",
+        "shared_storage_write"
+      ],
+      "deferredWorkflows": [],
+      "id": "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa"
+    }
+  ]
 }

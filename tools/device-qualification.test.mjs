@@ -746,13 +746,30 @@ test("production catalog binds retroarch prerequisite review to a required human
   ]);
 });
 
-test("production device registry starts with no targets", () => {
-  const targets = loadDeviceTargets(
+test("production device registry contains the registered Pocket Air Mini contract", () => {
+  const registry = loadDeviceTargets(
     path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json"),
     { authoredProfilesDir: AUTHORED_PROFILES },
   );
-  assert.equal(targets.schemaVersion, 2);
-  assert.deepEqual(targets.targets, []);
+  assert.equal(registry.schemaVersion, 2);
+  assert.equal(registry.targets.length, 1);
+
+  const [target] = registry.targets;
+  assert.equal(target.profileId.value, "ayaneo.pocket_air_mini");
+  assert.equal(target.profileId.source, "production_observation");
+  assert.equal(target.manufacturer.value, "ARBOR");
+  assert.equal(target.manufacturer.source, "production_observation");
+  assert.equal(target.model.value, "GT78-VN");
+  assert.equal(target.model.source, "production_observation");
+  assert.equal(target.androidApi.source, "production_observation");
+  assert.equal(target.abiSocClass.source, "production_observation");
+  assert.equal(target.rootState.value, "non_root");
+  assert.equal(target.rootState.source, "explicit_root_check");
+  assert.equal(target.connectionType.value, "usb2");
+  assert.equal(target.connectionType.source, "operator_attestation");
+  assert.deepEqual(target.capabilities, ["apk_install", "shared_storage_write"]);
+  assert.deepEqual(target.deferredWorkflows, []);
+  assert.equal(target.id, deviceTargetId(target));
 });
 
 test("the evidence schema matches the validator contract", () => {
@@ -1712,10 +1729,13 @@ test("production --check exits zero and detects matrix drift", () => {
     path.join(REPO_ROOT, "docs/qualification/device-qualification-matrix.md"),
     "utf8",
   );
-  assert.match(committed, /No physical-device qualification targets have been registered yet/);
+  assert.match(committed, /ayaneo\.pocket_air_mini/);
+  assert.match(committed, /ARBOR GT78-VN/);
+  assert.match(committed, /Support tier: unqualified/);
+  assert.match(committed, /\| retroarch-plus-bios \| missing \|/);
   assert.match(committed, /# Device Qualification Matrix/);
   assert.doesNotMatch(committed, /\bphase[\s_-]*6f\b/i);
-  assert.doesNotMatch(committed, /^## /m);
+  assert.doesNotMatch(committed, /^\| [^|]+ \| qualified \|/im);
 });
 
 test("the CLI rejects unknown flags", () => {
