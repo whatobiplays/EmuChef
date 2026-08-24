@@ -64,6 +64,49 @@ passed. This is a command-location issue, not a test failure.
 
 Implementation commit: `3f891a8` (`feat: add device qualification overlay`).
 
+## Review-fix round
+
+The bounded review-fix round addressed the three Important findings without
+adding a second workflow or device authority:
+
+- Review and execution binding/finalization now coordinate in-flight requests,
+  remove failed deduplication entries, and schedule a bounded retry. A
+  terminal candidate is marked finalized only after the finalization request
+  succeeds.
+- Existing `WorkflowState` device handle, facts, and plan observations now
+  refresh the bound session with its original opaque device handle when the
+  device is unavailable or its observed identity/plan drifts. The existing
+  backend refresh command remains the authority.
+- A successful run record clears the active session and intent lock, removes
+  the record action, and guards the recorded candidate against another record
+  request.
+
+Review-fix changed files:
+
+- `apps/emuchef-app/src/useDeviceQualificationMode.ts` — coordinated retries,
+  bound-device drift refresh, and post-record session clearing.
+- `apps/emuchef-app/tests/useDeviceQualificationMode.dom.test.tsx` — added
+  regression coverage for failed bind/finalization retries, unavailable and
+  changed device observations, plan drift, and record-action removal.
+
+## Review-fix verification
+
+All commands below were run from `apps/emuchef-app` unless noted otherwise.
+
+| Command | Result |
+| --- | --- |
+| `rtk npm exec -- vitest run --config tests/vitest.config.ts tests/useDeviceQualificationMode.dom.test.tsx` | Exit 0; 1 test file passed; 9 tests passed. |
+| `rtk npm run test` | Exit 0; logic suite 83/83 passed; DOM suite 9 files and 92/92 tests passed. |
+| `rtk npm run typecheck` | Exit 0; output `ok`. |
+| `rtk npm run lint` | Exit 0; output `ok`. |
+| `rtk git diff --check` | Exit 0; no whitespace errors. |
+
+The TDD red run before the production fix exited 1 with 9 tests and 4 failed
+regressions; the focused suite passed after the fix. The broad frontend test
+command completed without hanging.
+
+Review-fix commit: `070d16b` (`fix: harden qualification workflow coordination`).
+
 ## Known non-blocking notes
 
 - The overlay is intentionally available only when the trusted backend reports
