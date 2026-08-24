@@ -12,6 +12,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const APP_ROOT = appDir;
 const rustSourceDir = path.join(appDir, "src-tauri/src");
 
 function read(relativePath) {
@@ -47,6 +48,19 @@ function sourceSlice(source, startMarker, endMarker) {
   assert.notEqual(end, -1, `missing source marker: ${endMarker}`);
   return source.slice(start, end);
 }
+
+test("React qualification API exposes only opaque authority", () => {
+  const apiSource = fs.readFileSync(path.join(APP_ROOT, "src/api.ts"), "utf8");
+  for (const forbidden of [
+    "candidatePath",
+    "repositoryPath",
+    "evidencePath",
+    "toolPath",
+    "executablePath",
+  ]) {
+    assert.equal(apiSource.includes(forbidden), false, forbidden);
+  }
+});
 
 test("production CSP has no web network origin", () => {
   const config = JSON.parse(fs.readFileSync(path.join(appDir, "src-tauri/tauri.conf.json"), "utf8"));
@@ -596,7 +610,7 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
   const qualificationApi = sourceSlice(
     api,
     "deviceQualification:",
-    "\n  startRealExecution:",
+    "\n  checkDeviceRoot:",
   );
 
   assert.match(app, /mod device_qualification;/);

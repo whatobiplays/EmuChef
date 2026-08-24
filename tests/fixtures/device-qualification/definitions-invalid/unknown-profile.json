@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "targets": [
+    {
+      "id": "device-target-sha256:2b340d2f3f1ec4a5174c985a7d67c598319f6c52e50a217c2cfa0f6e54c51d0e",
+      "capabilities": [],
+      "deferredWorkflows": [],
+      "profileId": {
+        "value": "unknown.profile",
+        "source": "production_observation"
+      },
+      "manufacturer": {
+        "value": "Synthetic",
+        "source": "production_observation"
+      },
+      "model": {
+        "value": "Unknown Profile",
+        "source": "production_observation"
+      },
+      "androidVersion": {
+        "value": "15",
+        "source": "production_observation"
+      },
+      "androidApi": {
+        "value": 35,
+        "source": "production_observation"
+      },
+      "abiSocClass": {
+        "value": "arm64-snapdragon",
+        "source": "production_observation"
+      },
+      "rootState": {
+        "value": "non_root",
+        "source": "explicit_root_check"
+      },
+      "connectionType": {
+        "value": "usb3",
+        "source": "operator_attestation"
+      },
+      "firmwareBuild": {
+        "value": "synthetic/build",
+        "source": "production_observation"
+      }
+    }
+  ]
+}

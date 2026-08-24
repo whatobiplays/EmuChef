@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-08-19T00:00:00Z",
+  "workflowId": "obtainium-install",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
+    "profileId": {
+      "value": "ayaneo.pocket_s2",
+      "source": "production_observation"
+    },
+    "manufacturer": {
+      "value": "AYANEO",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "Synthetic Pocket S2",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "15",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 35,
+      "source": "production_observation"
+    },
+    "abiSocClass": {
+      "value": "arm64-snapdragon",
+      "source": "production_observation"
+    },
+    "rootState": {
+      "value": "non_root",
+      "source": "explicit_root_check"
+    },
+    "connectionType": {
+      "value": "usb3",
+      "source": "operator_attestation"
+    },
+    "firmwareBuild": {
+      "value": "synthetic/build",
+      "source": "production_observation"
+    }
+  },
+  "fingerprint": {
+    "schemaVersion": 2,
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "3333333333333333333333333333333333333333",
+      "materialBuildDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
+    "workflowVersion": 1,
+    "authoredContent": [
+      {
+        "id": "app.obtainium.install",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "runtimeContract": "real-execution-v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "runValidity": "valid",
+  "qualificationOutcome": "passed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "passed",
+      "observedAt": "2026-08-19T00:01:00Z"
+    }
+  ],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": [],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:56abd0e757a761c112cac628f8b1614e5c1d7ff2250066481b7747cc308325dc",
+  "runId": "qualification-run-sha256:3c0c3f963c4b3610eca24da81a7984b214884c9654ccbdce4fb397481f580410",
+  "recordDigest": "sha256:136dcdf0210666e1a4476d61a52ecb3304e544797a3741bee760610f550eaf4a"
+}

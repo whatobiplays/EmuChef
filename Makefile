@@ -18,7 +18,7 @@ BACKEND_DIR := $(dir $(BACKEND_MANIFEST))
 BACKEND_TEST_STAMP := $(BACKEND_DIR)target/.emuchef-cargo-test-source.sha256
 BACKEND_TEST_PENDING := $(BACKEND_TEST_STAMP).pending
 
-.PHONY: help install ensure-deps build test phase-6f-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev
+.PHONY: help install ensure-deps build test device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev
 
 help:
 	@printf '%s\n' \
@@ -28,7 +28,7 @@ help:
 		'  ensure-deps   Install missing or stale frontend dependencies' \
 		'  build         Build the Rust backend and both frontend applications' \
 		'  test          Run Rust, application, security, typecheck, and lint tests' \
-		'  phase-6f-qualification-check  Validate Phase 6F qualification definitions, evidence, and matrix' \
+		'  device-qualification-check    Validate device qualification definitions, evidence, and matrix' \
 		'  emuchef-app   Launch the EmuChef app in development mode' \
 		'  config-editor Launch the Config Editor app in development mode' \
 		'  dev           Launch both applications in development mode'
@@ -54,7 +54,7 @@ build: ensure-deps
 	npm --prefix $(EMUCHEF_APP_PREFIX) run build
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run build
 
-test: ensure-deps phase-6f-qualification-check cargo-test-freshness-check backend-test-fresh
+test: ensure-deps device-qualification-check cargo-test-freshness-check backend-test-fresh
 	cargo test --manifest-path $(BACKEND_MANIFEST)
 	cargo test --manifest-path $(EMUCHEF_TAURI_MANIFEST)
 	npm --prefix $(EMUCHEF_APP_PREFIX) run test
@@ -65,9 +65,9 @@ test: ensure-deps phase-6f-qualification-check cargo-test-freshness-check backen
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run typecheck
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run lint
 
-phase-6f-qualification-check:
-	node --test tools/phase-6f-qualification.test.mjs
-	node tools/phase-6f-qualification.mjs --check
+device-qualification-check:
+	node --test tools/device-qualification.test.mjs
+	node tools/device-qualification.mjs --check
 
 cargo-test-freshness-check:
 	node --test tools/cargo-test-freshness.test.mjs

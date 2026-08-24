@@ -914,8 +914,11 @@ Exact ADB serials and executable paths exist only inside trusted Rust/Tauri
 communication. Tauri assigns stable opaque device handles while a serial
 remains present during one application session and invalidates them on device
 disappearance. React receives the opaque handle, masked serial, display facts,
-connection state, and actionable errors. Exact serials never enter React
-payloads, state, logs, storage, or markup.
+connection state, and actionable errors. The production device probe also
+preserves the optional Android build fingerprint from `ro.build.fingerprint`
+as an internal `firmware_build` fact and exposes it at the React boundary as
+nullable `firmwareBuild`. Exact serials never enter React payloads, state,
+logs, storage, or markup.
 
 The backend owns exact/high/low/none device matching. A unique exact/high match
 may recommend a plan. Low/no matches are never auto-selected. Backend-approved
@@ -933,7 +936,9 @@ level only when no input diagnostic represents the same binding key and code,
 or the same code and message when no binding key is available. React and Tauri
 send camelCase product fields;
 probe facts remain snake_case inside the trusted inventory DTO and are converted
-to camelCase `deviceContext` and `targetDevice` objects for the sidecar.
+to camelCase `deviceContext` and `targetDevice` objects for the sidecar. The
+selected-device command and qualification orchestration share the trusted
+production probe helper; neither path issues a second build-fingerprint probe.
 `selectedRecipes: null` selects device-plan defaults, while an explicit empty
 array selects no recipes. Missing required input values remain successful
 description results with `binding_missing` diagnostics instead of transport
@@ -1005,6 +1010,12 @@ only the matching active or latest-terminal mapping, invalidates its originating
 review, and reports an unknown outcome without inferring terminal status.
 Reviews otherwise retain their independent stale, expiry, discard, and capacity
 lifecycle.
+
+When a terminal execution snapshot is retained, the trusted store also retains
+the production report and runtime metadata needed for report capture. The
+`production_execution_report_bytes` helper owns the sanitized projection,
+redaction, deterministic pretty-JSON serialization, and trailing newline used
+by both the native export dialog and qualification evidence capture.
 
 `getExecution` snapshots are authoritative for feature-grouped progress,
 current user-facing action, completion counts, and terminal state. Incremental
@@ -1147,6 +1158,252 @@ Host input binding validation reports a missing-path diagnostic only when host
 metadata cannot be read; an existing path of the wrong kind reports a kind
 mismatch, and an existing path of the expected kind is accepted. This keeps
 configuration planning usable for the root-capability review gate.
+
+## Device qualification repository contract
+
+The repository-owned device qualification Node tool remains the canonical
+authority for target registration validation, qualification-candidate
+promotion, evidence-bundle validation, canonical digests, compatibility
+projection, current-evidence selection, and matrix rendering. Production
+runtime behavior is unchanged by these repository contracts.
+
+Trusted Rust candidate persistence uses the compile-time repository root and
+the ignored `.emuchef_runtime/qualification-candidates/` directory. Each
+candidate is stored beneath an opaque
+`qualification-candidate-<32 lowercase hex>` handle. Its `candidate.json` is a
+strict Rust-owned envelope containing the handle, candidate kind, captured-at
+metadata, optional typed build identity, opaque Node-owned semantic payload,
+and optional report metadata. A declared report metadata entry names only
+`execution-report.json` and binds its byte length and SHA-256 to the exact
+`execution-report.json` bytes in the same directory. Candidate creation stages
+both files in a private temporary directory, synchronizes them, and publishes
+the complete directory with create-new collision behavior. Restart recovery,
+read, discard, and promotion reject symlinked root components, candidate
+directories, candidate files, and report files; no candidate path can escape
+the fixed root. Rust checks only this local envelope, file, and build-binding
+integrity and does not reimplement Node semantic validation. The Rust boundary
+accepts only the fixed `--describe`, `--register-target <handle>`, and
+`--record-run <handle>` operations. Promotion is refused before Node is
+invoked when build identity is missing or stale, and operation results use a
+strict Rust-owned envelope around an opaque canonical payload. React receives
+no repository path, candidate path, executable path, or arbitrary process
+arguments.
+
+Qualification-run candidates created when a session starts are provisional and
+remain non-promotable until terminal finalization writes a supported
+`runValidity`/`qualificationOutcome` classification. The Rust `record_run`
+boundary rejects those candidates before invoking Node; a terminal
+`invalid`/`not_observed` candidate remains eligible for canonical audit
+recording.
+
+`docs/testing/device-qualification/device-targets.json` now uses schema
+version 2. Every material target fact is stored as an exact `{ value, source }`
+wrapper, with legal provenance restricted by field: ordinary identity facts use
+`production_observation`, `rootState` uses `explicit_root_check`, and
+`connectionType` may use `operator_attestation` or
+`production_observation`. Registered target IDs are deterministic
+`device-target-sha256:<64 hex>` digests over the wrapped facts' values only, so
+policy arrays and provenance-source changes do not alter identity while
+material fact-value changes do.
+
+Device qualification evidence records and fingerprints also use schema version
+2. Embedded `deviceTarget` facts preserve the same typed provenance wrappers as
+the registered target, while compatibility fingerprints project only the fact
+values needed by workflow invalidation. `fingerprint.emuchefBuild` is a strict
+object containing the application version, exact Git commit, canonical
+material-build digest, `realExecutionEnabled`, and
+`qualificationContract`. Compatibility for the `emuchef_build` dimension
+compares the application version, material-build digest, `realExecutionEnabled`,
+and qualification contract only; the exact Git commit is preserved as audit
+provenance but does not invalidate evidence by itself. The material-build
+digest is repository-owned and covers the current working tree contents of the
+tracked product/runtime/authored inputs under `authored/`,
+`crates/emuchef-rust-backend/`, and the application source roots plus the exact
+package/lock/config files declared by `tools/device-qualification.mjs`, while
+excluding qualification-only UI/runtime files and evidence artifacts.
+
+Physical-device evidence is now bundle-shaped. Each recorded run directory under
+`docs/testing/device-qualification/evidence/` contains `evidence.json` and,
+when report capture succeeded, a digest-bound `execution-report.json`. Every
+valid run must contain exactly one `artifacts` entry for
+`execution-report.json`, the matching required automated observation, and
+report bytes whose SHA-256 matches the bound artifact. Invalid
+`qualificationOutcome: "not_observed"` audit bundles may omit the artifact and
+report file only when report capture itself was unavailable. Synthetic evidence
+fixtures under `tests/fixtures/device-qualification/` follow the same bundle
+layout.
+
+The canonical workflow contract for `retroarch-plus-bios` is now version 2.
+Its prerequisite `clean_or_deliberately_reset_device` remains declared in
+`prerequisites` and is also a required human checkpoint with allowed outcomes
+`pass`, `fail`, and `unable_to_verify`. This checkpoint is a pre-execution
+qualification gate: only `pass` may participate in a valid record, while
+`fail` or `unable_to_verify` force an invalid `not_observed` run rather than a
+product qualification failure.
+
+Qualification promotion is create-new and repository-bounded. Target and run
+promotion accept only `qualification-candidate-<32 lowercase hex>` identifiers
+through `node tools/device-qualification.mjs --register-target <candidate-id>`
+and `node tools/device-qualification.mjs --record-run <candidate-id>`. Before
+any canonical mutation the tool rechecks that the candidate build commit still
+matches `HEAD`, the tracked worktree is clean, the candidate material-build
+digest matches the current repository state, `qualificationContract` still
+matches the current tool contract, and `realExecutionEnabled` remains true. Run
+promotion also reloads the current workflow catalog, target registry, authored
+recipe digests, and runtime contract, rebuilds the expected fingerprint, binds
+the embedded evidence `deviceTarget` from the registered target rather than the
+candidate payload, and rejects any drift before sealing the run.
+
+`tools/device-qualification.mjs` is also the sole repository authority for
+deriving build/runtime identity. `node tools/device-qualification.mjs
+--build-identity` prints the canonical current build identity, optionally with
+`--require-clean` to reject tracked worktree drift. `node
+tools/device-qualification.mjs --describe` prints a machine-readable repository
+description containing schema version 1, runtime contract
+`real-execution-v1`, qualification contract version 1, the canonical build
+identity, the validated workflow catalog, and the validated device-target
+registry. Active repository projection and validation no longer read
+`EMUCHEF_PHASE_6F_BUILD_IDENTITY` or `EMUCHEF_PHASE_6F_RUNTIME_CONTRACT`.
+
+Recordable qualification application builds use the pinned
+`apps/emuchef-app/scripts/run-device-qualification.mjs` launcher. It performs
+the frontend build, prepares the development Rust sidecar, and then starts the
+Tauri application with the `real-execution` Cargo feature and
+`EMUCHEF_DEVICE_QUALIFICATION=1`; it does not use Vite hot reload or `tauri
+dev`. When that opt-in is present, the Tauri build script obtains the build
+identity only from `tools/device-qualification.mjs --build-identity
+--require-clean` and embeds the resulting strict camelCase JSON as
+`EMUCHEF_QUALIFICATION_BUILD_IDENTITY`. Rust qualification mode requires a
+debug build, the compiled `real-execution` feature, the explicit runtime opt-in,
+and a successfully parsed embedded identity whose real-execution capability is
+enabled. Before invoking the canonical Node command, an opted-in Cargo build
+watches that tool, the declared authored/backend/application material roots and
+exact package/lock/config files, every tracked repository path, and the Git
+reference/index state used by the identity command, so a changed input cannot
+reuse stale embedded metadata. Ordinary application builds omit these watches
+and the identity, retaining their normal production behavior.
+
+Active schema-v2 run records use the domain-oriented immutable ID form
+`qualification-run-sha256:<64 lowercase hex characters>`, derived from the
+unsealed record payload and then sealed with canonical `fingerprintDigest` and
+`recordDigest`. Current-state projection selects only valid, compatibility-clean
+bundles as current evidence; invalid runs remain historical audit evidence and
+cannot replace current qualification state. The current production target
+registry remains empty, so repository validation and matrix generation still
+make no claim that any physical device is qualified. The production-bound
+harness is implemented and available for future physical runs, but harness
+implementation itself adds no physical target or evidence and does not qualify
+a workflow or device.
+
+The operator workflow begins with
+`npm --prefix apps/emuchef-app run device-qualification`. An unregistered
+device is connected, probed, matched, attested as `usb2` or `usb3`, reviewed,
+and explicitly registered; registration requires stopping, committing the
+registry and matrix, and rebuilding before workflow qualification. The fresh
+build then uses the registered target and canonical workflow, normal EmuChef
+inputs, review, explicit real-execution confirmation, and only
+workflow-declared human checkpoints. The operator inspects terminal candidate
+classification, explicitly records the run when appropriate, commits the
+immutable evidence bundle and matrix, and runs `make device-qualification-check`
+and repository tests before committing or shipping evidence. Daijisho and ES-DE
+remain deferred, and physical matrix work remains in progress until real
+evidence is intentionally recorded.
+
+The development-only qualification mode exposes target-registration status and
+capture through the existing EmuChef application workflow. Its repository is a
+lazy optional provider: ordinary and packaged builds do not resolve, canonicalize,
+or expect a trusted source checkout during application startup. When any of the
+four runtime gates fail—debug build, compiled `real-execution` feature, embedded
+clean-build identity, and `EMUCHEF_DEVICE_QUALIFICATION=1`—the status command
+returns an empty disabled projection without initializing the provider or
+starting Node. If an opted-in build cannot resolve the trusted checkout or
+canonical tool, the command returns a sanitized unavailable projection with no
+workflow, target, or candidate data.
+
+An enabled status uses one serialized repository snapshot containing the
+canonical `--describe` result, restart-safe candidate summaries, and a
+sanitized resumable snapshot for the persisted non-terminal run session, when
+one exists. The snapshot includes only opaque handles, workflow intent,
+declared checkpoints, and their persisted outcomes/timestamps; it excludes
+device handles and filesystem paths. Status hydration does not re-probe a
+device or assign new checkpoint timestamps. It keeps
+`runtimeContract` separate from the embedded build identity and reports
+recordability only when the current trusted Git `HEAD`, tracked worktree
+cleanliness, embedded build identity, and in-process lifecycle state all agree.
+Candidate previews recompute promotability against those current facts on every
+load/list operation while preserving the stored immutable target values and
+provenance. A current repository/build mismatch makes the mode non-recordable
+until a fresh clean commit/rebuild is observed.
+
+Target capture accepts only an opaque device handle, an opaque authored device
+plan, and the attested `usb2` or `usb3` connection enum. Rust resolves the
+selected plan through the production probe/match path, obtains identity and
+capability facts from the existing production device qualification path, and
+obtains root state only through the existing explicit root-check authority.
+Captured schema-v2 facts retain `production_observation`,
+`explicit_root_check`, or `operator_attestation` provenance. Package-manager
+and storage availability map exactly to `apk_install` and
+`shared_storage_write`; unavailable or failed root verification rejects the
+candidate. Manufacturer, model, and firmware observations must be strings;
+only a numeric Android release is normalized to its string representation.
+The review preview is read-only and contains the exact typed facts and sources
+persisted in the opaque candidate directory.
+
+Target registration and candidate discard are explicit Tauri actions. The
+registration action accepts only an opaque candidate handle, delegates
+validation and deterministic target identity/mutation to
+`tools/device-qualification.mjs`, and returns the canonical target ID plus a
+`requiresCommitAndRebuild` consequence. Successful registration also marks the
+trusted repository lifecycle dirty; registration, capture, and future
+recordable qualification operations then fail closed until a clean commit,
+fresh build identity, and clean tracked worktree are observed. Candidate
+discard remains an explicit cleanup operation for stale candidates and is
+serialized with status and canonical mutations. Repository filesystem work,
+Node status, and Node mutations share one operation gate so status cannot read
+half-replaced registry/matrix state or race candidate deletion. React receives
+only opaque handles and sanitized DTOs; it has no repository, candidate,
+evidence, executable, or process authority. No target or physical evidence is
+created by the qualification-mode implementation itself.
+
+The ordinary React application includes a development-only qualification
+overlay when the trusted mode status is enabled. Disabled mode renders no
+overlay and performs no qualification mutation. The overlay offers explicit
+target/workflow binding, target-candidate capture and review, register and
+discard actions, workflow-declared checkpoint recording, terminal
+classification, and explicit run recording. It displays stored typed values
+with their provenance and reconstructs resumable target-registration previews
+from persisted sanitized summaries without recapturing a device. The hook also
+hydrates the persisted run-session snapshot into the overlay after restart;
+the overlay renders its stored checkpoint outcomes and timestamps without
+re-probing or retimestamping. Checkpoint controls start with no selected
+outcome, and persisted outcomes and timestamps remain unchanged on reload.
+
+The overlay observes the existing production review and execution state. It
+binds review and real-execution handles only after those normal workflow
+states exist, deduplicating binding and terminal finalization across React
+StrictMode. It never creates a review, starts execution, or renders a parallel
+device, configuration, review, confirmation, execution, or report flow. An
+active qualification session locks its device plan and required recipes by
+applying them once through the existing workflow reducer actions; the normal
+inputs, review, explicit real-execution confirmation, execution, and report
+surfaces remain authoritative. Qualification-mode implementation and
+automated tests do not perform physical qualification or add a qualification-
+only device command.
+
+Qualification session state is Rust-owned and restartable. A session uses an
+opaque qualification-session-<32 lowercase hex> handle associated with its
+opaque run candidate and persists strict lifecycle state in a separate
+session.json file beside the candidate envelope. Device refresh invalidation
+is monotonic; identity, target-fact, prerequisite, checkpoint, execution, and
+report failures cannot be cleared by a later observation. Review and execution
+bindings must match the stored device plan, workflow production recipes,
+registered target identity, and the existing real production execution
+relationship. Finalization reuses the production sanitized execution-report
+serializer and stores the exact report bytes; canonical run IDs, fingerprints,
+record digests, and evidence mutation remain owned by
+tools/device-qualification.mjs. Invalid or interrupted sessions remain
+recordable audit candidates only when the canonical tool accepts their
+invalid/not_observed state.
 
 ## Phase 6D.6 physical interruption qualification
 

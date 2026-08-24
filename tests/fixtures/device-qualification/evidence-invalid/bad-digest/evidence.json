@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-08-21T00:02:00Z",
+  "workflowId": "retroarch-plus-bios",
+  "workflowVersion": 2,
+  "deviceTarget": {
+    "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
+    "profileId": {
+      "value": "ayaneo.pocket_s2",
+      "source": "production_observation"
+    },
+    "manufacturer": {
+      "value": "AYANEO",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "Synthetic Pocket S2",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "15",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 35,
+      "source": "production_observation"
+    },
+    "abiSocClass": {
+      "value": "arm64-snapdragon",
+      "source": "production_observation"
+    },
+    "rootState": {
+      "value": "non_root",
+      "source": "explicit_root_check"
+    },
+    "connectionType": {
+      "value": "usb3",
+      "source": "operator_attestation"
+    },
+    "firmwareBuild": {
+      "value": "synthetic/build",
+      "source": "production_observation"
+    }
+  },
+  "fingerprint": {
+    "schemaVersion": 2,
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
+    "workflowVersion": 2,
+    "authoredContent": [
+      {
+        "id": "app.retroarch.provision",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "id": "feature.copy_bios",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "runtimeContract": "real-execution-v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "runValidity": "valid",
+  "qualificationOutcome": "passed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "passed",
+      "observedAt": "2026-08-21T00:03:00Z"
+    }
+  ],
+  "humanCheckpoints": [
+    {
+      "checkpointId": "clean_or_deliberately_reset_device",
+      "outcome": "pass",
+      "observedAt": "2026-08-23T12:30:30Z"
+    }
+  ],
+  "targetWideFailure": null,
+  "limitations": [],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:7ddccdd0ba72152cd17c247e81081295f0aa645201579596ed7edd31e8b289a5",
+  "runId": "qualification-run-sha256:a8def9b9e51d2ee4a19051721b8222b1833f115038842fe836106e90e904649b",
+  "recordDigest": "sha256:b089f5cc100b254ca1c9a95954ef0c287db8a0e4041e5de739479efd350ce500"
+}

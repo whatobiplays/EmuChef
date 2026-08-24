@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-08-21T00:00:00Z",
+  "workflowId": "rom-library-sync",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
+    "profileId": {
+      "value": "ayaneo.pocket_s2",
+      "source": "production_observation"
+    },
+    "manufacturer": {
+      "value": "AYANEO",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "Synthetic Pocket S2",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "15",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 35,
+      "source": "production_observation"
+    },
+    "abiSocClass": {
+      "value": "arm64-snapdragon",
+      "source": "production_observation"
+    },
+    "rootState": {
+      "value": "non_root",
+      "source": "explicit_root_check"
+    },
+    "connectionType": {
+      "value": "usb3",
+      "source": "operator_attestation"
+    },
+    "firmwareBuild": {
+      "value": "synthetic/build",
+      "source": "production_observation"
+    }
+  },
+  "fingerprint": {
+    "schemaVersion": 2,
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
+    "workflowVersion": 1,
+    "authoredContent": [
+      {
+        "id": "feature.copy_roms",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "runtimeContract": "real-execution-v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "runValidity": "valid",
+  "qualificationOutcome": "failed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "failed",
+      "observedAt": "2026-08-21T00:01:00Z"
+    }
+  ],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": [
+    "execution-report failed"
+  ],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:86c0e58aee26d4547a8d9d75fa810d64be9a342f9703b4dda98d1deeade4da9f",
+  "runId": "qualification-run-sha256:9390a13d43659237d02f4edd9ab549e5c18186e5fcf9c2d450d39a04a3bc2f30",
+  "recordDigest": "sha256:8ec25787ed640564c865f7435d9539320abfd4b158f28033ea02f01d76f69c47"
+}

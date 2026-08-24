@@ -9,6 +9,7 @@ default = []
 real-execution = []
 
 [build-dependencies]
+serde_json = { version = "1.0", features = ["preserve_order"] }
 tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
@@ -35,6 +36,7 @@ libc = "0.2"
 
 [dev-dependencies]
 emuchef-rust-backend = { path = "../../../crates/emuchef-rust-backend" }
+tauri = { version = "2.11.0", features = ["test"] }
 tempfile = "3.20"
 
 [lib]

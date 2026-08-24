@@ -26,6 +26,7 @@ use crate::device_qualification::{reconcile_inventory_with_context, RootQualific
 use crate::device_qualification::{RootQualificationKey, RootQualificationState};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
+use crate::qualification_repository::QualificationRepositoryProvider;
 use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
@@ -35,6 +36,7 @@ use crate::updates::{ActivityGate, UpdateService};
 pub struct AppState {
     pub sidecar: SidecarState,
     pub catalog: Result<CatalogDescriptor, String>,
+    pub qualification_repository: QualificationRepositoryProvider,
     pub adb: Mutex<AdbManager>,
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
@@ -757,6 +759,18 @@ pub fn poll_devices(
 
 #[tauri::command]
 pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
+    let (facts, serial) = probe_device_facts(&device_handle, &state)?;
+    Ok(public_device_facts(&device_handle, &facts, &serial))
+}
+
+/// Probe one selected device through the production sidecar boundary and retain
+/// the trusted facts in the existing session store. The normal React command
+/// and qualification orchestration share this helper so neither path creates
+/// a second device-probing authority.
+pub(crate) fn probe_device_facts(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<(Value, String), String> {
     let adb_path = current_adb_path(&state)?;
     let serial = state
         .handles
@@ -792,11 +806,21 @@ pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result
             )
         })?
         .set_facts(&device_handle, facts.clone())?;
-    Ok(public_device_facts(&device_handle, &facts, &serial))
+    Ok((facts, serial))
 }
 
 #[tauri::command]
 pub fn match_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
+    match_device_observation(&device_handle, &state)
+}
+
+/// Match a selected device through the same production sidecar boundary used
+/// by the public React command. Qualification mode consumes this sanitized
+/// projection to resolve the selected plan's authored profile ID.
+pub(crate) fn match_device_observation(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<Value, String> {
     let facts = state
         .handles
         .lock()
@@ -806,7 +830,7 @@ pub fn match_device(device_handle: String, state: State<'_, AppState>) -> Result
                 "Device session state is unavailable.",
             )
         })?
-        .facts(&device_handle)?
+        .facts(device_handle)?
         .clone();
     let catalog = catalog(&state)?;
     let exact_serial = facts
@@ -1430,6 +1454,7 @@ fn public_device_facts(device_handle: &str, facts: &Value, exact_serial: &str) -
         "model": facts.get("model"),
         "androidVersion": facts.get("android_version"),
         "androidApiLevel": facts.get("android_api_level"),
+        "firmwareBuild": facts.get("firmware_build"),
     });
     if !exact_serial.is_empty() {
         redact_exact_serial(&mut public, exact_serial);
@@ -2398,12 +2423,17 @@ mod tests {
                 "model": "Pocket",
                 "android_version": 13,
                 "android_api_level": 33,
+                "firmware_build": "AYANEO/device/build:15/ABC/123:user/release-keys",
             }),
             "exact-sensitive-serial",
         );
         let serialized = public.to_string();
         assert!(!serialized.contains("exact-sensitive-serial"));
         assert!(!serialized.contains("serial"));
+        assert_eq!(
+            public["firmwareBuild"],
+            "AYANEO/device/build:15/ABC/123:user/release-keys"
+        );
     }
 
     #[test]

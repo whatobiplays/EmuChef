@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "device-qualification": "node scripts/run-device-qualification.mjs",
     "sidecar:dev": "node scripts/prepare-rust-sidecar.mjs --profile debug",
     "sidecar:build": "node scripts/prepare-rust-sidecar.mjs --profile release",
     "dev": "vite",

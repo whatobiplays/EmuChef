@@ -1071,13 +1071,23 @@ pub fn check_device_root(
     device_handle: String,
     state: State<'_, AppState>,
 ) -> Result<RootQualificationCheckDto, String> {
+    check_device_root_observation(&device_handle, &state)
+}
+
+/// Run the existing authoritative root check for a selected native device.
+/// The public command and qualification target capture share this function so
+/// root state cannot be inferred or attested through a second authority.
+pub(crate) fn check_device_root_observation(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<RootQualificationCheckDto, String> {
     if !cfg!(feature = "real-execution") {
         return Err(safe_error(
             "real_execution_unavailable",
             "Root access checks are unavailable in this development build.",
         ));
     }
-    let current = refresh_current_qualification(&state, Some(&device_handle))?;
+    let current = refresh_current_qualification(state, Some(device_handle))?;
     if current.snapshot.state != DeviceQualificationState::Supported {
         return Err(safe_error(
             "device_qualification_incomplete",
@@ -1177,13 +1187,13 @@ pub fn check_device_root(
             .handles
             .lock()
             .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
-            .invalidate_reviews_for_device(&device_handle, "root_qualification_changed");
+            .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
     }
     Ok(RootQualificationCheckDto {
         qualification,
         runtime_generation,
         qualification_revision: context.qualification_revision,
-        device_identity: device_handle,
+        device_identity: device_handle.to_string(),
     })
 }
 

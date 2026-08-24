@@ -7,6 +7,9 @@ mod handles;
 mod menu;
 mod phase6d6_ui_smoke;
 mod qualification;
+pub(crate) mod qualification_build;
+mod qualification_mode;
+pub(crate) mod qualification_repository;
 mod recovery;
 mod saved_configurations;
 mod sidecar;
@@ -54,6 +57,7 @@ pub fn run() {
             app.manage(commands::AppState {
                 sidecar,
                 catalog,
+                qualification_repository: qualification_repository::QualificationRepositoryProvider::default(),
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
                 platform_tools_selections: Mutex::new(
                     commands::PlatformToolsSelectionStore::default(),
@@ -98,6 +102,17 @@ pub fn run() {
             commands::probe_device,
             device_qualification::check_device_root,
             commands::match_device,
+            qualification_mode::get_device_qualification_mode_status,
+            qualification_mode::create_qualification_target_candidate,
+            qualification_mode::register_qualification_target,
+            qualification_mode::discard_qualification_candidate,
+            qualification_mode::begin_qualification_session,
+            qualification_mode::refresh_qualification_session,
+            qualification_mode::bind_qualification_review,
+            qualification_mode::bind_qualification_execution,
+            qualification_mode::record_qualification_checkpoint,
+            qualification_mode::finalize_qualification_candidate,
+            qualification_mode::record_qualification_run,
             commands::describe_configuration,
             commands::create_review,
             commands::discard_review,

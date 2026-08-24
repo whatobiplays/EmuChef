@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-08-22T00:00:00Z",
+  "workflowId": "xaniteog-install",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
+    "profileId": {
+      "value": "ayaneo.pocket_s2",
+      "source": "production_observation"
+    },
+    "manufacturer": {
+      "value": "AYANEO",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "Synthetic Pocket S2",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "15",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 35,
+      "source": "production_observation"
+    },
+    "abiSocClass": {
+      "value": "arm64-snapdragon",
+      "source": "production_observation"
+    },
+    "rootState": {
+      "value": "non_root",
+      "source": "explicit_root_check"
+    },
+    "connectionType": {
+      "value": "usb3",
+      "source": "operator_attestation"
+    },
+    "firmwareBuild": {
+      "value": "synthetic/build",
+      "source": "production_observation"
+    }
+  },
+  "fingerprint": {
+    "schemaVersion": 2,
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
+    "workflowVersion": 1,
+    "authoredContent": [
+      {
+        "id": "app.xaniteog.install",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "runtimeContract": "real-execution-v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "runValidity": "invalid",
+  "qualificationOutcome": "not_observed",
+  "automatedObservations": [],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": [
+    "harness failed before product observation"
+  ],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:c61eeb3ff3ffc3ca25f4ec14ae5daa6a0056f0a4abc1b917eef80695460fc4e9",
+  "runId": "qualification-run-sha256:7ab51454c57314584f5edb441f9f4e039188832c5469f4bfa4cd727cdba2f7c4",
+  "recordDigest": "sha256:0894b44364cd59f30feb5aecd1f018801fe68d289913589f629afb7ce714f0ec"
+}

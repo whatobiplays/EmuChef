@@ -11,6 +11,13 @@ import type {
   ExecutionCancellation,
   DeviceQualificationSnapshot,
   RootQualificationCheck,
+  QualificationConnectionType,
+  BeginQualificationSessionRequest,
+  QualificationModeStatus,
+  QualificationRunRecordingResult,
+  QualificationSessionSnapshot,
+  QualificationCheckpointOutcome,
+  QualificationTargetCandidatePreview,
   ExecutionCapabilities,
   ExecutionEventBatch,
   ExecutionSnapshot,
@@ -129,6 +136,56 @@ export const api = {
     invoke<DeviceQualificationSnapshot>("get_device_qualification", { deviceHandle }),
   checkDeviceRoot: (deviceHandle: string) =>
     invoke<RootQualificationCheck>("check_device_root", { deviceHandle }),
+  deviceQualificationModeStatus: () =>
+    invoke<QualificationModeStatus>("get_device_qualification_mode_status"),
+  createQualificationTargetCandidate: (request: {
+    deviceHandle: string;
+    devicePlan: string;
+    connectionType: QualificationConnectionType;
+  }) => invoke<QualificationTargetCandidatePreview>("create_qualification_target_candidate", {
+    request,
+  }),
+  registerQualificationTarget: (candidateHandle: string) =>
+    invoke<{ targetId: string; requiresCommitAndRebuild: true }>("register_qualification_target", {
+      candidateHandle,
+    }),
+  discardQualificationCandidate: (candidateHandle: string) =>
+    invoke<void>("discard_qualification_candidate", { candidateHandle }),
+  beginQualificationSession: (request: BeginQualificationSessionRequest) =>
+    invoke<QualificationSessionSnapshot>("begin_qualification_session", { request }),
+  refreshQualificationSession: (sessionHandle: string, deviceHandle: string) =>
+    invoke<QualificationSessionSnapshot>("refresh_qualification_session", {
+      sessionHandle,
+      deviceHandle,
+    }),
+  bindQualificationReview: (sessionHandle: string, reviewHandle: string) =>
+    invoke<QualificationSessionSnapshot>("bind_qualification_review", {
+      sessionHandle,
+      reviewHandle,
+    }),
+  bindQualificationExecution: (sessionHandle: string, executionHandle: string) =>
+    invoke<QualificationSessionSnapshot>("bind_qualification_execution", {
+      sessionHandle,
+      executionHandle,
+    }),
+  recordQualificationCheckpoint: (
+    sessionHandle: string,
+    checkpointId: string,
+    outcome: QualificationCheckpointOutcome,
+  ) =>
+    invoke<QualificationSessionSnapshot>("record_qualification_checkpoint", {
+      sessionHandle,
+      checkpointId,
+      outcome,
+    }),
+  finalizeQualificationCandidate: (sessionHandle: string) =>
+    invoke<QualificationSessionSnapshot>("finalize_qualification_candidate", {
+      sessionHandle,
+    }),
+  recordQualificationRun: (candidateHandle: string) =>
+    invoke<QualificationRunRecordingResult>("record_qualification_run", {
+      candidateHandle,
+    }),
   startRealExecution: (reviewHandle: string, confirmation: RealExecutionConfirmation) =>
     invoke<RealExecutionSnapshot>("start_real_execution", {
       request: { reviewHandle, confirmation },
