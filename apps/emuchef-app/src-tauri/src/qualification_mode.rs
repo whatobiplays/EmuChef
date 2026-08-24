@@ -1672,6 +1672,21 @@ fn capture_target_registration_payload_from(
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
 }
 
+/// Projects the completed production root observation into the target contract.
+/// An unavailable root tool is a classified non-root observation; failed checks
+/// remain unverified and cannot produce a registration candidate.
+fn project_root_state(root: &RootQualificationState) -> Result<QualificationRootState, String> {
+    match root {
+        RootQualificationState::Granted => Ok(QualificationRootState::Rooted),
+        RootQualificationState::Denied | RootQualificationState::Unavailable => {
+            Ok(QualificationRootState::NonRoot)
+        }
+        RootQualificationState::CheckFailed { .. } => {
+            Err(safe_qualification_error("qualification_target_unverified"))
+        }
+    }
+}
+
 fn observe_device_from_source(
     source: &mut impl QualificationObservationSource,
     device_handle: &str,
@@ -1697,13 +1712,7 @@ fn observe_device_from_source(
     if root.device_identity != device_handle {
         return Err(safe_qualification_error("qualification_target_unverified"));
     }
-    let root_state = match root.qualification {
-        RootQualificationState::Granted => QualificationRootState::Rooted,
-        RootQualificationState::Denied => QualificationRootState::NonRoot,
-        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => {
-            return Err(safe_qualification_error("qualification_target_unverified"));
-        }
-    };
+    let root_state = project_root_state(&root.qualification)?;
     let android_version = required_fact_string(&facts, "android_version")?;
     let android_api = required_fact_u64(&facts, "android_api_level")?;
     let manufacturer = required_fact_string(&facts, "manufacturer")?;
@@ -2635,6 +2644,10 @@ mod tests {
         assert_eq!(payload["target"]["androidVersion"]["value"], "15");
         assert_eq!(payload["target"]["rootState"]["value"], "non_root");
         assert_eq!(
+            payload["target"]["rootState"]["source"],
+            "explicit_root_check"
+        );
+        assert_eq!(
             payload["target"]["connectionType"]["source"],
             "operator_attestation"
         );
@@ -2658,7 +2671,7 @@ mod tests {
     }
 
     #[test]
-    fn target_capture_accepts_numeric_android_version_but_rejects_unverified_root() {
+    fn target_capture_projects_root_observations_and_rejects_failed_root_checks() {
         let mut numeric_version = observation_source();
         let payload = capture_target_registration_payload_from(
             &mut numeric_version,
@@ -2668,31 +2681,52 @@ mod tests {
         .expect("numeric Android version should normalize");
         assert_eq!(payload["target"]["androidVersion"]["value"], "15");
 
-        let mut granted = observation_source();
-        granted.root.qualification = RootQualificationState::Granted;
-        let granted_payload = capture_target_registration_payload_from(
-            &mut granted,
-            &capture_request(),
-            &test_build(),
-        )
-        .expect("granted root should be recorded as rooted");
-        assert_eq!(granted_payload["target"]["rootState"]["value"], "rooted");
-
-        for root in [
-            RootQualificationState::Unavailable,
-            RootQualificationState::CheckFailed {
-                reason: RootQualificationFailureReason::TimedOut,
-                message: "timed out".to_string(),
-            },
+        for (root, expected) in [
+            (RootQualificationState::Granted, "rooted"),
+            (RootQualificationState::Denied, "non_root"),
+            (RootQualificationState::Unavailable, "non_root"),
         ] {
             let mut source = observation_source();
             source.root.qualification = root;
-            assert!(capture_target_registration_payload_from(
+            let payload = capture_target_registration_payload_from(
                 &mut source,
                 &capture_request(),
                 &test_build(),
             )
-            .is_err());
+            .expect("completed root observations should project to the target contract");
+            assert_eq!(payload["target"]["rootState"]["value"], expected);
+            assert_eq!(
+                payload["target"]["rootState"]["source"],
+                "explicit_root_check"
+            );
+        }
+
+        for root in [
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::TimedOut,
+                message: "timed out".to_string(),
+            },
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::Transport,
+                message: "transport failed".to_string(),
+            },
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::UnexpectedResponse,
+                message: "unexpected response".to_string(),
+            },
+        ] {
+            let mut source = observation_source();
+            source.root.qualification = root;
+            let error = capture_target_registration_payload_from(
+                &mut source,
+                &capture_request(),
+                &test_build(),
+            )
+            .expect_err("failed root checks must not produce a target candidate");
+            assert!(
+                error.contains("qualification_target_unverified"),
+                "unexpected target-capture error: {error}"
+            );
         }
     }
 
