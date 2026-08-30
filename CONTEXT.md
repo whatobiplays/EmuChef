@@ -1402,7 +1402,10 @@ and root state with the registered target before establishing the process-local
 association. Any mismatch follows monotonic session invalidation. Review,
 execution binding, and finalization require the current trusted association;
 they never rely on the historical persisted handle or run before successful
-refresh validation.
+refresh validation. The process-local association is cleared when device
+identity continuity or runtime authority is invalidated and when its candidate
+is discarded, finalized, or recorded; the persisted capture-time handle is
+never rewritten.
 
 Qualification session state is Rust-owned and restartable. A session uses an
 opaque qualification-session-<32 lowercase hex> handle associated with its

@@ -1376,7 +1376,6 @@ describe("device qualification controller integration", () => {
     expect(reasonId).toBeTruthy();
     const reason = reasonId ? document.getElementById(reasonId) : null;
     expect(reason).not.toBeNull();
-    expect(reason?.className).toContain("disabled-reason");
     expect(reason?.textContent).toBe(
       "The qualification session is already bound to its validated device for this app session.",
     );

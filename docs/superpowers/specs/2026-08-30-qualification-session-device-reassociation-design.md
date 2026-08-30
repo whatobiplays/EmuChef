@@ -43,7 +43,11 @@ device identities, so no second discovery or identity system is introduced.
 A newly created session records its association after the session has been
 created successfully. A restored session has no association because a new
 `SessionHandles` instance starts empty. Runtime invalidation clears session
-associations together with other live handle authority.
+associations together with other live handle authority. Device disappearance,
+identity-continuity loss, and explicit identity invalidation also clear every
+association for the affected opaque handle. Candidate discard, finalization,
+and recording remove the session entry so completed lifecycles do not retain
+transient authority.
 
 Review and execution binding require a current association. Their device-handle
 checks compare production review or execution state with the associated live

@@ -449,10 +449,13 @@ export function useDeviceQualificationMode({
       refreshSession = runOperation(
         () => api.refreshQualificationSession(sessionHandle, refreshDeviceHandle),
         (nextSession) => {
+          const refreshStillTargetsCurrentDevice =
+            workflowRef.current.deviceHandle === refreshDeviceHandle;
           if (
             sessionRef.current?.sessionHandle === sessionHandle
             && establishingAssociation
             && nextSession.runValidity === "valid"
+            && refreshStillTargetsCurrentDevice
           ) {
             sessionDeviceHandleRef.current = refreshDeviceHandle;
           }
@@ -460,8 +463,19 @@ export function useDeviceQualificationMode({
             sessionRef.current?.sessionHandle === sessionHandle
             && factsBecameAvailable
             && nextSession.runValidity === "valid"
+            && refreshStillTargetsCurrentDevice
           ) {
             boundDeviceFactsKeyRef.current = observedFactsKey;
+          }
+          if (
+            sessionRef.current?.sessionHandle === sessionHandle
+            && establishingAssociation
+            && !refreshStillTargetsCurrentDevice
+          ) {
+            // The selected device changed while the refresh was in flight.
+            // Let the current selection run through the normal validation path
+            // instead of retaining the old observation key.
+            lastSessionObservationKeyRef.current = null;
           }
           applySessionIfCurrent(sessionHandle, nextSession);
         },
@@ -488,6 +502,7 @@ export function useDeviceQualificationMode({
     scheduleTransitionRetry,
     session,
     transitionRetryRevision,
+    workflowRef,
     workflow.devicePlan,
   ]);
 

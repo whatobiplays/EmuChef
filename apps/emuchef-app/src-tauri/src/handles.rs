@@ -95,6 +95,7 @@ impl SessionHandles {
                     .or_insert(1);
                 *epoch = epoch.saturating_add(1).max(1);
                 self.qualification_context_by_handle.remove(handle);
+                self.clear_qualification_associations_for_device(handle);
                 self.invalidate_reviews_for_device(handle, "device_qualification_changed");
             }
         }
@@ -138,6 +139,7 @@ impl SessionHandles {
             };
             if continuity_lost && !forced_epoch_handles.contains(&handle) {
                 self.qualification_context_by_handle.remove(&handle);
+                self.clear_qualification_associations_for_device(&handle);
                 self.invalidate_reviews_for_device(&handle, "device_qualification_changed");
             }
             present.insert(
@@ -167,6 +169,7 @@ impl SessionHandles {
                     .or_insert(1);
                 *epoch = epoch.saturating_add(1).max(1);
                 self.qualification_context_by_handle.remove(&handle);
+                self.clear_qualification_associations_for_device(&handle);
                 self.invalidate_reviews_for_device(&handle, "review_stale");
             }
         }
@@ -252,6 +255,14 @@ impl SessionHandles {
                 true
             }
         }
+    }
+
+    /// Remove the current-process device association when a qualification
+    /// candidate reaches the end of its lifecycle.
+    pub fn clear_qualification_session_device(&mut self, session_handle: &str) -> bool {
+        self.qualification_device_by_session
+            .remove(session_handle)
+            .is_some()
     }
 
     /// Return the trusted native device records used to resolve qualification
@@ -469,6 +480,7 @@ impl SessionHandles {
     pub fn invalidate_identity_authority(&mut self, device_handle: &str) {
         self.devices_by_handle.remove(device_handle);
         self.qualification_context_by_handle.remove(device_handle);
+        self.clear_qualification_associations_for_device(device_handle);
         self.invalidate_reviews_for_device(device_handle, "review_stale");
         let epoch = self
             .session_epoch_by_handle
@@ -476,6 +488,11 @@ impl SessionHandles {
             .or_insert(1);
         *epoch = epoch.saturating_add(1).max(1);
         self.device_generation = self.device_generation.saturating_add(1).max(1);
+    }
+
+    fn clear_qualification_associations_for_device(&mut self, device_handle: &str) {
+        self.qualification_device_by_session
+            .retain(|_, associated| associated != device_handle);
     }
 
     fn expire_reviews(&mut self) {
@@ -565,6 +582,14 @@ mod tests {
         );
         assert!(handles.associate_qualification_session_device("session-one", "device-live"));
         assert!(!handles.associate_qualification_session_device("session-one", "device-other"));
+
+        assert!(handles.clear_qualification_session_device("session-one"));
+        assert_eq!(
+            handles.qualification_session_device_handle("session-one"),
+            None
+        );
+        assert!(!handles.clear_qualification_session_device("session-one"));
+        assert!(handles.associate_qualification_session_device("session-one", "device-live"));
 
         handles.invalidate_runtime_authority_preserving_identities();
         assert_eq!(
@@ -833,6 +858,7 @@ mod tests {
             }))
             .unwrap();
         let old = devices[0].device_handle.clone();
+        assert!(store.associate_qualification_session_device("session-one", &old));
         let old_epoch = store.device(&old).unwrap().session_epoch;
         store.set_qualification_context(qualification_context_for(&old, old_epoch));
         let review = store.insert_review(review_snapshot(&old));
@@ -847,6 +873,10 @@ mod tests {
 
         assert_ne!(replacement, old);
         assert!(store.device(&old).is_err());
+        assert_eq!(
+            store.qualification_session_device_handle("session-one"),
+            None
+        );
         assert!(store.qualification_context(&old).is_none());
         assert!(store
             .review(&review)
@@ -975,8 +1005,13 @@ mod tests {
             .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
             .unwrap();
         let handle = devices[0].device_handle.clone();
+        assert!(store.associate_qualification_session_device("session-one", &handle));
         let review = store.insert_review(review_snapshot(&handle));
         store.update_devices(&json!({ "devices": [] })).unwrap();
+        assert_eq!(
+            store.qualification_session_device_handle("session-one"),
+            None
+        );
         assert!(store.review(&review).unwrap_err().contains("review_stale"));
     }
 
@@ -1022,12 +1057,17 @@ mod tests {
             "capability-fingerprint",
         ));
         let review = store.insert_review(review_snapshot(&handle));
+        assert!(store.associate_qualification_session_device("session-one", &handle));
         let generation = store.device_generation();
         let epoch = store.device(&handle).unwrap().session_epoch;
 
         store.invalidate_identity_authority(&handle);
 
         assert!(store.device(&handle).is_err());
+        assert_eq!(
+            store.qualification_session_device_handle("session-one"),
+            None
+        );
         assert!(store.qualification_context(&handle).is_none());
         assert!(store.review(&review).unwrap_err().contains("review_stale"));
         assert!(store.device_generation() > generation);

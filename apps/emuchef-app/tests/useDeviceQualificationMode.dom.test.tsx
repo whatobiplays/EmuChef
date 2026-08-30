@@ -319,6 +319,66 @@ test("a restored session associates the selected device only after refresh valid
   expect(screen.getByTestId("qualification-recipes").textContent).toBe("recipe.one,recipe.dependency");
 });
 
+test("a stale restored refresh cannot associate a newly selected device", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    ...activeStatus(),
+    resumableSession: sessionSnapshot(),
+  });
+  let resolveFirstRefresh: ((snapshot: QualificationSessionSnapshot) => void) | undefined;
+  mockApi.refreshQualificationSession
+    .mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFirstRefresh = resolve;
+    }))
+    .mockResolvedValue(sessionSnapshot());
+
+  const firstDevice: WorkflowState = {
+    ...initialWorkflowState,
+    step: "setup",
+    deviceHandle: "device-first",
+    devicePlan: "plan.bound",
+    facts: {
+      deviceHandle: "device-first",
+      manufacturer: "Example",
+      brand: "Example",
+      model: "Original model",
+      androidVersion: 14,
+      androidApiLevel: 34,
+      firmwareBuild: "firmware-original",
+    },
+  };
+  const secondDevice: WorkflowState = {
+    ...firstDevice,
+    deviceHandle: "device-second",
+    facts: {
+      ...firstDevice.facts!,
+      deviceHandle: "device-second",
+    },
+  };
+
+  const { rerender } = render(<Harness workflow={initialWorkflowState} />);
+  await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("true"));
+  rerender(<Harness workflow={firstDevice} />);
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith(
+      "session-opaque",
+      "device-first",
+    );
+    expect(resolveFirstRefresh).toBeTypeOf("function");
+  });
+
+  rerender(<Harness workflow={secondDevice} />);
+  resolveFirstRefresh!(sessionSnapshot());
+
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(2);
+    expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith(
+      "session-opaque",
+      "device-second",
+    );
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+  });
+});
+
 test("a restored session remains invalid when refresh rejects a different device", async () => {
   mockApi.deviceQualificationModeStatus.mockResolvedValue({
     ...activeStatus(),

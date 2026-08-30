@@ -17,6 +17,7 @@ use crate::device_qualification::{
     check_device_root_observation, refresh_current_qualification, CapabilityAvailabilityDto,
     DeviceQualificationState, RootQualificationState,
 };
+use crate::handles::SessionHandles;
 use crate::qualification_build::{
     embedded_build_identity, qualification_gate_inputs, qualification_mode_enabled_at_runtime,
     QualificationBuildIdentity,
@@ -1117,6 +1118,32 @@ fn safe_qualification_error(code: &str) -> String {
     safe_error(code, message)
 }
 
+/// Drop the transient device binding after a candidate is discarded or
+/// finalized. Persisted session metadata remains untouched.
+fn clear_session_device_association(state: &AppState, session_handle: &str) -> Result<(), String> {
+    state
+        .handles
+        .lock()
+        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?
+        .clear_qualification_session_device(session_handle);
+    Ok(())
+}
+
+/// Require the trusted current-process device association before binding a
+/// production review or execution. Restored sessions intentionally have no
+/// association until normal selection, probing, and refresh validation finish;
+/// binding therefore fails closed instead of consulting historical metadata.
+fn require_current_qualification_device_handle(
+    handles: &SessionHandles,
+    session_handle: &str,
+    error_code: &str,
+) -> Result<String, String> {
+    handles
+        .qualification_session_device_handle(session_handle)
+        .map(str::to_string)
+        .ok_or_else(|| safe_qualification_error(error_code))
+}
+
 #[tauri::command]
 pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
@@ -1291,7 +1318,10 @@ pub fn discard_qualification_candidate(
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
     repository
         .discard_candidate(&candidate_handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
+        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+    let session_handle = session_handle_for_candidate(&candidate_handle)?;
+    clear_session_device_association(&state, &session_handle)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1482,10 +1512,11 @@ pub fn bind_qualification_review(
             .handles
             .lock()
             .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?;
-        let associated_device_handle = handles
-            .qualification_session_device_handle(&session_handle)
-            .ok_or_else(|| safe_qualification_error("qualification_review_mismatch"))?
-            .to_string();
+        let associated_device_handle = require_current_qualification_device_handle(
+            &handles,
+            &session_handle,
+            "qualification_review_mismatch",
+        )?;
         let review = handles
             .review(&review_handle)
             .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?
@@ -1518,13 +1549,17 @@ pub fn bind_qualification_execution(
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
     let candidate_handle = session_candidate_handle(&session_handle)?;
     let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    let associated_device_handle = state
-        .handles
-        .lock()
-        .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?
-        .qualification_session_device_handle(&session_handle)
-        .ok_or_else(|| safe_qualification_error("qualification_execution_mismatch"))?
-        .to_string();
+    let associated_device_handle = {
+        let handles = state
+            .handles
+            .lock()
+            .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?;
+        require_current_qualification_device_handle(
+            &handles,
+            &session_handle,
+            "qualification_execution_mismatch",
+        )?
+    };
     let binding = state
         .executions
         .lock()
@@ -1613,6 +1648,7 @@ pub fn finalize_qualification_candidate(
                     None,
                 )
                 .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
+            clear_session_device_association(&state, &session_handle)?;
             return session_snapshot(repository, &session);
         };
         if !execution_matches_session(
@@ -1663,6 +1699,7 @@ pub fn finalize_qualification_candidate(
             report_bytes.as_deref(),
         )
         .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
+    clear_session_device_association(&state, &session_handle)?;
     session_snapshot(repository, &session)
 }
 
@@ -1692,6 +1729,8 @@ pub fn record_qualification_run(
         .and_then(Value::as_str)
         .filter(|run_id| !run_id.is_empty())
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    let session_handle = session_handle_for_candidate(&candidate_handle)?;
+    clear_session_device_association(&state, &session_handle)?;
     Ok(QualificationRunRecordingResult {
         run_id: run_id.to_string(),
     })
@@ -1752,15 +1791,13 @@ fn capture_target_registration_payload_from(
 }
 
 /// Projects the completed production root observation into the target contract.
-/// An unavailable root tool is a classified non-root observation; failed checks
-/// remain unverified and cannot produce a registration candidate.
+/// Explicit denial is a trusted non-root observation. Unavailable and failed
+/// checks remain unverified and cannot produce a registration candidate.
 fn project_root_state(root: &RootQualificationState) -> Result<QualificationRootState, String> {
     match root {
         RootQualificationState::Granted => Ok(QualificationRootState::Rooted),
-        RootQualificationState::Denied | RootQualificationState::Unavailable => {
-            Ok(QualificationRootState::NonRoot)
-        }
-        RootQualificationState::CheckFailed { .. } => {
+        RootQualificationState::Denied => Ok(QualificationRootState::NonRoot),
+        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => {
             Err(safe_qualification_error("qualification_target_unverified"))
         }
     }
@@ -2763,7 +2800,7 @@ mod tests {
     }
 
     #[test]
-    fn target_capture_projects_root_observations_and_rejects_failed_root_checks() {
+    fn target_capture_projects_root_observations_and_rejects_unverified_root_checks() {
         let mut numeric_version = observation_source();
         let payload = capture_target_registration_payload_from(
             &mut numeric_version,
@@ -2776,7 +2813,6 @@ mod tests {
         for (root, expected) in [
             (RootQualificationState::Granted, "rooted"),
             (RootQualificationState::Denied, "non_root"),
-            (RootQualificationState::Unavailable, "non_root"),
         ] {
             let mut source = observation_source();
             source.root.qualification = root;
@@ -2794,6 +2830,7 @@ mod tests {
         }
 
         for root in [
+            RootQualificationState::Unavailable,
             RootQualificationState::CheckFailed {
                 reason: RootQualificationFailureReason::TimedOut,
                 message: "timed out".to_string(),
@@ -3162,6 +3199,32 @@ mod tests {
             "device-new-process"
         ));
         assert!(!review_matches_session(&session, &review, "device-other"));
+    }
+
+    #[test]
+    fn binding_requires_a_current_process_association() {
+        let mut handles = SessionHandles::default();
+        let error = require_current_qualification_device_handle(
+            &handles,
+            "qualification-session-test",
+            "qualification_review_mismatch",
+        )
+        .expect_err("restored sessions must refresh before binding");
+        assert!(error.contains("qualification_review_mismatch"));
+
+        assert!(handles.associate_qualification_session_device(
+            "qualification-session-test",
+            "device-new-process"
+        ));
+        assert_eq!(
+            require_current_qualification_device_handle(
+                &handles,
+                "qualification-session-test",
+                "qualification_review_mismatch",
+            )
+            .expect("validated association should be available"),
+            "device-new-process"
+        );
     }
 
     #[test]
