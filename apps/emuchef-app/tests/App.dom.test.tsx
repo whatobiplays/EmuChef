@@ -1210,7 +1210,61 @@ describe("Phase 5B workflow surfaces", () => {
 });
 
 describe("device qualification controller integration", () => {
-  test("qualification mode observes the normal workflow without creating review or starting execution", async () => {
+  test("a restored qualification session leaves a connected device row selectable", async () => {
+    const user = userEvent.setup();
+    const resumableSession = {
+      sessionHandle: "session-restored",
+      targetId: "target.one",
+      workflowId: "workflow.one",
+      workflowVersion: 1,
+      devicePlan: "plan.supported",
+      requiredRecipes: ["recipe.one"],
+      humanCheckpoints: [],
+      recordedCheckpoints: [],
+      runValidity: "valid",
+      qualificationOutcome: "not_observed",
+      invalidReason: null,
+      candidate: {
+        candidateHandle: "candidate-restored",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    };
+    mockApi.deviceQualificationModeStatus.mockResolvedValue({
+      enabled: true,
+      recordable: true,
+      message: null,
+      build: {
+        appVersion: "0.1.0",
+        gitCommit: "commit-opaque",
+        materialBuildDigest: "digest-opaque",
+        realExecutionEnabled: true,
+        qualificationContract: 2,
+      },
+      runtimeContract: "runtime-contract-2",
+      workflows: [],
+      targets: [],
+      resumableCandidates: [],
+      resumableSession,
+    });
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.refreshQualificationSession.mockResolvedValue(resumableSession);
+
+    await renderReadyApp();
+
+    const connectedDevice = await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    });
+    expect((connectedDevice as HTMLButtonElement).disabled).toBe(false);
+    await user.click(connectedDevice);
+    await waitFor(() => expect(mockApi.probeDevice).toHaveBeenCalledWith("device-opaque"));
+  });
+
+  test("active same-process qualification session observes normal workflow and locks its connected device row", async () => {
     const user = userEvent.setup();
     mockApi.deviceQualificationModeStatus.mockResolvedValue({
       enabled: true,
@@ -1305,6 +1359,26 @@ describe("device qualification controller integration", () => {
       selectedRecipes: ["recipe.one"],
     }));
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Provide required files and options" });
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: /Example Handheld/ });
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    const connectedDevice = await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    });
+    expect((connectedDevice as HTMLButtonElement).disabled).toBe(true);
+    const reasonId = connectedDevice.getAttribute("aria-describedby");
+    expect(reasonId).toBeTruthy();
+    const reason = reasonId ? document.getElementById(reasonId) : null;
+    expect(reason).not.toBeNull();
+    expect(reason?.textContent).toBe(
+      "The qualification session is already bound to its validated device for this app session.",
+    );
   });
 });
 

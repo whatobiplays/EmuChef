@@ -1812,7 +1812,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const selectDevice = async (deviceHandle: string, invoker: HTMLElement | null = null) => {
-    if (qualificationLocksIntent) {
+    if (qualification.deviceSelectionLocked) {
       setNotice("The qualification session is bound to the current device.");
       return;
     }
@@ -2617,11 +2617,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   {devices.map((device) => (
                     <li key={device.deviceHandle}>
                       <button
-                        aria-describedby={device.state !== "available" || savedConfigurationBlocked || multipleDevicesConnected
+                        aria-describedby={device.state !== "available" || savedConfigurationBlocked || multipleDevicesConnected || qualification.deviceSelectionLocked
                           ? stableDomId("device-reason", device.deviceHandle)
                           : undefined}
                         className="device-row"
-                        disabled={device.state !== "available" || busy || savedConfigurationBlocked || multipleDevicesConnected || qualificationLocksIntent}
+                        disabled={device.state !== "available" || busy || savedConfigurationBlocked || multipleDevicesConnected || qualification.deviceSelectionLocked}
                         onClick={(event) => void selectDevice(device.deviceHandle, event.currentTarget)}
                       >
                         <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
@@ -2633,10 +2633,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                                 : "Offline"}
                         </span>
                       </button>
-                      {(device.state !== "available" || savedConfigurationBlocked || multipleDevicesConnected) && (
+                      {(device.state !== "available" || savedConfigurationBlocked || multipleDevicesConnected || qualification.deviceSelectionLocked) && (
                         <small className="disabled-reason" id={stableDomId("device-reason", device.deviceHandle)}>
                           {savedConfigurationBlocked
                             ? "Repair or replace the incompatible saved setup before selecting a device."
+                            : qualification.deviceSelectionLocked
+                              ? "The qualification session is already bound to its validated device for this app session."
                             : device.state === "unauthorized"
                               ? "Unlock the device, accept the USB debugging prompt, then refresh."
                               : device.state === "offline"

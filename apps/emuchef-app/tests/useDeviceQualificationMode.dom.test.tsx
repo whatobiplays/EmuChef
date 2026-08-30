@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode, useRef } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -166,10 +166,14 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
   return (
     <>
       <output data-testid="qualification-active">{String(controller.intentLock !== null)}</output>
+      <output data-testid="qualification-device-selection-locked">
+        {controller.deviceSelectionLocked ? "locked" : "unlocked"}
+      </output>
       <output data-testid="qualification-plan">{controller.intentLock?.devicePlan ?? ""}</output>
       <output data-testid="qualification-recipes">{controller.intentLock?.selectedRecipes.join(",") ?? ""}</output>
       <output data-testid="qualification-candidate">{controller.targetCandidate?.target.model.value ?? ""}</output>
       <output data-testid="qualification-checkpoint">{controller.session?.recordedCheckpoints[0]?.observedAt ?? ""}</output>
+      <output data-testid="qualification-validity">{controller.session?.runValidity ?? ""}</output>
       <button
         type="button"
         onClick={() => void controller.beginSession({
@@ -205,6 +209,7 @@ test("disabled qualification mode leaves the normal workflow unconstrained", asy
   render(<Harness workflow={reviewWorkflow()} />);
 
   expect((await screen.findByTestId("qualification-active")).textContent).toBe("false");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
   expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
   expect(mockApi.bindQualificationReview).not.toHaveBeenCalled();
   expect(mockApi.bindQualificationExecution).not.toHaveBeenCalled();
@@ -267,8 +272,212 @@ test("refresh restores a persisted run session and checkpoint timestamp without 
     expect(screen.getByTestId("qualification-active").textContent).toBe("true");
   });
   expect(screen.getByTestId("qualification-checkpoint").textContent).toBe(recordedAt);
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
   expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
   expect(mockApi.refreshQualificationSession).not.toHaveBeenCalled();
+});
+
+test("a restored session associates the selected device only after refresh validation", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    ...activeStatus(),
+    resumableSession: sessionSnapshot(),
+  });
+  mockApi.refreshQualificationSession.mockResolvedValue(sessionSnapshot());
+  const observedWorkflow: WorkflowState = {
+    ...initialWorkflowState,
+    step: "setup",
+    deviceHandle: "device-new-process",
+    devicePlan: "plan.bound",
+    facts: {
+      deviceHandle: "device-new-process",
+      manufacturer: "Example",
+      brand: "Example",
+      model: "Original model",
+      androidVersion: 14,
+      androidApiLevel: 34,
+      firmwareBuild: "firmware-original",
+    },
+  };
+
+  const { rerender } = render(<Harness workflow={initialWorkflowState} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-active").textContent).toBe("true");
+  });
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+
+  rerender(<Harness workflow={observedWorkflow} />);
+
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith(
+      "session-opaque",
+      "device-new-process",
+    );
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+  });
+  expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
+  expect(screen.getByTestId("qualification-plan").textContent).toBe("plan.bound");
+  expect(screen.getByTestId("qualification-recipes").textContent).toBe("recipe.one,recipe.dependency");
+});
+
+test("a stale restored refresh cannot associate a newly selected device", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    ...activeStatus(),
+    resumableSession: sessionSnapshot(),
+  });
+  let resolveFirstRefresh: ((snapshot: QualificationSessionSnapshot) => void) | undefined;
+  mockApi.refreshQualificationSession
+    .mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFirstRefresh = resolve;
+    }))
+    .mockResolvedValue(sessionSnapshot());
+
+  const firstDevice: WorkflowState = {
+    ...initialWorkflowState,
+    step: "setup",
+    deviceHandle: "device-first",
+    devicePlan: "plan.bound",
+    facts: {
+      deviceHandle: "device-first",
+      manufacturer: "Example",
+      brand: "Example",
+      model: "Original model",
+      androidVersion: 14,
+      androidApiLevel: 34,
+      firmwareBuild: "firmware-original",
+    },
+  };
+  const secondDevice: WorkflowState = {
+    ...firstDevice,
+    deviceHandle: "device-second",
+    facts: {
+      ...firstDevice.facts!,
+      deviceHandle: "device-second",
+    },
+  };
+
+  const { rerender } = render(<Harness workflow={initialWorkflowState} />);
+  await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("true"));
+  rerender(<Harness workflow={firstDevice} />);
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith(
+      "session-opaque",
+      "device-first",
+    );
+    expect(resolveFirstRefresh).toBeTypeOf("function");
+  });
+
+  rerender(<Harness workflow={secondDevice} />);
+  await act(async () => {
+    resolveFirstRefresh!(sessionSnapshot());
+  });
+
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(2);
+    expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith(
+      "session-opaque",
+      "device-second",
+    );
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+  });
+});
+
+test("a stale restored refresh cannot associate changed facts for the same device", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    ...activeStatus(),
+    resumableSession: sessionSnapshot(),
+  });
+  let resolveFirstRefresh: ((snapshot: QualificationSessionSnapshot) => void) | undefined;
+  mockApi.refreshQualificationSession
+    .mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFirstRefresh = resolve;
+    }))
+    .mockResolvedValue(sessionSnapshot());
+
+  const initialFacts = {
+    deviceHandle: "device-first",
+    manufacturer: "Example",
+    brand: "Example",
+    model: "Original model",
+    androidVersion: 14,
+    androidApiLevel: 34,
+    firmwareBuild: "firmware-original",
+  };
+  const firstObservation: WorkflowState = {
+    ...initialWorkflowState,
+    step: "setup",
+    deviceHandle: "device-first",
+    devicePlan: "plan.bound",
+    facts: initialFacts,
+  };
+  const changedObservation: WorkflowState = {
+    ...firstObservation,
+    facts: { ...initialFacts, model: "Changed model" },
+  };
+
+  const { rerender } = render(<Harness workflow={initialWorkflowState} />);
+  await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("true"));
+  rerender(<Harness workflow={firstObservation} />);
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith(
+      "session-opaque",
+      "device-first",
+    );
+    expect(resolveFirstRefresh).toBeTypeOf("function");
+  });
+
+  rerender(<Harness workflow={changedObservation} />);
+  await act(async () => {
+    resolveFirstRefresh!(sessionSnapshot());
+  });
+
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledTimes(2);
+    expect(mockApi.refreshQualificationSession).toHaveBeenLastCalledWith(
+      "session-opaque",
+      "device-first",
+    );
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+  });
+});
+
+test("a restored session remains invalid when refresh rejects a different device", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    ...activeStatus(),
+    resumableSession: sessionSnapshot(),
+  });
+  mockApi.refreshQualificationSession.mockResolvedValue(sessionSnapshot({
+    runValidity: "invalid",
+    invalidReason: "device_identity_changed",
+  }));
+  const observedWorkflow: WorkflowState = {
+    ...initialWorkflowState,
+    step: "setup",
+    deviceHandle: "device-different",
+    devicePlan: "plan.bound",
+    facts: {
+      deviceHandle: "device-different",
+      manufacturer: "Other",
+      brand: "Other",
+      model: "Different model",
+      androidVersion: 15,
+      androidApiLevel: 35,
+      firmwareBuild: "different-firmware",
+    },
+  };
+
+  const { rerender } = render(<Harness workflow={initialWorkflowState} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-active").textContent).toBe("true");
+  });
+  rerender(<Harness workflow={observedWorkflow} />);
+
+  await waitFor(() => {
+    expect(mockApi.refreshQualificationSession).toHaveBeenCalledWith(
+      "session-opaque",
+      "device-different",
+    );
+  });
+  expect(screen.getByTestId("qualification-validity").textContent).toBe("invalid");
 });
 
 test("an active session exposes only its bound plan and recipes without starting product work", async () => {
@@ -280,6 +489,7 @@ test("an active session exposes only its bound plan and recipes without starting
   fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
 
   expect((await screen.findByTestId("qualification-active")).textContent).toBe("true");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
   expect(screen.getByTestId("qualification-plan").textContent).toBe("plan.bound");
   expect(screen.getByTestId("qualification-recipes").textContent).toBe("recipe.one,recipe.dependency");
   expect(mockApi.createReview).not.toHaveBeenCalled();

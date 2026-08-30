@@ -17,6 +17,7 @@ use crate::device_qualification::{
     check_device_root_observation, refresh_current_qualification, CapabilityAvailabilityDto,
     DeviceQualificationState, RootQualificationState,
 };
+use crate::handles::SessionHandles;
 use crate::qualification_build::{
     embedded_build_identity, qualification_gate_inputs, qualification_mode_enabled_at_runtime,
     QualificationBuildIdentity,
@@ -511,10 +512,6 @@ impl QualificationSession {
         &self.candidate_handle
     }
 
-    pub(crate) fn device_handle(&self) -> &str {
-        &self.device_handle
-    }
-
     pub(crate) fn target_id(&self) -> &str {
         &self.target_id
     }
@@ -619,9 +616,23 @@ impl QualificationSession {
         if self.run_validity() == RunValidity::Invalid {
             return;
         }
-        let mismatch = if observation.device_identity != self.device_handle {
-            Some(QualificationInvalidation::DeviceIdentityChanged)
-        } else if observation.profile_id != self.target.profile_id {
+        if observation.device_identity != self.device_handle {
+            self.invalidate(QualificationInvalidation::DeviceIdentityChanged);
+            return;
+        }
+        self.observe_matching_target(observation);
+    }
+
+    /// Compare trusted live observations with the session's immutable target.
+    ///
+    /// The observation's opaque device handle is intentionally excluded because
+    /// it is valid only within one application process. Callers must establish
+    /// current-process handle continuity through \`SessionHandles\`.
+    pub(crate) fn observe_matching_target(&mut self, observation: QualificationDeviceObservation) {
+        if self.run_validity() == RunValidity::Invalid {
+            return;
+        }
+        let mismatch = if observation.profile_id != self.target.profile_id {
             Some(QualificationInvalidation::TargetProfileChanged)
         } else if observation.manufacturer != self.target.manufacturer {
             Some(QualificationInvalidation::ManufacturerChanged)
@@ -1107,6 +1118,32 @@ fn safe_qualification_error(code: &str) -> String {
     safe_error(code, message)
 }
 
+/// Drop the transient device binding after a candidate is discarded or
+/// finalized. Persisted session metadata remains untouched.
+fn clear_session_device_association(state: &AppState, session_handle: &str) -> Result<(), String> {
+    state
+        .handles
+        .lock()
+        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?
+        .clear_qualification_session_device(session_handle);
+    Ok(())
+}
+
+/// Require the trusted current-process device association before binding a
+/// production review or execution. Restored sessions intentionally have no
+/// association until normal selection, probing, and refresh validation finish;
+/// binding therefore fails closed instead of consulting historical metadata.
+fn require_current_qualification_device_handle(
+    handles: &SessionHandles,
+    session_handle: &str,
+    error_code: &str,
+) -> Result<String, String> {
+    handles
+        .qualification_session_device_handle(session_handle)
+        .map(str::to_string)
+        .ok_or_else(|| safe_qualification_error(error_code))
+}
+
 #[tauri::command]
 pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
@@ -1281,7 +1318,10 @@ pub fn discard_qualification_candidate(
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
     repository
         .discard_candidate(&candidate_handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
+        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+    let session_handle = session_handle_for_candidate(&candidate_handle)?;
+    clear_session_device_association(&state, &session_handle)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1339,13 +1379,13 @@ pub fn begin_qualification_session(
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
     let session_handle = session_handle_for_candidate(&candidate_handle)?;
     let mut session = QualificationSession::new(
-        session_handle,
+        session_handle.clone(),
         candidate_handle.clone(),
         provisional_payload["capturedAt"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        request.device_handle,
+        request.device_handle.clone(),
         target_binding,
         workflow,
         build,
@@ -1365,6 +1405,15 @@ pub fn begin_qualification_session(
             safe_qualification_error("qualification_candidate_invalid")
         });
     }
+    let associated = state
+        .handles
+        .lock()
+        .map_err(|_| safe_qualification_error("qualification_target_unverified"))?
+        .associate_qualification_session_device(&session_handle, &request.device_handle);
+    if !associated {
+        let _ = repository.discard_candidate(&candidate_handle);
+        return Err(safe_qualification_error("qualification_target_unverified"));
+    }
     session_snapshot(repository, &session)
 }
 
@@ -1382,22 +1431,66 @@ pub fn refresh_qualification_session(
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
     let candidate_handle = session_candidate_handle(&session_handle)?;
     let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    if session.device_handle() != device_handle {
-        session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
+    let associated_device_handle = state
+        .handles
+        .lock()
+        .map_err(|_| safe_qualification_error("qualification_target_unverified"))?
+        .qualification_session_device_handle(&session_handle)
+        .map(str::to_string);
+    let observation = if associated_device_handle
+        .as_deref()
+        .is_some_and(|associated| associated != device_handle)
+    {
+        Err(String::new())
     } else {
-        let observation = {
-            let mut source = AppStateQualificationObservationSource { state: &state };
-            observe_device_from_source(&mut source, &device_handle, &session.device_plan)
-        };
-        match observation {
-            Ok((observation, _)) => session.observe_matching_device(observation),
-            Err(_) => session.invalidate(QualificationInvalidation::RefreshFailed),
-        }
-    }
+        let mut source = AppStateQualificationObservationSource { state: &state };
+        observe_device_from_source(&mut source, &device_handle, &session.device_plan)
+            .map(|(observation, _)| observation)
+    };
+    let should_associate = apply_qualification_refresh(
+        &mut session,
+        associated_device_handle.as_deref(),
+        &device_handle,
+        observation,
+    );
     repository
         .save_session(&candidate_handle, &session.to_persisted())
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+    if should_associate {
+        let associated = state
+            .handles
+            .lock()
+            .map_err(|_| safe_qualification_error("qualification_target_unverified"))?
+            .associate_qualification_session_device(&session_handle, &device_handle);
+        if !associated {
+            session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
+            repository
+                .save_session(&candidate_handle, &session.to_persisted())
+                .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        }
+    }
     session_snapshot(repository, &session)
+}
+
+/// Apply one trusted refresh observation to a qualification session.
+///
+/// Returns true only when a restored session has no process-local association
+/// and the observed device matches every immutable target fact.
+fn apply_qualification_refresh(
+    session: &mut QualificationSession,
+    associated_device_handle: Option<&str>,
+    device_handle: &str,
+    observation: Result<QualificationDeviceObservation, String>,
+) -> bool {
+    if associated_device_handle.is_some_and(|associated| associated != device_handle) {
+        session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
+        return false;
+    }
+    match observation {
+        Ok(observation) => session.observe_matching_target(observation),
+        Err(_) => session.invalidate(QualificationInvalidation::RefreshFailed),
+    }
+    session.run_validity() == RunValidity::Valid && associated_device_handle.is_none()
 }
 
 #[tauri::command]
@@ -1414,14 +1507,23 @@ pub fn bind_qualification_review(
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
     let candidate_handle = session_candidate_handle(&session_handle)?;
     let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    let review = state
-        .handles
-        .lock()
-        .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?
-        .review(&review_handle)
-        .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?
-        .clone();
-    if !review_matches_session(&session, &review) {
+    let (associated_device_handle, review) = {
+        let mut handles = state
+            .handles
+            .lock()
+            .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?;
+        let associated_device_handle = require_current_qualification_device_handle(
+            &handles,
+            &session_handle,
+            "qualification_review_mismatch",
+        )?;
+        let review = handles
+            .review(&review_handle)
+            .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?
+            .clone();
+        (associated_device_handle, review)
+    };
+    if !review_matches_session(&session, &review, &associated_device_handle) {
         return Err(safe_qualification_error("qualification_review_mismatch"));
     }
     session
@@ -1447,17 +1549,24 @@ pub fn bind_qualification_execution(
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
     let candidate_handle = session_candidate_handle(&session_handle)?;
     let mut session = load_session(repository, &session_handle, &candidate_handle)?;
+    let associated_device_handle = {
+        let handles = state
+            .handles
+            .lock()
+            .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?;
+        require_current_qualification_device_handle(
+            &handles,
+            &session_handle,
+            "qualification_execution_mismatch",
+        )?
+    };
     let binding = state
         .executions
         .lock()
         .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?
         .qualification_binding(&execution_handle)
         .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?;
-    if !binding.real
-        || binding.device_handle != session.device_handle()
-        || binding.review_handle != session.bound_review_handle().unwrap_or_default()
-        || !review_matches_session(&session, &binding.review)
-    {
+    if !execution_matches_session(&session, &binding, &associated_device_handle) {
         return Err(safe_qualification_error("qualification_execution_mismatch"));
     }
     session
@@ -1509,6 +1618,11 @@ pub fn finalize_qualification_candidate(
         .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
     let candidate_handle = session_candidate_handle(&session_handle)?;
     let mut session = load_session(repository, &session_handle, &candidate_handle)?;
+    let associated_device_handle = state.handles.lock().ok().and_then(|handles| {
+        handles
+            .qualification_session_device_handle(&session_handle)
+            .map(str::to_string)
+    });
     if session.build_identity() != &build {
         session.invalidate(QualificationInvalidation::ExecutionUnavailable);
     }
@@ -1534,13 +1648,14 @@ pub fn finalize_qualification_candidate(
                     None,
                 )
                 .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
+            clear_session_device_association(&state, &session_handle)?;
             return session_snapshot(repository, &session);
         };
-        if !binding.real
-            || binding.device_handle != session.device_handle()
-            || binding.review_handle != session.bound_review_handle().unwrap_or_default()
-            || !review_matches_session(&session, &binding.review)
-        {
+        if !execution_matches_session(
+            &session,
+            &binding,
+            associated_device_handle.as_deref().unwrap_or_default(),
+        ) {
             session.invalidate(QualificationInvalidation::ExecutionUnavailable);
         } else {
             session.classify_execution_status(binding.status.as_deref())?;
@@ -1584,6 +1699,7 @@ pub fn finalize_qualification_candidate(
             report_bytes.as_deref(),
         )
         .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
+    clear_session_device_association(&state, &session_handle)?;
     session_snapshot(repository, &session)
 }
 
@@ -1613,6 +1729,8 @@ pub fn record_qualification_run(
         .and_then(Value::as_str)
         .filter(|run_id| !run_id.is_empty())
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    let session_handle = session_handle_for_candidate(&candidate_handle)?;
+    clear_session_device_association(&state, &session_handle)?;
     Ok(QualificationRunRecordingResult {
         run_id: run_id.to_string(),
     })
@@ -1672,6 +1790,19 @@ fn capture_target_registration_payload_from(
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
 }
 
+/// Projects the completed production root observation into the target contract.
+/// Explicit denial is a trusted non-root observation. Unavailable and failed
+/// checks remain unverified and cannot produce a registration candidate.
+fn project_root_state(root: &RootQualificationState) -> Result<QualificationRootState, String> {
+    match root {
+        RootQualificationState::Granted => Ok(QualificationRootState::Rooted),
+        RootQualificationState::Denied => Ok(QualificationRootState::NonRoot),
+        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => {
+            Err(safe_qualification_error("qualification_target_unverified"))
+        }
+    }
+}
+
 fn observe_device_from_source(
     source: &mut impl QualificationObservationSource,
     device_handle: &str,
@@ -1697,13 +1828,7 @@ fn observe_device_from_source(
     if root.device_identity != device_handle {
         return Err(safe_qualification_error("qualification_target_unverified"));
     }
-    let root_state = match root.qualification {
-        RootQualificationState::Granted => QualificationRootState::Rooted,
-        RootQualificationState::Denied => QualificationRootState::NonRoot,
-        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => {
-            return Err(safe_qualification_error("qualification_target_unverified"));
-        }
-    };
+    let root_state = project_root_state(&root.qualification)?;
     let android_version = required_fact_string(&facts, "android_version")?;
     let android_api = required_fact_u64(&facts, "android_api_level")?;
     let manufacturer = required_fact_string(&facts, "manufacturer")?;
@@ -1977,8 +2102,9 @@ fn session_snapshot(
 fn review_matches_session(
     session: &QualificationSession,
     review: &crate::handles::ReviewedPlanSnapshot,
+    associated_device_handle: &str,
 ) -> bool {
-    if review.device_handle != session.device_handle()
+    if review.device_handle != associated_device_handle
         || review.response.get("devicePlan").and_then(Value::as_str) != Some(session.device_plan())
     {
         return false;
@@ -2021,6 +2147,17 @@ fn review_matches_session(
         && target.get("model").and_then(Value::as_str) == Some(&session.target().model)
         && target.get("androidApiLevel").and_then(Value::as_u64)
             == Some(session.target().android_api)
+}
+
+fn execution_matches_session(
+    session: &QualificationSession,
+    binding: &crate::execution::QualificationExecutionBinding,
+    associated_device_handle: &str,
+) -> bool {
+    binding.real
+        && binding.device_handle == associated_device_handle
+        && binding.review_handle == session.bound_review_handle().unwrap_or_default()
+        && review_matches_session(session, &binding.review, associated_device_handle)
 }
 
 fn is_terminal_execution_status(status: &str) -> bool {
@@ -2193,6 +2330,7 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
     use tauri::Manager;
 
     #[derive(Clone)]
@@ -2635,6 +2773,10 @@ mod tests {
         assert_eq!(payload["target"]["androidVersion"]["value"], "15");
         assert_eq!(payload["target"]["rootState"]["value"], "non_root");
         assert_eq!(
+            payload["target"]["rootState"]["source"],
+            "explicit_root_check"
+        );
+        assert_eq!(
             payload["target"]["connectionType"]["source"],
             "operator_attestation"
         );
@@ -2658,7 +2800,7 @@ mod tests {
     }
 
     #[test]
-    fn target_capture_accepts_numeric_android_version_but_rejects_unverified_root() {
+    fn target_capture_projects_root_observations_and_rejects_unverified_root_checks() {
         let mut numeric_version = observation_source();
         let payload = capture_target_registration_payload_from(
             &mut numeric_version,
@@ -2668,15 +2810,24 @@ mod tests {
         .expect("numeric Android version should normalize");
         assert_eq!(payload["target"]["androidVersion"]["value"], "15");
 
-        let mut granted = observation_source();
-        granted.root.qualification = RootQualificationState::Granted;
-        let granted_payload = capture_target_registration_payload_from(
-            &mut granted,
-            &capture_request(),
-            &test_build(),
-        )
-        .expect("granted root should be recorded as rooted");
-        assert_eq!(granted_payload["target"]["rootState"]["value"], "rooted");
+        for (root, expected) in [
+            (RootQualificationState::Granted, "rooted"),
+            (RootQualificationState::Denied, "non_root"),
+        ] {
+            let mut source = observation_source();
+            source.root.qualification = root;
+            let payload = capture_target_registration_payload_from(
+                &mut source,
+                &capture_request(),
+                &test_build(),
+            )
+            .expect("completed root observations should project to the target contract");
+            assert_eq!(payload["target"]["rootState"]["value"], expected);
+            assert_eq!(
+                payload["target"]["rootState"]["source"],
+                "explicit_root_check"
+            );
+        }
 
         for root in [
             RootQualificationState::Unavailable,
@@ -2684,15 +2835,27 @@ mod tests {
                 reason: RootQualificationFailureReason::TimedOut,
                 message: "timed out".to_string(),
             },
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::Transport,
+                message: "transport failed".to_string(),
+            },
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::UnexpectedResponse,
+                message: "unexpected response".to_string(),
+            },
         ] {
             let mut source = observation_source();
             source.root.qualification = root;
-            assert!(capture_target_registration_payload_from(
+            let error = capture_target_registration_payload_from(
                 &mut source,
                 &capture_request(),
                 &test_build(),
             )
-            .is_err());
+            .expect_err("failed root checks must not produce a target candidate");
+            assert!(
+                error.contains("qualification_target_unverified"),
+                "unexpected target-capture error: {error}"
+            );
         }
     }
 
@@ -2953,6 +3116,178 @@ mod tests {
 
     fn test_observation() -> QualificationDeviceObservation {
         QualificationDeviceObservation::for_test()
+    }
+
+    fn review_for_session(device_handle: &str) -> crate::handles::ReviewedPlanSnapshot {
+        crate::handles::ReviewedPlanSnapshot {
+            response: json!({
+                "devicePlan": "test-plan",
+                "selectedRecipes": ["test.recipe"],
+            }),
+            target: json!({
+                "id": "target-test",
+                "manufacturer": "Test",
+                "model": "Device",
+                "androidApiLevel": 35,
+            }),
+            catalog_identity: json!({}),
+            catalog_digest: "sha256:catalog".to_string(),
+            plan_digest: "sha256:plan".to_string(),
+            device_handle: device_handle.to_string(),
+            qualification_context: None,
+            platform_tools_identity: None,
+            created: Instant::now(),
+            last_access: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn restored_refresh_associates_a_matching_live_device_without_rewriting_capture_metadata() {
+        let mut session = test_session();
+        let mut observation = test_observation();
+        observation.device_identity = "device-new-process".to_string();
+
+        let should_associate =
+            apply_qualification_refresh(&mut session, None, "device-new-process", Ok(observation));
+
+        assert!(should_associate);
+        assert_eq!(session.run_validity(), RunValidity::Valid);
+        assert_eq!(session.to_persisted().device_handle, "device-test");
+    }
+
+    #[test]
+    fn restored_refresh_invalidates_target_drift_without_association() {
+        let mut session = test_session();
+        let mut observation = test_observation();
+        observation.device_identity = "device-new-process".to_string();
+        observation.model = "Different Device".to_string();
+
+        let should_associate =
+            apply_qualification_refresh(&mut session, None, "device-new-process", Ok(observation));
+
+        assert!(!should_associate);
+        assert_eq!(session.run_validity(), RunValidity::Invalid);
+        assert_eq!(session.invalid_reason().as_deref(), Some("model_changed"));
+    }
+
+    #[test]
+    fn active_refresh_rejects_a_different_live_handle_before_observation() {
+        let mut session = test_session();
+
+        let should_associate = apply_qualification_refresh(
+            &mut session,
+            Some("device-test"),
+            "device-other",
+            Ok(test_observation()),
+        );
+
+        assert!(!should_associate);
+        assert_eq!(
+            session.invalid_reason().as_deref(),
+            Some("device_identity_changed")
+        );
+    }
+
+    #[test]
+    fn review_matching_uses_the_trusted_live_association() {
+        let session = test_session();
+        let review = review_for_session("device-new-process");
+
+        assert!(review_matches_session(
+            &session,
+            &review,
+            "device-new-process"
+        ));
+        assert!(!review_matches_session(&session, &review, "device-other"));
+    }
+
+    #[test]
+    fn binding_requires_a_current_process_association() {
+        let mut handles = SessionHandles::default();
+        let error = require_current_qualification_device_handle(
+            &handles,
+            "qualification-session-test",
+            "qualification_review_mismatch",
+        )
+        .expect_err("restored sessions must refresh before binding");
+        assert!(error.contains("qualification_review_mismatch"));
+
+        assert!(handles.associate_qualification_session_device(
+            "qualification-session-test",
+            "device-new-process"
+        ));
+        assert_eq!(
+            require_current_qualification_device_handle(
+                &handles,
+                "qualification-session-test",
+                "qualification_review_mismatch",
+            )
+            .expect("validated association should be available"),
+            "device-new-process"
+        );
+    }
+
+    #[test]
+    fn execution_matching_uses_the_trusted_live_association() {
+        let mut session = test_session();
+        session
+            .bind_review("review-new-process".to_string())
+            .unwrap();
+        let mut binding = crate::execution::QualificationExecutionBinding {
+            real: true,
+            terminal: true,
+            review_handle: "review-new-process".to_string(),
+            device_handle: "device-new-process".to_string(),
+            review: review_for_session("device-new-process"),
+            status: Some("succeeded".to_string()),
+            report_available: true,
+        };
+
+        assert!(execution_matches_session(
+            &session,
+            &binding,
+            "device-new-process"
+        ));
+        assert!(!execution_matches_session(
+            &session,
+            &binding,
+            "device-other"
+        ));
+
+        binding.device_handle = "device-other".to_string();
+        assert!(!execution_matches_session(
+            &session,
+            &binding,
+            "device-new-process"
+        ));
+    }
+
+    #[test]
+    fn resumed_observation_accepts_a_new_handle_only_when_all_target_facts_match() {
+        let mut session = test_session();
+        let mut observation = test_observation();
+        observation.device_identity = "device-new-process".to_string();
+
+        session.observe_matching_target(observation);
+
+        assert_eq!(session.run_validity(), RunValidity::Valid);
+        assert_eq!(session.to_persisted().device_handle, "device-test");
+    }
+
+    #[test]
+    fn resumed_observation_invalidates_material_target_drift() {
+        let mut session = test_session();
+        let mut observation = test_observation();
+        observation.device_identity = "device-new-process".to_string();
+        observation.firmware_build = "different-build".to_string();
+
+        session.observe_matching_target(observation);
+
+        assert_eq!(session.run_validity(), RunValidity::Invalid);
+        assert_eq!(
+            session.invalid_reason().as_deref(),
+            Some("firmware_build_changed")
+        );
     }
 
     #[test]

@@ -3,9 +3,9 @@
 ## Purpose
 
 This runbook describes the production-bound workflow for a future
-physical-device qualification run. Implementing the harness does not qualify
-any device or workflow. The repository currently contains no physical target
-or evidence records.
+physical-device qualification run. The repository currently contains a
+registered physical target but no physical workflow qualification evidence.
+Target registration alone does not qualify the device or any workflow.
 
 Production EmuChef remains the system under test. The qualification harness
 observes the production workflow; it does not replace planner, executor,
