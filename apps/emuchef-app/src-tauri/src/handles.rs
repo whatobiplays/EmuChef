@@ -70,6 +70,7 @@ pub struct SessionHandles {
     device_generation: u64,
     session_epoch_by_handle: HashMap<String, u64>,
     qualification_context_by_handle: HashMap<String, QualificationContextKey>,
+    qualification_device_by_session: HashMap<String, String>,
     last_inventory_count: Option<usize>,
 }
 
@@ -224,6 +225,33 @@ impl SessionHandles {
     #[cfg(test)]
     pub(crate) fn session_epoch_for_test(&self, handle: &str) -> Option<u64> {
         self.session_epoch_by_handle.get(handle).copied()
+    }
+
+    /// Live device associated with a qualification session in this process.
+    pub fn qualification_session_device_handle(&self, session_handle: &str) -> Option<&str> {
+        self.qualification_device_by_session
+            .get(session_handle)
+            .map(String::as_str)
+    }
+
+    /// Associate a qualification session with one live device for this process.
+    ///
+    /// Repeating the same association is idempotent. A different handle is
+    /// rejected so callers can invalidate the session through qualification
+    /// authority instead of silently moving it to another device.
+    pub fn associate_qualification_session_device(
+        &mut self,
+        session_handle: &str,
+        device_handle: &str,
+    ) -> bool {
+        match self.qualification_device_by_session.get(session_handle) {
+            Some(current) => current == device_handle,
+            None => {
+                self.qualification_device_by_session
+                    .insert(session_handle.to_string(), device_handle.to_string());
+                true
+            }
+        }
     }
 
     /// Return the trusted native device records used to resolve qualification
@@ -388,6 +416,7 @@ impl SessionHandles {
         self.review_order.clear();
         self.devices_by_handle.clear();
         self.qualification_context_by_handle.clear();
+        self.qualification_device_by_session.clear();
         self.last_inventory_count = None;
         for epoch in self.session_epoch_by_handle.values_mut() {
             *epoch = epoch.saturating_add(1).max(1);
@@ -523,6 +552,25 @@ mod tests {
             created: Instant::now(),
             last_access: Instant::now(),
         }
+    }
+
+    #[test]
+    fn qualification_session_device_associations_are_process_local_and_single_device() {
+        let mut handles = SessionHandles::default();
+
+        assert!(handles.associate_qualification_session_device("session-one", "device-live"));
+        assert_eq!(
+            handles.qualification_session_device_handle("session-one"),
+            Some("device-live")
+        );
+        assert!(handles.associate_qualification_session_device("session-one", "device-live"));
+        assert!(!handles.associate_qualification_session_device("session-one", "device-other"));
+
+        handles.invalidate_runtime_authority_preserving_identities();
+        assert_eq!(
+            handles.qualification_session_device_handle("session-one"),
+            None
+        );
     }
 
     #[test]

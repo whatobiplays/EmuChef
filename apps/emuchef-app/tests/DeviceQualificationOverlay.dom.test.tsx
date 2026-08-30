@@ -88,6 +88,7 @@ function controller(
     session: null,
     targetCandidate: null,
     intentLock: null,
+    deviceSelectionLocked: false,
     busy: false,
     error: null,
     refresh: vi.fn().mockResolvedValue(undefined),

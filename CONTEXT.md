@@ -1390,6 +1390,20 @@ surfaces remain authoritative. Qualification-mode implementation and
 automated tests do not perform physical qualification or add a qualification-
 only device command.
 
+The persisted qualification-session `deviceHandle` is capture-time metadata,
+not durable runtime authority. `SessionHandles` is the sole authority for the
+live device associated with a qualification session in the current process.
+New sessions establish that association immediately. Restored sessions begin
+without one, so their immutable device plan and recipe intent remain locked
+while normal connected-device selection stays available. After the operator
+selects and probes a device, the backend compares the authoritative observed
+profile, manufacturer, model, Android version and API, ABI/SOC class, firmware,
+and root state with the registered target before establishing the process-local
+association. Any mismatch follows monotonic session invalidation. Review,
+execution binding, and finalization require the current trusted association;
+they never rely on the historical persisted handle or run before successful
+refresh validation.
+
 Qualification session state is Rust-owned and restartable. A session uses an
 opaque qualification-session-<32 lowercase hex> handle associated with its
 opaque run candidate and persists strict lifecycle state in a separate

@@ -25,6 +25,8 @@ export interface DeviceQualificationModeController {
   session: QualificationSessionSnapshot | null;
   targetCandidate: QualificationTargetCandidatePreview | null;
   intentLock: QualificationIntentLock | null;
+  /** Whether this process has validated and bound the session to its live device handle. */
+  deviceSelectionLocked: boolean;
   busy: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -322,7 +324,7 @@ export function useDeviceQualificationMode({
   const deviceObservationKey = workflowDeviceObservationKey(workflow);
 
   useEffect(() => {
-    if (!enabled || !session || !reviewHandle) return;
+    if (!enabled || !session || !sessionDeviceHandleRef.current || !reviewHandle) return;
     const sessionHandle = session.sessionHandle;
     const key = `${sessionHandle}:${reviewHandle}`;
     if (boundReviewKeysRef.current.has(key)) return;
@@ -355,7 +357,14 @@ export function useDeviceQualificationMode({
   ]);
 
   useEffect(() => {
-    if (!enabled || !session || !productionExecution || productionExecution.mode !== "real" || !executionIdentity) {
+    if (
+      !enabled
+      || !session
+      || !sessionDeviceHandleRef.current
+      || !productionExecution
+      || productionExecution.mode !== "real"
+      || !executionIdentity
+    ) {
       return;
     }
     const sessionHandle = session.sessionHandle;
@@ -416,16 +425,20 @@ export function useDeviceQualificationMode({
   ]);
 
   useEffect(() => {
-    if (!enabled || !session || !sessionDeviceHandleRef.current) return;
+    if (!enabled || !session) return;
     const sessionHandle = session.sessionHandle;
-    const boundDeviceHandle = sessionDeviceHandleRef.current;
-    const deviceUnavailable = observedDeviceHandle !== boundDeviceHandle;
+    const associatedDeviceHandle = sessionDeviceHandleRef.current;
+    const establishingAssociation = associatedDeviceHandle === null;
+    if (establishingAssociation && (!observedDeviceHandle || observedFactsKey === "")) return;
+    const refreshDeviceHandle = associatedDeviceHandle ?? observedDeviceHandle!;
+    const deviceUnavailable = associatedDeviceHandle !== null
+      && observedDeviceHandle !== associatedDeviceHandle;
     const factsBecameAvailable = boundDeviceFactsKeyRef.current === "" && observedFactsKey !== "";
     const identityChanged = boundDeviceFactsKeyRef.current !== ""
       && observedFactsKey !== boundDeviceFactsKeyRef.current;
     const planChanged = workflow.devicePlan !== session.devicePlan;
     const driftKey = `${sessionHandle}:${deviceObservationKey}`;
-    if (!deviceUnavailable && !factsBecameAvailable && !identityChanged && !planChanged) {
+    if (!establishingAssociation && !deviceUnavailable && !factsBecameAvailable && !identityChanged && !planChanged) {
       lastSessionObservationKeyRef.current = driftKey;
       return;
     }
@@ -434,9 +447,20 @@ export function useDeviceQualificationMode({
     let refreshSession = sessionRefreshPromisesRef.current.get(sessionHandle);
     if (!refreshSession) {
       refreshSession = runOperation(
-        () => api.refreshQualificationSession(sessionHandle, boundDeviceHandle),
+        () => api.refreshQualificationSession(sessionHandle, refreshDeviceHandle),
         (nextSession) => {
-          if (sessionRef.current?.sessionHandle === sessionHandle && factsBecameAvailable) {
+          if (
+            sessionRef.current?.sessionHandle === sessionHandle
+            && establishingAssociation
+            && nextSession.runValidity === "valid"
+          ) {
+            sessionDeviceHandleRef.current = refreshDeviceHandle;
+          }
+          if (
+            sessionRef.current?.sessionHandle === sessionHandle
+            && factsBecameAvailable
+            && nextSession.runValidity === "valid"
+          ) {
             boundDeviceFactsKeyRef.current = observedFactsKey;
           }
           applySessionIfCurrent(sessionHandle, nextSession);
@@ -470,12 +494,14 @@ export function useDeviceQualificationMode({
   const intentLock = session
     ? { devicePlan: session.devicePlan, selectedRecipes: [...session.requiredRecipes] }
     : null;
+  const deviceSelectionLocked = session !== null && sessionDeviceHandleRef.current !== null;
 
   return {
     status,
     session,
     targetCandidate,
     intentLock,
+    deviceSelectionLocked,
     busy,
     error,
     refresh,
