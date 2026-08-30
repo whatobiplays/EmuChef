@@ -278,9 +278,7 @@ steps:
     - package_name: com.retroarch.aarch64
       op: MANAGE_EXTERNAL_STORAGE
       mode: allow
-      required: false
-      when:
-        rooted: true
+      required: true
     policy:
       on_failure: warn
       require_all: false

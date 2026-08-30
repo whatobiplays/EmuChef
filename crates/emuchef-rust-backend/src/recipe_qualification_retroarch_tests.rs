@@ -336,6 +336,51 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
 }
 
 #[test]
+fn retroarch_manage_external_storage_is_required_without_root() {
+    let result = plan_retroarch(None);
+    let plan = result.plan.expect("plan should be generated");
+    let step = generated_step_for_authored_id(&plan, "grant_retroarch_permissions");
+    let appops = match step.params.get("appops") {
+        Some(ExecutionParamValue::Literal { value: Value::Array(actions) }) => actions,
+        other => panic!("expected literal appops array, got {other:?}"),
+    };
+    let manage_external_storage = appops
+        .iter()
+        .find(|action| {
+            action
+                .get("op")
+                .and_then(Value::as_str)
+                == Some("MANAGE_EXTERNAL_STORAGE")
+        })
+        .expect("RetroArch must declare MANAGE_EXTERNAL_STORAGE app-op automation");
+
+    assert_eq!(
+        manage_external_storage
+            .get("package_name")
+            .and_then(Value::as_str),
+        Some("com.retroarch.aarch64")
+    );
+    assert_eq!(
+        manage_external_storage.get("mode").and_then(Value::as_str),
+        Some("allow")
+    );
+    assert_eq!(
+        manage_external_storage
+            .get("required")
+            .and_then(Value::as_bool),
+        Some(true),
+        "all-files access is required for unattended RetroArch provisioning"
+    );
+    assert!(
+        manage_external_storage
+            .get("when")
+            .and_then(Value::as_object)
+            .is_none_or(|when| !when.contains_key("rooted")),
+        "MANAGE_EXTERNAL_STORAGE must be attempted on supported non-root devices"
+    );
+}
+
+#[test]
 fn retroarch_optional_cfg_is_not_required_for_planning() {
     let result = plan_retroarch(None);
     assert!(
