@@ -17,12 +17,21 @@ Silicon macOS.
 Nontechnical Android handheld owners who need to configure one device safely
 and reproducibly. They connect a device, confirm detected facts, choose an
 appropriate setup, provide required files and values, review the resulting
-plan, and simulate or—when explicitly enabled and qualified—apply it.
+plan, and simulate or—when real-device execution is explicitly enabled for a
+supported setup—apply it.
 
 ### Config Editor
 
 Technical authors who create and maintain recipes, application definitions,
 device profiles, and related catalog content used by EmuChef proper.
+
+### Internal qualification operator
+
+An internal technical operator maintains device-support evidence using the
+development-only qualification workflow. This is not a primary product user
+and does not define a third product workflow. The operator exercises the
+ordinary EmuChef proper workflow under stricter evidence-capture rules and does
+not gain separate device, planning, review, or execution authority.
 
 ## Product Purpose
 
@@ -89,7 +98,10 @@ modules or runtime state.
 The product name is EmuChef. User-facing language should be understandable to
 nontechnical end users and should avoid exposing internal catalog identifiers,
 protocol details, filesystem roots, exact device serials, or implementation
-terminology where a human-facing explanation is available.
+terminology where a human-facing explanation is available. Normal end-user
+device compatibility is expressed as supported or not supported. Qualification,
+registered-target, evidence-state, and support-tier terminology remains internal
+to engineering and deliberately internal operator workflows.
 
 ## Evidence on Hand
 

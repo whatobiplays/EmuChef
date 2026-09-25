@@ -970,11 +970,14 @@ evidence, checkpoint, applicability, and compatibility contracts exist under
 `docs/testing/device-qualification/`; `tools/device-qualification.mjs` remains
 the sole authority for validation, canonicalization, recording, projection, and
 matrix generation. Synthetic-only fixtures, the deterministic generated matrix,
-the operator runbook, and Makefile/CI validation are in place. No physical
-device targets or evidence are added by harness implementation itself, and no
-workflow or device is qualified merely because the harness exists. Physical
-device matrix work remains in progress until real evidence is intentionally
-recorded. Daijisho and ES-DE remain deferred.
+the operator runbook, and Makefile/CI validation are in place. Harness
+implementation by itself adds no physical target or evidence and qualifies no
+workflow or device. A Pocket Air Mini target has since been explicitly
+registered, but the generated matrix still classifies it as unqualified with no
+current valid physical evidence for any declared workflow; registration alone
+does not establish a user-facing support claim. Physical-device matrix work
+remains in progress until real evidence is intentionally recorded. Daijisho and
+ES-DE remain deferred.
 
 ### 6G — Production Readiness
 

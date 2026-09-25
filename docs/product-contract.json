@@ -66,7 +66,9 @@
     "Truthful accessible status and recovery",
     "Bounded local control",
     "Explicit separation of EmuChef proper and Config Editor",
-    "Evidence before qualification or release claims"
+    "Evidence before qualification or release claims",
+    "End-user device compatibility uses supported or not supported language; qualification and evidence terminology stays internal to engineering and operator workflows",
+    "Internal qualification tooling observes the ordinary EmuChef workflow and never creates a parallel source of device, planning, review, or execution authority"
   ],
   "canonical_docs": [
     "README.md",

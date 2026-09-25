@@ -8,6 +8,13 @@ EmuChef provisions Android emulation handhelds from authored YAML. A device
 plan selects recipes, the planner emits an execution plan, and the executor
 applies that plan through local filesystem operations and ADB.
 
+A **qualification operator** is an internal technical role that maintains the
+evidence used to make device-support decisions. The role is not a primary
+product user and does not define a third product workflow. **Qualification** is
+internal engineering and evidence terminology; normal end-user compatibility
+language is **supported** or **not supported**. Registration or evidence state
+alone does not establish a user-facing support claim.
+
 Rust is the sole product runtime. The Cargo package
 `crates/emuchef-rust-backend` builds the `emuchef` binary and owns:
 
@@ -1288,12 +1295,13 @@ Active schema-v2 run records use the domain-oriented immutable ID form
 unsealed record payload and then sealed with canonical `fingerprintDigest` and
 `recordDigest`. Current-state projection selects only valid, compatibility-clean
 bundles as current evidence; invalid runs remain historical audit evidence and
-cannot replace current qualification state. The current production target
-registry remains empty, so repository validation and matrix generation still
-make no claim that any physical device is qualified. The production-bound
-harness is implemented and available for future physical runs, but harness
-implementation itself adds no physical target or evidence and does not qualify
-a workflow or device.
+cannot replace current qualification state. The production target registry now
+contains the Pocket Air Mini target, but the generated matrix classifies it as
+unqualified and shows no current valid physical evidence for any declared
+workflow. Registration therefore establishes only the immutable target identity;
+it does not establish a user-facing support claim. The production-bound harness
+is implemented and available for physical runs, but harness implementation by
+itself does not qualify a workflow or device.
 
 The operator workflow begins with
 `npm --prefix apps/emuchef-app run device-qualification`. An unregistered
@@ -1690,8 +1698,8 @@ verification failure, all results actually produced before the failure remain
 truthful, and the BIOS step and overall run fail. The generated production plan
 remains unchanged, and this makes no claim that BIOS follows the complete
 RetroArch workflow. The fake filesystem does not treat `/sdcard` and
-`/storage/emulated/0` as aliases. Phase 6E remains In progress for
-ROM/content and other workflow qualification and physical/full end-to-end work;
-Phase 6D remains In progress with all existing missing physical and UI-smoke
-evidence unchanged. The automated work follows the owner's sequencing decision
-and does not waive any Phase 6D requirement.
+`/storage/emulated/0` as aliases. Phase 6E remains In progress for other
+workflow qualification and physical/full end-to-end work; Phase 6D remains In
+progress with all existing missing physical and UI-smoke evidence unchanged.
+The automated work follows the owner's sequencing decision and does not waive
+any Phase 6D requirement.
