@@ -1,0 +1,20 @@
+CONTEXT.md
+  h_2e7f3207901880 11-17,1298-1304,1701-1705
+PRODUCT.md
+  h_2e7f3207901880 20-21,28-35,101-104
+docs/product-contract.json
+  h_2e7f3207901880 69-71
+docs/product/product-roadmap.md
+  h_2e7f3207901880 973-980
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fb7f9d4e6471b0239f66e0bcad3dff11e2ff3053",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
