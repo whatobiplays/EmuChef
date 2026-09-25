@@ -220,10 +220,8 @@ __marimo__/
 
 .emuchef_cache
 .emuchef_runtime
-AGENTS.md
 .codex
 .worktrees/
-.codegraph
 .chatgpt
 
 # Repository-owned Superpowers design/spec/plan documents are commit-able.
