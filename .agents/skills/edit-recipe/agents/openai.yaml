@@ -1,0 +1,3 @@
+interface:
+  display_name: "Edit EmuChef Recipe"
+  short_description: "Edit recipes and migrate recipe identity safely"

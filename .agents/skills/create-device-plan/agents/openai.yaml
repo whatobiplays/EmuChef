@@ -1,0 +1,3 @@
+interface:
+  display_name: "Create Device Plan"
+  short_description: "Compose authored device setup plans"

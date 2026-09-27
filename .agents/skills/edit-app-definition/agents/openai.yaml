@@ -1,0 +1,3 @@
+interface:
+  display_name: "Edit App Definition"
+  short_description: "Update authored app definitions safely"

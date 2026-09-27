@@ -1,0 +1,3 @@
+interface:
+  display_name: "EmuChef Authored Object"
+  short_description: "Shared authored-catalog policy and orchestration"

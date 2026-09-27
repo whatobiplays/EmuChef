@@ -1,0 +1,3 @@
+interface:
+  display_name: "Edit Device Profile"
+  short_description: "Refine device matching and capabilities safely"

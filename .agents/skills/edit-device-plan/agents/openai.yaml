@@ -1,0 +1,3 @@
+interface:
+  display_name: "Edit Device Plan"
+  short_description: "Edit device plan composition and identity"
