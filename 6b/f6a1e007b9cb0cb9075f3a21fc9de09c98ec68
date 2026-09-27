@@ -1,0 +1,60 @@
+.agents/skills/authored-object/SKILL.md
+  h_2e7f3207901880 1-81
+.agents/skills/authored-object/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/authored-object/references/evidence.md
+  h_2e7f3207901880 1-40
+.agents/skills/authored-object/references/ownership-and-composition.md
+  h_2e7f3207901880 1-50
+.agents/skills/authored-object/references/reporting.md
+  h_2e7f3207901880 1-28
+.agents/skills/authored-object/references/validation.md
+  h_2e7f3207901880 1-33
+.agents/skills/create-app-definition/SKILL.md
+  h_2e7f3207901880 1-32
+.agents/skills/create-app-definition/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/create-device-plan/SKILL.md
+  h_2e7f3207901880 1-25
+.agents/skills/create-device-plan/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/create-device-profile/SKILL.md
+  h_2e7f3207901880 1-42
+.agents/skills/create-device-profile/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/create-recipe/SKILL.md
+  h_2e7f3207901880 1-39
+.agents/skills/create-recipe/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/diagnose-authored-object/SKILL.md
+  h_2e7f3207901880 1-25
+.agents/skills/diagnose-authored-object/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/edit-app-definition/SKILL.md
+  h_2e7f3207901880 1-21
+.agents/skills/edit-app-definition/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/edit-device-plan/SKILL.md
+  h_2e7f3207901880 1-29
+.agents/skills/edit-device-plan/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/edit-device-profile/SKILL.md
+  h_2e7f3207901880 1-21
+.agents/skills/edit-device-profile/agents/openai.yaml
+  h_2e7f3207901880 1-3
+.agents/skills/edit-recipe/SKILL.md
+  h_2e7f3207901880 1-25
+.agents/skills/edit-recipe/agents/openai.yaml
+  h_2e7f3207901880 1-3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6bf6a1e007b9cb0cb9075f3a21fc9de09c98ec68",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
