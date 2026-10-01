@@ -1,0 +1,44 @@
+authored/recipes/app.armsx1.install.yaml
+  s_8b10a0c4230f3b::t_27d9997a3a197a 1-60
+authored/device_profiles/google.sdk_gphone64_arm64.yaml
+  s_99c52f5482f265::t_790974f3ad6ce0 1-34
+crates/emuchef-rust-backend/src/planner_tests.rs
+  s_6e45b70b7be182::t_233c52e800d750 3387-3397,5661-5664
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1d1f2fefef1d6246f4a9ac86ab4c746c53028a4a",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_6e45b70b7be182": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e67d-0812-78b0-a9f2-1a3c3d5e671b",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_8b10a0c4230f3b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f3b3-cbe3-76c2-b062-dd9cfd231c05",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_99c52f5482f265": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f3df-ffd2-78c2-983d-5e11a8e84523",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
