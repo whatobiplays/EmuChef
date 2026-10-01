@@ -3373,6 +3373,23 @@ fn resolve_step_params(
     Ok(resolved)
 }
 
+/// Project a runtime reference into the JSON shape expected by executor params.
+///
+/// Path-aware consumers require the type and location envelope for `file_path`,
+/// `directory_path`, and `path_list`. Every other runtime type is consumed as
+/// its payload. Step-output and artifact-field references share this contract so
+/// an equivalent value does not change shape based on where it came from.
+fn project_runtime_value(value: &RuntimeValue) -> Result<Value, StepFailure> {
+    if matches!(
+        value.type_name.as_str(),
+        "file_path" | "directory_path" | "path_list"
+    ) {
+        serde_json::to_value(value).map_err(|error| StepFailure::new(error.to_string()))
+    } else {
+        Ok(value.value.clone())
+    }
+}
+
 fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value, StepFailure> {
     if let Some(input_ref) = ref_value.strip_prefix("inputs.") {
         let Some(input) = state.inputs.get(input_ref) else {
@@ -3442,8 +3459,7 @@ fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value,
                 )))
             }
         };
-        return serde_json::to_value(runtime_value)
-            .map_err(|error| StepFailure::new(error.to_string()));
+        return project_runtime_value(&runtime_value);
     }
     let Some(step_ref) = ref_value.strip_prefix("steps.") else {
         return Err(StepFailure::new(format!(
@@ -3470,7 +3486,7 @@ fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value,
             "unknown_step_output: Unknown step output in ref: {ref_value:?}."
         )));
     };
-    serde_json::to_value(value).map_err(|error| StepFailure::new(error.to_string()))
+    project_runtime_value(value)
 }
 
 fn string_list_param(value: Option<&Value>) -> Vec<String> {
@@ -4104,5 +4120,190 @@ mod phase_5b10_tests {
             ]
         );
         assert!(!actual.to_string().contains("com.example.after"));
+    }
+}
+#[cfg(test)]
+mod runtime_ref_projection_tests {
+    use super::*;
+
+    fn runtime_value(type_name: &str, value: Value, location: Option<&str>) -> RuntimeValue {
+        RuntimeValue {
+            type_name: type_name.to_string(),
+            value,
+            location: location.map(str::to_string),
+        }
+    }
+
+    fn resolved_step(outputs: OrderedMap<RuntimeValue>) -> ExecutionState {
+        let mut state = ExecutionState::default();
+        state.steps.insert(
+            "producer".to_string(),
+            StepRuntimeState {
+                status: StepRuntimeStatus::Succeeded,
+                outputs,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn step_output_refs_project_payloads_and_preserve_required_path_envelopes() {
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "url".to_string(),
+            runtime_value("string", json!("https://example.test/app.apk"), None),
+        );
+        outputs.insert(
+            "size".to_string(),
+            runtime_value("integer", json!(17), None),
+        );
+        outputs.insert(
+            "available".to_string(),
+            runtime_value("boolean", json!(true), None),
+        );
+        outputs.insert(
+            "metadata".to_string(),
+            runtime_value("object", json!({"channel": "stable"}), None),
+        );
+        outputs.insert(
+            "names".to_string(),
+            runtime_value("string_list", json!(["one", "two"]), None),
+        );
+        outputs.insert(
+            "path".to_string(),
+            runtime_value("path", json!("/tmp/path"), Some("host")),
+        );
+        outputs.insert(
+            "device_path".to_string(),
+            runtime_value("device_path", json!("/sdcard/app.apk"), Some("device")),
+        );
+        outputs.insert(
+            "apk".to_string(),
+            runtime_value("file_path", json!("/tmp/app.apk"), Some("host")),
+        );
+        outputs.insert(
+            "directory".to_string(),
+            runtime_value("directory_path", json!("/tmp/apps"), Some("host")),
+        );
+        outputs.insert(
+            "paths".to_string(),
+            runtime_value("path_list", json!(["/tmp/one", "/tmp/two"]), Some("host")),
+        );
+        let state = resolved_step(outputs);
+
+        for (field, expected) in [
+            ("url", json!("https://example.test/app.apk")),
+            ("size", json!(17)),
+            ("available", json!(true)),
+            ("metadata", json!({"channel": "stable"})),
+            ("names", json!(["one", "two"])),
+            ("path", json!("/tmp/path")),
+            ("device_path", json!("/sdcard/app.apk")),
+            (
+                "apk",
+                json!({"type": "file_path", "value": "/tmp/app.apk", "location": "host"}),
+            ),
+            (
+                "directory",
+                json!({"type": "directory_path", "value": "/tmp/apps", "location": "host"}),
+            ),
+            (
+                "paths",
+                json!({"type": "path_list", "value": ["/tmp/one", "/tmp/two"], "location": "host"}),
+            ),
+        ] {
+            assert_eq!(
+                resolve_runtime_ref(&state, &format!("steps.producer.outputs.{field}"))
+                    .expect("step output ref should resolve"),
+                expected,
+                "unexpected projection for {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_field_refs_project_payloads_and_preserve_file_path_envelope() {
+        let mut state = ExecutionState::default();
+        state.artifacts.insert(
+            "app".to_string(),
+            ArtifactRuntimeState {
+                status: ArtifactRuntimeStatus::Resolved,
+                local_path: Some("/tmp/app.apk".to_string()),
+                resolved_url: Some("https://example.test/app.apk".to_string()),
+                filename: Some("app.apk".to_string()),
+                cache_hit: true,
+                error: None,
+            },
+        );
+
+        assert_eq!(
+            resolve_runtime_ref(&state, "artifacts.app.filename")
+                .expect("artifact filename ref should resolve"),
+            json!("app.apk")
+        );
+        assert_eq!(
+            resolve_runtime_ref(&state, "artifacts.app.cache_hit")
+                .expect("artifact cache-hit ref should resolve"),
+            json!(true)
+        );
+        assert_eq!(
+            resolve_runtime_ref(&state, "artifacts.app.local_path")
+                .expect("artifact local-path ref should resolve"),
+            json!({"type": "file_path", "value": "/tmp/app.apk", "location": "host"})
+        );
+    }
+
+    #[test]
+    fn input_refs_keep_their_existing_type_specific_projection() {
+        let mut state = ExecutionState::default();
+        for (id, value) in [
+            (
+                "file",
+                runtime_value("file_path", json!("/tmp/app.apk"), Some("host")),
+            ),
+            (
+                "directory",
+                runtime_value("directory_path", json!("/tmp/apps"), Some("host")),
+            ),
+            (
+                "paths",
+                runtime_value("path_list", json!(["/tmp/one"]), Some("host")),
+            ),
+            (
+                "path",
+                runtime_value("path", json!("/tmp/path"), Some("host")),
+            ),
+            (
+                "device",
+                runtime_value("device_path", json!("/sdcard/app.apk"), Some("device")),
+            ),
+            ("label", runtime_value("string", json!("stable"), None)),
+        ] {
+            state.inputs.insert(id.to_string(), value);
+        }
+
+        for (reference, expected) in [
+            (
+                "inputs.file",
+                json!({"type": "file_path", "value": "/tmp/app.apk", "location": "host"}),
+            ),
+            (
+                "inputs.directory",
+                json!({"type": "directory_path", "value": "/tmp/apps", "location": "host"}),
+            ),
+            (
+                "inputs.paths",
+                json!({"type": "path_list", "value": ["/tmp/one"], "location": "host"}),
+            ),
+            ("inputs.path", json!("/tmp/path")),
+            ("inputs.device", json!("/sdcard/app.apk")),
+            ("inputs.label", json!("stable")),
+        ] {
+            assert_eq!(
+                resolve_runtime_ref(&state, reference).expect("input ref should resolve"),
+                expected,
+                "unexpected projection for {reference}"
+            );
+        }
     }
 }

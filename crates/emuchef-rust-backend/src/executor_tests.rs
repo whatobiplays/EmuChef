@@ -1,9 +1,9 @@
 use std::cell::Cell;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -110,6 +110,61 @@ fn constraints() -> ExecutionStepConstraints {
 
 fn literal(value: Value) -> ExecutionParamValue {
     ExecutionParamValue::Literal { value }
+}
+
+fn download_remote_file_step(
+    id: &str,
+    url: ExecutionParamValue,
+    dependencies: Vec<String>,
+) -> ExecutionStep {
+    let mut params = OrderedMap::new();
+    params.insert("url".to_string(), url);
+    ExecutionStep {
+        id: id.to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "download_remote_file".to_string(),
+        name: "Download Remote File".to_string(),
+        note: "Download Remote File".to_string(),
+        dependencies,
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }
+}
+
+fn spawn_executor_http_server(
+    bodies: Vec<&'static [u8]>,
+) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("local HTTP server should bind");
+    let address = listener
+        .local_addr()
+        .expect("local HTTP server address should be available");
+    let requests = Arc::new(AtomicUsize::new(0));
+    let thread_requests = Arc::clone(&requests);
+    let server = thread::spawn(move || {
+        for body in bodies {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("executor should connect to local HTTP server");
+            let mut request = [0u8; 4096];
+            let _ = stream
+                .read(&mut request)
+                .expect("HTTP request should be readable");
+            thread_requests.fetch_add(1, Ordering::Relaxed);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(header.as_bytes())
+                .expect("HTTP response header should be writable");
+            stream
+                .write_all(body)
+                .expect("HTTP response body should be writable");
+        }
+    });
+    (format!("http://{address}"), requests, server)
 }
 
 fn wait_step(id: &str, name: &str, duration_ms: i64) -> ExecutionStep {
@@ -4479,4 +4534,104 @@ fn cooperative_cancellation_preserves_completed_work_and_schedules_no_later_step
         crate::executor::StepRunStatus::Cancelled
     );
     assert_eq!(runner.adapters().sleep_calls(), &[0.001]);
+}
+
+#[test]
+fn download_remote_file_filename_output_reaches_the_next_url_parser() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let (base_url, requests, server) = spawn_executor_http_server(vec![b"first download"]);
+    let first = download_remote_file_step(
+        "download",
+        literal(json!(format!("{base_url}/source.apk"))),
+        Vec::new(),
+    );
+    let second = download_remote_file_step(
+        "download-again",
+        ExecutionParamValue::Ref {
+            ref_value: "steps.download.outputs.filename".to_string(),
+        },
+        vec!["download".to_string()],
+    );
+    let execution_plan = plan(vec![first, second]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+    server.join().expect("local HTTP server should finish");
+
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    let second_message = actual["steps"][1]["message"]
+        .as_str()
+        .expect("second download should report its URL failure");
+    assert!(
+        second_message.starts_with("artifact_url_invalid:"),
+        "the filename ref should reach URL parsing, got: {actual:#}"
+    );
+    assert!(
+        !second_message.contains("download_remote_file requires url"),
+        "the filename ref should resolve to a scalar string before URL parsing: {actual:#}"
+    );
+}
+
+#[test]
+fn downloaded_local_path_ref_installs_the_host_apk() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let (base_url, requests, server) = spawn_executor_http_server(vec![b"fixture apk bytes"]);
+    let download = download_remote_file_step(
+        "download",
+        literal(json!(format!("{base_url}/app.apk"))),
+        Vec::new(),
+    );
+    let mut install_params = OrderedMap::new();
+    install_params.insert(
+        "app".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.download.outputs.local_path".to_string(),
+        },
+    );
+    let install = ExecutionStep {
+        id: "install".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "install_apk".to_string(),
+        name: "Install Downloaded APK".to_string(),
+        note: "Install Downloaded APK".to_string(),
+        dependencies: vec!["download".to_string()],
+        constraints: constraints(),
+        params: install_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+
+    let (actual, runner) = run_value(
+        &plan(vec![download, install]),
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+    server.join().expect("local HTTP server should finish");
+
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert_eq!(actual["success"], true, "{actual:#}");
+    let install_command = runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .find(|command| command.first().is_some_and(|value| value == "install_apk"))
+        .expect("install_apk should receive the downloaded host file");
+    let installed_path = PathBuf::from(&install_command[1]);
+    assert!(installed_path.is_file(), "{installed_path:?}");
+    assert_eq!(
+        installed_path.extension().and_then(|value| value.to_str()),
+        Some("apk")
+    );
 }
