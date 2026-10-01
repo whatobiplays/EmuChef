@@ -1,0 +1,26 @@
+tools/device-qualification.test.mjs
+  s_d14208ab87e0d2::t_526d83cc8827c6 1800
+  s_d14208ab87e0d2::t_0db48a4c3daed0 1801
+  s_d14208ab87e0d2::t_d135877b9c0aaa 1795-1798
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c4844fa3bd69a274fdd2c429ae3c59d214657aed",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_d14208ab87e0d2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f4a4-b9a7-7303-80d6-a1c2364b93d9",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
