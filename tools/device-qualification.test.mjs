@@ -1792,10 +1792,13 @@ test("repository validation wires device qualification without claiming completi
   assert.match(workflow, /Validate device qualification foundation/);
   assert.doesNotMatch(workflow, /Validate Phase/);
   assert.match(roadmap, /6F \| Physical-device test matrix \| In progress/);
-  assert.match(roadmap, /No physical\s+device targets or evidence are added by harness implementation itself/i);
+  assert.match(
+    roadmap,
+    /Harness\s+implementation by itself adds no physical target or evidence and qualifies no\s+workflow or device/i,
+  );
   assert.match(roadmap, /production-bound device qualification harness is implemented and available/i);
-  assert.match(roadmap, /physical\s+device matrix work remains in progress/i);
-  assert.match(roadmap, /Daijisho and ES-DE remain deferred/i);
+  assert.match(roadmap, /Physical-device matrix work\s+remains in progress/i);
+  assert.match(roadmap, /Daijisho and\s+ES-DE remain deferred/i);
   assert.doesNotMatch(roadmap, /6F \| Physical-device test matrix \| Completed/);
 });
 
