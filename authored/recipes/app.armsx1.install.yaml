@@ -1,0 +1,60 @@
+schema_version: 1
+kind: recipe
+id: app.armsx1.install
+name: Install or update ARMSX1
+description: Install or update the latest stable ARMSX1 Android release. The current release targets arm64-v8a devices running Android 8.0 (API 26) or later.
+recipe_dependencies: []
+provides:
+  features:
+    - armsx1_install
+artifacts: {}
+steps:
+  - id: resolve_armsx1_release
+    type: resolve_remote_release
+    name: Resolve latest stable ARMSX1 release
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      provider: github
+      base_url: https://github.com
+      repository: ARMSX2/ARMSX1
+      include_prereleases: false
+      asset_pattern: '^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$'
+    verify: []
+  - id: download_armsx1_apk
+    type: download_remote_file
+    name: Download ARMSX1 APK
+    user_toggleable: false
+    dependencies:
+      - resolve_armsx1_release
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      url:
+        ref: steps.resolve_armsx1_release.outputs.download_url
+      cache: default
+    verify: []
+  - id: install_armsx1
+    type: install_apk
+    name: Install or update ARMSX1
+    user_toggleable: false
+    dependencies:
+      - download_armsx1_apk
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: steps.download_armsx1_apk.outputs.local_path
+      expected_package_name: com.nanodata.armsx
+      replace_existing: true
+    verify:
+      - type: package_installed
+        params:
+          package_name: com.nanodata.armsx

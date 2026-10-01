@@ -53,7 +53,7 @@ fn every_checked_in_app_definition_is_valid_and_canonicalizes_idempotently() {
 #[test]
 fn every_checked_in_device_profile_is_valid_and_canonicalizes_idempotently() {
     let paths = yaml_files(&repo_root().join("authored/device_profiles"));
-    assert_eq!(paths.len(), 5);
+    assert_eq!(paths.len(), 6);
 
     for path in paths {
         let source = fs::read_to_string(&path).unwrap();

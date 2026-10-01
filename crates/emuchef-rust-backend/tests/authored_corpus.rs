@@ -9,6 +9,7 @@ use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
 const EXPECTED_AUTHORED_RECIPES: &[&str] = &[
+    "app.armsx1.install.yaml",
     "app.obtainium.install.yaml",
     "app.retroarch.provision.yaml",
     "app.xaniteog.install.yaml",

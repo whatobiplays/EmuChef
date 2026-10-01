@@ -3384,6 +3384,17 @@ fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
                 true,
                 vec!["handheld_android".to_string(), "brand_ayaneo".to_string()],
             ),
+            (
+                "authored/device_profiles/google.sdk_gphone64_arm64.yaml".to_string(),
+                "google.sdk_gphone64_arm64".to_string(),
+                true,
+                false,
+                vec![
+                    "android_emulator".to_string(),
+                    "arm64".to_string(),
+                    "api_36".to_string(),
+                ],
+            ),
         ]
     );
 }
@@ -5647,6 +5658,10 @@ struct AuthoredCorpusRecipeEntry {
 
 fn authored_corpus_recipe_inventory() -> &'static [AuthoredCorpusRecipeEntry] {
     &[
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/app.armsx1.install.yaml",
+            recipe_id: "app.armsx1.install",
+        },
         AuthoredCorpusRecipeEntry {
             path: "authored/recipes/app.obtainium.install.yaml",
             recipe_id: "app.obtainium.install",
