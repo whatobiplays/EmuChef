@@ -588,7 +588,11 @@ impl QualificationRepository {
         let _operation = self.lock_operation()?;
         let directory = self.candidate_directory_unlocked(candidate_handle)?;
         validate_candidate_files(&directory)?;
-        remove_optional_regular_file(&directory, SESSION_REPORT_FILE, "qualification terminal report")
+        remove_optional_regular_file(
+            &directory,
+            SESSION_REPORT_FILE,
+            "qualification terminal report",
+        )
     }
 
     /// Replaces a provisional candidate payload with the terminal run

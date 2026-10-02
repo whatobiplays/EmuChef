@@ -470,11 +470,7 @@ impl QualificationSession {
     /// Re-attach the process-local bindings this process established for the
     /// active attempt. A session loaded from disk never carries them, so it
     /// only learns its bindings from the process-local store.
-    fn attach_process_local_bindings(
-        &mut self,
-        review: Option<String>,
-        execution: Option<String>,
-    ) {
+    fn attach_process_local_bindings(&mut self, review: Option<String>, execution: Option<String>) {
         self.bound_review_handle = review;
         self.bound_execution_handle = execution;
     }
@@ -833,7 +829,10 @@ impl QualificationSession {
             return false;
         }
         if self.terminal_outcome == QualificationOutcome::NotObserved {
-            let status = self.terminal_execution_status.as_deref().unwrap_or_default();
+            let status = self
+                .terminal_execution_status
+                .as_deref()
+                .unwrap_or_default();
             return is_terminal_execution_status(status) && status != "cancelled";
         }
         true
@@ -985,7 +984,9 @@ impl QualificationSession {
             return Err("qualification session awaits evidence without a terminal run".to_string());
         }
         if persisted.terminal_execution_status.is_some() && !persisted.execution_admitted {
-            return Err("qualification session retained a terminal run it never admitted".to_string());
+            return Err(
+                "qualification session retained a terminal run it never admitted".to_string(),
+            );
         }
         Ok(Self {
             session_handle: persisted.session_handle,
@@ -1046,9 +1047,7 @@ pub(crate) fn project_root_state(root: &RootQualificationState) -> Option<Qualif
     match root {
         RootQualificationState::Granted => Some(QualificationRootState::Rooted),
         RootQualificationState::Denied => Some(QualificationRootState::NonRoot),
-        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => {
-            None
-        }
+        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => None,
     }
 }
 
@@ -1197,10 +1196,7 @@ pub(crate) fn review_observation(
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string),
-        android_api: review
-            .target
-            .get("androidApiLevel")
-            .and_then(Value::as_u64),
+        android_api: review.target.get("androidApiLevel").and_then(Value::as_u64),
     }
 }
 
@@ -1441,7 +1437,10 @@ fn load_active_session(
 /// Persist one session transition. A save failure must fail evidence closed:
 /// the strict session file is removed so a later launch cannot resurrect a
 /// stale valid attempt, and the caller poisons the in-memory session.
-fn persist(provider: &QualificationRepository, session: &QualificationSession) -> Result<(), String> {
+fn persist(
+    provider: &QualificationRepository,
+    session: &QualificationSession,
+) -> Result<(), String> {
     match provider.save_session(session.candidate_handle(), &session.to_persisted()) {
         Ok(()) => Ok(()),
         Err(_) => {
@@ -1699,8 +1698,8 @@ fn recover_current_candidate(
     if persisted.candidate_handle != *candidate_handle {
         return Err(invalid_error());
     }
-    let mut session = QualificationSession::from_persisted(persisted)
-        .map_err(|_| invalid_error())?;
+    let mut session =
+        QualificationSession::from_persisted(persisted).map_err(|_| invalid_error())?;
     session.set_terminal_report(provider.load_session_report(candidate_handle)?);
     if session.run_validity() == RunValidity::Invalid {
         return finalize_recovered_invalid(provider, store, session);
@@ -2205,7 +2204,10 @@ pub(crate) fn observe_device_inventory(state: &AppState, present_device_handles:
     let Some(associated) = store.associated_device_handle().map(str::to_string) else {
         return;
     };
-    if present_device_handles.iter().any(|handle| handle == &associated) {
+    if present_device_handles
+        .iter()
+        .any(|handle| handle == &associated)
+    {
         return;
     }
     let mut session = match load_active_session(provider, &store, &candidate_handle) {
@@ -2540,13 +2542,22 @@ mod tests {
 
     #[test]
     fn inactive_observation_is_a_no_persistence_no_op() {
-        let (_temp, app) = test_app(QualificationRepositoryProvider::unavailable_for_test(), true);
+        let (_temp, app) = test_app(
+            QualificationRepositoryProvider::unavailable_for_test(),
+            true,
+        );
         observe(
             &app.state::<AppState>(),
             QualificationLifecycleObservation::DeviceObserved(Box::new(observation("device-one"))),
         );
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
-        assert!(&app.state::<AppState>().qualification_sessions.lock().unwrap().active_candidate().is_none());
+        assert!(&app
+            .state::<AppState>()
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .active_candidate()
+            .is_none());
     }
 
     #[test]
@@ -2565,13 +2576,22 @@ mod tests {
         assert!(snapshot.recordable);
         assert!(session_status(&app.state::<AppState>()).unwrap().is_some());
 
-        let second = create_run_candidate(&app.state::<AppState>().qualification_repository.get().unwrap(), CAPTURED_AT);
+        let second = create_run_candidate(
+            &app.state::<AppState>()
+                .qualification_repository
+                .get()
+                .unwrap(),
+            CAPTURED_AT,
+        );
         let error = begin(
             &app.state::<AppState>(),
             begin_request(&second, CAPTURED_AT, observation("device-one")),
         )
         .expect_err("a second attempt must be rejected");
-        assert!(error.contains("already active"), "unexpected error: {error}");
+        assert!(
+            error.contains("already active"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -2864,7 +2884,10 @@ mod tests {
         let provider = QualificationRepositoryProvider::for_test(restarted);
         let (_app_temp, app) = test_app(provider, true);
         let resumed = session_status(&app.state::<AppState>()).unwrap().unwrap();
-        assert_eq!(resumed.session_handle, session_handle_for_candidate(&candidate).unwrap());
+        assert_eq!(
+            resumed.session_handle,
+            session_handle_for_candidate(&candidate).unwrap()
+        );
         assert!(app
             .state::<AppState>()
             .qualification_sessions
@@ -2947,9 +2970,7 @@ mod tests {
         assert!(document.get("boundReviewHandle").is_none());
         observe(
             &app.state::<AppState>(),
-            QualificationLifecycleObservation::DeviceObserved(Box::new(observation(
-                "device-two",
-            ))),
+            QualificationLifecycleObservation::DeviceObserved(Box::new(observation("device-two"))),
         );
         observe(
             &app.state::<AppState>(),
@@ -3655,7 +3676,9 @@ mod tests {
     fn repository_paths_are_resolved_from_the_trusted_root() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
-        assert!(repository.repo_root().ends_with(temp.path().file_name().unwrap()));
+        assert!(repository
+            .repo_root()
+            .ends_with(temp.path().file_name().unwrap()));
     }
 
     #[test]

@@ -179,9 +179,9 @@ pub(crate) struct QualificationModeStatus {
     pub(crate) targets: Vec<QualificationTargetSummary>,
     pub(crate) resumable_candidates: Vec<QualificationCandidateSummaryDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resumable_session: Option<crate::qualification_session::QualificationSessionSnapshot>,
+    pub(crate) resumable_session:
+        Option<crate::qualification_session::QualificationSessionSnapshot>,
 }
-
 
 /// The only input accepted by target-registration capture.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -517,11 +517,12 @@ pub fn begin_qualification_session(
         let mut source = QualificationObservationSource { state: &state };
         source.capture_selected_device(&request.device_handle, &request.device_plan)?
     };
-    if workflow
-        .required_capabilities
-        .iter()
-        .any(|required| !capture.capabilities.iter().any(|available| available == required))
-    {
+    if workflow.required_capabilities.iter().any(|required| {
+        !capture
+            .capabilities
+            .iter()
+            .any(|available| available == required)
+    }) {
         return Err(safe_qualification_error("qualification_target_unverified"));
     }
     let captured_at = current_timestamp()?;
@@ -535,15 +536,14 @@ pub fn begin_qualification_session(
     let candidate_handle = repository
         .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let session_handle = match crate::qualification_session::session_handle_for_candidate(
-        &candidate_handle,
-    ) {
-        Ok(handle) => handle,
-        Err(error) => {
-            let _ = repository.discard_candidate(&candidate_handle);
-            return Err(error);
-        }
-    };
+    let session_handle =
+        match crate::qualification_session::session_handle_for_candidate(&candidate_handle) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = repository.discard_candidate(&candidate_handle);
+                return Err(error);
+            }
+        };
     let started = crate::qualification_session::begin(
         &state,
         crate::qualification_session::BeginSessionRequest {
@@ -578,7 +578,12 @@ pub fn record_qualification_checkpoint(
 ) -> Result<crate::qualification_session::QualificationSessionSnapshot, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
     let _ = require_recordable_mode(&mode)?;
-    crate::qualification_session::record_checkpoint(&state, &session_handle, &checkpoint_id, outcome)
+    crate::qualification_session::record_checkpoint(
+        &state,
+        &session_handle,
+        &checkpoint_id,
+        outcome,
+    )
 }
 
 /// Close the active attempt as an operator-abandoned invalid candidate. The
@@ -653,7 +658,8 @@ impl SelectedDeviceObservationSource for QualificationObservationSource<'_> {
         device_handle: &str,
         device_plan: &str,
     ) -> Result<SelectedDeviceCapture, String> {
-        let mut passive = crate::device_observation::AppStateObservationSource { state: self.state };
+        let mut passive =
+            crate::device_observation::AppStateObservationSource { state: self.state };
         let capture = passive.capture_selected_device(device_handle, device_plan)?;
         let root =
             crate::device_qualification::check_device_root_observation(device_handle, self.state)?;
@@ -977,8 +983,10 @@ mod tests {
                     android_api_level: Some(35),
                     abi_class: Some("arm64"),
                     storage: crate::device_observation::CapabilityAvailabilityDto::Available,
-                    package_manager: crate::device_observation::CapabilityAvailabilityDto::Available,
-                    activity_manager: crate::device_observation::CapabilityAvailabilityDto::Unavailable,
+                    package_manager:
+                        crate::device_observation::CapabilityAvailabilityDto::Available,
+                    activity_manager:
+                        crate::device_observation::CapabilityAvailabilityDto::Unavailable,
                     root: None,
                     runtime_generation: 1,
                     qualification_revision: 1,
@@ -1232,12 +1240,9 @@ mod tests {
     #[test]
     fn target_capture_projects_the_exact_trusted_observation_into_the_candidate() {
         let mut source = FakeDeviceSource::returning(trusted_capture());
-        let payload = capture_target_registration_payload(
-            &mut source,
-            &capture_request(),
-            &test_build(),
-        )
-        .expect("a trusted capture should produce a candidate");
+        let payload =
+            capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                .expect("a trusted capture should produce a candidate");
 
         assert_eq!(source.calls, 1);
         assert_eq!(payload["target"]["profileId"]["value"], "ayaneo.pocket_s2");
@@ -1267,15 +1272,11 @@ mod tests {
 
     #[test]
     fn target_capture_fails_closed_when_the_device_is_not_trusted() {
-        let mut source = FakeDeviceSource::failing(
-            &safe_qualification_error("qualification_target_unverified"),
-        );
-        let error = capture_target_registration_payload(
-            &mut source,
-            &capture_request(),
-            &test_build(),
-        )
-        .expect_err("an untrusted device must not produce a candidate");
+        let mut source =
+            FakeDeviceSource::failing(&safe_qualification_error("qualification_target_unverified"));
+        let error =
+            capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                .expect_err("an untrusted device must not produce a candidate");
 
         assert_eq!(source.calls, 1);
         assert!(error.contains("qualification_target_unverified"));
@@ -1302,12 +1303,9 @@ mod tests {
             let mut capture = trusted_capture();
             capture.observation.root_state = root_state;
             let mut source = FakeDeviceSource::returning(capture);
-            let error = capture_target_registration_payload(
-                &mut source,
-                &capture_request(),
-                &test_build(),
-            )
-            .expect_err("an unproven root check must not produce a target candidate");
+            let error =
+                capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                    .expect_err("an unproven root check must not produce a target candidate");
             assert!(
                 error.contains("qualification_target_unverified"),
                 "unexpected target-capture error: {error}"
@@ -1324,12 +1322,9 @@ mod tests {
             let mut capture = trusted_capture();
             capture.observation.root_state = Some(root);
             let mut source = FakeDeviceSource::returning(capture);
-            let payload = capture_target_registration_payload(
-                &mut source,
-                &capture_request(),
-                &test_build(),
-            )
-            .expect("completed root checks should project to the target contract");
+            let payload =
+                capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                    .expect("completed root checks should project to the target contract");
             assert_eq!(payload["target"]["rootState"]["value"], expected);
             assert_eq!(
                 payload["target"]["rootState"]["source"],

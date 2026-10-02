@@ -785,7 +785,11 @@ pub fn poll_devices(
 #[tauri::command]
 pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
     let probe = probe_device_facts(&device_handle, &state)?;
-    Ok(public_device_facts(&device_handle, &probe.facts, &probe.serial))
+    Ok(public_device_facts(
+        &device_handle,
+        &probe.facts,
+        &probe.serial,
+    ))
 }
 
 /// One trusted device probe result.
@@ -918,8 +922,8 @@ fn match_device_result(
             )
         })?;
     let public = public_match(&result, exact_serial.as_deref());
-    let projection = crate::device_observation::DeviceMatchProjection::decode(&public)
-        .ok_or_else(|| {
+    let projection =
+        crate::device_observation::DeviceMatchProjection::decode(&public).ok_or_else(|| {
             safe_error(
                 "device_match_failed",
                 "The device could not be matched to the setup catalog.",

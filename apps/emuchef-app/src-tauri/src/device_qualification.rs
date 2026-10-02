@@ -17,7 +17,6 @@ use crate::device_observation::{
 };
 use crate::handles::{DeviceDto, SessionHandles};
 
-
 /// Apply one inventory to native session and root authority using explicit
 /// generation inputs. The execution seam uses this same function with a
 /// deterministic runtime requester.
@@ -621,5 +620,4 @@ mod tests {
         assert!(invalidation.cancelled_in_flight);
         assert!(!store.complete(attempt, RootQualificationState::Granted));
     }
-
 }

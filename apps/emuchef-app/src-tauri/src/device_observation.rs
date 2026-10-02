@@ -21,7 +21,6 @@ use crate::device_qualification::{
 };
 use crate::handles::SessionHandles;
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DeviceQualificationState {
@@ -382,7 +381,10 @@ impl SelectedDeviceObservation {
     /// into this one. Observed facts win field by field and unobserved facts
     /// are retained, so a sequence of partial observations accumulates the
     /// trusted observation state without ever inventing a value.
-    pub(crate) fn merged_with(&self, newer: &SelectedDeviceObservation) -> SelectedDeviceObservation {
+    pub(crate) fn merged_with(
+        &self,
+        newer: &SelectedDeviceObservation,
+    ) -> SelectedDeviceObservation {
         debug_assert_eq!(self.device_handle, newer.device_handle);
         let mut merged = self.clone();
         if newer.profile_id.is_some() {
@@ -509,9 +511,7 @@ pub(crate) fn matched_profile_id(
 
 /// Passive capabilities a workflow may require, derived only from observed
 /// capability availability.
-pub(crate) fn capabilities_from_snapshot(
-    snapshot: &DeviceQualificationSnapshotDto,
-) -> Vec<String> {
+pub(crate) fn capabilities_from_snapshot(snapshot: &DeviceQualificationSnapshotDto) -> Vec<String> {
     let mut capabilities = Vec::new();
     if snapshot.package_manager == CapabilityAvailabilityDto::Available {
         capabilities.push("apk_install".to_string());
@@ -535,9 +535,9 @@ pub(crate) fn commit_selected_observation(
 ) {
     crate::qualification_session::observe(
         state,
-        crate::qualification_session::QualificationLifecycleObservation::DeviceObserved(
-            Box::new(observation),
-        ),
+        crate::qualification_session::QualificationLifecycleObservation::DeviceObserved(Box::new(
+            observation,
+        )),
     );
 }
 
@@ -1626,16 +1626,15 @@ mod tests {
 
     #[test]
     fn typed_observation_retains_only_normalized_trusted_facts() {
-        let observation = SelectedDeviceObservation::new("device-one").with_probe_facts(
-            &probe_facts(json!({
+        let observation =
+            SelectedDeviceObservation::new("device-one").with_probe_facts(&probe_facts(json!({
                 "manufacturer": "AYANEO",
                 "model": "Pocket S2",
                 "android_version": 15,
                 "android_api_level": 35,
                 "firmware_build": "vendor/build",
                 "serial": "exact-sensitive-serial",
-            })),
-        );
+            })));
         assert_eq!(observation.device_handle, "device-one");
         assert_eq!(observation.manufacturer.as_deref(), Some("AYANEO"));
         assert_eq!(observation.model.as_deref(), Some("Pocket S2"));
@@ -1679,7 +1678,9 @@ mod tests {
         assert_eq!(observation.android_api, Some(35));
         assert_eq!(observation.root_state, Some(RootQualificationState::Denied));
 
-        let rooted = observation.clone().with_root_state(RootQualificationState::Granted);
+        let rooted = observation
+            .clone()
+            .with_root_state(RootQualificationState::Granted);
         assert_eq!(rooted.root_state, Some(RootQualificationState::Granted));
     }
 

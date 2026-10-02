@@ -1042,12 +1042,11 @@ fn start_real_execution_inner(
     // Publish the product admission to an active qualification attempt only
     // after the execution mapping exists.
     if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
-        let mapping = executions
-            .mapping(
-                ExecutionKind::Real,
-                execution_handle,
-                REAL_EXECUTION_UNAVAILABLE,
-            )?;
+        let mapping = executions.mapping(
+            ExecutionKind::Real,
+            execution_handle,
+            REAL_EXECUTION_UNAVAILABLE,
+        )?;
         observe_real_admission(state, &mapping, &mapping.review);
     }
     Ok(public)
@@ -1201,21 +1200,27 @@ fn bind_real_start_result(
 /// The admission is observed after the product mapping exists and before the
 /// start result is published, so a qualification attempt can never bind an
 /// execution the product has not started.
-fn observe_real_admission(state: &AppState, mapping: &ExecutionMapping, review: &ReviewedPlanSnapshot) {
+fn observe_real_admission(
+    state: &AppState,
+    mapping: &ExecutionMapping,
+    review: &ReviewedPlanSnapshot,
+) {
     if !cfg!(feature = "real-execution") {
         return;
     }
     crate::qualification_session::observe(
         state,
         crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
-            Box::new(crate::qualification_session::ExecutionAdmissionObservation {
-                execution_handle: mapping.public_handle.clone(),
-                review: crate::qualification_session::review_observation(
-                    &mapping.review_handle,
-                    review,
-                ),
-                device_handle: review.device_handle.clone(),
-            }),
+            Box::new(
+                crate::qualification_session::ExecutionAdmissionObservation {
+                    execution_handle: mapping.public_handle.clone(),
+                    review: crate::qualification_session::review_observation(
+                        &mapping.review_handle,
+                        review,
+                    ),
+                    device_handle: review.device_handle.clone(),
+                },
+            ),
         ),
     );
 }
@@ -1268,13 +1273,11 @@ fn spawn_real_execution_terminal_monitor(app: AppHandle, execution_handle: Strin
     }
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        let resolution = monitor_real_terminal(
-            &execution_handle,
-            &state,
-            &state.sidecar,
-            &mut |interval| std::thread::sleep(interval),
-        )
-        .map(|event| monitor_resolution_message(&event));
+        let resolution =
+            monitor_real_terminal(&execution_handle, &state, &state.sidecar, &mut |interval| {
+                std::thread::sleep(interval)
+            })
+            .map(|event| monitor_resolution_message(&event));
         #[cfg(debug_assertions)]
         if let Some(message) = resolution {
             eprintln!("{message}");
@@ -1359,16 +1362,12 @@ fn retain_terminal_real_execution(
     mapping: &ExecutionMapping,
     report: &Value,
 ) -> Option<RealExecutionMonitorEvent> {
-    let newly_retained = state
-        .executions
-        .lock()
-        .ok()?
-        .mark_terminal_with_report(
-            ExecutionKind::Real,
-            &mapping.public_handle,
-            report.clone(),
-            Value::Null,
-        );
+    let newly_retained = state.executions.lock().ok()?.mark_terminal_with_report(
+        ExecutionKind::Real,
+        &mapping.public_handle,
+        report.clone(),
+        Value::Null,
+    );
     if !newly_retained {
         return None;
     }
@@ -1381,11 +1380,8 @@ fn retain_terminal_real_execution(
             mapping,
         );
     } else if root_failed {
-        let _ = invalidate_root_terminal_authority(
-            &state.handles,
-            &state.root_qualification,
-            mapping,
-        );
+        let _ =
+            invalidate_root_terminal_authority(&state.handles, &state.root_qualification, mapping);
     }
     let report_runtime = serde_json::to_value(state.sidecar.status()).ok();
     let report_bytes = {
@@ -4529,14 +4525,18 @@ mod tests {
             qualification_sessions: Mutex::new(
                 crate::qualification_session::QualificationSessionStore::default(),
             ),
-            saved_configurations: Mutex::new(crate::saved_configurations::SavedConfigurationStore::load(
-                app_root.join("recent-configurations.json"),
-            )),
+            saved_configurations: Mutex::new(
+                crate::saved_configurations::SavedConfigurationStore::load(
+                    app_root.join("recent-configurations.json"),
+                ),
+            ),
             recovery: Mutex::new(crate::recovery::RecoveryStore::load(
                 app_root.join("recovery-draft.json"),
                 app_root.join("session-active.marker"),
             )),
-            support: Mutex::new(crate::support::SupportStore::new(app_root.join("support-cache"))),
+            support: Mutex::new(crate::support::SupportStore::new(
+                app_root.join("support-cache"),
+            )),
             updates: crate::updates::UpdateService::from_production_document()
                 .expect("test update trust should be available"),
             update_activity: crate::updates::ActivityGate::default(),
@@ -5223,8 +5223,7 @@ mod tests {
             retained
         };
         let non_root_review_for =
-            |device_handle: &str,
-             context: &crate::device_observation::QualificationContextKey| {
+            |device_handle: &str, context: &crate::device_observation::QualificationContextKey| {
                 let mut retained = review();
                 retained.device_handle = device_handle.to_string();
                 retained.qualification_context = Some(context.clone());
@@ -5584,7 +5583,10 @@ mod tests {
 
     impl crate::qualification_repository::QualificationToolRunner for NoQualificationToolRunner {
         fn run(&self, _repo_root: &Path, _args: &[String]) -> Result<Vec<u8>, String> {
-            Err("terminal-monitor tests must not invoke the canonical qualification tool".to_string())
+            Err(
+                "terminal-monitor tests must not invoke the canonical qualification tool"
+                    .to_string(),
+            )
         }
     }
 
@@ -5642,8 +5644,7 @@ mod tests {
         }
     }
 
-    fn qualification_session_observation() -> crate::device_observation::SelectedDeviceObservation
-    {
+    fn qualification_session_observation() -> crate::device_observation::SelectedDeviceObservation {
         crate::device_observation::SelectedDeviceObservation {
             device_handle: "device-one".to_string(),
             profile_id: Some("profile.test".to_string()),
@@ -5671,7 +5672,10 @@ mod tests {
     }
 
     /// Bind one real execution mapping for the monitor tests.
-    fn bind_monitor_execution(executions: &Mutex<ExecutionHandleStore>, sidecar_id: &str) -> String {
+    fn bind_monitor_execution(
+        executions: &Mutex<ExecutionHandleStore>,
+        sidecar_id: &str,
+    ) -> String {
         let mut executions = executions.lock().unwrap();
         executions.reserve_start(ExecutionKind::Real).unwrap();
         executions
@@ -5694,8 +5698,14 @@ mod tests {
         let runtime = ScriptedRuntime {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(vec![
-                Err(safe_error("execution_status_unavailable", "transient status")),
-                Err(safe_error("execution_status_unavailable", "transient status")),
+                Err(safe_error(
+                    "execution_status_unavailable",
+                    "transient status",
+                )),
+                Err(safe_error(
+                    "execution_status_unavailable",
+                    "transient status",
+                )),
                 Ok(json!({
                     "execution": {
                         "executionId": "sidecar-retry",
@@ -5746,7 +5756,10 @@ mod tests {
         let state = app.state::<AppState>();
         let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
 
-        let Some(RealExecutionMonitorEvent::Lost { execution_handle: lost }) = event else {
+        let Some(RealExecutionMonitorEvent::Lost {
+            execution_handle: lost,
+        }) = event
+        else {
             panic!("a lost runtime session must resolve through product loss semantics");
         };
         assert_eq!(lost, execution_handle);
@@ -5782,7 +5795,9 @@ mod tests {
         let repository_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
         std::fs::write(
-            repository_root.path().join("authored/recipes/test.recipe.yaml"),
+            repository_root
+                .path()
+                .join("authored/recipes/test.recipe.yaml"),
             b"id: test.recipe\n",
         )
         .unwrap();
@@ -5810,9 +5825,8 @@ mod tests {
         let handles = Mutex::new(SessionHandles::default());
         let root = Mutex::new(RootQualificationStore::default());
         let execution_handle = bind_monitor_execution(&executions, "sidecar-qualification");
-        let provider = crate::qualification_repository::QualificationRepositoryProvider::for_test(
-            repository,
-        );
+        let provider =
+            crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
         let (app_root, app) = test_app_with_qualification(executions, handles, root, provider);
         let state = app.state::<AppState>();
         let session_handle =
@@ -5842,11 +5856,13 @@ mod tests {
         crate::qualification_session::observe(
             &state,
             crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
-                Box::new(crate::qualification_session::ExecutionAdmissionObservation {
-                    execution_handle: execution_handle.clone(),
-                    review: qualification_admission_review(),
-                    device_handle: "device-one".to_string(),
-                }),
+                Box::new(
+                    crate::qualification_session::ExecutionAdmissionObservation {
+                        execution_handle: execution_handle.clone(),
+                        review: qualification_admission_review(),
+                        device_handle: "device-one".to_string(),
+                    },
+                ),
             ),
         );
         (repository_root, app_root, app, execution_handle, candidate)
