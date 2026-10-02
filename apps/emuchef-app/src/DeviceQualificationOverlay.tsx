@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type {
   QualificationCheckpointOutcome,
   QualificationFactPreview,
+  QualificationSessionPhase,
   QualificationTargetCandidatePreview,
 } from "./types";
 import type { DeviceQualificationModeController } from "./useDeviceQualificationMode";
@@ -11,6 +12,18 @@ const checkpointOutcomeLabels: Record<QualificationCheckpointOutcome, string> = 
   pass: "Pass",
   fail: "Fail",
   unable_to_verify: "Unable to verify",
+};
+
+/**
+ * Operator-facing labels for the sanitized lifecycle phase authored by Rust.
+ * The overlay renders the phase it is given and never derives lifecycle state
+ * itself.
+ */
+const sessionPhaseLabels: Record<QualificationSessionPhase, string> = {
+  executionPending: "Awaiting real execution",
+  executionActive: "Real execution in progress",
+  terminalAwaitingEvidence: "Terminal execution retained — awaiting required evidence",
+  closed: "Attempt closed",
 };
 
 interface DeviceQualificationOverlayProps {
@@ -92,7 +105,7 @@ function TargetCandidate({
   );
 }
 
-function terminalClassification(controller: DeviceQualificationModeController): string | null {
+function outcomeClassification(controller: DeviceQualificationModeController): string | null {
   const current = controller.session;
   if (!current) return null;
   if (current.runValidity === "invalid") return "Invalid qualification run — not product evidence";
@@ -127,7 +140,7 @@ export function DeviceQualificationOverlay({
 
   if (!status?.enabled) return null;
 
-  const classification = terminalClassification(controller);
+  const classification = outcomeClassification(controller);
   const selectedTarget = status.targets.find((target) => target.id === targetId) ?? null;
   const selectedWorkflow = status.workflows.find((workflow) => workflow.id === workflowId) ?? null;
   const canBeginSession = Boolean(
@@ -145,9 +158,19 @@ export function DeviceQualificationOverlay({
           <p className="eyebrow">Development controller</p>
           <h2 id="qualification-overlay-heading">Device qualification mode</h2>
         </div>
-        <span className={`status ${status.recordable ? "qualification-supported" : "qualification-unsupported"}`}>
-          {status.recordable ? "Recordable build" : "Inspection only"}
-        </span>
+        <div className="qualification-overlay-status">
+          <span className={`status ${status.recordable ? "qualification-supported" : "qualification-unsupported"}`}>
+            {status.recordable ? "Recordable build" : "Inspection only"}
+          </span>
+          <button
+            className="secondary"
+            type="button"
+            disabled={controller.busy}
+            onClick={() => void controller.refresh()}
+          >
+            Refresh qualification status
+          </button>
+        </div>
       </div>
       <p>
         This controller observes the normal EmuChef workflow. Complete device setup, inputs, review,
@@ -236,7 +259,9 @@ export function DeviceQualificationOverlay({
               <p className="eyebrow">Active session</p>
               <h3 id="qualification-session-state-heading">Normal workflow intent is locked</h3>
             </div>
-            <span className="status qualification-supported">Bound</span>
+            <span className="status qualification-supported" role="status">
+              {sessionPhaseLabels[controller.session.phase]}
+            </span>
           </div>
           <dl className="qualification-session-facts">
             <div><dt>Target</dt><dd>{controller.session.targetId}</dd></div>
@@ -280,15 +305,38 @@ export function DeviceQualificationOverlay({
               {classification}
             </p>
           )}
-          {controller.session.candidate && (
-            <button
-              type="button"
-              disabled={controller.busy}
-              onClick={() => void controller.recordRun(controller.session!.candidate!.candidateHandle)}
-            >
-              Record qualification run
-            </button>
+          {controller.session.runValidity === "invalid" && controller.session.invalidReason && (
+            <p className="error" role="status">{controller.session.invalidReason}</p>
           )}
+          {!controller.session.recordable && (
+            <p className="warning" role="status">
+              This attempt can no longer be recorded as qualification evidence.
+            </p>
+          )}
+          <div className="button-row">
+            {controller.session.candidate && (
+              <button
+                type="button"
+                disabled={controller.busy}
+                onClick={() => void controller.recordRun(controller.session!.candidate!.candidateHandle)}
+              >
+                Record qualification run
+              </button>
+            )}
+            <button
+              className="secondary"
+              type="button"
+              disabled={controller.busy || controller.session.phase === "closed"}
+              onClick={() => void controller.abandonSession()}
+            >
+              Abandon qualification attempt
+            </button>
+          </div>
+          <p className="disabled-reason">
+            Completion, evidence capture, and candidate materialization happen automatically as the
+            normal workflow commits its own transitions. Abandoning closes this attempt as an invalid
+            candidate and never changes the product execution.
+          </p>
         </section>
       )}
     </aside>

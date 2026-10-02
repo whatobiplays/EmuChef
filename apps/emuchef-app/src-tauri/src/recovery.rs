@@ -66,6 +66,11 @@ pub struct RecoveryStore {
     disposition: Option<DraftDisposition>,
     sensitivity: HashMap<String, bool>,
     required_reentry: HashSet<String>,
+    /// Proof, established on the first application session of this process,
+    /// that the previous process ended through the accepted termination
+    /// contract. Other native authorities that must fail closed after an
+    /// unproven shutdown read this without inspecting recovery drafts.
+    clean_handoff_proven: Option<bool>,
 }
 
 impl RecoveryStore {
@@ -84,6 +89,7 @@ impl RecoveryStore {
             disposition: None,
             sensitivity: HashMap::new(),
             required_reentry: HashSet::new(),
+            clean_handoff_proven: None,
         }
     }
 
@@ -92,6 +98,7 @@ impl RecoveryStore {
         let interrupted_session = first_process_session && self.marker_path.is_file();
         if first_process_session {
             atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")?;
+            self.clean_handoff_proven = Some(!interrupted_session);
         }
 
         self.session_generation = self.session_generation.saturating_add(1).max(1);
@@ -156,6 +163,13 @@ impl RecoveryStore {
         let mut keys = self.required_reentry.iter().cloned().collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    /// Whether this process proved that the previous application process ended
+    /// through the accepted termination contract. Returns false until the first
+    /// application session of this process begins, so callers fail closed.
+    pub fn session_handoff_proven(&self) -> bool {
+        self.clean_handoff_proven.unwrap_or(false)
     }
 
     /// Aggregate, payload-free facts for troubleshooting and reset options.

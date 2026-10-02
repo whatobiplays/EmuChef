@@ -16,13 +16,14 @@ itself imply support.
 
 1. Launch a clean qualification build with `npm --prefix apps/emuchef-app run device-qualification`.
 2. If the device is unregistered: connect/probe/match it, choose usb2/usb3, review the captured facts, Register device target, stop, commit the registry/matrix, and rebuild.
-3. On the new clean build: choose the registered target and canonical workflow.
-4. Complete normal EmuChef inputs, review, and explicit real-execution confirmation.
-5. Complete only workflow-declared human checkpoints.
-6. Inspect terminal candidate classification.
-7. Explicitly Record qualification run, including invalid/not_observed audit runs only when intentionally preserving harness history.
-8. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.
-9. Run `make device-qualification-check` and repository tests before committing/shipping evidence.
+3. On the new clean build: begin a qualification attempt by choosing the registered target and canonical workflow.
+4. Complete the workflow-declared checkpoints that must pass before the run. A required prerequisite checkpoint that is missing, failed, or unable to verify invalidates the attempt.
+5. Complete normal EmuChef inputs, review, and explicit real-execution confirmation. The attempt observes these product transitions automatically.
+6. Complete any remaining workflow-declared checkpoints after the terminal execution. Until they are complete the attempt stays in terminal-awaiting-evidence.
+7. Inspect the automatically materialized candidate classification, then explicitly Record qualification run, including invalid/not_observed audit runs only when intentionally preserving harness history.
+8. If the attempt cannot continue, use Abandon qualification attempt to close it as an invalid candidate. Abandoning never changes the product execution.
+9. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.
+10. Run `make device-qualification-check` and repository tests before committing/shipping evidence.
 
 ## Evidence record rules
 
@@ -81,11 +82,73 @@ safety failure invalidates the target as a whole.
 ## Harness boundary
 
 The harness implements the operator flow by layering target registration,
-candidate persistence, checkpoint capture, terminal classification, and
+candidate persistence, checkpoint declaration, terminal classification, and
 explicit recording over the normal production EmuChef workflow. It does not
 add a qualification-only planner, executor, device command, or ADB authority.
 The operator remains responsible for physical observations and must not treat
 the harness being available as physical qualification evidence.
+
+The harness does not reconstruct lifecycle ordering. The product observes its
+own committed transitions and the harness captures them, so the operator
+interface never decides when a review or an execution belongs to an attempt and
+never finalizes a candidate. See "Automatic lifecycle capture" below.
+
+## Automatic lifecycle capture
+
+Qualification evidence lifecycle is owned by the Rust/Tauri product, not by the
+operator interface. The operator interface loads sanitized status, declares
+checkpoints, and records or discards candidates. It never binds a review or an
+execution, never finalizes a candidate, and never retries a trusted transition.
+
+- Every committed product transition is fed to the active attempt
+  synchronously, after the product committed it and before the product result is
+  returned. Observed transitions are trusted device observation, explicit root
+  check, review creation, real-execution admission, and real-execution terminal.
+- Device observation is committed at the single authoritative seam, so an
+  attempt sees exactly the observation the product committed, with the same
+  typed facts, profile match, and root state.
+- Every real execution is watched by the product terminal monitor, whether or
+  not qualification mode is active. The monitor retains the authoritative
+  terminal transition - status, authority invalidation, launch action, and
+  report bytes - and only then notifies qualification.
+- The monitor never gives up on a running execution. It keeps observing through
+  transient failures and resolves the execution through the existing
+  authoritative runtime-loss semantics when the runtime session that owned it is
+  gone, so a product execution is never left active because observation stopped.
+- Reading an execution, exporting a report, or refreshing status is a pure
+  projection. None of them advances product or qualification lifecycle state.
+- A terminal execution that is still missing required non-prerequisite
+  checkpoints enters terminal-awaiting-evidence. The immutable candidate is
+  materialized automatically once the required evidence is complete or the
+  attempt becomes invalid; there is no operator finalization step.
+- A recorded checkpoint is immutable. A second submission for the same
+  checkpoint is rejected and never replaces the retained outcome or timestamp.
+  While an attempt is in terminal-awaiting-evidence, only unrecorded required
+  checkpoints are accepted.
+- A terminal execution that invalidated device identity or root authority can
+  never produce valid evidence, so the attempt materializes as
+  invalid/not_observed.
+- Abandoning an attempt closes it immediately as an invalid/not_observed
+  candidate. Abandonment never changes product execution state.
+
+## Restart and fail-closed recovery
+
+- At most one attempt is active in a process.
+- A new-version attempt resumes only after a proven clean shutdown. An unproven
+  shutdown or an incompatible persisted attempt invalidates the attempt instead
+  of producing evidence.
+- After a restart, the resumed attempt reassociates with a device on the first
+  trusted device observation the product commits, not on the first status
+  query. If the attempt can no longer prove it ran against the same device, it
+  fails closed.
+- A resumed attempt never trusts the previous process's device, review, or
+  execution handles. Device and review associations are re-established by new
+  authoritative product observations in the current process, and an attempt
+  that admitted a real execution without retaining its terminal transition
+  fails closed as invalid/not_observed.
+- If an attempt cannot be persisted, it is poisoned in memory: it is reported as
+  unavailable and can never claim evidence. Ordinary product operations are
+  never failed by qualification persistence.
 
 ## Repository validation
 

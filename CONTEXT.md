@@ -8,12 +8,36 @@ EmuChef provisions Android emulation handhelds from authored YAML. A device
 plan selects recipes, the planner emits an execution plan, and the executor
 applies that plan through local filesystem operations and ADB.
 
+## Domain Language
+
+**App definition**: The catalog authority for one application's identity and reusable app-specific facts and policy, including package identity, artifact sources and release strategy, permission automation sets, and named app paths or configuration targets. App-aware recipe steps reference an app definition instead of restating those facts.
+
+**App artifact**: A named app-owned resource with one source strategy. Independently selectable builds are separate named artifacts rather than nested variants; recipes explicitly choose the artifact they require.
+
+**Recipe**: A reusable executable workflow of ordered steps. A recipe may contain no app-aware steps or may operate on one or multiple app definitions; app association belongs to the relevant steps rather than to the recipe as a whole.
+
+**Device plan**: The device-setup orchestration that selects and combines recipes for a supported device configuration.
+
+**Execution plan**: The immutable planner-resolved snapshot consumed by the executor. Authored app, recipe, and device-plan references are resolved before execution so the executor does not reinterpret catalog state.
+
+**Permission set**: A named grouping of app-owned permission actions. The only standardized sets are `baseline` for normal provisioning permissions and `elevated` for permissions or app-ops that require root; recipes choose sets directly and there is no separate authority-scope dimension.
+
+**Package ID**: The single Android application package identity owned by one app definition. Every installable APK artifact in that app definition must resolve to that same package ID; alternate package IDs require separate app definitions.
+
+**App target**: A named app-owned file or directory destination with a semantic device location. App targets use relative paths for `app_data`, `external_app_data`, and `shared_storage`, and may use an explicit `absolute_device_path` location as a literal escape hatch.
+
 A **qualification operator** is an internal technical role that maintains the
 evidence used to make device-support decisions. The role is not a primary
 product user and does not define a third product workflow. **Qualification** is
 internal engineering and evidence terminology; normal end-user compatibility
 language is **supported** or **not supported**. Registration or evidence state
 alone does not establish a user-facing support claim.
+
+**Device observation**: The trusted passive interpretation of the currently selected device used by ordinary EmuChef behavior. It combines typed observed device facts, profile matching, and passive support/capability interpretation; explicit root checking is a separate authority.
+
+**Qualification session**: One internal evidence-capture attempt bound to a registered target, canonical qualification workflow, ordinary product intent, and authoritative product observations. At most one qualification session is active, and it may observe but never authorize the ordinary product workflow.
+
+**Qualification candidate**: An immutable stored outcome of a closed qualification attempt. A candidate may be valid/passed, valid/failed, or invalid/not-observed; canonical evidence recording remains a separate explicit operator action.
 
 Rust is the sole product runtime. The Cargo package
 `crates/emuchef-rust-backend` builds the `emuchef` binary and owns:
@@ -153,6 +177,12 @@ Authored source lives under `authored/`:
 - `recipes/` defines inputs, artifacts, groups, and ordered steps;
 - `device_profiles/` defines match criteria and capability defaults;
 - `device_plans/` selects profiles and recipes.
+
+Device profiles may target Android emulators for recipe validation. Schema-v1
+matching uses manufacturer, brand, model patterns, and Android release bounds;
+ABI and Android API level are descriptive tags or metadata and do not constrain
+matching. A device plan must reference the profile before planner validation
+can use its capabilities.
 
 Product catalog operations consume a resolved local snapshot rather than a
 repository-specific global root. A snapshot carries `bundled` or

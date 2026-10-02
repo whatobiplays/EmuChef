@@ -27,6 +27,7 @@ use crate::device_qualification::{RootQualificationKey, RootQualificationState};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::qualification_repository::QualificationRepositoryProvider;
+use crate::qualification_session::QualificationSessionStore;
 use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
@@ -41,6 +42,7 @@ pub struct AppState {
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
     pub handles: Mutex<SessionHandles>,
+    pub qualification_sessions: Mutex<QualificationSessionStore>,
     pub root_qualification: Mutex<RootQualificationStore>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
@@ -84,6 +86,25 @@ where
         platform_tools_revision,
         request,
     )
+    .map(|devices| {
+        report_device_inventory_to_qualification(state);
+        devices
+    })
+}
+
+/// Report one reconciled inventory to the active qualification attempt. A
+/// device that is gone can no longer prove attempt continuity, so the session
+/// fails closed instead of staying active on an absent device.
+pub(crate) fn report_device_inventory_to_qualification(state: &AppState) {
+    let handles = match state.handles.lock() {
+        Ok(handles) => handles
+            .qualification_devices()
+            .into_iter()
+            .map(|device| device.handle)
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    crate::qualification_session::observe_device_inventory(state, &handles);
 }
 
 /// Request and reconcile one inventory using explicit native authority inputs.
@@ -393,6 +414,10 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             )
         })?
         .reset();
+    // A new frontend session drops process-local attempt authority. Persisted
+    // candidates stay resumable and are re-adopted from the first trusted
+    // observation of the new process session.
+    crate::qualification_session::reset(state);
     state
         .support
         .lock()
@@ -759,8 +784,21 @@ pub fn poll_devices(
 
 #[tauri::command]
 pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
-    let (facts, serial) = probe_device_facts(&device_handle, &state)?;
-    Ok(public_device_facts(&device_handle, &facts, &serial))
+    let probe = probe_device_facts(&device_handle, &state)?;
+    Ok(public_device_facts(&device_handle, &probe.facts, &probe.serial))
+}
+
+/// One trusted device probe result.
+///
+/// The raw payload remains available to the public command and the existing
+/// process-local fact store, while `typed` is the typed projection that
+/// qualification consumes; it is `None` when the payload does not decode, in
+/// which case no identity fact was established and no observation is
+/// committed.
+pub(crate) struct DeviceProbeResult {
+    pub(crate) facts: Value,
+    pub(crate) typed: Option<crate::device_observation::DeviceProbeFacts>,
+    pub(crate) serial: String,
 }
 
 /// Probe one selected device through the production sidecar boundary and retain
@@ -770,7 +808,7 @@ pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result
 pub(crate) fn probe_device_facts(
     device_handle: &str,
     state: &AppState,
-) -> Result<(Value, String), String> {
+) -> Result<DeviceProbeResult, String> {
     let adb_path = current_adb_path(&state)?;
     let serial = state
         .handles
@@ -806,7 +844,19 @@ pub(crate) fn probe_device_facts(
             )
         })?
         .set_facts(&device_handle, facts.clone())?;
-    Ok((facts, serial))
+    let typed = crate::device_observation::DeviceProbeFacts::decode(&facts);
+    if let Some(typed_facts) = typed.as_ref() {
+        crate::device_observation::commit_selected_observation(
+            &state,
+            crate::device_observation::SelectedDeviceObservation::new(device_handle)
+                .with_probe_facts(typed_facts),
+        );
+    }
+    Ok(DeviceProbeResult {
+        facts,
+        typed,
+        serial,
+    })
 }
 
 #[tauri::command]
@@ -821,6 +871,24 @@ pub(crate) fn match_device_observation(
     device_handle: &str,
     state: &AppState,
 ) -> Result<Value, String> {
+    match_device_result(device_handle, state).map(|(public, _projection)| public)
+}
+
+/// Match a selected device through the production sidecar boundary and return
+/// the typed projection qualification consumes alongside the public DTO.
+pub(crate) fn match_device_projection(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<crate::device_observation::DeviceMatchProjection, String> {
+    match_device_result(device_handle, state).map(|(_public, projection)| projection)
+}
+
+/// Resolve one trusted catalog match and project it both for the client and for
+/// typed qualification consumers from the same sidecar result.
+fn match_device_result(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<(Value, crate::device_observation::DeviceMatchProjection), String> {
     let facts = state
         .handles
         .lock()
@@ -849,7 +917,15 @@ pub(crate) fn match_device_observation(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
-    Ok(public_match(&result, exact_serial.as_deref()))
+    let public = public_match(&result, exact_serial.as_deref());
+    let projection = crate::device_observation::DeviceMatchProjection::decode(&public)
+        .ok_or_else(|| {
+            safe_error(
+                "device_match_failed",
+                "The device could not be matched to the setup catalog.",
+            )
+        })?;
+    Ok((public, projection))
 }
 
 #[tauri::command]
@@ -1042,7 +1118,14 @@ pub fn create_review(
         )
     })?;
     handles.invalidate_catalog(catalog(&state)?.digest());
-    let review_handle = handles.insert_review(snapshot);
+    let review_handle = handles.insert_review(snapshot.clone());
+    drop(handles);
+    crate::qualification_session::observe(
+        &state,
+        crate::qualification_session::QualificationLifecycleObservation::ReviewCreated(Box::new(
+            crate::qualification_session::review_observation(&review_handle, &snapshot),
+        )),
+    );
     let exact_serial = plan
         .pointer("/target_device/serial")
         .and_then(Value::as_str);

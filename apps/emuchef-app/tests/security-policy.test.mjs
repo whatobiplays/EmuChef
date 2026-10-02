@@ -606,6 +606,7 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
   const api = read("src/api.ts");
   const types = read("src/types.ts");
   const qualification = read("src-tauri/src/device_qualification.rs");
+  const observation = read("src-tauri/src/device_observation.rs");
   const execution = read("src-tauri/src/execution.rs");
   const qualificationApi = sourceSlice(
     api,
@@ -614,7 +615,7 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
   );
 
   assert.match(app, /mod device_qualification;/);
-  assert.match(app, /device_qualification::get_device_qualification,/);
+  assert.match(app, /device_observation::get_device_qualification,/);
   assert.match(app, /device_qualification::check_device_root,/);
   assert.match(
     qualificationApi,
@@ -629,8 +630,14 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
   assert.match(qualification, /RootQualificationState::CheckFailed/);
   assert.match(qualification, /RootQualificationFailureReason::UnexpectedResponse/);
   assert.match(qualification, /"checkRoot"/);
-  assert.match(qualification, /devices\.len\(\) != 1/);
-  assert.doesNotMatch(qualification, /Command::new|std::process|listAdbDevices|probeDevice|startExecution/);
+  assert.match(qualification, /check_device_root_observation/);
+  assert.match(observation, /devices\.len\(\) != 1/);
+  for (const passive of [qualification, observation]) {
+    assert.doesNotMatch(passive, /Command::new|std::process|listAdbDevices|probeDevice|startExecution/);
+  }
+  // Passive device observation consumes committed root state and never runs a
+  // root check of its own.
+  assert.doesNotMatch(observation, /"checkRoot"|probe_root|rootProbe/);
   assert.doesNotMatch(execution, /DeviceQualificationSnapshotDto|qualification_revision/);
 });
 

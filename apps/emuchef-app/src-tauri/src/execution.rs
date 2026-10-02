@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -28,8 +29,10 @@ use crate::commands::{
     catalog, current_adb_path, list_and_reconcile_inventory_with_authority, redact_absolute_paths,
     redact_exact_serial, safe_error, AppState,
 };
-use crate::device_qualification::{
+use crate::device_observation::{
     qualify_reconciled_current_with_runtime, CurrentQualification, DeviceQualificationState,
+};
+use crate::device_qualification::{
     RootQualificationKey, RootQualificationState, RootQualificationStore,
 };
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
@@ -68,17 +71,12 @@ struct StoredExecutionReport {
     runtime: Value,
 }
 
-/// Internal relationship data used by qualification binding. The public API
-/// exposes only the execution handle; qualification reads this narrow view so
-/// it cannot start, confirm, or reinterpret an execution.
-pub(crate) struct QualificationExecutionBinding {
-    pub(crate) real: bool,
-    pub(crate) terminal: bool,
-    pub(crate) review_handle: String,
-    pub(crate) device_handle: String,
-    pub(crate) review: ReviewedPlanSnapshot,
-    pub(crate) status: Option<String>,
-    pub(crate) report_available: bool,
+/// Sanitized projection of one retained launch action record.
+fn retained_launch_action_value(action: &LaunchActionRecord) -> Value {
+    json!({
+        "handle": action.action_handle,
+        "label": action.label,
+    })
 }
 
 /// Bounded, restart-volatile execution handle state.
@@ -315,10 +313,7 @@ impl ExecutionHandleStore {
             .values()
             .find(|action| action.mapping.public_handle == mapping.public_handle)
         {
-            return Some(json!({
-                "handle": existing.action_handle,
-                "label": existing.label,
-            }));
+            return Some(retained_launch_action_value(existing));
         }
         let label = eligible_launch_label(mapping, report)?;
         let action_handle = format!("launch_{}", Uuid::new_v4().simple());
@@ -331,6 +326,27 @@ impl ExecutionHandleStore {
             },
         );
         Some(json!({ "handle": action_handle, "label": label }))
+    }
+
+    /// Read the retained launch action for one execution without minting a new
+    /// one. UI reads are pure projections and never create product state.
+    fn retained_launch_action(&self, public_handle: &str) -> Option<Value> {
+        if self.successful_launches.contains(public_handle) {
+            return None;
+        }
+        self.launch_actions
+            .values()
+            .find(|action| action.mapping.public_handle == public_handle)
+            .map(retained_launch_action_value)
+    }
+
+    /// Whether one terminal transition is already retained for this execution.
+    fn terminal_retained(&self, kind: ExecutionKind, public_handle: &str) -> bool {
+        self.latest_terminal.as_ref().is_some_and(|mapping| {
+            mapping.kind == kind
+                && mapping.public_handle == public_handle
+                && self.latest_terminal_report.is_some()
+        })
     }
 
     /// Atomically remove one opaque action before any external revalidation or ADB work.
@@ -390,35 +406,6 @@ impl ExecutionHandleStore {
             self.successful_launches.remove(public_handle);
             self.active = None;
         }
-    }
-
-    pub(crate) fn qualification_binding(
-        &self,
-        public_handle: &str,
-    ) -> Result<QualificationExecutionBinding, String> {
-        let mapping = self.mapping_any(public_handle)?;
-        let terminal = self
-            .latest_terminal
-            .as_ref()
-            .is_some_and(|candidate| candidate.public_handle == public_handle);
-        let status = terminal
-            .then(|| {
-                self.latest_terminal_report
-                    .as_ref()
-                    .and_then(|report| report.report.get("status"))
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
-            .flatten();
-        Ok(QualificationExecutionBinding {
-            real: mapping.kind == ExecutionKind::Real,
-            terminal,
-            review_handle: mapping.review_handle,
-            device_handle: mapping.review.device_handle.clone(),
-            review: mapping.review,
-            status,
-            report_available: terminal && self.latest_terminal_report.is_some(),
-        })
     }
 }
 
@@ -914,7 +901,11 @@ fn execution_capabilities_unavailable() -> String {
 }
 
 #[tauri::command]
-pub fn start_real_execution(request: Value, state: State<'_, AppState>) -> Result<Value, String> {
+pub fn start_real_execution(
+    app: AppHandle,
+    request: Value,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
     if !cfg!(feature = "real-execution") {
         return Err(safe_error(
             "real_execution_disabled",
@@ -937,11 +928,24 @@ pub fn start_real_execution(request: Value, state: State<'_, AppState>) -> Resul
                 "Another execution is already starting or active.",
             )
         })?;
-    let result = start_real_execution_inner(&request.review_handle, &state, &mut executions);
-    if result.is_err() {
-        executions.release_start();
+    match start_real_execution_inner(&request.review_handle, &state, &mut executions) {
+        Ok(public) => {
+            // The product owns terminal retention for every real execution, so
+            // the monitor starts before the start result reaches React.
+            if let Some(execution_handle) = public
+                .get("executionHandle")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                spawn_real_execution_terminal_monitor(app, execution_handle);
+            }
+            Ok(public)
+        }
+        Err(error) => {
+            executions.release_start();
+            Err(error)
+        }
     }
-    result
 }
 
 fn parse_real_start_request(request: Value) -> Result<RealExecutionStartRequest, String> {
@@ -1027,14 +1031,26 @@ fn start_real_execution_inner(
         runtime_generation,
         platform_tools_revision,
     };
-    start_real_execution_inner_with_runtime(
+    let public = start_real_execution_inner_with_runtime(
         review_handle,
         &state.handles,
         &state.root_qualification,
         executions,
         &state.sidecar,
         &platform_tools,
-    )
+    )?;
+    // Publish the product admission to an active qualification attempt only
+    // after the execution mapping exists.
+    if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
+        let mapping = executions
+            .mapping(
+                ExecutionKind::Real,
+                execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )?;
+        observe_real_admission(state, &mapping, &mapping.review);
+    }
+    Ok(public)
 }
 
 /// Immutable snapshot of the revalidated Platform-Tools state consumed by the
@@ -1180,50 +1196,251 @@ fn bind_real_start_result(
     Ok(project_real_snapshot(&mapping, report))
 }
 
+/// Feed one committed real-execution admission to the active attempt.
+///
+/// The admission is observed after the product mapping exists and before the
+/// start result is published, so a qualification attempt can never bind an
+/// execution the product has not started.
+fn observe_real_admission(state: &AppState, mapping: &ExecutionMapping, review: &ReviewedPlanSnapshot) {
+    if !cfg!(feature = "real-execution") {
+        return;
+    }
+    crate::qualification_session::observe(
+        state,
+        crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
+            Box::new(crate::qualification_session::ExecutionAdmissionObservation {
+                execution_handle: mapping.public_handle.clone(),
+                review: crate::qualification_session::review_observation(
+                    &mapping.review_handle,
+                    review,
+                ),
+                device_handle: review.device_handle.clone(),
+            }),
+        ),
+    );
+}
+
+/// One authoritative resolution produced by the product terminal monitor.
+#[derive(Clone, Debug)]
+enum RealExecutionMonitorEvent {
+    /// The monitor retained one terminal execution transition.
+    Terminal {
+        observation: crate::qualification_session::TerminalExecutionObservation,
+    },
+    /// The runtime session that owned the execution is gone, so the execution
+    /// was resolved through the existing authoritative loss semantics.
+    Lost { execution_handle: String },
+}
+
+/// Operator-facing description of one monitor resolution. It never contains a
+/// device serial, filesystem path, or report content.
+fn monitor_resolution_message(event: &RealExecutionMonitorEvent) -> String {
+    match event {
+        RealExecutionMonitorEvent::Terminal { observation } => format!(
+            "real execution {} retained an authoritative terminal transition",
+            observation.execution_handle
+        ),
+        RealExecutionMonitorEvent::Lost { execution_handle } => format!(
+            "real execution {execution_handle} was resolved through its runtime session loss"
+        ),
+    }
+}
+
+/// Interval between authoritative status polls while an execution runs.
+const REAL_EXECUTION_MONITOR_INTERVAL: Duration = Duration::from_millis(1_000);
+/// Longest backoff applied after repeated transient status failures.
+const REAL_EXECUTION_MONITOR_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Start the product-owned terminal monitor for one real execution.
+///
+/// Every guarded real execution gets exactly one monitor, whether or not a
+/// qualification attempt is active or qualification mode is enabled: the
+/// product must retain its own terminal transition (report bytes, device and
+/// root authority invalidation, launch action) before an execution can be
+/// considered finished. The monitor never abandons an execution after a
+/// transient failure. When the runtime session that owned the execution is
+/// gone it resolves the execution through the same authoritative loss
+/// semantics every other execution path uses, so an execution is never left
+/// active merely because observation stopped.
+fn spawn_real_execution_terminal_monitor(app: AppHandle, execution_handle: String) {
+    if !cfg!(feature = "real-execution") {
+        return;
+    }
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let resolution = monitor_real_terminal(
+            &execution_handle,
+            &state,
+            &state.sidecar,
+            &mut |interval| std::thread::sleep(interval),
+        )
+        .map(|event| monitor_resolution_message(&event));
+        #[cfg(debug_assertions)]
+        if let Some(message) = resolution {
+            eprintln!("{message}");
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = resolution;
+    });
+}
+
+/// Run one terminal monitor until the execution is resolved.
+///
+/// Returns the authoritative resolution, or `None` when the execution was
+/// already terminal or its mapping was dropped, so the monitor only ever
+/// reports a transition it actually committed. Transient runtime failures back
+/// off and retry forever: giving up would leave the execution store active
+/// without any authority tracking it.
+fn monitor_real_terminal<R, W>(
+    execution_handle: &str,
+    state: &AppState,
+    runtime: &R,
+    wait: &mut W,
+) -> Option<RealExecutionMonitorEvent>
+where
+    R: RuntimeRequester,
+    W: FnMut(Duration),
+{
+    let mut interval = REAL_EXECUTION_MONITOR_INTERVAL;
+    loop {
+        let mapping = match state.executions.lock() {
+            Ok(store) => {
+                if store.terminal_retained(ExecutionKind::Real, execution_handle) {
+                    return None;
+                }
+                store
+                    .mapping(
+                        ExecutionKind::Real,
+                        execution_handle,
+                        REAL_EXECUTION_UNAVAILABLE,
+                    )
+                    .ok()
+            }
+            Err(_) => return None,
+        };
+        let Some(mapping) = mapping else {
+            return None;
+        };
+        match runtime_request(
+            runtime,
+            "getExecution",
+            json!({ "executionId": mapping.sidecar_id }),
+        ) {
+            Ok(response) => {
+                let report = response.get("execution").cloned().unwrap_or(Value::Null);
+                if is_terminal_status(report.get("status").and_then(Value::as_str)) {
+                    return retain_terminal_real_execution(state, &mapping, &report);
+                }
+                interval = REAL_EXECUTION_MONITOR_INTERVAL;
+            }
+            Err(error) if execution_session_loss(&error).is_some() => {
+                recover_from_real_execution_loss(state, execution_handle, &error).ok()?;
+                return Some(RealExecutionMonitorEvent::Lost {
+                    execution_handle: execution_handle.to_string(),
+                });
+            }
+            Err(_) => {
+                interval = (interval * 2).min(REAL_EXECUTION_MONITOR_MAX_BACKOFF);
+            }
+        }
+        wait(interval);
+    }
+}
+
+/// Retain one authoritative terminal transition exactly once, then feed the
+/// committed typed result to the active qualification attempt.
+///
+/// The qualification attempt receives the transition only after the product
+/// terminal state, authority invalidation, launch action, and report bytes are
+/// retained, so it can never observe a terminal state the product has not
+/// committed.
+fn retain_terminal_real_execution(
+    state: &AppState,
+    mapping: &ExecutionMapping,
+    report: &Value,
+) -> Option<RealExecutionMonitorEvent> {
+    let newly_retained = state
+        .executions
+        .lock()
+        .ok()?
+        .mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            Value::Null,
+        );
+    if !newly_retained {
+        return None;
+    }
+    let identity_failed = report_has_identity_failure(report);
+    let root_failed = !identity_failed && report_has_root_authority_failure(report);
+    if identity_failed {
+        let _ = invalidate_identity_terminal_authority(
+            &state.handles,
+            &state.root_qualification,
+            mapping,
+        );
+    } else if root_failed {
+        let _ = invalidate_root_terminal_authority(
+            &state.handles,
+            &state.root_qualification,
+            mapping,
+        );
+    }
+    let report_runtime = serde_json::to_value(state.sidecar.status()).ok();
+    let report_bytes = {
+        let mut executions = state.executions.lock().ok()?;
+        let _ = executions.launch_action(mapping, report);
+        if let Some(report_runtime) = report_runtime {
+            let _ = executions.set_terminal_report_runtime(&mapping.public_handle, report_runtime);
+        }
+        production_execution_report_bytes(&executions, &mapping.public_handle).ok()
+    };
+    let observation = crate::qualification_session::TerminalExecutionObservation {
+        execution_handle: mapping.public_handle.clone(),
+        status: report
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        report_available: report_bytes.is_some(),
+        report_bytes,
+        authority_invalidated: identity_failed || root_failed,
+    };
+    crate::qualification_session::observe(
+        state,
+        crate::qualification_session::QualificationLifecycleObservation::RealExecutionTerminal(
+            Box::new(observation.clone()),
+        ),
+    );
+    Some(RealExecutionMonitorEvent::Terminal { observation })
+}
+
+/// Project one real execution for the client.
+///
+/// Terminal retention, device and root authority invalidation, launch-action
+/// creation, report retention, and qualification notification are owned by the
+/// product terminal monitor. This command only publishes retained product
+/// state, so polling it can never advance product or qualification lifecycle
+/// state. A runtime session that is already gone is reported as unavailable
+/// and is resolved by the monitor through the authoritative loss semantics.
 #[tauri::command]
 pub fn get_real_execution(
     execution_handle: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let public = get_real_execution_inner_with_runtime(
-        &execution_handle,
-        &state.executions,
-        &state.handles,
-        &state.root_qualification,
-        &state.sidecar,
-        |error| recover_from_real_execution_loss(&state, &execution_handle, error),
-    )?;
-    if public.get("terminal").and_then(Value::as_bool) == Some(true) {
-        let runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
-            safe_error(
-                "report_serialization_failed",
-                "Runtime metadata could not be prepared for the report.",
-            )
-        })?;
-        state
-            .executions
-            .lock()
-            .map_err(|_| real_execution_state_error())?
-            .set_terminal_report_runtime(&execution_handle, runtime)?;
-    }
-    Ok(public)
+    get_real_execution_inner_with_runtime(&execution_handle, &state.executions, &state.sidecar)
 }
 
-/// Retrieve one real execution report and retain terminal identity failures
-/// exactly once. The runtime requester is injectable so deterministic tests
-/// exercise the same mapping, terminal transition, and authority invalidation
-/// path as the Tauri command without starting a native process.
-fn get_real_execution_inner_with_runtime<R, F>(
+/// Retrieve one real execution report as a pure projection. The runtime
+/// requester is injectable so deterministic tests exercise the same mapping and
+/// projection path as the Tauri command without starting a native process.
+fn get_real_execution_inner_with_runtime<R>(
     execution_handle: &str,
     executions: &Mutex<ExecutionHandleStore>,
-    handles: &Mutex<SessionHandles>,
-    root_qualification: &Mutex<RootQualificationStore>,
     runtime: &R,
-    recover_session_loss: F,
 ) -> Result<Value, String>
 where
     R: RuntimeRequester,
-    F: FnOnce(&str) -> Result<(), String>,
 {
     let mapping = executions
         .lock()
@@ -1240,7 +1457,6 @@ where
     ) {
         Ok(response) => response,
         Err(error) if execution_session_loss(&error).is_some() => {
-            recover_session_loss(&error)?;
             return Err(safe_error(
                 "execution_unavailable",
                 REAL_EXECUTION_UNAVAILABLE,
@@ -1260,32 +1476,11 @@ where
         )
     })?;
     let mut public = project_real_snapshot(&mapping, report);
-    if is_terminal_status(report.get("status").and_then(Value::as_str)) {
-        let newly_retained = executions
-            .lock()
-            .map_err(|_| real_execution_state_error())?
-            .mark_terminal_with_report(
-                ExecutionKind::Real,
-                execution_handle,
-                report.clone(),
-                Value::Null,
-            );
-        if newly_retained {
-            if report_has_identity_failure(report) {
-                invalidate_identity_terminal_authority(handles, root_qualification, &mapping)?;
-            } else if report_has_root_authority_failure(report) {
-                invalidate_root_terminal_authority(handles, root_qualification, &mapping)?;
-            }
-        }
-        let mut executions = executions
-            .lock()
-            .map_err(|_| real_execution_state_error())?;
-        public["launchAction"] = executions
-            .launch_action(&mapping, report)
-            .unwrap_or(Value::Null);
-    } else {
-        public["launchAction"] = Value::Null;
-    }
+    public["launchAction"] = executions
+        .lock()
+        .map_err(|_| real_execution_state_error())?
+        .retained_launch_action(execution_handle)
+        .unwrap_or(Value::Null);
     let launch_action_present = public
         .get("launchAction")
         .and_then(Value::as_object)
@@ -1319,7 +1514,6 @@ pub fn get_real_execution_events(
     ) {
         Ok(response) => response,
         Err(error) if execution_session_loss(&error).is_some() => {
-            recover_from_real_execution_loss(&state, &execution_handle, &error)?;
             return Err(safe_error(
                 "execution_unavailable",
                 REAL_EXECUTION_UNAVAILABLE,
@@ -1664,8 +1858,18 @@ fn recover_from_real_execution_loss(
         Some(ExecutionSessionLoss::UnknownExecution) => {
             forget_lost_real_mapping(state, public_handle)
         }
-        None => Ok(()),
-    }
+        None => return Ok(()),
+    }?;
+    // The product no longer holds any authority for this execution, so an
+    // active attempt fails closed instead of waiting for evidence that can
+    // never arrive.
+    crate::qualification_session::observe(
+        state,
+        crate::qualification_session::QualificationLifecycleObservation::RealExecutionLost {
+            execution_handle: public_handle.to_string(),
+        },
+    );
+    Ok(())
 }
 
 /// Discard all native authority derived from a sidecar process generation that
@@ -3263,7 +3467,7 @@ mod tests {
         }]);
         assert!(review_requires_root(&review));
 
-        let context = crate::device_qualification::QualificationContextKey::new(
+        let context = crate::device_observation::QualificationContextKey::new(
             "device_one",
             1,
             1,
@@ -3272,7 +3476,7 @@ mod tests {
             "input-bound-root",
         );
         review.qualification_context = Some(context.clone());
-        let current = crate::device_qualification::test_current_qualification(
+        let current = crate::device_observation::test_current_qualification(
             DeviceQualificationState::Supported,
             Some(context),
         );
@@ -3334,14 +3538,14 @@ mod tests {
     #[test]
     fn final_qualification_gate_rejects_unsupported_and_incomplete_profiles() {
         let review = review();
-        let unsupported = crate::device_qualification::test_current_qualification(
+        let unsupported = crate::device_observation::test_current_qualification(
             DeviceQualificationState::Unsupported,
             None,
         );
         assert!(validate_final_qualification(&review, &unsupported, false)
             .unwrap_err()
             .contains("device_qualification_unsupported"));
-        let incomplete = crate::device_qualification::test_current_qualification(
+        let incomplete = crate::device_observation::test_current_qualification(
             DeviceQualificationState::InsufficientlyQualified,
             None,
         );
@@ -3352,7 +3556,7 @@ mod tests {
 
     #[test]
     fn final_qualification_gate_allows_only_matching_supported_context() {
-        let context = crate::device_qualification::QualificationContextKey::new(
+        let context = crate::device_observation::QualificationContextKey::new(
             "device_one",
             1,
             1,
@@ -3362,7 +3566,7 @@ mod tests {
         );
         let mut review = review();
         review.qualification_context = Some(context.clone());
-        let current = crate::device_qualification::test_current_qualification(
+        let current = crate::device_observation::test_current_qualification(
             DeviceQualificationState::Supported,
             Some(context),
         );
@@ -4285,6 +4489,63 @@ mod tests {
         }
     }
 
+    /// Build one application state around the exact authoritative stores a
+    /// test prepared, so the product terminal monitor and the qualification
+    /// session can be driven through the same process-wide seams production
+    /// uses.
+    fn test_app(
+        executions: Mutex<ExecutionHandleStore>,
+        handles: Mutex<SessionHandles>,
+        root_qualification: Mutex<RootQualificationStore>,
+    ) -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+        test_app_with_qualification(
+            executions,
+            handles,
+            root_qualification,
+            crate::qualification_repository::QualificationRepositoryProvider::default(),
+        )
+    }
+
+    fn test_app_with_qualification(
+        executions: Mutex<ExecutionHandleStore>,
+        handles: Mutex<SessionHandles>,
+        root_qualification: Mutex<RootQualificationStore>,
+        qualification_repository: crate::qualification_repository::QualificationRepositoryProvider,
+    ) -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+        let temp = tempfile::tempdir().expect("test app directory should be created");
+        let app_root = temp.path();
+        let app_state = AppState {
+            sidecar: SidecarState::new(app_root.join("sidecar-cache")),
+            catalog: Err("test catalog is not needed by execution monitor tests".to_string()),
+            qualification_repository,
+            adb: Mutex::new(crate::adb::AdbManager::new(app_root.join("platform-tools"))),
+            platform_tools_selections: Mutex::new(
+                crate::commands::PlatformToolsSelectionStore::default(),
+            ),
+            input_contracts: Mutex::new(crate::commands::InputContractSnapshot::default()),
+            handles,
+            root_qualification,
+            executions,
+            qualification_sessions: Mutex::new(
+                crate::qualification_session::QualificationSessionStore::default(),
+            ),
+            saved_configurations: Mutex::new(crate::saved_configurations::SavedConfigurationStore::load(
+                app_root.join("recent-configurations.json"),
+            )),
+            recovery: Mutex::new(crate::recovery::RecoveryStore::load(
+                app_root.join("recovery-draft.json"),
+                app_root.join("session-active.marker"),
+            )),
+            support: Mutex::new(crate::support::SupportStore::new(app_root.join("support-cache"))),
+            updates: crate::updates::UpdateService::from_production_document()
+                .expect("test update trust should be available"),
+            update_activity: crate::updates::ActivityGate::default(),
+        };
+        let app = tauri::test::mock_app();
+        assert!(app.manage(app_state));
+        (temp, app)
+    }
+
     fn supported_inventory(transport_id: &str) -> Value {
         json!({
             "devices": [{
@@ -4341,7 +4602,7 @@ mod tests {
         };
         let mut setup_request =
             |request_type: &str, payload: Value| setup_runtime.request(request_type, payload);
-        let context = crate::device_qualification::qualify_reconciled_current_with_runtime(
+        let context = crate::device_observation::qualify_reconciled_current_with_runtime(
             &handles,
             &root,
             "/trusted/adb",
@@ -4485,7 +4746,7 @@ mod tests {
                 .expect("unrelated facts should be retained");
             (affected, unrelated)
         };
-        let affected_context = crate::device_qualification::QualificationContextKey::new(
+        let affected_context = crate::device_observation::QualificationContextKey::new(
             &affected_handle,
             1,
             2,
@@ -4493,7 +4754,7 @@ mod tests {
             4,
             "affected-capabilities",
         );
-        let unrelated_context = crate::device_qualification::QualificationContextKey::new(
+        let unrelated_context = crate::device_observation::QualificationContextKey::new(
             &unrelated_handle,
             1,
             2,
@@ -4585,15 +4846,18 @@ mod tests {
             .session_epoch_for_test(&affected_handle)
             .unwrap();
 
-        let first = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("first terminal retrieval should succeed");
+        let (_temp, app) = test_app(executions, handles, root);
+        let state = app.state::<AppState>();
+        let handles = &state.handles;
+        let root = &state.root_qualification;
+        let executions = &state.executions;
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            matches!(event, Some(RealExecutionMonitorEvent::Terminal { .. })),
+            "the monitor must retain the authoritative terminal transition"
+        );
+        let first = get_real_execution_inner_with_runtime(&execution_handle, executions, &runtime)
+            .expect("first terminal retrieval should succeed");
         assert_eq!(first["status"], "failed");
         assert_eq!(first["terminal"], true);
         assert!(!first.to_string().contains("sensitive-serial"));
@@ -4648,16 +4912,11 @@ mod tests {
             .mapping(ExecutionKind::Real, &execution_handle, "missing")
             .is_ok());
 
-        let second = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("repeated terminal retrieval should retain the report");
-        assert_eq!(second["status"], "failed");
+        let repeated = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            repeated.is_none(),
+            "an authoritative terminal transition must never be retained twice"
+        );
         assert_eq!(
             handles.lock().unwrap().device_generation(),
             generation_after_first
@@ -4786,15 +5045,18 @@ mod tests {
             responses: Mutex::new(vec![terminal_response(), terminal_response()]),
         };
         let generation_before = handles.lock().unwrap().device_generation();
-        let first = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("first root terminal retrieval should succeed");
+        let (_temp, app) = test_app(executions, handles, root);
+        let state = app.state::<AppState>();
+        let handles = &state.handles;
+        let root = &state.root_qualification;
+        let executions = &state.executions;
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            matches!(event, Some(RealExecutionMonitorEvent::Terminal { .. })),
+            "the monitor must retain the authoritative terminal transition"
+        );
+        let first = get_real_execution_inner_with_runtime(&execution_handle, executions, &runtime)
+            .expect("first root terminal retrieval should succeed");
         assert_eq!(first["status"], "failed");
         assert_eq!(first["errors"][0]["remediation"]["kind"], "requalify_root");
         assert!(!first.to_string().contains("private root detail"));
@@ -4824,16 +5086,11 @@ mod tests {
             .unwrap()
             .complete(late_attempt, RootQualificationState::Granted));
 
-        let second = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("repeated root terminal retrieval should retain the report");
-        assert_eq!(second["status"], "failed");
+        let repeated = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            repeated.is_none(),
+            "an authoritative terminal transition must never be retained twice"
+        );
         assert_eq!(
             handles.lock().unwrap().device_generation(),
             generation_before
@@ -4892,7 +5149,7 @@ mod tests {
                 .expect("unrelated facts should be retained");
             (affected, unrelated)
         };
-        let affected_context = crate::device_qualification::QualificationContextKey::new(
+        let affected_context = crate::device_observation::QualificationContextKey::new(
             &affected_handle,
             1,
             2,
@@ -4900,7 +5157,7 @@ mod tests {
             4,
             "affected-capabilities",
         );
-        let unrelated_context = crate::device_qualification::QualificationContextKey::new(
+        let unrelated_context = crate::device_observation::QualificationContextKey::new(
             &unrelated_handle,
             1,
             2,
@@ -4909,7 +5166,7 @@ mod tests {
             "unrelated-capabilities",
         );
         let root_review_for = |device_handle: &str,
-                               context: &crate::device_qualification::QualificationContextKey,
+                               context: &crate::device_observation::QualificationContextKey,
                                input_bound_destination: bool| {
             let mut retained = review();
             retained.device_handle = device_handle.to_string();
@@ -4967,7 +5224,7 @@ mod tests {
         };
         let non_root_review_for =
             |device_handle: &str,
-             context: &crate::device_qualification::QualificationContextKey| {
+             context: &crate::device_observation::QualificationContextKey| {
                 let mut retained = review();
                 retained.device_handle = device_handle.to_string();
                 retained.qualification_context = Some(context.clone());
@@ -5075,15 +5332,18 @@ mod tests {
             Some(RootQualificationState::Granted)
         );
 
-        let first = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("first expanded root terminal retrieval should succeed");
+        let (_temp, app) = test_app(executions, handles, root);
+        let state = app.state::<AppState>();
+        let handles = &state.handles;
+        let root = &state.root_qualification;
+        let executions = &state.executions;
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            matches!(event, Some(RealExecutionMonitorEvent::Terminal { .. })),
+            "the monitor must retain the authoritative terminal transition"
+        );
+        let first = get_real_execution_inner_with_runtime(&execution_handle, executions, &runtime)
+            .expect("first expanded root terminal retrieval should succeed");
         assert_eq!(first["status"], "failed");
         assert_eq!(first["errors"][0]["remediation"]["kind"], "requalify_root");
         assert_eq!(first["completion"]["partialChangesPossible"], true);
@@ -5203,16 +5463,11 @@ mod tests {
             .mapping(ExecutionKind::Real, &execution_handle, "missing")
             .is_ok());
 
-        let second = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("repeated expanded root terminal retrieval should succeed");
-        assert_eq!(second["status"], "failed");
+        let repeated = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            repeated.is_none(),
+            "an authoritative terminal transition must never be retained twice"
+        );
         assert_eq!(
             handles.lock().unwrap().device_generation(),
             generation_before
@@ -5323,6 +5578,398 @@ mod tests {
             .is_ok());
     }
 
+    /// Canonical tool runner for tests that never invoke the qualification
+    /// tool: the session module only persists and materializes candidates.
+    struct NoQualificationToolRunner;
+
+    impl crate::qualification_repository::QualificationToolRunner for NoQualificationToolRunner {
+        fn run(&self, _repo_root: &Path, _args: &[String]) -> Result<Vec<u8>, String> {
+            Err("terminal-monitor tests must not invoke the canonical qualification tool".to_string())
+        }
+    }
+
+    fn qualification_build_json() -> Value {
+        json!({
+            "appVersion": "0.1.0",
+            "gitCommit": "1".repeat(40),
+            "materialBuildDigest": format!("sha256:{}", "a".repeat(64)),
+            "realExecutionEnabled": true,
+            "qualificationContract": 1,
+        })
+    }
+
+    fn qualification_session_target() -> crate::qualification_session::QualificationTargetBinding {
+        crate::qualification_session::QualificationTargetBinding {
+            target_id: "target-test".to_string(),
+            profile_id: "profile.test".to_string(),
+            manufacturer: "Test".to_string(),
+            model: "Device".to_string(),
+            android_version: "15".to_string(),
+            android_api: 35,
+            abi_soc_class: "arm64".to_string(),
+            root_state: crate::qualification_mode::QualificationRootState::NonRoot,
+            connection_type: crate::qualification_mode::QualificationConnectionType::Usb3,
+            firmware_build: "test/build".to_string(),
+        }
+    }
+
+    fn qualification_session_workflow() -> crate::qualification_mode::QualificationWorkflow {
+        crate::qualification_mode::QualificationWorkflow {
+            id: "test-workflow".to_string(),
+            version: 1,
+            purpose: "test".to_string(),
+            production_recipes: vec!["test.recipe".to_string()],
+            required_capabilities: Vec::new(),
+            prerequisites: Vec::new(),
+            human_checkpoints: vec![crate::qualification_mode::QualificationWorkflowCheckpoint {
+                id: "device_state_verified".to_string(),
+                instruction: "Verify the device state".to_string(),
+                fact: "device_state".to_string(),
+                allowed_outcomes: vec![
+                    crate::qualification_mode::QualificationCheckpointOutcome::Pass,
+                    crate::qualification_mode::QualificationCheckpointOutcome::Fail,
+                    crate::qualification_mode::QualificationCheckpointOutcome::UnableToVerify,
+                ],
+                required: true,
+            }],
+            compatibility_dimensions: Vec::new(),
+            automated_observations: vec![
+                crate::qualification_mode::QualificationWorkflowObservation {
+                    id: "execution-report".to_string(),
+                    required: true,
+                },
+            ],
+        }
+    }
+
+    fn qualification_session_observation() -> crate::device_observation::SelectedDeviceObservation
+    {
+        crate::device_observation::SelectedDeviceObservation {
+            device_handle: "device-one".to_string(),
+            profile_id: Some("profile.test".to_string()),
+            manufacturer: Some("Test".to_string()),
+            model: Some("Device".to_string()),
+            android_version: Some("15".to_string()),
+            android_api: Some(35),
+            abi_soc_class: Some("arm64".to_string()),
+            firmware_build: Some("test/build".to_string()),
+            root_state: Some(crate::device_qualification::RootQualificationState::Denied),
+        }
+    }
+
+    fn qualification_admission_review() -> crate::qualification_session::ReviewObservation {
+        crate::qualification_session::ReviewObservation {
+            review_handle: "review-one".to_string(),
+            device_handle: "device-one".to_string(),
+            device_plan: "test-plan".to_string(),
+            selected_recipes: vec!["test.recipe".to_string()],
+            target_id: Some("target-test".to_string()),
+            manufacturer: Some("Test".to_string()),
+            model: Some("Device".to_string()),
+            android_api: Some(35),
+        }
+    }
+
+    /// Bind one real execution mapping for the monitor tests.
+    fn bind_monitor_execution(executions: &Mutex<ExecutionHandleStore>, sidecar_id: &str) -> String {
+        let mut executions = executions.lock().unwrap();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        executions
+            .bind_started(
+                ExecutionKind::Real,
+                sidecar_id.to_string(),
+                "review-one".to_string(),
+                review(),
+            )
+            .public_handle
+            .clone()
+    }
+
+    #[test]
+    fn product_terminal_monitor_retries_transient_failures_until_it_resolves() {
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let handles = Mutex::new(SessionHandles::default());
+        let root = Mutex::new(RootQualificationStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-retry");
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Err(safe_error("execution_status_unavailable", "transient status")),
+                Err(safe_error("execution_status_unavailable", "transient status")),
+                Ok(json!({
+                    "execution": {
+                        "executionId": "sidecar-retry",
+                        "status": "succeeded",
+                        "recipes": []
+                    }
+                })),
+            ]),
+        };
+        let (_temp, app) = test_app(executions, handles, root);
+        let state = app.state::<AppState>();
+        let mut waits = Vec::new();
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |interval| {
+            waits.push(interval)
+        });
+
+        assert!(
+            matches!(event, Some(RealExecutionMonitorEvent::Terminal { .. })),
+            "the monitor must keep observing until the execution is resolved"
+        );
+        assert_eq!(
+            waits,
+            vec![Duration::from_secs(2), Duration::from_secs(4)],
+            "transient failures must back off instead of giving up"
+        );
+        assert!(state
+            .executions
+            .lock()
+            .unwrap()
+            .terminal_retained(ExecutionKind::Real, &execution_handle));
+        assert!(monitor_resolution_message(&event.unwrap()).contains(&execution_handle));
+    }
+
+    #[test]
+    fn product_terminal_monitor_resolves_a_lost_runtime_session_as_product_loss() {
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let handles = Mutex::new(SessionHandles::default());
+        let root = Mutex::new(RootQualificationStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-lost");
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            ))]),
+        };
+        let (_temp, app) = test_app(executions, handles, root);
+        let state = app.state::<AppState>();
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+
+        let Some(RealExecutionMonitorEvent::Lost { execution_handle: lost }) = event else {
+            panic!("a lost runtime session must resolve through product loss semantics");
+        };
+        assert_eq!(lost, execution_handle);
+        assert!(
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .mapping(ExecutionKind::Real, &execution_handle, "missing")
+                .is_err(),
+            "the lost runtime authority must drop the execution mapping"
+        );
+        let message = monitor_resolution_message(&RealExecutionMonitorEvent::Lost {
+            execution_handle: execution_handle.clone(),
+        });
+        assert!(message.contains(&execution_handle));
+        assert!(!message.contains("sensitive-serial"));
+    }
+
+    /// Prepare one active qualification attempt bound to one real execution so
+    /// a test can drive the product terminal monitor through the same seams
+    /// production uses.
+    ///
+    /// The first returned directory holds the authored corpus and qualification
+    /// repository root, the second holds the application state directories.
+    fn begin_monitor_qualification_attempt() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tauri::App<tauri::test::MockRuntime>,
+        String,
+        String,
+    ) {
+        let repository_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            repository_root.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let repository =
+            crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                repository_root.path().to_path_buf(),
+                Box::new(NoQualificationToolRunner),
+                serde_json::from_value(qualification_build_json()).unwrap(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: "1".repeat(40),
+                    tracked_worktree_clean: true,
+                },
+            );
+        let candidate = repository
+            .create_candidate(
+                crate::qualification_repository::CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": qualification_build_json(),
+                }),
+                None,
+            )
+            .unwrap();
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let handles = Mutex::new(SessionHandles::default());
+        let root = Mutex::new(RootQualificationStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-qualification");
+        let provider = crate::qualification_repository::QualificationRepositoryProvider::for_test(
+            repository,
+        );
+        let (app_root, app) = test_app_with_qualification(executions, handles, root, provider);
+        let state = app.state::<AppState>();
+        let session_handle =
+            crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
+        crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle: session_handle.clone(),
+                candidate_handle: candidate.clone(),
+                captured_at: "2026-08-23T12:00:00Z".to_string(),
+                device_plan: "test-plan".to_string(),
+                target: qualification_session_target(),
+                workflow: qualification_session_workflow(),
+                build: serde_json::from_value(qualification_build_json()).unwrap(),
+                runtime_contract: "real-execution-v1".to_string(),
+                observation: qualification_session_observation(),
+            },
+        )
+        .expect("the attempt should begin against the prepared candidate");
+        crate::qualification_session::record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            crate::qualification_mode::QualificationCheckpointOutcome::Pass,
+        )
+        .expect("the required checkpoint should be recorded");
+        crate::qualification_session::observe(
+            &state,
+            crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
+                Box::new(crate::qualification_session::ExecutionAdmissionObservation {
+                    execution_handle: execution_handle.clone(),
+                    review: qualification_admission_review(),
+                    device_handle: "device-one".to_string(),
+                }),
+            ),
+        );
+        (repository_root, app_root, app, execution_handle, candidate)
+    }
+
+    /// Compose one scripted terminal execution report for the monitor tests.
+    fn terminal_execution_json(execution_id: &str, status: &str, errors: Value) -> Value {
+        json!({
+            "execution": {
+                "executionId": execution_id,
+                "status": status,
+                "errors": errors,
+                "recipes": []
+            }
+        })
+    }
+
+    #[test]
+    fn product_terminal_monitor_feeds_the_committed_transition_to_qualification() {
+        let (_repository_root, _app_root, app, execution_handle, candidate) =
+            begin_monitor_qualification_attempt();
+        let state = app.state::<AppState>();
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![Ok(terminal_execution_json(
+                "sidecar-qualification",
+                "succeeded",
+                json!([]),
+            ))]),
+        };
+
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(matches!(
+            event,
+            Some(RealExecutionMonitorEvent::Terminal { .. })
+        ));
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("valid"),
+            "the product terminal transition must reach the qualification attempt"
+        );
+        assert_eq!(
+            stored
+                .payload
+                .get("qualificationOutcome")
+                .and_then(Value::as_str),
+            Some("passed")
+        );
+        assert_eq!(
+            stored
+                .payload
+                .pointer("/artifacts/0/path")
+                .and_then(Value::as_str),
+            Some("execution-report.json")
+        );
+        assert!(crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn product_terminal_monitor_keeps_authority_loss_inside_qualification_evidence() {
+        let (_repository_root, _app_root, app, execution_handle, candidate) =
+            begin_monitor_qualification_attempt();
+        let state = app.state::<AppState>();
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![Ok(terminal_execution_json(
+                "sidecar-qualification",
+                "failed",
+                json!([{ "code": "device_identity_changed", "message": "identity detail" }]),
+            ))]),
+        };
+
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        let Some(RealExecutionMonitorEvent::Terminal { observation }) = event else {
+            panic!("the monitor must retain the authoritative terminal transition");
+        };
+        assert!(
+            observation.authority_invalidated,
+            "a terminal identity failure must be reported as invalidated authority"
+        );
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid"),
+            "an invalidated authority transition can never produce valid evidence"
+        );
+        assert_eq!(
+            stored
+                .payload
+                .get("qualificationOutcome")
+                .and_then(Value::as_str),
+            Some("not_observed")
+        );
+        assert!(stored
+            .payload
+            .get("automatedObservations")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty));
+        assert!(stored
+            .payload
+            .get("artifacts")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty));
+        assert!(crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn identity_failure_takes_precedence_over_root_invalidation() {
         let (handles, root, review_handle) = prepared_real_review(true);
@@ -5353,9 +6000,8 @@ mod tests {
                 .public_handle
                 .clone()
         };
-        let runtime = ScriptedRuntime {
-            requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(vec![Ok(json!({
+        let combined_terminal = || {
+            Ok(json!({
                 "execution": {
                     "executionId": "sidecar-combined-terminal",
                     "status": "failed",
@@ -5365,17 +6011,23 @@ mod tests {
                     ],
                     "recipes": []
                 }
-            }))]),
+            }))
         };
-        let public = get_real_execution_inner_with_runtime(
-            &execution_handle,
-            &executions,
-            &handles,
-            &root,
-            &runtime,
-            |_| Ok(()),
-        )
-        .expect("combined terminal retrieval should succeed");
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![combined_terminal(), combined_terminal()]),
+        };
+        let (_temp, app) = test_app(executions, handles, root);
+        let state = app.state::<AppState>();
+        let handles = &state.handles;
+        let executions = &state.executions;
+        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        assert!(
+            matches!(event, Some(RealExecutionMonitorEvent::Terminal { .. })),
+            "the monitor must retain the authoritative terminal transition"
+        );
+        let public = get_real_execution_inner_with_runtime(&execution_handle, executions, &runtime)
+            .expect("combined terminal retrieval should succeed");
         assert_eq!(
             public["errors"][1]["remediation"]["kind"],
             "reconnect_device"

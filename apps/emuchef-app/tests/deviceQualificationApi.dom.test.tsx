@@ -16,6 +16,17 @@ describe("device qualification API", () => {
     invokeMock.mockResolvedValue(undefined);
   });
 
+  it("exposes no frontend lifecycle orchestration commands", () => {
+    for (const removed of [
+      "refreshQualificationSession",
+      "bindQualificationReview",
+      "bindQualificationExecution",
+      "finalizeQualificationCandidate",
+    ]) {
+      expect(Object.prototype.hasOwnProperty.call(api, removed)).toBe(false);
+    }
+  });
+
   it("keeps status and target capture behind opaque Tauri commands", async () => {
     await api.deviceQualificationModeStatus();
     expect(invokeMock).toHaveBeenLastCalledWith("get_device_qualification_mode_status");
@@ -50,7 +61,7 @@ describe("device qualification API", () => {
     });
   });
 
-  it("orchestrates qualification sessions through typed opaque handles", async () => {
+  it("exposes only explicit operator actions over opaque session handles", async () => {
     await api.beginQualificationSession({
       deviceHandle: "device_opaque",
       devicePlan: "plan_opaque",
@@ -66,24 +77,6 @@ describe("device qualification API", () => {
       },
     });
 
-    await api.refreshQualificationSession("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "device_opaque");
-    expect(invokeMock).toHaveBeenLastCalledWith("refresh_qualification_session", {
-      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      deviceHandle: "device_opaque",
-    });
-
-    await api.bindQualificationReview("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "review_opaque");
-    expect(invokeMock).toHaveBeenLastCalledWith("bind_qualification_review", {
-      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      reviewHandle: "review_opaque",
-    });
-
-    await api.bindQualificationExecution("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "execution_opaque");
-    expect(invokeMock).toHaveBeenLastCalledWith("bind_qualification_execution", {
-      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      executionHandle: "execution_opaque",
-    });
-
     await api.recordQualificationCheckpoint(
       "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "clean_or_deliberately_reset_device",
@@ -95,8 +88,10 @@ describe("device qualification API", () => {
       outcome: "pass",
     });
 
-    await api.finalizeQualificationCandidate("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    expect(invokeMock).toHaveBeenLastCalledWith("finalize_qualification_candidate", {
+    await api.abandonQualificationSession(
+      "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("abandon_qualification_session", {
       sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
 

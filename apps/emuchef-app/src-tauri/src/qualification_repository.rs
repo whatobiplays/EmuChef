@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::qualification_build::{embedded_build_identity, QualificationBuildIdentity};
-use crate::qualification_mode::{PersistedQualificationSession, QualificationSession};
+use crate::qualification_session::{PersistedQualificationSession, QualificationSession};
 
 /// Prefix shared by every opaque candidate handle.
 pub(crate) const CANDIDATE_HANDLE_PREFIX: &str = "qualification-candidate-";
@@ -36,8 +36,10 @@ const QUALIFICATION_TOOL: &str = "tools/device-qualification.mjs";
 const CANDIDATE_FILE: &str = "candidate.json";
 const SESSION_FILE: &str = "session.json";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
+const SESSION_REPORT_FILE: &str = "session-terminal-report.json";
 const CANDIDATE_STAGING_PREFIX: &str = ".qualification-candidate-tmp-";
 const SESSION_STAGING_PREFIX: &str = ".qualification-session-tmp-";
+const SESSION_REPORT_STAGING_PREFIX: &str = ".qualification-session-report-tmp-";
 const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The two candidate kinds understood by the repository qualification tool.
@@ -105,8 +107,6 @@ pub struct StoredQualificationCandidate {
     pub(crate) build: Option<QualificationBuildIdentity>,
     pub(crate) payload: Value,
     pub(crate) report: Option<QualificationReportMetadata>,
-    #[serde(skip)]
-    pub(crate) report_bytes: Option<Vec<u8>>,
     pub(crate) promotable: bool,
     pub(crate) non_promotable_reason: Option<String>,
 }
@@ -349,6 +349,7 @@ impl QualificationRepository {
     }
 
     /// Returns the fixed ignored candidate root beneath the repository.
+    #[cfg(test)]
     pub(crate) fn candidate_root(&self) -> &Path {
         &self.candidate_root
     }
@@ -524,6 +525,72 @@ impl QualificationRepository {
         Ok(persisted)
     }
 
+    /// Reads the raw session document so recovery can tell a session written by
+    /// an older build apart from missing or corrupt state. Version checks stay
+    /// with the session owner; this boundary only returns the stored JSON.
+    pub(crate) fn load_session_json(&self, candidate_handle: &str) -> Result<Value, String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        let bytes = read_regular_file(&directory.join(SESSION_FILE), "qualification session")?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| "qualification session JSON is invalid".to_string())
+    }
+
+    /// Removes authoritative session state once an attempt has closed. The
+    /// immutable candidate and any recorded evidence remain untouched.
+    pub(crate) fn remove_session(&self, candidate_handle: &str) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        remove_optional_regular_file(&directory, SESSION_FILE, "qualification session")
+    }
+
+    /// Persists the authoritative terminal execution report captured by the
+    /// product terminal transition, before the immutable candidate exists.
+    /// The report is stored beside the session and published into the candidate
+    /// artifact set when the candidate is materialized.
+    pub(crate) fn save_session_report(
+        &self,
+        candidate_handle: &str,
+        report_bytes: &[u8],
+    ) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        write_synced_replaced_file(
+            &directory,
+            SESSION_REPORT_FILE,
+            SESSION_REPORT_STAGING_PREFIX,
+            report_bytes,
+        )
+    }
+
+    /// Loads the retained terminal execution report, when one was captured.
+    pub(crate) fn load_session_report(
+        &self,
+        candidate_handle: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        let path = directory.join(SESSION_REPORT_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => read_regular_file(&path, "qualification terminal report").map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("qualification terminal report could not be inspected".to_string()),
+        }
+    }
+
+    /// Removes a retained terminal execution report that will never be
+    /// published by an immutable candidate.
+    pub(crate) fn remove_session_report(&self, candidate_handle: &str) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        remove_optional_regular_file(&directory, SESSION_REPORT_FILE, "qualification terminal report")
+    }
+
     /// Replaces a provisional candidate payload with the terminal run
     /// candidate while retaining its opaque directory and resumable session.
     pub(crate) fn finalize_candidate(
@@ -609,7 +676,7 @@ impl QualificationRepository {
         }
         let report_path = directory.join(EXECUTION_REPORT_FILE);
         let declared_report_sha256 = candidate_report_sha256(&envelope.payload)?;
-        let report_bytes = load_report_bytes(
+        load_report_bytes(
             &report_path,
             envelope.report.as_ref(),
             declared_report_sha256.as_deref(),
@@ -637,7 +704,6 @@ impl QualificationRepository {
             build: envelope.build,
             payload: envelope.payload,
             report: envelope.report,
-            report_bytes,
             promotable,
             non_promotable_reason,
         })
@@ -1204,6 +1270,21 @@ fn validate_regular_file_path(path: &Path, required: bool, label: &str) -> Resul
     }
 }
 
+/// Removes one optional regular file from a candidate directory. Missing files
+/// are already in the desired state; symlinks and directories are refused so a
+/// removal can never follow a substituted path.
+fn remove_optional_regular_file(directory: &Path, file: &str, label: &str) -> Result<(), String> {
+    let path = directory.join(file);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(format!("{label} file is not regular"))
+        }
+        Ok(_) => fs::remove_file(&path).map_err(|_| format!("{label} file could not be removed")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(format!("{label} file could not be inspected")),
+    }
+}
+
 fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     validate_regular_file_path(path, true, label)?;
     let mut options = OpenOptions::new();
@@ -1228,11 +1309,15 @@ fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Validate the declared execution report against the retained candidate
+/// metadata. The bytes themselves stay on disk; the candidate envelope as
+/// loaded never carries them, so callers cannot accidentally treat a report as
+/// authoritative without going through this check.
 fn load_report_bytes(
     report_path: &Path,
     metadata: Option<&QualificationReportMetadata>,
     declared_sha256: Option<&str>,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<(), String> {
     match metadata {
         Some(metadata) => {
             if metadata.path != EXECUTION_REPORT_FILE
@@ -1249,7 +1334,7 @@ fn load_report_bytes(
                     "qualification execution report bytes do not match metadata".to_string()
                 );
             }
-            Ok(Some(bytes))
+            Ok(())
         }
         None => match fs::symlink_metadata(report_path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1258,7 +1343,7 @@ fn load_report_bytes(
             Ok(_) => {
                 Err("qualification execution report is not declared by the candidate".to_string())
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err("qualification execution report could not be inspected".to_string()),
         },
     }
@@ -1474,7 +1559,6 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
-    use crate::qualification_mode::QualificationSession;
 
     #[derive(Clone, Default)]
     struct FakeQualificationToolRunner {
@@ -1641,10 +1725,9 @@ mod tests {
         let handle = repository
             .create_candidate(CandidateKind::QualificationRun, &json, Some(report))
             .expect("report candidate should be stored");
-        let loaded = repository
+        repository
             .load_candidate(&handle)
             .expect("report candidate should reload");
-        assert_eq!(loaded.report_bytes.as_deref(), Some(report.as_slice()));
 
         let report_path = repository
             .candidate_root()

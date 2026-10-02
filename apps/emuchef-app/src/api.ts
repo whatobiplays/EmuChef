@@ -153,20 +153,9 @@ export const api = {
     invoke<void>("discard_qualification_candidate", { candidateHandle }),
   beginQualificationSession: (request: BeginQualificationSessionRequest) =>
     invoke<QualificationSessionSnapshot>("begin_qualification_session", { request }),
-  refreshQualificationSession: (sessionHandle: string, deviceHandle: string) =>
-    invoke<QualificationSessionSnapshot>("refresh_qualification_session", {
+  abandonQualificationSession: (sessionHandle: string) =>
+    invoke<QualificationSessionSnapshot>("abandon_qualification_session", {
       sessionHandle,
-      deviceHandle,
-    }),
-  bindQualificationReview: (sessionHandle: string, reviewHandle: string) =>
-    invoke<QualificationSessionSnapshot>("bind_qualification_review", {
-      sessionHandle,
-      reviewHandle,
-    }),
-  bindQualificationExecution: (sessionHandle: string, executionHandle: string) =>
-    invoke<QualificationSessionSnapshot>("bind_qualification_execution", {
-      sessionHandle,
-      executionHandle,
     }),
   recordQualificationCheckpoint: (
     sessionHandle: string,
@@ -177,10 +166,6 @@ export const api = {
       sessionHandle,
       checkpointId,
       outcome,
-    }),
-  finalizeQualificationCandidate: (sessionHandle: string) =>
-    invoke<QualificationSessionSnapshot>("finalize_qualification_candidate", {
-      sessionHandle,
     }),
   recordQualificationRun: (candidateHandle: string) =>
     invoke<QualificationRunRecordingResult>("record_qualification_run", {
