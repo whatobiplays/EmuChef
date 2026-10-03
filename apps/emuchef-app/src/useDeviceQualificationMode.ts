@@ -97,6 +97,10 @@ export function useDeviceQualificationMode({
   const [error, setError] = useState<string | null>(null);
   const busyCountRef = useRef(0);
   const refreshGenerationRef = useRef(0);
+  const beginStatusGenerationRef = useRef<number | null>(null);
+  const beginSessionHandleRef = useRef<string | null>(null);
+  // The successful begin result is authoritative, but status refresh may lag it.
+  const [beginAssociationPending, setBeginAssociationPending] = useState(false);
   const recordingCandidateHandlesRef = useRef(new Set<string>());
 
   const startBusy = useCallback(() => {
@@ -127,7 +131,25 @@ export function useDeviceQualificationMode({
     }
   }, [finishBusy, startBusy]);
 
-  const applyStatus = useCallback((nextStatus: QualificationModeStatus) => {
+  const applyStatus = useCallback((nextStatus: QualificationModeStatus, generation: number) => {
+    const pendingBeginGeneration = beginStatusGenerationRef.current;
+    const pendingSessionHandle = beginSessionHandleRef.current;
+    const statusMatchesBegunSession = pendingSessionHandle !== null
+      && nextStatus.resumableSession?.sessionHandle === pendingSessionHandle;
+    const statusConfirmsBeginClosed = !nextStatus.enabled
+      || (statusMatchesBegunSession && nextStatus.resumableSession?.phase === "closed")
+      || (nextStatus.resumableSession == null && !nextStatus.deviceSelectionLocked);
+    const statusConfirmsBeginAssociated = statusMatchesBegunSession
+      && nextStatus.deviceSelectionLocked;
+    if (
+      pendingBeginGeneration !== null
+      && generation > pendingBeginGeneration
+      && (statusConfirmsBeginAssociated || statusConfirmsBeginClosed)
+    ) {
+      beginStatusGenerationRef.current = null;
+      beginSessionHandleRef.current = null;
+      setBeginAssociationPending(false);
+    }
     setStatus(nextStatus);
     if (!nextStatus.enabled) {
       setSession(null);
@@ -158,7 +180,7 @@ export function useDeviceQualificationMode({
     setError(null);
     try {
       const nextStatus = await api.deviceQualificationModeStatus();
-      if (generation === refreshGenerationRef.current) applyStatus(nextStatus);
+      if (generation === refreshGenerationRef.current) applyStatus(nextStatus, generation);
     } catch (refreshError) {
       if (generation === refreshGenerationRef.current) setError(errorMessage(refreshError));
     } finally {
@@ -185,7 +207,18 @@ export function useDeviceQualificationMode({
     if (!enabled || !status?.enabled) return;
     const result = await runOperation(
       () => api.beginQualificationSession(request),
-      (nextSession) => setSession(nextSession),
+      (nextSession) => {
+        setSession(nextSession);
+        if (nextSession.phase === "closed") {
+          beginStatusGenerationRef.current = null;
+          beginSessionHandleRef.current = null;
+          setBeginAssociationPending(false);
+        } else {
+          beginStatusGenerationRef.current = refreshGenerationRef.current;
+          beginSessionHandleRef.current = nextSession.sessionHandle;
+          setBeginAssociationPending(true);
+        }
+      },
     );
     if (result !== null) await refresh();
   }, [enabled, refresh, runOperation, status?.enabled]);
@@ -232,7 +265,14 @@ export function useDeviceQualificationMode({
     if (!enabled || !status?.enabled || !session) return;
     const result = await runOperation(
       () => api.abandonQualificationSession(session.sessionHandle),
-      (closedSession) => setSession(closedSession),
+      (closedSession) => {
+        setSession(closedSession);
+        if (closedSession.phase === "closed") {
+          beginStatusGenerationRef.current = null;
+          beginSessionHandleRef.current = null;
+          setBeginAssociationPending(false);
+        }
+      },
     );
     if (result === null) return;
     await refresh();
@@ -265,7 +305,7 @@ export function useDeviceQualificationMode({
 
   const deviceSelectionLocked = session?.phase === "closed"
     ? false
-    : status?.deviceSelectionLocked ?? false;
+    : beginAssociationPending || (status?.deviceSelectionLocked ?? false);
   const intentLock = session && session.phase !== "closed"
     ? { devicePlan: session.devicePlan, selectedRecipes: [...session.requiredRecipes] }
     : null;

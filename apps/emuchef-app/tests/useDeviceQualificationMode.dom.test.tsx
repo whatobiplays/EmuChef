@@ -147,6 +147,7 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
   return (
     <>
       <output data-testid="qualification-active">{String(controller.intentLock !== null)}</output>
+      <output data-testid="qualification-mode-enabled">{String(controller.status?.enabled ?? false)}</output>
       <output data-testid="qualification-session-present">
         {controller.session === null ? "absent" : "present"}
       </output>
@@ -336,10 +337,14 @@ test("an active attempt exposes only its bound plan and recipes without starting
     }));
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("false");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-mode-enabled").textContent).toBe("true");
+  });
   fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
 
-  expect((await screen.findByTestId("qualification-active")).textContent).toBe("true");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-active").textContent).toBe("true");
+  });
   expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
   expect(screen.getByTestId("qualification-plan").textContent).toBe("plan.bound");
   expect(screen.getByTestId("qualification-recipes").textContent).toBe("recipe.one,recipe.dependency");
@@ -350,6 +355,100 @@ test("an active attempt exposes only its bound plan and recipes without starting
     workflowId: "workflow.one",
   });
   expect(mockApi.recordQualificationRun).not.toHaveBeenCalled();
+});
+
+test("a successful begin keeps selection locked until status confirms association", async () => {
+  let resolveStaleStatus!: (status: QualificationModeStatus) => void;
+  let resolveCurrentStatus!: (status: QualificationModeStatus) => void;
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus())
+    .mockReturnValueOnce(new Promise((resolve) => { resolveStaleStatus = resolve; }))
+    .mockReturnValueOnce(new Promise((resolve) => { resolveCurrentStatus = resolve; }));
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-mode-enabled").textContent).toBe("true");
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await waitFor(() => expect(mockApi.beginQualificationSession).toHaveBeenCalledTimes(1));
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-active").textContent).toBe("true");
+    expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2);
+  });
+
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+
+  await act(async () => {
+    resolveStaleStatus(activeStatus({
+      deviceSelectionLocked: false,
+      resumableSession: sessionSnapshot(),
+    }));
+  });
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(3));
+  await act(async () => {
+    resolveCurrentStatus(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }));
+  });
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+});
+
+test("a fresh status with no active session releases the temporary begin lock", async () => {
+  let resolveNoSessionStatus!: (status: QualificationModeStatus) => void;
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus())
+    .mockReturnValueOnce(new Promise((resolve) => { resolveNoSessionStatus = resolve; }));
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-mode-enabled").textContent).toBe("true");
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+    expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2);
+  });
+
+  await act(async () => {
+    resolveNoSessionStatus(activeStatus({
+      deviceSelectionLocked: false,
+      resumableSession: null,
+    }));
+  });
+
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("absent");
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+  });
+});
+
+test("an unrelated locked session cannot clear the pending begin lock", async () => {
+  let resolveUnrelatedStatus!: (status: QualificationModeStatus) => void;
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus())
+    .mockReturnValueOnce(new Promise((resolve) => { resolveUnrelatedStatus = resolve; }));
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-mode-enabled").textContent).toBe("true");
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
+  await waitFor(() => expect(mockApi.beginQualificationSession).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    resolveUnrelatedStatus(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot({ sessionHandle: "unrelated-session" }),
+    }));
+  });
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
 });
 
 test("candidate capture resolves the selected device from live operator intent", async () => {
@@ -376,7 +475,9 @@ test("candidate capture resolves the selected device from live operator intent",
   });
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("false");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-mode-enabled").textContent).toBe("true");
+  });
   fireEvent.click(screen.getByRole("button", { name: "Capture target" }));
 
   await waitFor(() => {
@@ -386,7 +487,9 @@ test("candidate capture resolves the selected device from live operator intent",
       connectionType: "usb3",
     });
   });
-  expect((await screen.findByTestId("qualification-candidate")).textContent).toBe("Captured model");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-candidate").textContent).toBe("Captured model");
+  });
 });
 
 test("checkpoint recording forwards only the opaque handle and declared outcome", async () => {
@@ -591,13 +694,16 @@ test("a failed operator action surfaces a bounded error without changing locks",
   mockApi.beginQualificationSession.mockRejectedValue(new Error("qualification_target_unverified"));
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("false");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-mode-enabled").textContent).toBe("true");
+  });
   fireEvent.click(screen.getByRole("button", { name: "Begin session" }));
 
   await waitFor(() => {
     expect(screen.getByTestId("qualification-error").textContent).toBe("qualification_target_unverified");
   });
   expect(screen.getByTestId("qualification-active").textContent).toBe("false");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
 });
 
 test("successful run recording clears the active qualification session", async () => {

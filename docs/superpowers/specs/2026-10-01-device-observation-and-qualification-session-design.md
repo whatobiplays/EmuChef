@@ -404,8 +404,16 @@ An active session may resume only when the application can prove the prior proce
 
 On next launch:
 
-- proven clean handoff -> the version-compatible active session may resume;
-- crash, forced termination, missing marker, ambiguous termination, or other unproven shutdown -> the active session becomes invalid/not-observed.
+- proven clean handoff and matching captured build identity -> a valid,
+  version-compatible active session may resume;
+- a valid session captured by another build remains deferred and unchanged;
+- returning to the matching captured build may resume that valid session; recovery
+  never relabels execution evidence from one build as evidence from another;
+- an already-invalid session recovered under another build can only become a
+  non-promotable `invalid/not_observed` audit candidate;
+- crash, forced termination, missing marker, ambiguous termination, or other
+  unproven shutdown -> the active session becomes invalid/not-observed and is
+  retained only as a non-promotable audit candidate.
 
 This avoids adding a qualification-specific event journal while preserving the invariant that no missed authoritative transition can later yield valid evidence.
 

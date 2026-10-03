@@ -871,13 +871,16 @@ test("recording the same target or run twice rejects the second write without mu
     };
     const firstRecord = recordQualificationRunCandidate(runCandidate.candidateId, recordPaths);
     const evidenceRoot = path.join(seededRepo, "docs/testing/device-qualification/evidence");
+    const matrixPath = path.join(seededRepo, "docs/qualification/device-qualification-matrix.md");
     const before = snapshotTree(evidenceRoot);
+    const beforeMatrix = readFileSync(matrixPath, "utf8");
     assert.ok(firstRecord.runId);
     assert.throws(
       () => recordQualificationRunCandidate(runCandidate.candidateId, recordPaths),
       /already exists|immutable|duplicate/i,
     );
     assert.deepEqual(snapshotTree(evidenceRoot), before);
+    assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
   } finally {
     rmSync(seededRepo, { recursive: true, force: true });
   }

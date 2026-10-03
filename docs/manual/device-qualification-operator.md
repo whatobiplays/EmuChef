@@ -32,10 +32,18 @@ itself imply support.
    Status may safely retry materialization from the execution report and
    checkpoint evidence already retained; it does not rerun or re-observe the
    product execution. A build mismatch defers the session without closing it.
+   This deferral applies only while the attempt remains valid. An already-invalid
+   attempt may be recovered under another build only as an invalid/not_observed,
+   non-promotable audit candidate; operators do not need to restore the captured
+   build solely to preserve that invalid result.
    There is no operator finalization step. If the report remains unavailable
    or inconsistent after the source/build conditions are restored, treat the
    terminal result as unproven and abandon the attempt.
-7. Inspect the automatically materialized candidate classification, then explicitly Record qualification run, including invalid/not_observed audit runs only when intentionally preserving harness history.
+7. Inspect the automatically materialized candidate classification. Explicitly
+   Record qualification run only for promotable candidates. Invalid/not_observed
+   recovery candidates remain available as non-promotable audit records and may
+   be discarded when they are no longer needed; they cannot be recorded as
+   canonical evidence.
 8. If the attempt cannot continue, use Abandon qualification attempt to close it as an invalid candidate. Abandoning never changes the product execution.
 9. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.
 10. Run `make device-qualification-check` and repository tests before committing/shipping evidence.
@@ -160,9 +168,14 @@ execution, never finalizes a candidate, and never retries a trusted transition.
 ## Restart and fail-closed recovery
 
 - At most one attempt is active in a process.
-- A new-version attempt resumes only after a proven clean shutdown. An unproven
-  shutdown or an incompatible persisted attempt invalidates the attempt instead
-  of producing evidence.
+- A valid new-version attempt resumes only after a proven clean shutdown and a
+  matching captured build identity. A valid attempt captured by another build
+  remains deferred and unchanged. An unproven shutdown or incompatible persisted
+  attempt becomes invalid/not_observed and remains as a non-promotable audit
+  candidate.
+- An already-invalid attempt may be recovered under another build only as a
+  non-promotable invalid/not_observed audit candidate; restoring its captured
+  build is not required to preserve that audit result.
 - After a restart, the resumed attempt reassociates with a device on the first
   trusted device observation the product commits, not on the first status
   query. If the attempt can no longer prove it ran against the same device, it

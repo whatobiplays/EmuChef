@@ -1092,10 +1092,22 @@ where
     // The inventory used to resolve the reviewed opaque handle must be fresh
     // and native-authoritative. A targeted qualifyDevice call is deliberately
     // separate; its internal listing is not a continuity authority.
-    list_and_reconcile_inventory(state, request)?;
+    let inventory_failure_target = current_observation_failure_target(state, requested_handle);
+    if let Err(error) = list_and_reconcile_inventory(state, request) {
+        return fail_qualification_refresh(state, inventory_failure_target, error);
+    }
 
-    let adb_path = current_adb_path(state)?;
-    let current = qualify_reconciled_current_with_runtime(
+    // Inventory reconciliation has already published its generation to the
+    // active attempt. Capture the target for the subsequent asynchronous
+    // qualification request from that reconciled device session.
+    let observation_failure_target = current_observation_failure_target(state, requested_handle);
+    let adb_path = match current_adb_path(state) {
+        Ok(path) => path,
+        Err(error) => {
+            return fail_qualification_refresh(state, observation_failure_target, error);
+        }
+    };
+    let current = match qualify_reconciled_current_with_runtime(
         &state.handles,
         &state.root_qualification,
         &adb_path,
@@ -1103,35 +1115,87 @@ where
         qualification_revision,
         requested_handle,
         request,
-    )?;
-    commit_snapshot_observation(state, &current)?;
+    ) {
+        Ok(current) => current,
+        Err(error) => {
+            return fail_qualification_refresh(state, observation_failure_target, error);
+        }
+    };
+    commit_snapshot_observation(state, &current, observation_failure_target)?;
     Ok(current)
 }
 
-/// Commit the support interpretation retained by one targeted qualification as
-/// an authoritative device observation. Only a supported device whose identity
-/// the run actually established can be observed this way; every other result
-/// leaves the attempt untouched.
-fn commit_snapshot_observation(
+fn fail_qualification_refresh<T>(
+    state: &AppState,
+    target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+    error: String,
+) -> Result<T, String> {
+    crate::qualification_session::observe_device_observation_failure(state, target);
+    Err(error)
+}
+
+/// Capture only an already-associated attempt for the exact device session this
+/// refresh is about to observe. The candidate and epoch fence delayed results.
+fn current_observation_failure_target(
+    state: &AppState,
+    requested_handle: Option<&str>,
+) -> Option<crate::qualification_session::DeviceObservationFailureTarget> {
+    let (device_handle, session_epoch) = {
+        let handles = match state.handles.lock() {
+            Ok(handles) => handles,
+            Err(poisoned) => {
+                let handles = poisoned.into_inner();
+                state.handles.clear_poison();
+                handles
+            }
+        };
+        let devices = handles.qualification_devices();
+        if devices.len() != 1 {
+            return None;
+        }
+        let device = devices.into_iter().next()?;
+        if device.state != "available"
+            || requested_handle.is_some_and(|requested| requested != device.handle)
+        {
+            return None;
+        }
+        (device.handle, device.session_epoch)
+    };
+    crate::qualification_session::capture_device_observation_failure_target(
+        state,
+        &device_handle,
+        session_epoch,
+    )
+}
+
+/// Commit the typed facts from one targeted qualification before applying its
+/// support result. Conflicts are therefore visible to qualification even when
+/// the product correctly reports an unsupported or incomplete device.
+pub(crate) fn commit_snapshot_observation(
     state: &AppState,
     current: &CurrentQualification,
+    failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
 ) -> Result<(), String> {
-    if current.snapshot.state != DeviceQualificationState::Supported {
-        return Ok(());
-    }
     let Some(identity) = current.snapshot.device_identity.as_deref() else {
+        crate::qualification_session::observe_device_observation_failure(state, failure_target);
         return Ok(());
     };
-    let context = current
-        .context
-        .as_ref()
-        .ok_or_else(unverified_device_error)?;
-    commit_selected_observation(
+    let Some(context) = current.context.as_ref() else {
+        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+        return Ok(());
+    };
+    if let Err(error) = commit_selected_observation(
         state,
         SelectedDeviceObservation::new(identity)
             .with_snapshot(&current.snapshot)
             .with_session_epoch(context.session_epoch),
-    )
+    ) {
+        return fail_qualification_refresh(state, failure_target, error);
+    }
+    if current.snapshot.state != DeviceQualificationState::Supported {
+        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+    }
+    Ok(())
 }
 
 /// Qualify the single target from an already reconciled native inventory.
@@ -1264,19 +1328,29 @@ where
     let response = request(
         "qualifyDevice",
         json!({ "adbPath": adb_path, "serial": &target.serial }),
-    )
-    .map_err(|_| {
-        safe_error(
-            "device_qualification_failed",
-            "Connected-device qualification could not be completed.",
-        )
-    })?;
-    let observed = QualifyDeviceObservation::decode(&response).ok_or_else(|| {
-        safe_error(
-            "device_qualification_failed",
-            "Connected-device qualification could not be completed.",
-        )
-    })?;
+    );
+    ensure_target_session_current(handles, &target)?;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            clear_unverified_device_authority(
+                handles,
+                root_qualification,
+                &identity,
+                target.session_epoch,
+            )?;
+            return Err(qualification_probe_error());
+        }
+    };
+    let Some(observed) = QualifyDeviceObservation::decode(&response) else {
+        clear_unverified_device_authority(
+            handles,
+            root_qualification,
+            &identity,
+            target.session_epoch,
+        )?;
+        return Err(qualification_probe_error());
+    };
     let (mut snapshot, observed_qualification) = classify_observed_complete(
         runtime_generation,
         qualification_revision,
@@ -1284,6 +1358,12 @@ where
         Some(&identity),
     );
     if observed_qualification.state == ObservedDeviceState::Unverified {
+        clear_unverified_device_authority(
+            handles,
+            root_qualification,
+            &identity,
+            target.session_epoch,
+        )?;
         return Ok(CurrentQualification {
             snapshot,
             context: None,
@@ -1347,6 +1427,83 @@ where
         context: Some(context),
     })
 }
+
+fn qualification_probe_error() -> String {
+    safe_error(
+        "device_qualification_failed",
+        "Connected-device qualification could not be completed.",
+    )
+}
+
+/// Reject a delayed qualification response from a replaced native session.
+fn ensure_target_session_current(
+    handles: &Mutex<SessionHandles>,
+    target: &crate::handles::DeviceRecord,
+) -> Result<(), String> {
+    let handles = handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?;
+    let current = handles.device(&target.handle).map_err(|_| {
+        safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        )
+    })?;
+    if current.state != "available"
+        || current.serial != target.serial
+        || current.session_epoch != target.session_epoch
+    {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
+    Ok(())
+}
+
+/// Drop product qualification and root authority after an observation cannot
+/// establish trustworthy facts for the still-current device session.
+fn clear_unverified_device_authority(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    device_handle: &str,
+    expected_session_epoch: u64,
+) -> Result<(), String> {
+    let mut handles_guard = match handles.lock() {
+        Ok(handles_guard) => handles_guard,
+        Err(poisoned) => {
+            let handles_guard = poisoned.into_inner();
+            handles.clear_poison();
+            handles_guard
+        }
+    };
+    let current = handles_guard.device(device_handle).map_err(|_| {
+        safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        )
+    })?;
+    if current.state != "available" || current.session_epoch != expected_session_epoch {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
+    handles_guard.clear_qualification_context(device_handle);
+    handles_guard.invalidate_reviews_for_device(device_handle, "device_qualification_changed");
+
+    let mut root_guard = match root_qualification.lock() {
+        Ok(root_guard) => root_guard,
+        Err(poisoned) => {
+            let root_guard = poisoned.into_inner();
+            root_qualification.clear_poison();
+            root_guard
+        }
+    };
+    root_guard.invalidate_for_device(device_handle);
+    Ok(())
+}
+
 fn classify_observed_complete<'a>(
     runtime_generation: u64,
     qualification_revision: u64,
@@ -1778,6 +1935,182 @@ mod tests {
 
         assert_eq!(
             result.state,
+            DeviceQualificationState::InsufficientlyQualified
+        );
+    }
+
+    #[test]
+    fn unverified_qualification_clears_retained_context_and_root_authority() {
+        let mut native_handles = SessionHandles::default();
+        native_handles
+            .update_devices(&json!({
+                "devices": [{ "serial": "private-serial", "state": "available" }]
+            }))
+            .unwrap();
+        let device_handle = native_handles
+            .single_available_device_handle()
+            .expect("one available device has an opaque handle");
+        let context = QualificationContextKey::new(
+            &device_handle,
+            1,
+            2,
+            3,
+            3,
+            "previously-supported-capabilities",
+        );
+        native_handles.set_qualification_context(context.clone());
+        let handles = Mutex::new(native_handles);
+        let root_key = RootQualificationKey::from_context(&context);
+        let mut roots = RootQualificationStore::default();
+        let root_attempt = roots.begin(root_key.clone()).unwrap();
+        assert!(roots.complete(root_attempt, RootQualificationState::Granted));
+        let roots = Mutex::new(roots);
+        let mut request = |request_type: &str, _: Value| {
+            assert_eq!(request_type, "qualifyDevice");
+            Ok(json!({
+                "androidMajor": 14,
+                "androidApiLevel": 34,
+                "abi": "arm64-v8a",
+                "storage": "available",
+                "packageManager": "available",
+                "activityManager": "available"
+            }))
+        };
+
+        let current = qualify_reconciled_current_with_runtime(
+            &handles,
+            &roots,
+            "/adb",
+            2,
+            3,
+            Some(&device_handle),
+            &mut request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            current.snapshot.state,
+            DeviceQualificationState::InsufficientlyQualified
+        );
+        assert!(current.context.is_none());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .qualification_context(&device_handle)
+            .is_none());
+        assert_eq!(roots.lock().unwrap().get(&root_key), None);
+    }
+
+    #[test]
+    fn delayed_unverified_result_cannot_clear_replacement_session_authority() {
+        let mut native_handles = SessionHandles::default();
+        native_handles
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "private-serial",
+                    "state": "available",
+                    "transportId": "transport-old"
+                }]
+            }))
+            .unwrap();
+        let device_handle = native_handles
+            .single_available_device_handle()
+            .expect("one available device has an opaque handle");
+        let handles = Mutex::new(native_handles);
+        let roots = Mutex::new(RootQualificationStore::default());
+        let mut replacement_context = None;
+        let mut request = |request_type: &str, _: Value| {
+            assert_eq!(request_type, "qualifyDevice");
+            let context = {
+                let mut handles = handles.lock().unwrap();
+                handles
+                    .update_devices(&json!({
+                        "devices": [{
+                            "serial": "private-serial",
+                            "state": "available",
+                            "transportId": "transport-new"
+                        }]
+                    }))
+                    .unwrap();
+                let epoch = handles.device_session_epoch(&device_handle).unwrap();
+                let context = QualificationContextKey::new(
+                    &device_handle,
+                    epoch,
+                    2,
+                    3,
+                    3,
+                    "replacement-capabilities",
+                );
+                handles.set_qualification_context(context.clone());
+                context
+            };
+            let root_key = RootQualificationKey::from_context(&context);
+            let mut roots = roots.lock().unwrap();
+            let attempt = roots.begin(root_key).unwrap();
+            assert!(roots.complete(attempt, RootQualificationState::Granted));
+            replacement_context = Some(context);
+            Ok(json!({
+                "androidMajor": 14,
+                "androidApiLevel": 34,
+                "abi": "arm64-v8a",
+                "storage": "available",
+                "packageManager": "available",
+                "activityManager": "available"
+            }))
+        };
+
+        let error = qualify_reconciled_current_with_runtime(
+            &handles,
+            &roots,
+            "/adb",
+            2,
+            3,
+            Some(&device_handle),
+            &mut request,
+        )
+        .expect_err("a response from the replaced device session must be rejected");
+
+        assert!(error.contains("device_changed"));
+        let replacement_context = replacement_context.unwrap();
+        let stale_clear = clear_unverified_device_authority(&handles, &roots, &device_handle, 1)
+            .expect_err("an old epoch cannot clear authority for the replacement session");
+        assert!(stale_clear.contains("device_changed"));
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle),
+            Some(replacement_context.clone())
+        );
+        assert_eq!(
+            roots
+                .lock()
+                .unwrap()
+                .get(&RootQualificationKey::from_context(&replacement_context)),
+            Some(RootQualificationState::Granted)
+        );
+    }
+
+    #[test]
+    fn production_qualification_classifier_preserves_recognized_device_states() {
+        assert_eq!(
+            qualification_snapshot_with_state(Some("online")).state,
+            DeviceQualificationState::Supported
+        );
+        assert_eq!(
+            qualification_snapshot_with_state(Some("unauthorized")).state,
+            DeviceQualificationState::Unauthorized
+        );
+        assert_eq!(
+            qualification_snapshot_with_state(Some("offline")).state,
+            DeviceQualificationState::Offline
+        );
+        assert_eq!(
+            qualification_snapshot_with_state(Some("no_device")).state,
+            DeviceQualificationState::NoDevice
+        );
+        assert_eq!(
+            qualification_snapshot_with_state(Some("multiple_devices")).state,
             DeviceQualificationState::InsufficientlyQualified
         );
     }

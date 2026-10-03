@@ -92,11 +92,12 @@ No operator candidate-finalization action remains.
 1. Treat pre-refactor active persisted sessions as incompatible with the new lifecycle contract.
 2. Preserve already-materialized candidates and canonical recorded evidence.
 3. Convert incompatible old active sessions into invalid/not-observed state rather than migrating them to valid sessions.
-4. Resume a new-version active session only after proven clean application handoff.
-5. Crash/forced/ambiguous prior termination invalidates the active attempt.
-6. After clean restart, automatically reassociate on the first trusted device observation; never reuse the prior process-local handle.
-7. Compatible observation continues the session; conflicting observation invalidates it.
-8. If invalid-candidate persistence fails, keep the session poisoned/non-recordable in memory and never claim the candidate exists.
+4. Resume a valid new-version active session only after proven clean application handoff and a matching captured build identity.
+5. Keep a valid session from another build deferred and unchanged until its captured build is running again; then it may resume after a proven clean handoff. Never relabel execution evidence from one build as evidence from another. An already-invalid session may be recovered under another build only as a non-promotable `invalid/not_observed` audit candidate.
+6. Crash/forced/ambiguous prior termination invalidates the active attempt and retains a non-promotable `invalid/not_observed` audit candidate.
+7. After clean restart, automatically reassociate on the first trusted device observation; never reuse the prior process-local handle.
+8. Compatible observation continues the session; conflicting observation invalidates it.
+9. If invalid-candidate persistence fails, keep the session poisoned/non-recordable in memory and never claim the candidate exists.
 
 Do not add a qualification event journal.
 

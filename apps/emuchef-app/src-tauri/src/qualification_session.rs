@@ -4657,6 +4657,126 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_passive_qualification_publishes_conflicting_facts_then_fails_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&serde_json::json!({
+                    "devices": [{ "serial": "private-device-serial", "state": "available" }]
+                }))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation(&device_handle)),
+        )
+        .unwrap();
+
+        let context = crate::device_observation::QualificationContextKey::new(
+            &device_handle,
+            1,
+            1,
+            1,
+            1,
+            "incomplete-capability-context",
+        );
+        let mut current = crate::device_observation::test_current_qualification(
+            crate::device_observation::DeviceQualificationState::InsufficientlyQualified,
+            Some(context),
+        );
+        current.snapshot.device_identity = Some(device_handle.clone());
+        current.snapshot.android_api_level = Some(36);
+        let failure_target = capture_device_observation_failure_target(&state, &device_handle, 1);
+
+        crate::device_observation::commit_snapshot_observation(&state, &current, failure_target)
+            .unwrap();
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
+        );
+        let limitations = stored
+            .payload
+            .get("limitations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            limitations.first().and_then(Value::as_str),
+            Some("The Android API level no longer matches the registered target.")
+        );
+        assert!(session_status(&state).unwrap().is_none());
+    }
+
+    #[test]
+    fn incomplete_passive_qualification_fails_attempt_without_a_fact_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&serde_json::json!({
+                    "devices": [{ "serial": "private-device-serial", "state": "available" }]
+                }))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation(&device_handle)),
+        )
+        .unwrap();
+
+        let context = crate::device_observation::QualificationContextKey::new(
+            &device_handle,
+            1,
+            1,
+            1,
+            1,
+            "incomplete-capability-context",
+        );
+        let mut current = crate::device_observation::test_current_qualification(
+            crate::device_observation::DeviceQualificationState::InsufficientlyQualified,
+            Some(context),
+        );
+        current.snapshot.device_identity = Some(device_handle.clone());
+        current.snapshot.android_api_level = Some(35);
+        let failure_target = capture_device_observation_failure_target(&state, &device_handle, 1);
+
+        crate::device_observation::commit_snapshot_observation(&state, &current, failure_target)
+            .unwrap();
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
+        );
+        assert!(session_status(&state).unwrap().is_none());
+    }
+
+    #[test]
     fn failing_to_materialize_an_invalid_candidate_poisons_the_attempt() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
