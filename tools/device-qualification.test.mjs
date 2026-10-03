@@ -883,6 +883,32 @@ test("recording the same target or run twice rejects the second write without mu
   }
 });
 
+test("the canonical recorder rejects an incomplete provisional run candidate without mutation", () => {
+  const repoRoot = createTempQualificationRepo({
+    deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
+  });
+  try {
+    const candidate = {
+      candidateSchemaVersion: 1,
+      candidateId: "qualification-candidate-1234567890abcdef1234567890abcdef",
+      kind: "qualification_run",
+      capturedAt: "2026-08-23T12:30:00Z",
+      build: buildMaterialIdentity({ repoRoot, requireClean: false }),
+    };
+    writeCandidateFixture(repoRoot, candidate);
+    const evidenceRoot = path.join(repoRoot, "docs/testing/device-qualification/evidence");
+    const before = snapshotTree(evidenceRoot);
+
+    assert.throws(
+      () => recordQualificationRunCandidate(candidate.candidateId, { repoRoot }),
+      /qualification_run candidate fields must be exactly/i,
+    );
+    assert.deepEqual(snapshotTree(evidenceRoot), before);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("recording a run refuses a destination reserved by another invocation without deleting it", () => {
   const repoRoot = createTempQualificationRepo({
     deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),

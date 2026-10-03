@@ -27,6 +27,7 @@ use crate::device_qualification::{RootQualificationKey, RootQualificationState};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::qualification_repository::QualificationRepositoryProvider;
+use crate::qualification_session::QualificationSessionStore;
 use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
@@ -41,6 +42,7 @@ pub struct AppState {
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
     pub handles: Mutex<SessionHandles>,
+    pub qualification_sessions: Mutex<QualificationSessionStore>,
     pub root_qualification: Mutex<RootQualificationStore>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
@@ -84,6 +86,41 @@ where
         platform_tools_revision,
         request,
     )
+    .map(|devices| {
+        report_device_inventory_to_qualification(state);
+        devices
+    })
+}
+
+/// Report one reconciled inventory to the active qualification attempt. A
+/// device that is gone can no longer prove attempt continuity, so the session
+/// fails closed instead of staying active on an absent device.
+pub(crate) fn report_device_inventory_to_qualification(state: &AppState) {
+    let (generation, available_devices) = match state.handles.lock() {
+        Ok(handles) => (
+            handles.device_generation(),
+            handles
+                .qualification_devices()
+                .into_iter()
+                .filter(|device| device.state == "available")
+                .map(|device| (device.handle, device.session_epoch))
+                .collect::<Vec<_>>(),
+        ),
+        Err(poisoned) => {
+            let handles = poisoned.into_inner();
+            state.handles.clear_poison();
+            (
+                handles.device_generation(),
+                handles
+                    .qualification_devices()
+                    .into_iter()
+                    .filter(|device| device.state == "available")
+                    .map(|device| (device.handle, device.session_epoch))
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    crate::qualification_session::observe_device_inventory(state, generation, &available_devices);
 }
 
 /// Request and reconcile one inventory using explicit native authority inputs.
@@ -393,6 +430,10 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             )
         })?
         .reset();
+    // A new frontend session drops process-local attempt authority. Persisted
+    // candidates stay resumable and are re-adopted from the first trusted
+    // observation of the new process session.
+    crate::qualification_session::reset(state);
     state
         .support
         .lock()
@@ -759,8 +800,26 @@ pub fn poll_devices(
 
 #[tauri::command]
 pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
-    let (facts, serial) = probe_device_facts(&device_handle, &state)?;
-    Ok(public_device_facts(&device_handle, &facts, &serial))
+    let probe = probe_device_facts(&device_handle, &state)?;
+    Ok(public_device_facts(
+        &device_handle,
+        &probe.facts,
+        &probe.serial,
+    ))
+}
+
+/// One trusted device probe result.
+///
+/// The raw payload remains available to the public command and the existing
+/// process-local fact store, while `typed` is the typed projection that
+/// qualification consumes; it is `None` when the payload does not decode, in
+/// which case no identity fact was established and no observation is
+/// committed.
+pub(crate) struct DeviceProbeResult {
+    pub(crate) facts: Value,
+    pub(crate) typed: Option<crate::device_observation::DeviceProbeFacts>,
+    pub(crate) serial: String,
+    pub(crate) session_epoch: u64,
 }
 
 /// Probe one selected device through the production sidecar boundary and retain
@@ -770,32 +829,88 @@ pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result
 pub(crate) fn probe_device_facts(
     device_handle: &str,
     state: &AppState,
-) -> Result<(Value, String), String> {
+) -> Result<DeviceProbeResult, String> {
     let adb_path = current_adb_path(&state)?;
-    let serial = state
-        .handles
-        .lock()
-        .map_err(|_| {
+    probe_device_facts_with(device_handle, state, |serial| {
+        state
+            .sidecar
+            .request(
+                "probeDevice",
+                json!({ "adbPath": adb_path, "serial": serial }),
+            )
+            .map_err(|_| {
+                safe_error(
+                    "adb_probe_failed",
+                    "The selected device information could not be read.",
+                )
+            })
+    })
+}
+
+/// Run a probe after capturing one device-session identity. The closure makes
+/// the asynchronous observation boundary explicit: its result is retained only
+/// if the same native handle and epoch remain current after it returns.
+pub(crate) fn probe_device_facts_with<F>(
+    device_handle: &str,
+    state: &AppState,
+    probe: F,
+) -> Result<DeviceProbeResult, String>
+where
+    F: FnOnce(&str) -> Result<Value, String>,
+{
+    let (serial, session_epoch) = {
+        let handles = state.handles.lock().map_err(|_| {
             safe_error(
                 "session_state_unavailable",
                 "Device session state is unavailable.",
             )
-        })?
-        .device(&device_handle)?
-        .serial
-        .clone();
-    let facts = state
-        .sidecar
-        .request(
-            "probeDevice",
-            json!({ "adbPath": adb_path, "serial": &serial }),
-        )
-        .map_err(|_| {
-            safe_error(
-                "adb_probe_failed",
-                "The selected device information could not be read.",
-            )
         })?;
+        let device = handles.device(device_handle)?;
+        if device.state != "available" {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+        (device.serial.clone(), device.session_epoch)
+    };
+    let failure_target = crate::qualification_session::capture_device_observation_failure_target(
+        state,
+        device_handle,
+        session_epoch,
+    );
+    let facts = match probe(&serial) {
+        Ok(facts) => facts,
+        Err(error) => {
+            let current = state
+                .handles
+                .lock()
+                .map_err(|_| {
+                    safe_error(
+                        "session_state_unavailable",
+                        "Device session state is unavailable.",
+                    )
+                })?
+                .device(device_handle)
+                .is_ok_and(|device| {
+                    device.state == "available"
+                        && device.serial == serial
+                        && device.session_epoch == session_epoch
+                });
+            if !current {
+                return Err(safe_error(
+                    "device_changed",
+                    "The selected device changed. Refresh device discovery and try again.",
+                ));
+            }
+            crate::qualification_session::observe_device_observation_failure(
+                state,
+                failure_target.clone(),
+            );
+            return Err(error);
+        }
+    };
+    let typed = crate::device_observation::DeviceProbeFacts::decode(&facts);
     state
         .handles
         .lock()
@@ -805,8 +920,23 @@ pub(crate) fn probe_device_facts(
                 "Device session state is unavailable.",
             )
         })?
-        .set_facts(&device_handle, facts.clone())?;
-    Ok((facts, serial))
+        .set_facts_for_epoch(&device_handle, session_epoch, facts.clone())?;
+    if let Some(typed_facts) = typed.as_ref() {
+        crate::device_observation::commit_selected_observation(
+            &state,
+            crate::device_observation::SelectedDeviceObservation::new(device_handle)
+                .with_probe_facts(typed_facts)
+                .with_session_epoch(session_epoch),
+        )?;
+    } else {
+        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+    }
+    Ok(DeviceProbeResult {
+        facts,
+        typed,
+        serial,
+        session_epoch,
+    })
 }
 
 #[tauri::command]
@@ -821,17 +951,41 @@ pub(crate) fn match_device_observation(
     device_handle: &str,
     state: &AppState,
 ) -> Result<Value, String> {
-    let facts = state
-        .handles
-        .lock()
-        .map_err(|_| {
+    match_device_result(device_handle, state).map(|(public, _projection)| public)
+}
+
+/// Match a selected device through the production sidecar boundary and return
+/// the typed projection qualification consumes alongside the public DTO.
+pub(crate) fn match_device_projection(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<crate::device_observation::DeviceMatchProjection, String> {
+    match_device_result(device_handle, state).map(|(_public, projection)| projection)
+}
+
+/// Resolve one trusted catalog match and project it both for the client and for
+/// typed qualification consumers from the same sidecar result.
+fn match_device_result(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<(Value, crate::device_observation::DeviceMatchProjection), String> {
+    let (facts, session_epoch) = {
+        let handles = state.handles.lock().map_err(|_| {
             safe_error(
                 "session_state_unavailable",
                 "Device session state is unavailable.",
             )
-        })?
-        .facts(device_handle)?
-        .clone();
+        })?;
+        let device = handles.device(device_handle)?;
+        if device.state != "available" {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+        let (facts, epoch) = handles.facts_with_epoch(device_handle)?;
+        (facts.clone(), epoch)
+    };
     let catalog = catalog(&state)?;
     let exact_serial = facts
         .get("serial")
@@ -849,7 +1003,49 @@ pub(crate) fn match_device_observation(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
-    Ok(public_match(&result, exact_serial.as_deref()))
+    {
+        let handles = state.handles.lock().map_err(|_| {
+            safe_error(
+                "session_state_unavailable",
+                "Device session state is unavailable.",
+            )
+        })?;
+        let device = handles.device(device_handle).map_err(|_| {
+            safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            )
+        })?;
+        if device.state != "available"
+            || device.session_epoch != session_epoch
+            || device.facts_session_epoch != Some(session_epoch)
+        {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+    }
+    let public = public_match(&result, exact_serial.as_deref());
+    let projection =
+        crate::device_observation::DeviceMatchProjection::decode(&public).ok_or_else(|| {
+            safe_error(
+                "device_match_failed",
+                "The device could not be matched to the setup catalog.",
+            )
+        })?;
+    if let Some(device_plan) = crate::qualification_session::active_device_plan(state) {
+        let mut observation =
+            crate::device_observation::SelectedDeviceObservation::new(device_handle)
+                .with_session_epoch(session_epoch);
+        if let Some(profile_id) =
+            crate::device_observation::matched_profile_id(&projection, &device_plan)
+        {
+            observation = observation.with_profile_id(profile_id);
+        }
+        crate::device_observation::commit_selected_observation(state, observation)?;
+    }
+    Ok((public, projection))
 }
 
 #[tauri::command]
@@ -1042,7 +1238,14 @@ pub fn create_review(
         )
     })?;
     handles.invalidate_catalog(catalog(&state)?.digest());
-    let review_handle = handles.insert_review(snapshot);
+    let review_handle = handles.insert_review(snapshot.clone());
+    drop(handles);
+    crate::qualification_session::observe(
+        &state,
+        crate::qualification_session::QualificationLifecycleObservation::ReviewCreated(Box::new(
+            crate::qualification_session::review_observation(&review_handle, &snapshot),
+        )),
+    );
     let exact_serial = plan
         .pointer("/target_device/serial")
         .and_then(Value::as_str);
@@ -1462,7 +1665,7 @@ fn public_device_facts(device_handle: &str, facts: &Value, exact_serial: &str) -
     public
 }
 
-fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
+pub(crate) fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
     let candidates = |field: &str| {
         result
             .get(field)

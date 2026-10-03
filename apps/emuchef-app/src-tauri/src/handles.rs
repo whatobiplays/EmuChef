@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::adb::AdbInstallationIdentity;
-use crate::device_qualification::QualificationContextKey;
+use crate::device_observation::QualificationContextKey;
 
 const MAX_REVIEWS: usize = 16;
 const MAX_TOMBSTONES: usize = 64;
@@ -25,6 +25,7 @@ pub struct DeviceRecord {
     pub transport_id: Option<String>,
     pub session_epoch: u64,
     pub facts: Option<Value>,
+    pub facts_session_epoch: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -70,7 +71,6 @@ pub struct SessionHandles {
     device_generation: u64,
     session_epoch_by_handle: HashMap<String, u64>,
     qualification_context_by_handle: HashMap<String, QualificationContextKey>,
-    qualification_device_by_session: HashMap<String, String>,
     last_inventory_count: Option<usize>,
 }
 
@@ -95,7 +95,6 @@ impl SessionHandles {
                     .or_insert(1);
                 *epoch = epoch.saturating_add(1).max(1);
                 self.qualification_context_by_handle.remove(handle);
-                self.clear_qualification_associations_for_device(handle);
                 self.invalidate_reviews_for_device(handle, "device_qualification_changed");
             }
         }
@@ -119,7 +118,6 @@ impl SessionHandles {
                 .map(str::to_string);
             let handle = self.handle_for_serial(serial);
             let previous = self.devices_by_handle.get(&handle);
-            let previous_facts = previous.and_then(|record| record.facts.clone());
             let continuity_lost = previous.is_some_and(|previous| {
                 !(previous.state == "available"
                     && state == "available"
@@ -137,9 +135,12 @@ impl SessionHandles {
                 }
                 *entry
             };
+            let (previous_facts, previous_facts_epoch) = previous
+                .filter(|record| record.session_epoch == epoch)
+                .map(|record| (record.facts.clone(), record.facts_session_epoch))
+                .unwrap_or((None, None));
             if continuity_lost && !forced_epoch_handles.contains(&handle) {
                 self.qualification_context_by_handle.remove(&handle);
-                self.clear_qualification_associations_for_device(&handle);
                 self.invalidate_reviews_for_device(&handle, "device_qualification_changed");
             }
             present.insert(
@@ -152,6 +153,7 @@ impl SessionHandles {
                     transport_id,
                     session_epoch: epoch,
                     facts: previous_facts,
+                    facts_session_epoch: previous_facts_epoch,
                 },
             );
         }
@@ -169,7 +171,6 @@ impl SessionHandles {
                     .or_insert(1);
                 *epoch = epoch.saturating_add(1).max(1);
                 self.qualification_context_by_handle.remove(&handle);
-                self.clear_qualification_associations_for_device(&handle);
                 self.invalidate_reviews_for_device(&handle, "review_stale");
             }
         }
@@ -230,47 +231,19 @@ impl SessionHandles {
         self.session_epoch_by_handle.get(handle).copied()
     }
 
-    /// Live device associated with a qualification session in this process.
-    pub fn qualification_session_device_handle(&self, session_handle: &str) -> Option<&str> {
-        self.qualification_device_by_session
-            .get(session_handle)
-            .map(String::as_str)
-    }
-
-    /// Associate a qualification session with one live device for this process.
-    ///
-    /// Repeating the same association is idempotent. A different handle is
-    /// rejected so callers can invalidate the session through qualification
-    /// authority instead of silently moving it to another device.
-    pub fn associate_qualification_session_device(
-        &mut self,
-        session_handle: &str,
-        device_handle: &str,
-    ) -> bool {
-        match self.qualification_device_by_session.get(session_handle) {
-            Some(current) => current == device_handle,
-            None => {
-                self.qualification_device_by_session
-                    .insert(session_handle.to_string(), device_handle.to_string());
-                true
-            }
-        }
-    }
-
-    /// Remove the current-process device association when a qualification
-    /// candidate reaches the end of its lifecycle.
-    pub fn clear_qualification_session_device(&mut self, session_handle: &str) -> bool {
-        self.qualification_device_by_session
-            .remove(session_handle)
-            .is_some()
-    }
-
     /// Return the trusted native device records used to resolve qualification
     /// requests. Exact serials never cross the React projection boundary.
     pub fn qualification_devices(&self) -> Vec<DeviceRecord> {
         let mut devices = self.devices_by_handle.values().cloned().collect::<Vec<_>>();
         devices.sort_by(|left, right| left.handle.cmp(&right.handle));
         devices
+    }
+
+    /// Return the native continuity epoch for one currently retained device.
+    pub fn device_session_epoch(&self, handle: &str) -> Option<u64> {
+        self.devices_by_handle
+            .get(handle)
+            .map(|device| device.session_epoch)
     }
 
     pub fn single_available_device_handle(&self) -> Option<String> {
@@ -291,6 +264,30 @@ impl SessionHandles {
     }
 
     pub fn set_facts(&mut self, handle: &str, facts: Value) -> Result<(), String> {
+        let epoch = self.device_session_epoch(handle).ok_or_else(|| {
+            stable_handle_error("device_unknown", "This device is no longer available.")
+        })?;
+        self.set_facts_for_epoch(handle, epoch, facts)
+    }
+
+    /// Retain facts only for the native device session that produced them.
+    /// Callers capture the epoch before asynchronous observation and must pass
+    /// that same epoch after revalidating continuity.
+    pub fn set_facts_for_epoch(
+        &mut self,
+        handle: &str,
+        expected_epoch: u64,
+        facts: Value,
+    ) -> Result<(), String> {
+        let device = self.devices_by_handle.get(handle).ok_or_else(|| {
+            stable_handle_error("device_unknown", "This device is no longer available.")
+        })?;
+        if device.state != "available" || device.session_epoch != expected_epoch {
+            return Err(stable_handle_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
         let changed = self
             .devices_by_handle
             .get(handle)
@@ -307,6 +304,10 @@ impl SessionHandles {
             .get_mut(handle)
             .expect("device was checked above")
             .facts = Some(facts);
+        self.devices_by_handle
+            .get_mut(handle)
+            .expect("device was checked above")
+            .facts_session_epoch = Some(expected_epoch);
         Ok(())
     }
 
@@ -346,9 +347,26 @@ impl SessionHandles {
     }
 
     pub fn facts(&self, handle: &str) -> Result<&Value, String> {
-        self.device(handle)?.facts.as_ref().ok_or_else(|| {
+        let device = self.device(handle)?;
+        if device.facts_session_epoch != Some(device.session_epoch) {
+            return Err(stable_handle_error(
+                "device_not_probed",
+                "Read the device information again.",
+            ));
+        }
+        device.facts.as_ref().ok_or_else(|| {
             stable_handle_error("device_not_probed", "Read the device information again.")
         })
+    }
+
+    /// Return the retained typed-probe payload with its capture epoch.
+    pub fn facts_with_epoch(&self, handle: &str) -> Result<(&Value, u64), String> {
+        let device = self.device(handle)?;
+        let facts = self.facts(handle)?;
+        let epoch = device.facts_session_epoch.ok_or_else(|| {
+            stable_handle_error("device_not_probed", "Read the device information again.")
+        })?;
+        Ok((facts, epoch))
     }
 
     pub fn insert_review(&mut self, mut snapshot: ReviewedPlanSnapshot) -> String {
@@ -427,7 +445,6 @@ impl SessionHandles {
         self.review_order.clear();
         self.devices_by_handle.clear();
         self.qualification_context_by_handle.clear();
-        self.qualification_device_by_session.clear();
         self.last_inventory_count = None;
         for epoch in self.session_epoch_by_handle.values_mut() {
             *epoch = epoch.saturating_add(1).max(1);
@@ -480,7 +497,6 @@ impl SessionHandles {
     pub fn invalidate_identity_authority(&mut self, device_handle: &str) {
         self.devices_by_handle.remove(device_handle);
         self.qualification_context_by_handle.remove(device_handle);
-        self.clear_qualification_associations_for_device(device_handle);
         self.invalidate_reviews_for_device(device_handle, "review_stale");
         let epoch = self
             .session_epoch_by_handle
@@ -488,11 +504,6 @@ impl SessionHandles {
             .or_insert(1);
         *epoch = epoch.saturating_add(1).max(1);
         self.device_generation = self.device_generation.saturating_add(1).max(1);
-    }
-
-    fn clear_qualification_associations_for_device(&mut self, device_handle: &str) {
-        self.qualification_device_by_session
-            .retain(|_, associated| associated != device_handle);
     }
 
     fn expire_reviews(&mut self) {
@@ -569,33 +580,6 @@ mod tests {
             created: Instant::now(),
             last_access: Instant::now(),
         }
-    }
-
-    #[test]
-    fn qualification_session_device_associations_are_process_local_and_single_device() {
-        let mut handles = SessionHandles::default();
-
-        assert!(handles.associate_qualification_session_device("session-one", "device-live"));
-        assert_eq!(
-            handles.qualification_session_device_handle("session-one"),
-            Some("device-live")
-        );
-        assert!(handles.associate_qualification_session_device("session-one", "device-live"));
-        assert!(!handles.associate_qualification_session_device("session-one", "device-other"));
-
-        assert!(handles.clear_qualification_session_device("session-one"));
-        assert_eq!(
-            handles.qualification_session_device_handle("session-one"),
-            None
-        );
-        assert!(!handles.clear_qualification_session_device("session-one"));
-        assert!(handles.associate_qualification_session_device("session-one", "device-live"));
-
-        handles.invalidate_runtime_authority_preserving_identities();
-        assert_eq!(
-            handles.qualification_session_device_handle("session-one"),
-            None
-        );
     }
 
     #[test]
@@ -858,7 +842,6 @@ mod tests {
             }))
             .unwrap();
         let old = devices[0].device_handle.clone();
-        assert!(store.associate_qualification_session_device("session-one", &old));
         let old_epoch = store.device(&old).unwrap().session_epoch;
         store.set_qualification_context(qualification_context_for(&old, old_epoch));
         let review = store.insert_review(review_snapshot(&old));
@@ -873,10 +856,6 @@ mod tests {
 
         assert_ne!(replacement, old);
         assert!(store.device(&old).is_err());
-        assert_eq!(
-            store.qualification_session_device_handle("session-one"),
-            None
-        );
         assert!(store.qualification_context(&old).is_none());
         assert!(store
             .review(&review)
@@ -1005,13 +984,8 @@ mod tests {
             .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
             .unwrap();
         let handle = devices[0].device_handle.clone();
-        assert!(store.associate_qualification_session_device("session-one", &handle));
         let review = store.insert_review(review_snapshot(&handle));
         store.update_devices(&json!({ "devices": [] })).unwrap();
-        assert_eq!(
-            store.qualification_session_device_handle("session-one"),
-            None
-        );
         assert!(store.review(&review).unwrap_err().contains("review_stale"));
     }
 
@@ -1057,17 +1031,12 @@ mod tests {
             "capability-fingerprint",
         ));
         let review = store.insert_review(review_snapshot(&handle));
-        assert!(store.associate_qualification_session_device("session-one", &handle));
         let generation = store.device_generation();
         let epoch = store.device(&handle).unwrap().session_epoch;
 
         store.invalidate_identity_authority(&handle);
 
         assert!(store.device(&handle).is_err());
-        assert_eq!(
-            store.qualification_session_device_handle("session-one"),
-            None
-        );
         assert!(store.qualification_context(&handle).is_none());
         assert!(store.review(&review).unwrap_err().contains("review_stale"));
         assert!(store.device_generation() > generation);
@@ -1083,6 +1052,51 @@ mod tests {
             .unwrap();
         assert_eq!(reappeared[0].device_handle, handle);
         assert!(store.device(&handle).unwrap().session_epoch > epoch);
+        assert!(store.facts(&handle).is_err());
+    }
+
+    #[test]
+    fn facts_from_a_prior_device_epoch_are_not_retained_after_reconnect() {
+        let mut store = SessionHandles::default();
+        let handle = store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-1"
+                }]
+            }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        store
+            .set_facts(
+                &handle,
+                json!({ "model": "Pocket", "firmwareBuild": "old" }),
+            )
+            .unwrap();
+        let captured_epoch = store.device_session_epoch(&handle).unwrap();
+
+        store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-2"
+                }]
+            }))
+            .unwrap();
+
+        assert!(store.device_session_epoch(&handle).unwrap() > captured_epoch);
+        assert!(store
+            .set_facts_for_epoch(
+                &handle,
+                captured_epoch,
+                json!({ "model": "Pocket", "firmwareBuild": "stale" }),
+            )
+            .is_err());
         assert!(store.facts(&handle).is_err());
     }
 

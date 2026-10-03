@@ -1,6 +1,7 @@
 mod adb;
 mod catalog;
 mod commands;
+mod device_observation;
 mod device_qualification;
 mod execution;
 mod handles;
@@ -10,6 +11,7 @@ mod qualification;
 pub(crate) mod qualification_build;
 mod qualification_mode;
 pub(crate) mod qualification_repository;
+mod qualification_session;
 mod recovery;
 mod saved_configurations;
 mod sidecar;
@@ -54,7 +56,7 @@ pub fn run() {
                 app.handle().exit(exit_code);
                 return Ok(());
             }
-            app.manage(commands::AppState {
+            let app_state = commands::AppState {
                 sidecar,
                 catalog,
                 qualification_repository: qualification_repository::QualificationRepositoryProvider::default(),
@@ -64,6 +66,9 @@ pub fn run() {
                 ),
                 input_contracts: Mutex::new(commands::InputContractSnapshot::default()),
                 handles: Mutex::new(handles::SessionHandles::default()),
+                qualification_sessions: Mutex::new(
+                    qualification_session::QualificationSessionStore::default(),
+                ),
                 root_qualification: Mutex::new(
                     device_qualification::RootQualificationStore::default(),
                 ),
@@ -80,7 +85,9 @@ pub fn run() {
                 support: Mutex::new(support::SupportStore::new(cache_root)),
                 updates: updates::UpdateService::from_production_document()?,
                 update_activity: updates::ActivityGate::default(),
-            });
+            };
+            qualification_mode::recover_sessions_at_process_start(&app_state);
+            app.manage(app_state);
             app.manage(phase6d6_ui_smoke::Phase6d6UiSmokeStore::default());
             Ok(())
         })
@@ -101,17 +108,15 @@ pub fn run() {
             commands::poll_devices,
             commands::probe_device,
             device_qualification::check_device_root,
+            device_observation::get_device_qualification,
             commands::match_device,
             qualification_mode::get_device_qualification_mode_status,
             qualification_mode::create_qualification_target_candidate,
             qualification_mode::register_qualification_target,
             qualification_mode::discard_qualification_candidate,
             qualification_mode::begin_qualification_session,
-            qualification_mode::refresh_qualification_session,
-            qualification_mode::bind_qualification_review,
-            qualification_mode::bind_qualification_execution,
             qualification_mode::record_qualification_checkpoint,
-            qualification_mode::finalize_qualification_candidate,
+            qualification_mode::abandon_qualification_session,
             qualification_mode::record_qualification_run,
             commands::describe_configuration,
             commands::create_review,
@@ -148,7 +153,6 @@ pub fn run() {
             execution::get_real_execution_events,
             execution::cancel_real_execution,
             execution::export_execution_report,
-            device_qualification::get_device_qualification,
             execution::launch_configured_app,
             support::get_cache_inventory,
             support::get_support_snapshot,

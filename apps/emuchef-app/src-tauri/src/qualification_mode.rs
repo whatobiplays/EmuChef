@@ -8,16 +8,11 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tauri::State;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-use crate::commands::{match_device_observation, probe_device_facts, safe_error, AppState};
-use crate::device_qualification::{
-    check_device_root_observation, refresh_current_qualification, CapabilityAvailabilityDto,
-    DeviceQualificationState, RootQualificationState,
-};
-use crate::handles::SessionHandles;
+use crate::commands::{safe_error, AppState};
+use crate::device_observation::{SelectedDeviceCapture, SelectedDeviceObservationSource};
 use crate::qualification_build::{
     embedded_build_identity, qualification_gate_inputs, qualification_mode_enabled_at_runtime,
     QualificationBuildIdentity,
@@ -177,6 +172,7 @@ pub(crate) struct QualificationCandidateSummaryDto {
 pub(crate) struct QualificationModeStatus {
     pub(crate) enabled: bool,
     pub(crate) recordable: bool,
+    pub(crate) device_selection_locked: bool,
     pub(crate) message: Option<String>,
     pub(crate) build: Option<QualificationBuildIdentity>,
     pub(crate) runtime_contract: Option<String>,
@@ -184,825 +180,8 @@ pub(crate) struct QualificationModeStatus {
     pub(crate) targets: Vec<QualificationTargetSummary>,
     pub(crate) resumable_candidates: Vec<QualificationCandidateSummaryDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resumable_session: Option<QualificationSessionSnapshot>,
-}
-
-/// The validity of a run candidate is monotonic: a session may become invalid,
-/// but a later device observation can never make it valid again.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RunValidity {
-    Valid,
-    Invalid,
-}
-
-/// The product result is kept separate from run validity so an interrupted or
-/// otherwise invalid run is never presented as a product failure.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum QualificationOutcome {
-    Passed,
-    Failed,
-    NotObserved,
-}
-
-/// Stable reasons for invalidating a qualification session.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum QualificationInvalidation {
-    DeviceUnavailable,
-    DeviceIdentityChanged,
-    TargetProfileChanged,
-    ManufacturerChanged,
-    ModelChanged,
-    AndroidVersionChanged,
-    AndroidApiChanged,
-    AbiSocClassChanged,
-    FirmwareBuildChanged,
-    RootStateChanged,
-    RefreshFailed,
-    MissingRequiredCheckpoint,
-    RequiredCheckpointUnableToVerify,
-    PrerequisiteFailed,
-    ExecutionCancelled,
-    ExecutionUnavailable,
-}
-
-impl QualificationInvalidation {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::DeviceUnavailable => "device_unavailable",
-            Self::DeviceIdentityChanged => "device_identity_changed",
-            Self::TargetProfileChanged => "target_profile_changed",
-            Self::ManufacturerChanged => "manufacturer_changed",
-            Self::ModelChanged => "model_changed",
-            Self::AndroidVersionChanged => "android_version_changed",
-            Self::AndroidApiChanged => "android_api_changed",
-            Self::AbiSocClassChanged => "abi_soc_class_changed",
-            Self::FirmwareBuildChanged => "firmware_build_changed",
-            Self::RootStateChanged => "root_state_changed",
-            Self::RefreshFailed => "refresh_failed",
-            Self::MissingRequiredCheckpoint => "missing_required_checkpoint",
-            Self::RequiredCheckpointUnableToVerify => "required_checkpoint_unable_to_verify",
-            Self::PrerequisiteFailed => "prerequisite_failed",
-            Self::ExecutionCancelled => "execution_cancelled",
-            Self::ExecutionUnavailable => "execution_unavailable",
-        }
-    }
-}
-
-/// The material device facts observed by the existing production qualification
-/// helpers. These facts are compared against the target bound to a session.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct QualificationDeviceObservation {
-    pub(crate) device_identity: String,
-    pub(crate) profile_id: String,
-    pub(crate) manufacturer: String,
-    pub(crate) model: String,
-    pub(crate) android_version: String,
-    pub(crate) android_api: u64,
-    pub(crate) abi_soc_class: String,
-    pub(crate) firmware_build: String,
-    pub(crate) root_state: QualificationRootState,
-}
-
-impl QualificationDeviceObservation {
-    #[cfg(test)]
-    fn for_test() -> Self {
-        Self {
-            device_identity: "device-test".to_string(),
-            profile_id: "profile.test".to_string(),
-            manufacturer: "Test".to_string(),
-            model: "Device".to_string(),
-            android_version: "15".to_string(),
-            android_api: 35,
-            abi_soc_class: "arm64".to_string(),
-            firmware_build: "test/build".to_string(),
-            root_state: QualificationRootState::NonRoot,
-        }
-    }
-}
-
-/// The immutable target facts captured from the repository target catalog at
-/// the point a session starts.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct QualificationTargetBinding {
-    pub(crate) target_id: String,
-    pub(crate) profile_id: String,
-    pub(crate) manufacturer: String,
-    pub(crate) model: String,
-    pub(crate) android_version: String,
-    pub(crate) android_api: u64,
-    pub(crate) abi_soc_class: String,
-    pub(crate) root_state: QualificationRootState,
-    pub(crate) connection_type: QualificationConnectionType,
-    pub(crate) firmware_build: String,
-}
-
-/// One explicitly submitted operator checkpoint. The timestamp is assigned at
-/// submission and is never recomputed during restart or finalization.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct RecordedQualificationCheckpoint {
-    pub(crate) checkpoint_id: String,
-    pub(crate) outcome: QualificationCheckpointOutcome,
-    pub(crate) observed_at: String,
-}
-
-/// Strict on-disk representation of a resumable qualification session.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct PersistedQualificationSession {
-    pub(crate) session_schema_version: u64,
-    pub(crate) session_handle: String,
-    pub(crate) candidate_handle: String,
-    pub(crate) captured_at: String,
-    pub(crate) device_handle: String,
-    pub(crate) target_id: String,
-    pub(crate) target: QualificationTargetBinding,
-    pub(crate) workflow_id: String,
-    pub(crate) workflow_version: u64,
-    pub(crate) device_plan: String,
-    pub(crate) required_recipes: Vec<String>,
-    pub(crate) prerequisites: Vec<String>,
-    pub(crate) human_checkpoints: Vec<QualificationWorkflowCheckpoint>,
-    pub(crate) automated_observations: Vec<QualificationWorkflowObservation>,
-    pub(crate) recorded_checkpoints: Vec<RecordedQualificationCheckpoint>,
-    pub(crate) build: QualificationBuildIdentity,
-    pub(crate) runtime_contract: String,
-    pub(crate) run_validity: RunValidity,
-    pub(crate) invalidation: Option<QualificationInvalidation>,
-    pub(crate) bound_review_handle: Option<String>,
-    pub(crate) bound_execution_handle: Option<String>,
-    pub(crate) terminal_execution_status: Option<String>,
-    pub(crate) terminal_outcome: QualificationOutcome,
-}
-
-/// Sanitized session state returned to the overlay. Handles are opaque and no
-/// candidate paths, process arguments, or raw device observations cross this
-/// boundary.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct QualificationSessionSnapshot {
-    pub(crate) session_handle: String,
-    pub(crate) target_id: String,
-    pub(crate) workflow_id: String,
-    pub(crate) workflow_version: u64,
-    pub(crate) device_plan: String,
-    pub(crate) required_recipes: Vec<String>,
-    pub(crate) human_checkpoints: Vec<QualificationWorkflowCheckpoint>,
-    pub(crate) recorded_checkpoints: Vec<RecordedQualificationCheckpoint>,
-    pub(crate) run_validity: RunValidity,
-    pub(crate) qualification_outcome: QualificationOutcome,
-    pub(crate) invalid_reason: Option<String>,
-    pub(crate) candidate: Option<QualificationCandidateSummaryDto>,
-}
-
-const SESSION_SCHEMA_VERSION: u64 = 1;
-const SESSION_HANDLE_PREFIX: &str = "qualification-session-";
-const SESSION_HANDLE_HEX_LENGTH: usize = 32;
-
-/// Pure lifecycle state for one qualification run candidate.
-pub(crate) struct QualificationSession {
-    session_handle: String,
-    candidate_handle: String,
-    captured_at: String,
-    device_handle: String,
-    target_id: String,
-    target: QualificationTargetBinding,
-    workflow_id: String,
-    workflow_version: u64,
-    device_plan: String,
-    required_recipes: Vec<String>,
-    prerequisites: Vec<String>,
-    human_checkpoints: Vec<QualificationWorkflowCheckpoint>,
-    automated_observations: Vec<QualificationWorkflowObservation>,
-    recorded_checkpoints: Vec<RecordedQualificationCheckpoint>,
-    build: QualificationBuildIdentity,
-    runtime_contract: String,
-    invalidation: Option<QualificationInvalidation>,
-    bound_review_handle: Option<String>,
-    bound_execution_handle: Option<String>,
-    terminal_execution_status: Option<String>,
-    terminal_outcome: QualificationOutcome,
-}
-
-impl QualificationSession {
-    pub(crate) fn new(
-        session_handle: String,
-        candidate_handle: String,
-        captured_at: String,
-        device_handle: String,
-        target: QualificationTargetBinding,
-        workflow: QualificationWorkflow,
-        build: QualificationBuildIdentity,
-        runtime_contract: String,
-    ) -> Result<Self, String> {
-        validate_session_handle(&session_handle)?;
-        if candidate_handle.is_empty()
-            || captured_at.is_empty()
-            || device_handle.is_empty()
-            || target.target_id.is_empty()
-            || workflow.id.is_empty()
-            || runtime_contract.is_empty()
-        {
-            return Err("qualification session metadata is incomplete".to_string());
-        }
-        let target_id = target.target_id.clone();
-        Ok(Self {
-            session_handle,
-            candidate_handle,
-            captured_at,
-            device_handle,
-            target,
-            target_id,
-            workflow_id: workflow.id,
-            workflow_version: workflow.version,
-            device_plan: String::new(),
-            required_recipes: workflow.production_recipes,
-            prerequisites: workflow.prerequisites,
-            human_checkpoints: workflow.human_checkpoints,
-            automated_observations: workflow.automated_observations,
-            recorded_checkpoints: Vec::new(),
-            build,
-            runtime_contract,
-            invalidation: None,
-            bound_review_handle: None,
-            bound_execution_handle: None,
-            terminal_execution_status: None,
-            terminal_outcome: QualificationOutcome::NotObserved,
-        })
-    }
-
-    pub(crate) fn with_device_plan(mut self, device_plan: String) -> Self {
-        self.device_plan = device_plan;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(checkpoint_ids: &[&str]) -> Self {
-        let checkpoints = checkpoint_ids
-            .iter()
-            .map(|id| QualificationWorkflowCheckpoint {
-                id: (*id).to_string(),
-                instruction: "test checkpoint".to_string(),
-                fact: "test_fact".to_string(),
-                allowed_outcomes: vec![
-                    QualificationCheckpointOutcome::Pass,
-                    QualificationCheckpointOutcome::Fail,
-                    QualificationCheckpointOutcome::UnableToVerify,
-                ],
-                required: true,
-            })
-            .collect::<Vec<_>>();
-        let workflow = QualificationWorkflow {
-            id: "test-workflow".to_string(),
-            version: 1,
-            purpose: "test".to_string(),
-            production_recipes: vec!["test.recipe".to_string()],
-            required_capabilities: Vec::new(),
-            prerequisites: checkpoint_ids
-                .iter()
-                .filter(|id| **id == "clean_or_deliberately_reset_device")
-                .map(|id| (*id).to_string())
-                .collect(),
-            human_checkpoints: checkpoints,
-            compatibility_dimensions: Vec::new(),
-            automated_observations: vec![QualificationWorkflowObservation {
-                id: "execution-report".to_string(),
-                required: true,
-            }],
-        };
-        let target = QualificationTargetBinding {
-            target_id: "target-test".to_string(),
-            profile_id: "profile.test".to_string(),
-            manufacturer: "Test".to_string(),
-            model: "Device".to_string(),
-            android_version: "15".to_string(),
-            android_api: 35,
-            abi_soc_class: "arm64".to_string(),
-            root_state: QualificationRootState::NonRoot,
-            connection_type: QualificationConnectionType::Usb3,
-            firmware_build: "test/build".to_string(),
-        };
-        let build = QualificationBuildIdentity {
-            app_version: "0.1.0".to_string(),
-            git_commit: "1".repeat(40),
-            material_build_digest: format!("sha256:{}", "a".repeat(64)),
-            real_execution_enabled: true,
-            qualification_contract: 1,
-        };
-        let session = Self::new(
-            format!("{SESSION_HANDLE_PREFIX}{}", "b".repeat(32)),
-            format!("qualification-candidate-{}", "a".repeat(32)),
-            "2026-08-23T12:00:00Z".to_string(),
-            "device-test".to_string(),
-            target,
-            workflow,
-            build,
-            "real-execution-v1".to_string(),
-        )
-        .expect("test session should be valid");
-        session.with_device_plan("test-plan".to_string())
-    }
-
-    pub(crate) fn candidate_handle(&self) -> &str {
-        &self.candidate_handle
-    }
-
-    pub(crate) fn target_id(&self) -> &str {
-        &self.target_id
-    }
-
-    pub(crate) fn workflow_id(&self) -> &str {
-        &self.workflow_id
-    }
-
-    pub(crate) fn workflow_version(&self) -> u64 {
-        self.workflow_version
-    }
-
-    pub(crate) fn required_recipes(&self) -> &[String] {
-        &self.required_recipes
-    }
-
-    pub(crate) fn device_plan(&self) -> &str {
-        &self.device_plan
-    }
-
-    pub(crate) fn build_identity(&self) -> &QualificationBuildIdentity {
-        &self.build
-    }
-
-    pub(crate) fn runtime_contract(&self) -> &str {
-        &self.runtime_contract
-    }
-
-    pub(crate) fn automated_observations(&self) -> &[QualificationWorkflowObservation] {
-        &self.automated_observations
-    }
-
-    pub(crate) fn terminal_execution_status(&self) -> Option<&str> {
-        self.terminal_execution_status.as_deref()
-    }
-
-    pub(crate) fn target(&self) -> &QualificationTargetBinding {
-        &self.target
-    }
-
-    pub(crate) fn bound_review_handle(&self) -> Option<&str> {
-        self.bound_review_handle.as_deref()
-    }
-
-    pub(crate) fn bound_execution_handle(&self) -> Option<&str> {
-        self.bound_execution_handle.as_deref()
-    }
-
-    pub(crate) fn bind_review(&mut self, review_handle: String) -> Result<(), String> {
-        if self.run_validity() == RunValidity::Invalid || !self.can_bind_product_workflow() {
-            return Err("qualification session is not eligible for review binding".to_string());
-        }
-        if review_handle.is_empty() {
-            return Err("qualification review handle is invalid".to_string());
-        }
-        self.bound_review_handle = Some(review_handle);
-        Ok(())
-    }
-
-    pub(crate) fn bind_execution(&mut self, execution_handle: String) -> Result<(), String> {
-        if self.run_validity() == RunValidity::Invalid
-            || self.bound_review_handle.is_none()
-            || !self.can_bind_product_workflow()
-        {
-            return Err("qualification session is not eligible for execution binding".to_string());
-        }
-        if execution_handle.is_empty() {
-            return Err("qualification execution handle is invalid".to_string());
-        }
-        self.bound_execution_handle = Some(execution_handle);
-        Ok(())
-    }
-
-    pub(crate) fn run_validity(&self) -> RunValidity {
-        if self.invalidation.is_some() {
-            RunValidity::Invalid
-        } else {
-            RunValidity::Valid
-        }
-    }
-
-    pub(crate) fn qualification_outcome(&self) -> QualificationOutcome {
-        if self.run_validity() == RunValidity::Invalid {
-            QualificationOutcome::NotObserved
-        } else {
-            self.terminal_outcome
-        }
-    }
-
-    pub(crate) fn invalid_reason(&self) -> Option<String> {
-        self.invalidation.map(|reason| reason.as_str().to_string())
-    }
-
-    pub(crate) fn invalidate(&mut self, reason: QualificationInvalidation) {
-        if self.invalidation.is_none() {
-            self.invalidation = Some(reason);
-            self.terminal_outcome = QualificationOutcome::NotObserved;
-        }
-    }
-
-    pub(crate) fn observe_matching_device(&mut self, observation: QualificationDeviceObservation) {
-        if self.run_validity() == RunValidity::Invalid {
-            return;
-        }
-        if observation.device_identity != self.device_handle {
-            self.invalidate(QualificationInvalidation::DeviceIdentityChanged);
-            return;
-        }
-        self.observe_matching_target(observation);
-    }
-
-    /// Compare trusted live observations with the session's immutable target.
-    ///
-    /// The observation's opaque device handle is intentionally excluded because
-    /// it is valid only within one application process. Callers must establish
-    /// current-process handle continuity through \`SessionHandles\`.
-    pub(crate) fn observe_matching_target(&mut self, observation: QualificationDeviceObservation) {
-        if self.run_validity() == RunValidity::Invalid {
-            return;
-        }
-        let mismatch = if observation.profile_id != self.target.profile_id {
-            Some(QualificationInvalidation::TargetProfileChanged)
-        } else if observation.manufacturer != self.target.manufacturer {
-            Some(QualificationInvalidation::ManufacturerChanged)
-        } else if observation.model != self.target.model {
-            Some(QualificationInvalidation::ModelChanged)
-        } else if observation.android_version != self.target.android_version {
-            Some(QualificationInvalidation::AndroidVersionChanged)
-        } else if observation.android_api != self.target.android_api {
-            Some(QualificationInvalidation::AndroidApiChanged)
-        } else if observation.abi_soc_class != self.target.abi_soc_class {
-            Some(QualificationInvalidation::AbiSocClassChanged)
-        } else if observation.firmware_build != self.target.firmware_build {
-            Some(QualificationInvalidation::FirmwareBuildChanged)
-        } else if observation.root_state != self.target.root_state {
-            Some(QualificationInvalidation::RootStateChanged)
-        } else {
-            None
-        };
-        if let Some(reason) = mismatch {
-            self.invalidate(reason);
-        }
-    }
-
-    pub(crate) fn record_checkpoint(
-        &mut self,
-        checkpoint_id: &str,
-        outcome: QualificationCheckpointOutcome,
-    ) -> Result<(), String> {
-        let observed_at = OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .map_err(|_| "qualification checkpoint timestamp is unavailable".to_string())?;
-        self.record_checkpoint_at(checkpoint_id, outcome, &observed_at)
-    }
-
-    pub(crate) fn record_checkpoint_at(
-        &mut self,
-        checkpoint_id: &str,
-        outcome: QualificationCheckpointOutcome,
-        observed_at: &str,
-    ) -> Result<(), String> {
-        let declaration = self
-            .human_checkpoints
-            .iter()
-            .find(|checkpoint| checkpoint.id == checkpoint_id)
-            .ok_or_else(|| {
-                "qualification checkpoint is not declared by the workflow".to_string()
-            })?;
-        if !declaration.allowed_outcomes.contains(&outcome) {
-            return Err(
-                "qualification checkpoint outcome is not allowed by the workflow".to_string(),
-            );
-        }
-        validate_checkpoint_timestamp(observed_at)?;
-        let checkpoint = RecordedQualificationCheckpoint {
-            checkpoint_id: checkpoint_id.to_string(),
-            outcome,
-            observed_at: observed_at.to_string(),
-        };
-        if let Some(existing) = self
-            .recorded_checkpoints
-            .iter_mut()
-            .find(|recorded| recorded.checkpoint_id == checkpoint_id)
-        {
-            *existing = checkpoint;
-        } else {
-            self.recorded_checkpoints.push(checkpoint);
-        }
-        if declaration.required && outcome == QualificationCheckpointOutcome::UnableToVerify {
-            self.invalidate(QualificationInvalidation::RequiredCheckpointUnableToVerify);
-        } else if self.prerequisites.iter().any(|id| id == checkpoint_id)
-            && outcome != QualificationCheckpointOutcome::Pass
-        {
-            self.invalidate(QualificationInvalidation::PrerequisiteFailed);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn recorded_checkpoints(&self) -> &[RecordedQualificationCheckpoint] {
-        &self.recorded_checkpoints
-    }
-
-    pub(crate) fn can_bind_product_workflow(&self) -> bool {
-        self.run_validity() == RunValidity::Valid
-            && self.prerequisites.iter().all(|prerequisite| {
-                self.recorded_checkpoints.iter().any(|recorded| {
-                    recorded.checkpoint_id == *prerequisite
-                        && recorded.outcome == QualificationCheckpointOutcome::Pass
-                })
-            })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn classify_execution(&mut self, status: &str) -> Result<(), String> {
-        self.classify_execution_status(Some(status))
-    }
-
-    pub(crate) fn classify_execution_status(&mut self, status: Option<&str>) -> Result<(), String> {
-        self.terminal_execution_status = status.map(ToString::to_string);
-        let Some(status) = status else {
-            self.invalidate(QualificationInvalidation::ExecutionUnavailable);
-            return Ok(());
-        };
-        if !matches!(
-            status,
-            "succeeded" | "succeeded_with_warnings" | "failed" | "cancelled"
-        ) {
-            self.invalidate(QualificationInvalidation::ExecutionUnavailable);
-            return Ok(());
-        }
-        if self.run_validity() == RunValidity::Invalid {
-            return Ok(());
-        }
-        if self
-            .human_checkpoints
-            .iter()
-            .filter(|checkpoint| checkpoint.required)
-            .any(|checkpoint| {
-                !self.recorded_checkpoints.iter().any(|recorded| {
-                    recorded.checkpoint_id == checkpoint.id
-                        && recorded.outcome != QualificationCheckpointOutcome::UnableToVerify
-                })
-            })
-        {
-            self.invalidate(QualificationInvalidation::MissingRequiredCheckpoint);
-            return Ok(());
-        }
-        if status == "cancelled" {
-            self.invalidate(QualificationInvalidation::ExecutionCancelled);
-            return Ok(());
-        }
-        self.terminal_outcome = if status == "failed"
-            || self
-                .recorded_checkpoints
-                .iter()
-                .any(|checkpoint| checkpoint.outcome == QualificationCheckpointOutcome::Fail)
-        {
-            QualificationOutcome::Failed
-        } else {
-            QualificationOutcome::Passed
-        };
-        Ok(())
-    }
-
-    pub(crate) fn to_persisted(&self) -> PersistedQualificationSession {
-        PersistedQualificationSession {
-            session_schema_version: SESSION_SCHEMA_VERSION,
-            session_handle: self.session_handle.clone(),
-            candidate_handle: self.candidate_handle.clone(),
-            captured_at: self.captured_at.clone(),
-            device_handle: self.device_handle.clone(),
-            target_id: self.target_id.clone(),
-            target: self.target.clone(),
-            workflow_id: self.workflow_id.clone(),
-            workflow_version: self.workflow_version,
-            device_plan: self.device_plan.clone(),
-            required_recipes: self.required_recipes.clone(),
-            prerequisites: self.prerequisites.clone(),
-            human_checkpoints: self.human_checkpoints.clone(),
-            automated_observations: self.automated_observations.clone(),
-            recorded_checkpoints: self.recorded_checkpoints.clone(),
-            build: self.build.clone(),
-            runtime_contract: self.runtime_contract.clone(),
-            run_validity: self.run_validity(),
-            invalidation: self.invalidation,
-            bound_review_handle: self.bound_review_handle.clone(),
-            bound_execution_handle: self.bound_execution_handle.clone(),
-            terminal_execution_status: self.terminal_execution_status.clone(),
-            terminal_outcome: self.qualification_outcome(),
-        }
-    }
-
-    pub(crate) fn from_persisted(persisted: PersistedQualificationSession) -> Result<Self, String> {
-        if persisted.session_schema_version != SESSION_SCHEMA_VERSION {
-            return Err("qualification session schema version is unsupported".to_string());
-        }
-        validate_session_handle(&persisted.session_handle)?;
-        if persisted.candidate_handle.is_empty()
-            || persisted.captured_at.is_empty()
-            || persisted.device_handle.is_empty()
-            || persisted.target_id.is_empty()
-            || persisted.workflow_id.is_empty()
-            || persisted.runtime_contract.is_empty()
-        {
-            return Err("qualification session metadata is incomplete".to_string());
-        }
-        if persisted.target_id != persisted.target.target_id
-            || persisted.workflow_id.is_empty()
-            || persisted
-                .human_checkpoints
-                .iter()
-                .any(|checkpoint| checkpoint.id.is_empty())
-        {
-            return Err("qualification session binding is inconsistent".to_string());
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        for checkpoint in &persisted.recorded_checkpoints {
-            if !ids.insert(checkpoint.checkpoint_id.clone()) {
-                return Err("qualification session records a checkpoint more than once".to_string());
-            }
-            let declaration = persisted
-                .human_checkpoints
-                .iter()
-                .find(|declared| declared.id == checkpoint.checkpoint_id)
-                .ok_or_else(|| "qualification session records an unknown checkpoint".to_string())?;
-            if !declaration.allowed_outcomes.contains(&checkpoint.outcome)
-                || validate_checkpoint_timestamp(&checkpoint.observed_at).is_err()
-            {
-                return Err("qualification session checkpoint record is invalid".to_string());
-            }
-        }
-        let invalid = persisted.invalidation.is_some();
-        if (invalid && persisted.run_validity != RunValidity::Invalid)
-            || (!invalid && persisted.run_validity != RunValidity::Valid)
-        {
-            return Err("qualification session validity is inconsistent".to_string());
-        }
-        if invalid && persisted.terminal_outcome != QualificationOutcome::NotObserved {
-            return Err("invalid qualification session has a product outcome".to_string());
-        }
-        Ok(Self {
-            session_handle: persisted.session_handle,
-            candidate_handle: persisted.candidate_handle,
-            captured_at: persisted.captured_at,
-            device_handle: persisted.device_handle,
-            target_id: persisted.target_id,
-            target: persisted.target,
-            workflow_id: persisted.workflow_id,
-            workflow_version: persisted.workflow_version,
-            device_plan: persisted.device_plan,
-            required_recipes: persisted.required_recipes,
-            prerequisites: persisted.prerequisites,
-            human_checkpoints: persisted.human_checkpoints,
-            automated_observations: persisted.automated_observations,
-            recorded_checkpoints: persisted.recorded_checkpoints,
-            build: persisted.build,
-            runtime_contract: persisted.runtime_contract,
-            invalidation: persisted.invalidation,
-            bound_review_handle: persisted.bound_review_handle,
-            bound_execution_handle: persisted.bound_execution_handle,
-            terminal_execution_status: persisted.terminal_execution_status,
-            terminal_outcome: persisted.terminal_outcome,
-        })
-    }
-
-    pub(crate) fn snapshot(
-        &self,
-        candidate: Option<QualificationCandidateSummaryDto>,
-    ) -> QualificationSessionSnapshot {
-        QualificationSessionSnapshot {
-            session_handle: self.session_handle.clone(),
-            target_id: self.target_id.clone(),
-            workflow_id: self.workflow_id.clone(),
-            workflow_version: self.workflow_version,
-            device_plan: self.device_plan.clone(),
-            required_recipes: self.required_recipes.clone(),
-            human_checkpoints: self.human_checkpoints.clone(),
-            recorded_checkpoints: self.recorded_checkpoints.clone(),
-            run_validity: self.run_validity(),
-            qualification_outcome: self.qualification_outcome(),
-            invalid_reason: self.invalid_reason(),
-            candidate,
-        }
-    }
-}
-
-fn validate_session_handle(handle: &str) -> Result<(), String> {
-    let suffix = handle
-        .strip_prefix(SESSION_HANDLE_PREFIX)
-        .ok_or_else(|| "qualification session handle is invalid".to_string())?;
-    if suffix.len() != SESSION_HANDLE_HEX_LENGTH
-        || !suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err("qualification session handle is invalid".to_string());
-    }
-    Ok(())
-}
-
-fn validate_checkpoint_timestamp(timestamp: &str) -> Result<(), String> {
-    let bytes = timestamp.as_bytes();
-    let fixed_shape = bytes.len() >= 20
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[8..10].iter().all(u8::is_ascii_digit)
-        && bytes[11..13].iter().all(u8::is_ascii_digit)
-        && bytes[14..16].iter().all(u8::is_ascii_digit)
-        && bytes[17..19].iter().all(u8::is_ascii_digit);
-    if !fixed_shape {
-        return Err("qualification checkpoint timestamp is invalid".to_string());
-    }
-    let mut timezone_start = 19;
-    if bytes.get(timezone_start) == Some(&b'.') {
-        timezone_start += 1;
-        let fraction_start = timezone_start;
-        while bytes.get(timezone_start).is_some_and(u8::is_ascii_digit) {
-            timezone_start += 1;
-        }
-        if timezone_start == fraction_start {
-            return Err("qualification checkpoint timestamp is invalid".to_string());
-        }
-    }
-    let valid_timezone = match bytes.get(timezone_start) {
-        Some(b'Z') => timezone_start + 1 == bytes.len(),
-        Some(b'+' | b'-') => {
-            timezone_start + 6 == bytes.len()
-                && bytes[timezone_start + 3] == b':'
-                && bytes[timezone_start + 1..timezone_start + 3]
-                    .iter()
-                    .all(u8::is_ascii_digit)
-                && bytes[timezone_start + 4..timezone_start + 6]
-                    .iter()
-                    .all(u8::is_ascii_digit)
-        }
-        _ => false,
-    };
-    if !valid_timezone || OffsetDateTime::parse(timestamp, &Rfc3339).is_err() {
-        return Err("qualification checkpoint timestamp is invalid".to_string());
-    }
-    Ok(())
-}
-
-/// The production observation boundary consumed by target registration.
-/// Qualification mode may orchestrate these calls, but it does not create a
-/// second device-probing, matching, qualification, or root authority.
-trait QualificationObservationSource {
-    fn probe(&mut self, device_handle: &str) -> Result<Value, String>;
-    fn match_device(&mut self, device_handle: &str) -> Result<Value, String>;
-    fn qualification(
-        &mut self,
-        device_handle: &str,
-    ) -> Result<crate::device_qualification::DeviceQualificationSnapshotDto, String>;
-    fn root(
-        &mut self,
-        device_handle: &str,
-    ) -> Result<crate::device_qualification::RootQualificationCheckDto, String>;
-}
-
-struct AppStateQualificationObservationSource<'a> {
-    state: &'a AppState,
-}
-
-impl QualificationObservationSource for AppStateQualificationObservationSource<'_> {
-    fn probe(&mut self, device_handle: &str) -> Result<Value, String> {
-        probe_device_facts(device_handle, self.state).map(|(facts, _)| facts)
-    }
-
-    fn match_device(&mut self, device_handle: &str) -> Result<Value, String> {
-        match_device_observation(device_handle, self.state)
-    }
-
-    fn qualification(
-        &mut self,
-        device_handle: &str,
-    ) -> Result<crate::device_qualification::DeviceQualificationSnapshotDto, String> {
-        refresh_current_qualification(self.state, Some(device_handle))
-            .map(|current| current.snapshot)
-    }
-
-    fn root(
-        &mut self,
-        device_handle: &str,
-    ) -> Result<crate::device_qualification::RootQualificationCheckDto, String> {
-        check_device_root_observation(device_handle, self.state)
-    }
+    pub(crate) resumable_session:
+        Option<crate::qualification_session::QualificationSessionSnapshot>,
 }
 
 /// The only input accepted by target-registration capture.
@@ -1065,6 +244,14 @@ impl QualificationModeState {
     }
 }
 
+/// Return the build identity currently trusted by qualification mode. Persisted
+/// sessions use it to avoid resuming evidence under a different binary.
+pub(crate) fn current_build_identity(
+    provider: &QualificationRepositoryProvider,
+) -> Option<QualificationBuildIdentity> {
+    QualificationModeState::current(provider).build
+}
+
 /// Guard shared by every qualification command that changes trusted state.
 fn require_recordable_mode(
     state: &QualificationModeState,
@@ -1118,30 +305,40 @@ fn safe_qualification_error(code: &str) -> String {
     safe_error(code, message)
 }
 
-/// Drop the transient device binding after a candidate is discarded or
-/// finalized. Persisted session metadata remains untouched.
-fn clear_session_device_association(state: &AppState, session_handle: &str) -> Result<(), String> {
-    state
-        .handles
-        .lock()
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?
-        .clear_qualification_session_device(session_handle);
-    Ok(())
+/// Serialize operations that require no active attempt. Session start holds the
+/// same gate across observation and candidate creation, before device or root
+/// side effects can occur.
+pub(crate) fn with_inactive_qualification_session<T>(
+    state: &AppState,
+    repository: &crate::qualification_repository::QualificationRepository,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _begin_guard = repository
+        .lock_begin()
+        .map_err(|_| safe_qualification_error("qualification_session_active"))?;
+    crate::qualification_session::recover_persisted_sessions(state, repository)?;
+    if crate::qualification_session::session_status(state)?.is_some() {
+        return Err(safe_qualification_error("qualification_session_active"));
+    }
+    operation()
 }
 
-/// Require the trusted current-process device association before binding a
-/// production review or execution. Restored sessions intentionally have no
-/// association until normal selection, probing, and refresh validation finish;
-/// binding therefore fails closed instead of consulting historical metadata.
-fn require_current_qualification_device_handle(
-    handles: &SessionHandles,
-    session_handle: &str,
-    error_code: &str,
-) -> Result<String, String> {
-    handles
-        .qualification_session_device_handle(session_handle)
-        .map(str::to_string)
-        .ok_or_else(|| safe_qualification_error(error_code))
+/// Recover restart-stable qualification attempts while native app state is
+/// being initialized. This runs after RecoveryStore loads the process marker
+/// and before any UI status projection is available.
+pub(crate) fn recover_sessions_at_process_start(state: &AppState) {
+    let mode = QualificationModeState::current(&state.qualification_repository);
+    if !mode.enabled || mode.build.is_none() {
+        return;
+    }
+    let Some(repository) = state.qualification_repository.get() else {
+        return;
+    };
+    if crate::qualification_session::recover_persisted_sessions(state, repository).is_err() {
+        eprintln!(
+            "Qualification session startup recovery could not complete; persisted attempts remain fail-closed."
+        );
+    }
 }
 
 #[tauri::command]
@@ -1149,7 +346,25 @@ pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
 ) -> Result<QualificationModeStatus, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
-    qualification_mode_status(&mode, &state.qualification_repository)
+    if mode.enabled && mode.build.is_some() {
+        if let Some(repository) = state.qualification_repository.get() {
+            crate::qualification_session::recover_persisted_sessions(&state, repository).map_err(
+                |_| safe_qualification_error("qualification_session_recovery_unavailable"),
+            )?;
+        }
+        crate::qualification_session::retry_deferred_finalization(&state)
+            .map_err(|_| safe_qualification_error("qualification_session_recovery_unavailable"))?;
+    }
+    let mut status = qualification_mode_status(&mode, &state.qualification_repository)?;
+    // Rust may reconcile persisted session state before projecting status, but
+    // the command never infers or observes new product transitions. Disabled
+    // builds cannot hold an attempt and must not initialize the repository.
+    if status.enabled {
+        status.resumable_session = crate::qualification_session::session_status(&state)?;
+        status.device_selection_locked =
+            crate::qualification_session::device_selection_locked(&state)?;
+    }
+    Ok(status)
 }
 
 fn qualification_mode_status(
@@ -1171,7 +386,6 @@ fn qualification_mode_status(
     let repository_status = repository
         .describe_and_list_candidates()
         .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
-    let resumable_session = resumable_session_snapshot(repository, &repository_status.candidates)?;
     let description = repository_status.description;
     let workflows = workflows_from_description(&description)?;
     let targets = targets_from_description(&description)?;
@@ -1189,13 +403,14 @@ fn qualification_mode_status(
     Ok(QualificationModeStatus {
         enabled: true,
         recordable,
+        device_selection_locked: false,
         message,
         build: Some(description.build),
         runtime_contract: Some(description.runtime_contract),
         workflows,
         targets,
         resumable_candidates: candidates,
-        resumable_session,
+        resumable_session: None,
     })
 }
 
@@ -1203,6 +418,7 @@ fn disabled_mode_status() -> QualificationModeStatus {
     QualificationModeStatus {
         enabled: false,
         recordable: false,
+        device_selection_locked: false,
         message: Some(
             "Device qualification mode is unavailable in this application build.".to_string(),
         ),
@@ -1241,10 +457,19 @@ pub fn create_qualification_target_candidate(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    let _begin_guard = repository
+        .lock_begin()
+        .map_err(|_| safe_qualification_error("qualification_session_active"))?;
+    if crate::qualification_session::session_status(&state)?.is_some() {
+        return Err(safe_qualification_error("qualification_session_active"));
+    }
     repository
         .require_recordable()
         .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
-    let payload = capture_target_registration_payload(&state, &request, &build)?;
+    let payload = {
+        let mut source = QualificationObservationSource { state: &state };
+        capture_target_registration_payload(&mut source, &request, &build)?
+    };
     let handle = repository
         .create_candidate(CandidateKind::TargetRegistration, &payload, None)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
@@ -1319,8 +544,7 @@ pub fn discard_qualification_candidate(
     repository
         .discard_candidate(&candidate_handle)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let session_handle = session_handle_for_candidate(&candidate_handle)?;
-    clear_session_device_association(&state, &session_handle)?;
+    crate::qualification_session::forget_candidate(&state, &candidate_handle);
     Ok(())
 }
 
@@ -1328,254 +552,86 @@ pub fn discard_qualification_candidate(
 pub fn begin_qualification_session(
     request: BeginQualificationSessionRequest,
     state: State<'_, AppState>,
-) -> Result<QualificationSessionSnapshot, String> {
+) -> Result<crate::qualification_session::QualificationSessionSnapshot, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
     let build = require_recordable_mode(&mode)?.clone();
     let repository = state
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    repository
-        .require_recordable()
-        .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
-    let description = repository
-        .describe()
-        .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
-    if description.build != build {
-        return Err(safe_qualification_error("qualification_source_changed"));
-    }
-    let workflows = workflows_from_description(&description)?;
-    let workflow = workflows
-        .into_iter()
-        .find(|workflow| workflow.id == request.workflow_id)
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let targets = targets_from_description(&description)?;
-    let target = targets
-        .into_iter()
-        .find(|target| target.id == request.target_id)
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let target_binding = target_binding_from_summary(&target);
-    let (observation, capabilities) = {
-        let mut source = AppStateQualificationObservationSource { state: &state };
-        observe_device_from_source(&mut source, &request.device_handle, &request.device_plan)?
-    };
-    if workflow
-        .required_capabilities
-        .iter()
-        .any(|required| !capabilities.iter().any(|available| available == required))
-    {
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    let captured_at = current_timestamp()?;
-    let provisional_payload = serde_json::json!({
-        "capturedAt": captured_at,
-        "build": build,
-        "workflowId": request.workflow_id,
-        "workflowVersion": workflow.version,
-        "deviceTargetId": request.target_id,
-    });
-    let candidate_handle = repository
-        .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let session_handle = session_handle_for_candidate(&candidate_handle)?;
-    let mut session = QualificationSession::new(
-        session_handle.clone(),
-        candidate_handle.clone(),
-        provisional_payload["capturedAt"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        request.device_handle.clone(),
-        target_binding,
-        workflow,
-        build,
-        description.runtime_contract,
-    )?
-    .with_device_plan(request.device_plan);
-    session.observe_matching_device(observation);
-    if session.run_validity() == RunValidity::Invalid {
-        let _ = repository.discard_candidate(&candidate_handle);
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    if let Err(error) = repository.save_session(&candidate_handle, &session.to_persisted()) {
-        let _ = repository.discard_candidate(&candidate_handle);
-        return Err(if error.contains("source state") {
-            safe_qualification_error("qualification_source_changed")
-        } else {
-            safe_qualification_error("qualification_candidate_invalid")
-        });
-    }
-    let associated = state
-        .handles
-        .lock()
-        .map_err(|_| safe_qualification_error("qualification_target_unverified"))?
-        .associate_qualification_session_device(&session_handle, &request.device_handle);
-    if !associated {
-        let _ = repository.discard_candidate(&candidate_handle);
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    session_snapshot(repository, &session)
-}
-
-#[tauri::command]
-pub fn refresh_qualification_session(
-    session_handle: String,
-    device_handle: String,
-    state: State<'_, AppState>,
-) -> Result<QualificationSessionSnapshot, String> {
-    let mode = QualificationModeState::current(&state.qualification_repository);
-    let _ = require_recordable_mode(&mode)?;
-    let repository = state
-        .qualification_repository
-        .get()
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let candidate_handle = session_candidate_handle(&session_handle)?;
-    let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    let associated_device_handle = state
-        .handles
-        .lock()
-        .map_err(|_| safe_qualification_error("qualification_target_unverified"))?
-        .qualification_session_device_handle(&session_handle)
-        .map(str::to_string);
-    let observation = if associated_device_handle
-        .as_deref()
-        .is_some_and(|associated| associated != device_handle)
-    {
-        Err(String::new())
-    } else {
-        let mut source = AppStateQualificationObservationSource { state: &state };
-        observe_device_from_source(&mut source, &device_handle, &session.device_plan)
-            .map(|(observation, _)| observation)
-    };
-    let should_associate = apply_qualification_refresh(
-        &mut session,
-        associated_device_handle.as_deref(),
-        &device_handle,
-        observation,
-    );
-    repository
-        .save_session(&candidate_handle, &session.to_persisted())
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    if should_associate {
-        let associated = state
-            .handles
-            .lock()
-            .map_err(|_| safe_qualification_error("qualification_target_unverified"))?
-            .associate_qualification_session_device(&session_handle, &device_handle);
-        if !associated {
-            session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
-            repository
-                .save_session(&candidate_handle, &session.to_persisted())
-                .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+    with_inactive_qualification_session(&state, repository, || {
+        repository
+            .require_recordable()
+            .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
+        let description = repository
+            .describe()
+            .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
+        if description.build != build {
+            return Err(safe_qualification_error("qualification_source_changed"));
         }
-    }
-    session_snapshot(repository, &session)
-}
-
-/// Apply one trusted refresh observation to a qualification session.
-///
-/// Returns true only when a restored session has no process-local association
-/// and the observed device matches every immutable target fact.
-fn apply_qualification_refresh(
-    session: &mut QualificationSession,
-    associated_device_handle: Option<&str>,
-    device_handle: &str,
-    observation: Result<QualificationDeviceObservation, String>,
-) -> bool {
-    if associated_device_handle.is_some_and(|associated| associated != device_handle) {
-        session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
-        return false;
-    }
-    match observation {
-        Ok(observation) => session.observe_matching_target(observation),
-        Err(_) => session.invalidate(QualificationInvalidation::RefreshFailed),
-    }
-    session.run_validity() == RunValidity::Valid && associated_device_handle.is_none()
-}
-
-#[tauri::command]
-pub fn bind_qualification_review(
-    session_handle: String,
-    review_handle: String,
-    state: State<'_, AppState>,
-) -> Result<QualificationSessionSnapshot, String> {
-    let mode = QualificationModeState::current(&state.qualification_repository);
-    let _ = require_recordable_mode(&mode)?;
-    let repository = state
-        .qualification_repository
-        .get()
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let candidate_handle = session_candidate_handle(&session_handle)?;
-    let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    let (associated_device_handle, review) = {
-        let mut handles = state
-            .handles
-            .lock()
-            .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?;
-        let associated_device_handle = require_current_qualification_device_handle(
-            &handles,
-            &session_handle,
-            "qualification_review_mismatch",
-        )?;
-        let review = handles
-            .review(&review_handle)
-            .map_err(|_| safe_qualification_error("qualification_review_mismatch"))?
-            .clone();
-        (associated_device_handle, review)
-    };
-    if !review_matches_session(&session, &review, &associated_device_handle) {
-        return Err(safe_qualification_error("qualification_review_mismatch"));
-    }
-    session
-        .bind_review(review_handle)
-        .map_err(|_| safe_qualification_error("qualification_checkpoint_invalid"))?;
-    repository
-        .save_session(&candidate_handle, &session.to_persisted())
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    session_snapshot(repository, &session)
-}
-
-#[tauri::command]
-pub fn bind_qualification_execution(
-    session_handle: String,
-    execution_handle: String,
-    state: State<'_, AppState>,
-) -> Result<QualificationSessionSnapshot, String> {
-    let mode = QualificationModeState::current(&state.qualification_repository);
-    let _ = require_recordable_mode(&mode)?;
-    let repository = state
-        .qualification_repository
-        .get()
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let candidate_handle = session_candidate_handle(&session_handle)?;
-    let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    let associated_device_handle = {
-        let handles = state
-            .handles
-            .lock()
-            .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?;
-        require_current_qualification_device_handle(
-            &handles,
-            &session_handle,
-            "qualification_execution_mismatch",
-        )?
-    };
-    let binding = state
-        .executions
-        .lock()
-        .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?
-        .qualification_binding(&execution_handle)
-        .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?;
-    if !execution_matches_session(&session, &binding, &associated_device_handle) {
-        return Err(safe_qualification_error("qualification_execution_mismatch"));
-    }
-    session
-        .bind_execution(execution_handle)
-        .map_err(|_| safe_qualification_error("qualification_execution_mismatch"))?;
-    repository
-        .save_session(&candidate_handle, &session.to_persisted())
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    session_snapshot(repository, &session)
+        let workflow = workflows_from_description(&description)?
+            .into_iter()
+            .find(|workflow| workflow.id == request.workflow_id)
+            .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        let target = targets_from_description(&description)?
+            .into_iter()
+            .find(|target| target.id == request.target_id)
+            .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        let capture = {
+            let mut source = QualificationObservationSource { state: &state };
+            source.capture_selected_device(&request.device_handle, &request.device_plan)?
+        };
+        if workflow.required_capabilities.iter().any(|required| {
+            !capture
+                .capabilities
+                .iter()
+                .any(|available| available == required)
+        }) {
+            return Err(safe_qualification_error("qualification_target_unverified"));
+        }
+        let captured_at = current_timestamp()?;
+        let provisional_payload = serde_json::json!({
+            "capturedAt": captured_at,
+            "build": build,
+            "workflowId": request.workflow_id,
+            "workflowVersion": workflow.version,
+            "deviceTargetId": request.target_id,
+        });
+        let candidate_handle = repository
+            .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
+            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        let session_handle =
+            match crate::qualification_session::session_handle_for_candidate(&candidate_handle) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = repository.discard_candidate(&candidate_handle);
+                    return Err(error);
+                }
+            };
+        let started = crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle,
+                candidate_handle: candidate_handle.clone(),
+                captured_at,
+                device_plan: request.device_plan.clone(),
+                target: target_binding_from_summary(&target),
+                workflow,
+                build,
+                runtime_contract: description.runtime_contract,
+                observation: capture.observation,
+            },
+        );
+        match started {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                // An attempt that never became active must not leave a provisional
+                // candidate behind.
+                let _ = repository.discard_candidate(&candidate_handle);
+                Err(error)
+            }
+        }
+    })
 }
 
 #[tauri::command]
@@ -1584,123 +640,28 @@ pub fn record_qualification_checkpoint(
     checkpoint_id: String,
     outcome: CheckpointOutcome,
     state: State<'_, AppState>,
-) -> Result<QualificationSessionSnapshot, String> {
+) -> Result<crate::qualification_session::QualificationSessionSnapshot, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
     let _ = require_recordable_mode(&mode)?;
-    let repository = state
-        .qualification_repository
-        .get()
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let candidate_handle = session_candidate_handle(&session_handle)?;
-    let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    session
-        .record_checkpoint(&checkpoint_id, outcome)
-        .map_err(|_| safe_qualification_error("qualification_checkpoint_invalid"))?;
-    repository
-        .save_session(&candidate_handle, &session.to_persisted())
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    session_snapshot(repository, &session)
+    crate::qualification_session::record_checkpoint(
+        &state,
+        &session_handle,
+        &checkpoint_id,
+        outcome,
+    )
 }
 
+/// Close the active attempt as an operator-abandoned invalid candidate. The
+/// immutable invalid candidate is materialized so the attempt cannot be
+/// resumed, and the product execution state is never changed by abandoning.
 #[tauri::command]
-pub fn finalize_qualification_candidate(
+pub fn abandon_qualification_session(
     session_handle: String,
     state: State<'_, AppState>,
-) -> Result<QualificationSessionSnapshot, String> {
+) -> Result<crate::qualification_session::QualificationSessionSnapshot, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
-    let build = require_recordable_mode(&mode)?.clone();
-    let repository = state
-        .qualification_repository
-        .get()
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    repository
-        .require_recordable()
-        .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
-    let candidate_handle = session_candidate_handle(&session_handle)?;
-    let mut session = load_session(repository, &session_handle, &candidate_handle)?;
-    let associated_device_handle = state.handles.lock().ok().and_then(|handles| {
-        handles
-            .qualification_session_device_handle(&session_handle)
-            .map(str::to_string)
-    });
-    if session.build_identity() != &build {
-        session.invalidate(QualificationInvalidation::ExecutionUnavailable);
-    }
-    let mut report_bytes = None;
-    if let Some(execution_handle) = session.bound_execution_handle().map(str::to_string) {
-        let binding = state
-            .executions
-            .lock()
-            .ok()
-            .and_then(|executions| executions.qualification_binding(&execution_handle).ok());
-        let Some(binding) = binding else {
-            session.invalidate(QualificationInvalidation::ExecutionUnavailable);
-            session.classify_execution_status(None)?;
-            repository
-                .save_session(&candidate_handle, &session.to_persisted())
-                .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-            let payload = run_candidate_payload(repository, &session, None)?;
-            repository
-                .finalize_candidate(
-                    &candidate_handle,
-                    CandidateKind::QualificationRun,
-                    &payload,
-                    None,
-                )
-                .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
-            clear_session_device_association(&state, &session_handle)?;
-            return session_snapshot(repository, &session);
-        };
-        if !execution_matches_session(
-            &session,
-            &binding,
-            associated_device_handle.as_deref().unwrap_or_default(),
-        ) {
-            session.invalidate(QualificationInvalidation::ExecutionUnavailable);
-        } else {
-            session.classify_execution_status(binding.status.as_deref())?;
-            if binding.terminal
-                && binding.report_available
-                && binding
-                    .status
-                    .as_deref()
-                    .is_some_and(is_terminal_execution_status)
-            {
-                let report = state
-                    .executions
-                    .lock()
-                    .map_err(|_| safe_qualification_error("qualification_execution_unavailable"))
-                    .and_then(|executions| {
-                        crate::execution::production_execution_report_bytes(
-                            &executions,
-                            &execution_handle,
-                        )
-                    });
-                match report {
-                    Ok(bytes) => report_bytes = Some(bytes),
-                    Err(_) => session.invalidate(QualificationInvalidation::ExecutionUnavailable),
-                }
-            } else if session.run_validity() == RunValidity::Valid {
-                session.invalidate(QualificationInvalidation::ExecutionUnavailable);
-            }
-        }
-    } else {
-        session.classify_execution_status(None)?;
-    }
-    repository
-        .save_session(&candidate_handle, &session.to_persisted())
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let payload = run_candidate_payload(repository, &session, report_bytes.as_deref())?;
-    repository
-        .finalize_candidate(
-            &candidate_handle,
-            CandidateKind::QualificationRun,
-            &payload,
-            report_bytes.as_deref(),
-        )
-        .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
-    clear_session_device_association(&state, &session_handle)?;
-    session_snapshot(repository, &session)
+    let _ = require_recordable_mode(&mode)?;
+    crate::qualification_session::abandon(&state, &session_handle)
 }
 
 #[tauri::command]
@@ -1714,25 +675,26 @@ pub fn record_qualification_run(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let result = repository
-        .record_run(&candidate_handle)
-        .map_err(|error| qualification_repository_command_error(&error))?;
-    if result.operation != QualificationOperation::RecordRun
-        || result.candidate_kind != CandidateKind::QualificationRun
-        || result.candidate_handle != candidate_handle
-    {
-        return Err(safe_qualification_error("qualification_candidate_invalid"));
-    }
-    let run_id = result
-        .payload
-        .get("runId")
-        .and_then(Value::as_str)
-        .filter(|run_id| !run_id.is_empty())
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let session_handle = session_handle_for_candidate(&candidate_handle)?;
-    clear_session_device_association(&state, &session_handle)?;
-    Ok(QualificationRunRecordingResult {
-        run_id: run_id.to_string(),
+    with_inactive_qualification_session(&state, repository, || {
+        let result = repository
+            .record_run(&candidate_handle)
+            .map_err(|error| qualification_repository_command_error(&error))?;
+        if result.operation != QualificationOperation::RecordRun
+            || result.candidate_kind != CandidateKind::QualificationRun
+            || result.candidate_handle != candidate_handle
+        {
+            return Err(safe_qualification_error("qualification_candidate_invalid"));
+        }
+        let run_id = result
+            .payload
+            .get("runId")
+            .and_then(Value::as_str)
+            .filter(|run_id| !run_id.is_empty())
+            .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        crate::qualification_session::forget_candidate(&state, &candidate_handle);
+        Ok(QualificationRunRecordingResult {
+            run_id: run_id.to_string(),
+        })
     })
 }
 
@@ -1744,39 +706,90 @@ struct TargetRegistrationCandidatePayload {
     target: QualificationTargetCandidateTarget,
 }
 
-fn capture_target_registration_payload(
-    state: &AppState,
-    request: &CreateQualificationTargetCandidateRequest,
-    build: &QualificationBuildIdentity,
-) -> Result<Value, String> {
-    let mut source = AppStateQualificationObservationSource { state };
-    capture_target_registration_payload_from(&mut source, request, build)
+/// Qualification-specific device observation source.
+///
+/// Qualification target and session setup explicitly composes the two
+/// existing trusted authorities: the passive typed device observation owned by
+/// `device_observation`, and the explicit root-check authority owned by
+/// `device_qualification`. Neither authority probes on the other's behalf, and
+/// the composed observation is committed through the ordinary device
+/// observation seam so an active attempt observes exactly the capture that
+/// target registration and session start consumed.
+struct QualificationObservationSource<'a> {
+    state: &'a AppState,
 }
 
-fn capture_target_registration_payload_from(
-    source: &mut impl QualificationObservationSource,
+impl SelectedDeviceObservationSource for QualificationObservationSource<'_> {
+    fn capture_selected_device(
+        &mut self,
+        device_handle: &str,
+        device_plan: &str,
+    ) -> Result<SelectedDeviceCapture, String> {
+        let mut passive =
+            crate::device_observation::AppStateObservationSource { state: self.state };
+        let capture = passive.capture_selected_device(device_handle, device_plan)?;
+        let root =
+            crate::device_qualification::check_device_root_observation(device_handle, self.state)?;
+        if root.device_identity != device_handle
+            || root.session_epoch != capture.observation.session_epoch.unwrap_or_default()
+        {
+            return Err(crate::device_observation::unverified_device_error());
+        }
+        let observation = capture.observation.with_root_state(root.qualification);
+        crate::device_observation::commit_selected_observation(self.state, observation.clone())?;
+        Ok(SelectedDeviceCapture {
+            observation,
+            capabilities: capture.capabilities,
+        })
+    }
+}
+
+fn capture_target_registration_payload<S: SelectedDeviceObservationSource>(
+    source: &mut S,
     request: &CreateQualificationTargetCandidateRequest,
     build: &QualificationBuildIdentity,
 ) -> Result<Value, String> {
-    let (observation, capabilities) =
-        observe_device_from_source(source, &request.device_handle, &request.device_plan)?;
+    let capture = source.capture_selected_device(&request.device_handle, &request.device_plan)?;
+    target_registration_payload(&capture, request.connection_type, build)
+}
+
+/// Build the canonical target-registration candidate payload from one trusted
+/// typed device capture. Every material fact must have been established by the
+/// capture: an unobserved fact fails the candidate closed instead of being
+/// assumed.
+fn target_registration_payload(
+    capture: &crate::device_observation::SelectedDeviceCapture,
+    connection_type: QualificationConnectionType,
+    build: &QualificationBuildIdentity,
+) -> Result<Value, String> {
+    let observation = &capture.observation;
+    let root_state = crate::qualification_session::project_root_state(&required_observation_fact(
+        observation.root_state.clone(),
+    )?)
+    .ok_or_else(|| safe_qualification_error("qualification_target_unverified"))?;
     let target = QualificationTargetCandidateTarget {
-        profile_id: observed_fact(observation.profile_id),
-        manufacturer: observed_fact(observation.manufacturer),
-        model: observed_fact(observation.model),
-        android_version: observed_fact(observation.android_version),
-        android_api: observed_fact(observation.android_api),
-        abi_soc_class: observed_fact(observation.abi_soc_class),
+        profile_id: observed_fact(required_observation_fact(observation.profile_id.clone())?),
+        manufacturer: observed_fact(required_observation_fact(observation.manufacturer.clone())?),
+        model: observed_fact(required_observation_fact(observation.model.clone())?),
+        android_version: observed_fact(required_observation_fact(
+            observation.android_version.clone(),
+        )?),
+        android_api: observed_fact(required_observation_fact(observation.android_api)?),
+        abi_soc_class: observed_fact(required_observation_fact(
+            observation.abi_soc_class.clone(),
+        )?),
         root_state: QualificationFactPreview {
-            value: observation.root_state,
+            value: root_state,
             source: QualificationFactSource::ExplicitRootCheck,
         },
         connection_type: QualificationFactPreview {
-            value: request.connection_type,
+            value: connection_type,
             source: QualificationFactSource::OperatorAttestation,
         },
-        firmware_build: observed_fact(observation.firmware_build),
-        capabilities,
+        firmware_build: observed_fact(required_observation_fact(
+            observation.firmware_build.clone(),
+        )?),
+        capabilities: capture.capabilities.clone(),
         deferred_workflows: Vec::new(),
     };
     let payload = TargetRegistrationCandidatePayload {
@@ -1790,71 +803,9 @@ fn capture_target_registration_payload_from(
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
 }
 
-/// Projects the completed production root observation into the target contract.
-/// Explicit denial is a trusted non-root observation. Unavailable and failed
-/// checks remain unverified and cannot produce a registration candidate.
-fn project_root_state(root: &RootQualificationState) -> Result<QualificationRootState, String> {
-    match root {
-        RootQualificationState::Granted => Ok(QualificationRootState::Rooted),
-        RootQualificationState::Denied => Ok(QualificationRootState::NonRoot),
-        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => {
-            Err(safe_qualification_error("qualification_target_unverified"))
-        }
-    }
-}
-
-fn observe_device_from_source(
-    source: &mut impl QualificationObservationSource,
-    device_handle: &str,
-    device_plan: &str,
-) -> Result<(QualificationDeviceObservation, Vec<String>), String> {
-    let facts = source.probe(device_handle)?;
-    let matched = source.match_device(device_handle)?;
-    let profile_id = matched_profile_id(&matched, device_plan).ok_or_else(|| {
-        safe_error(
-            "device_plan_unmatched",
-            "The selected device plan is not a trusted match for this device.",
-        )
-    })?;
-    let snapshot = source.qualification(device_handle)?;
-    if snapshot.state != DeviceQualificationState::Supported
-        || snapshot.device_identity.as_deref() != Some(device_handle)
-        || snapshot.android_api_level.is_none()
-        || snapshot.abi_class.is_none()
-    {
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    let root = source.root(device_handle)?;
-    if root.device_identity != device_handle {
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    let root_state = project_root_state(&root.qualification)?;
-    let android_version = required_fact_string(&facts, "android_version")?;
-    let android_api = required_fact_u64(&facts, "android_api_level")?;
-    let manufacturer = required_fact_string(&facts, "manufacturer")?;
-    let model = required_fact_string(&facts, "model")?;
-    let firmware_build = required_fact_string(&facts, "firmware_build")?;
-    if snapshot.android_api_level.map(u64::from) != Some(android_api) {
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    let abi_soc_class = snapshot
-        .abi_class
-        .map(str::to_string)
-        .ok_or_else(|| safe_qualification_error("qualification_target_unverified"))?;
-    Ok((
-        QualificationDeviceObservation {
-            device_identity: device_handle.to_string(),
-            profile_id,
-            manufacturer,
-            model,
-            android_version,
-            android_api,
-            abi_soc_class,
-            firmware_build,
-            root_state,
-        },
-        capabilities_from_snapshot(&snapshot),
-    ))
+/// Require one material observation fact for canonical registration.
+fn required_observation_fact<T>(value: Option<T>) -> Result<T, String> {
+    value.ok_or_else(|| safe_qualification_error("qualification_target_unverified"))
 }
 
 fn observed_fact<T>(value: T) -> QualificationFactPreview<T> {
@@ -1862,49 +813,6 @@ fn observed_fact<T>(value: T) -> QualificationFactPreview<T> {
         value,
         source: QualificationFactSource::ProductionObservation,
     }
-}
-
-fn capabilities_from_snapshot(
-    snapshot: &crate::device_qualification::DeviceQualificationSnapshotDto,
-) -> Vec<String> {
-    let mut capabilities = Vec::new();
-    if snapshot.package_manager == CapabilityAvailabilityDto::Available {
-        capabilities.push("apk_install".to_string());
-    }
-    if snapshot.storage == CapabilityAvailabilityDto::Available {
-        capabilities.push("shared_storage_write".to_string());
-    }
-    capabilities
-}
-
-fn required_fact_string(facts: &Value, field: &str) -> Result<String, String> {
-    let value = facts
-        .get(field)
-        .filter(|value| !value.is_null())
-        .ok_or_else(|| safe_qualification_error("qualification_target_unverified"))?;
-    match value {
-        Value::String(value) if !value.is_empty() => Ok(value.clone()),
-        Value::Number(value) if field == "android_version" => Ok(value.to_string()),
-        _ => Err(safe_qualification_error("qualification_target_unverified")),
-    }
-}
-
-fn required_fact_u64(facts: &Value, field: &str) -> Result<u64, String> {
-    facts
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| safe_qualification_error("qualification_target_unverified"))
-}
-
-fn matched_profile_id(result: &Value, device_plan: &str) -> Option<String> {
-    ["candidates", "safeGenericPlans", "blankSetupPlans"]
-        .into_iter()
-        .filter_map(|field| result.get(field).and_then(Value::as_array))
-        .flatten()
-        .find(|candidate| candidate.get("planId").and_then(Value::as_str) == Some(device_plan))
-        .and_then(|candidate| candidate.get("profileId").and_then(Value::as_str))
-        .filter(|profile_id| !profile_id.is_empty())
-        .map(str::to_string)
 }
 
 fn workflows_from_description(
@@ -2005,38 +913,16 @@ fn candidate_summary_from_repository(
     })
 }
 
-fn resumable_session_snapshot(
-    repository: &crate::qualification_repository::QualificationRepository,
-    candidates: &[RepositoryCandidateSummary],
-) -> Result<Option<QualificationSessionSnapshot>, String> {
-    for candidate in candidates {
-        if candidate.kind != CandidateKind::QualificationRun
-            || candidate.run_validity.is_some()
-            || candidate.qualification_outcome.is_some()
-        {
-            continue;
-        }
-        let Ok(persisted) = repository.load_session(&candidate.candidate_handle) else {
-            continue;
-        };
-        let session = QualificationSession::from_persisted(persisted)
-            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-        if session.candidate_handle() != candidate.candidate_handle {
-            return Err(safe_qualification_error("qualification_candidate_invalid"));
-        }
-        return session_snapshot(repository, &session).map(Some);
-    }
-    Ok(None)
-}
-
 fn current_timestamp() -> Result<String, String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
 }
 
-fn target_binding_from_summary(target: &QualificationTargetSummary) -> QualificationTargetBinding {
-    QualificationTargetBinding {
+fn target_binding_from_summary(
+    target: &QualificationTargetSummary,
+) -> crate::qualification_session::QualificationTargetBinding {
+    crate::qualification_session::QualificationTargetBinding {
         target_id: target.id.clone(),
         profile_id: target.profile_id.clone(),
         manufacturer: target.manufacturer.clone(),
@@ -2048,239 +934,6 @@ fn target_binding_from_summary(target: &QualificationTargetSummary) -> Qualifica
         connection_type: target.connection_type,
         firmware_build: target.firmware_build.clone(),
     }
-}
-
-fn session_handle_for_candidate(candidate_handle: &str) -> Result<String, String> {
-    let suffix = candidate_handle
-        .strip_prefix(crate::qualification_repository::CANDIDATE_HANDLE_PREFIX)
-        .ok_or_else(|| safe_qualification_error("qualification_candidate_invalid"))?;
-    let handle = format!("{SESSION_HANDLE_PREFIX}{suffix}");
-    validate_session_handle(&handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    Ok(handle)
-}
-
-fn session_candidate_handle(session_handle: &str) -> Result<String, String> {
-    validate_session_handle(session_handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let suffix = session_handle
-        .strip_prefix(SESSION_HANDLE_PREFIX)
-        .expect("validated session handle has the expected prefix");
-    Ok(format!(
-        "{}{}",
-        crate::qualification_repository::CANDIDATE_HANDLE_PREFIX,
-        suffix
-    ))
-}
-
-fn load_session(
-    repository: &crate::qualification_repository::QualificationRepository,
-    session_handle: &str,
-    candidate_handle: &str,
-) -> Result<QualificationSession, String> {
-    let persisted = repository
-        .load_session(candidate_handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    if persisted.session_handle != session_handle {
-        return Err(safe_qualification_error("qualification_candidate_invalid"));
-    }
-    QualificationSession::from_persisted(persisted)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
-}
-
-fn session_snapshot(
-    repository: &crate::qualification_repository::QualificationRepository,
-    session: &QualificationSession,
-) -> Result<QualificationSessionSnapshot, String> {
-    let candidate = repository
-        .load_candidate(session.candidate_handle())
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let summary = candidate_summary_from_repository(candidate.summary())?;
-    Ok(session.snapshot(Some(summary)))
-}
-
-fn review_matches_session(
-    session: &QualificationSession,
-    review: &crate::handles::ReviewedPlanSnapshot,
-    associated_device_handle: &str,
-) -> bool {
-    if review.device_handle != associated_device_handle
-        || review.response.get("devicePlan").and_then(Value::as_str) != Some(session.device_plan())
-    {
-        return false;
-    }
-    let Some(recipes) = review
-        .response
-        .get("selectedRecipes")
-        .and_then(Value::as_array)
-    else {
-        return false;
-    };
-    let recipes = recipes
-        .iter()
-        .map(Value::as_str)
-        .collect::<Option<Vec<_>>>();
-    if recipes.as_deref()
-        != Some(
-            session
-                .required_recipes()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .as_slice(),
-        )
-    {
-        return false;
-    }
-    let target = &review.target;
-    if let Some(target_id) = target
-        .get("id")
-        .or_else(|| review.response.get("deviceTargetId"))
-        .or_else(|| review.response.get("targetId"))
-        .and_then(Value::as_str)
-    {
-        if target_id != session.target_id() {
-            return false;
-        }
-    }
-    target.get("manufacturer").and_then(Value::as_str) == Some(&session.target().manufacturer)
-        && target.get("model").and_then(Value::as_str) == Some(&session.target().model)
-        && target.get("androidApiLevel").and_then(Value::as_u64)
-            == Some(session.target().android_api)
-}
-
-fn execution_matches_session(
-    session: &QualificationSession,
-    binding: &crate::execution::QualificationExecutionBinding,
-    associated_device_handle: &str,
-) -> bool {
-    binding.real
-        && binding.device_handle == associated_device_handle
-        && binding.review_handle == session.bound_review_handle().unwrap_or_default()
-        && review_matches_session(session, &binding.review, associated_device_handle)
-}
-
-fn is_terminal_execution_status(status: &str) -> bool {
-    matches!(
-        status,
-        "succeeded" | "succeeded_with_warnings" | "failed" | "cancelled"
-    )
-}
-
-fn run_candidate_payload(
-    repository: &crate::qualification_repository::QualificationRepository,
-    session: &QualificationSession,
-    report_bytes: Option<&[u8]>,
-) -> Result<Value, String> {
-    let mut authored_content = Vec::new();
-    for recipe_id in session.required_recipes() {
-        if recipe_id.is_empty()
-            || recipe_id.contains('/')
-            || recipe_id.contains('\\')
-            || recipe_id.contains("..")
-        {
-            return Err(safe_qualification_error(
-                "qualification_finalization_failed",
-            ));
-        }
-        let path = repository
-            .repo_root()
-            .join("authored/recipes")
-            .join(format!("{recipe_id}.yaml"));
-        let bytes = std::fs::read(path)
-            .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
-        authored_content.push(serde_json::json!({
-            "id": recipe_id,
-            "sha256": hex::encode(Sha256::digest(bytes)),
-        }));
-    }
-    let target = session.target();
-    let target_root_state = serde_json::to_value(&target.root_state)
-        .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
-    let target_connection_type = serde_json::to_value(target.connection_type)
-        .map_err(|_| safe_qualification_error("qualification_finalization_failed"))?;
-    let fingerprint = serde_json::json!({
-        "schemaVersion": 2,
-        "emuchefBuild": session.build_identity(),
-        "workflowVersion": session.workflow_version(),
-        "authoredContent": authored_content,
-        "runtimeContract": session.runtime_contract(),
-        "deviceProfile": target.profile_id,
-        "androidApi": target.android_api,
-        "firmwareBuild": target.firmware_build,
-        "abiSocClass": target.abi_soc_class,
-        "rootState": target_root_state,
-        "connectionType": target_connection_type,
-    });
-    let valid = session.run_validity() == RunValidity::Valid;
-    let observed_at = current_timestamp()?;
-    let automated_observations = if valid {
-        let outcome = match session.terminal_execution_status() {
-            Some("succeeded") | Some("succeeded_with_warnings") => "passed",
-            Some("failed") => "failed",
-            _ => {
-                return Err(safe_qualification_error(
-                    "qualification_finalization_failed",
-                ))
-            }
-        };
-        session
-            .automated_observations()
-            .iter()
-            .filter(|observation| observation.id == "execution-report")
-            .map(|observation| {
-                serde_json::json!({
-                    "id": observation.id,
-                    "outcome": outcome,
-                    "observedAt": observed_at,
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let human_checkpoints = session
-        .recorded_checkpoints()
-        .iter()
-        .map(|checkpoint| {
-            serde_json::json!({
-                "checkpointId": checkpoint.checkpoint_id,
-                "outcome": checkpoint.outcome,
-                "observedAt": checkpoint.observed_at,
-            })
-        })
-        .collect::<Vec<_>>();
-    let artifacts = report_bytes
-        .map(|bytes| {
-            vec![serde_json::json!({
-                "id": "execution-report",
-                "kind": "production_execution_report",
-                "path": "execution-report.json",
-                "sha256": hex::encode(Sha256::digest(bytes)),
-            })]
-        })
-        .unwrap_or_default();
-    Ok(serde_json::json!({
-        "candidateSchemaVersion": 1,
-        "candidateId": session.candidate_handle(),
-        "kind": "qualification_run",
-        "capturedAt": session.to_persisted().captured_at,
-        "build": session.build_identity(),
-        "workflowId": session.workflow_id(),
-        "workflowVersion": session.workflow_version(),
-        "deviceTargetId": target.target_id,
-        "fingerprint": fingerprint,
-        "runValidity": session.run_validity(),
-        "qualificationOutcome": session.qualification_outcome(),
-        "automatedObservations": automated_observations,
-        "humanCheckpoints": human_checkpoints,
-        "targetWideFailure": Value::Null,
-        "limitations": session
-            .invalid_reason()
-            .into_iter()
-            .collect::<Vec<_>>(),
-        "artifacts": artifacts,
-    }))
 }
 
 fn target_candidate_preview(
@@ -2315,10 +968,8 @@ mod tests {
     use super::*;
     use crate::adb::AdbManager;
     use crate::commands::{AppState, InputContractSnapshot, PlatformToolsSelectionStore};
-    use crate::device_qualification::{
-        CapabilityAvailabilityDto, DeviceQualificationSnapshotDto, RootQualificationCheckDto,
-        RootQualificationFailureReason,
-    };
+    use crate::device_observation::{SelectedDeviceCapture, SelectedDeviceObservation};
+    use crate::device_qualification::{RootQualificationFailureReason, RootQualificationState};
     use crate::execution::ExecutionHandleStore;
     use crate::handles::SessionHandles;
     use crate::qualification_repository::QualificationRepositoryProvider;
@@ -2330,79 +981,88 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
     use tauri::Manager;
 
-    #[derive(Clone)]
-    struct FakeObservationSource {
-        calls: Vec<&'static str>,
-        facts: Value,
-        matched: Value,
-        qualification: DeviceQualificationSnapshotDto,
-        root: RootQualificationCheckDto,
+    /// Deterministic stand-in for the production device-observation seam.
+    ///
+    /// The production implementation composes the ADB probe, the catalog
+    /// match, the passive support projection, and the explicit root check into
+    /// one typed capture. Tests supply that exact typed result instead, so the
+    /// candidate payload projection is proven without a device or a sidecar
+    /// process.
+    struct FakeDeviceSource {
+        capture: Option<SelectedDeviceCapture>,
+        error: Option<String>,
+        calls: usize,
     }
 
-    impl QualificationObservationSource for FakeObservationSource {
-        fn probe(&mut self, _device_handle: &str) -> Result<Value, String> {
-            self.calls.push("probe");
-            Ok(self.facts.clone())
+    impl FakeDeviceSource {
+        fn returning(capture: SelectedDeviceCapture) -> Self {
+            Self {
+                capture: Some(capture),
+                error: None,
+                calls: 0,
+            }
         }
 
-        fn match_device(&mut self, _device_handle: &str) -> Result<Value, String> {
-            self.calls.push("match");
-            Ok(self.matched.clone())
+        fn failing(message: &str) -> Self {
+            Self {
+                capture: None,
+                error: Some(message.to_string()),
+                calls: 0,
+            }
         }
+    }
 
-        fn qualification(
+    impl SelectedDeviceObservationSource for FakeDeviceSource {
+        fn capture_selected_device(
             &mut self,
             _device_handle: &str,
-        ) -> Result<DeviceQualificationSnapshotDto, String> {
-            self.calls.push("qualification");
-            Ok(self.qualification.clone())
-        }
-
-        fn root(&mut self, device_handle: &str) -> Result<RootQualificationCheckDto, String> {
-            self.calls.push("root");
-            let mut root = self.root.clone();
-            root.device_identity = device_handle.to_string();
-            Ok(root)
+            _device_plan: &str,
+        ) -> Result<SelectedDeviceCapture, String> {
+            self.calls += 1;
+            if let Some(error) = self.error.take() {
+                return Err(error);
+            }
+            Ok(self
+                .capture
+                .take()
+                .expect("the fake observation source must be consulted once"))
         }
     }
 
-    fn observation_source() -> FakeObservationSource {
-        FakeObservationSource {
-            calls: Vec::new(),
-            facts: json!({
-                "manufacturer": "AYANEO",
-                "model": "Pocket S2",
-                "android_version": 15,
-                "android_api_level": 35,
-                "firmware_build": "vendor/build"
-            }),
-            matched: json!({
-                "candidates": [{ "planId": "selected-plan", "profileId": "ayaneo.pocket_s2" }]
-            }),
-            qualification: DeviceQualificationSnapshotDto {
-                state: DeviceQualificationState::Supported,
-                summary: "supported",
-                limitations: Vec::new(),
-                android_major: Some(15),
-                android_api_level: Some(35),
-                abi_class: Some("arm64"),
-                storage: CapabilityAvailabilityDto::Available,
-                package_manager: CapabilityAvailabilityDto::Available,
-                activity_manager: CapabilityAvailabilityDto::Unavailable,
-                root: None,
-                runtime_generation: 1,
-                qualification_revision: 1,
-                device_identity: Some("device-opaque".to_string()),
-            },
-            root: RootQualificationCheckDto {
-                qualification: RootQualificationState::Denied,
-                runtime_generation: 1,
-                qualification_revision: 1,
-                device_identity: "device-opaque".to_string(),
-            },
+    fn trusted_capture() -> SelectedDeviceCapture {
+        let facts = crate::device_observation::DeviceProbeFacts::decode(&json!({
+            "manufacturer": "AYANEO",
+            "model": "Pocket S2",
+            "android_version": 15,
+            "android_api_level": 35,
+            "firmware_build": "vendor/build"
+        }))
+        .expect("the test probe payload should decode into typed facts");
+        SelectedDeviceCapture {
+            observation: SelectedDeviceObservation::new("device-opaque")
+                .with_probe_facts(&facts)
+                .with_profile_id("ayaneo.pocket_s2")
+                .with_snapshot(&crate::device_observation::DeviceQualificationSnapshotDto {
+                    state: crate::device_observation::DeviceQualificationState::Supported,
+                    summary: "supported",
+                    limitations: Vec::new(),
+                    android_major: Some(15),
+                    android_api_level: Some(35),
+                    abi_class: Some("arm64"),
+                    storage: crate::device_observation::CapabilityAvailabilityDto::Available,
+                    package_manager:
+                        crate::device_observation::CapabilityAvailabilityDto::Available,
+                    activity_manager:
+                        crate::device_observation::CapabilityAvailabilityDto::Unavailable,
+                    root: None,
+                    runtime_generation: 1,
+                    qualification_revision: 1,
+                    device_identity: Some("device-opaque".to_string()),
+                })
+                .with_root_state(RootQualificationState::Denied),
+            capabilities: vec!["apk_install".to_string()],
         }
     }
 
@@ -2442,6 +1102,9 @@ mod tests {
                 crate::device_qualification::RootQualificationStore::default(),
             ),
             executions: Mutex::new(ExecutionHandleStore::default()),
+            qualification_sessions: Mutex::new(
+                crate::qualification_session::QualificationSessionStore::default(),
+            ),
             saved_configurations: Mutex::new(SavedConfigurationStore::load(
                 app_root.join("recent-configurations.json"),
             )),
@@ -2468,6 +1131,7 @@ mod tests {
         assert!(!status.enabled);
         assert!(!status.recordable);
         assert!(status.workflows.is_empty());
+        assert!(status.resumable_session.is_none());
         assert!(!app
             .state::<AppState>()
             .qualification_repository
@@ -2578,6 +1242,7 @@ mod tests {
         assert!(status.workflows.is_empty());
         assert!(status.targets.is_empty());
         assert!(status.resumable_candidates.is_empty());
+        assert!(status.resumable_session.is_none());
         assert!(!provider.is_initialized_for_test());
     }
 
@@ -2599,85 +1264,6 @@ mod tests {
         assert!(status.workflows.is_empty());
         assert!(status.targets.is_empty());
         assert!(status.resumable_candidates.is_empty());
-    }
-
-    #[test]
-    fn enabled_status_restores_persisted_run_session_without_reprobing_or_retimestamping() {
-        let build = test_build();
-        let description = json!({
-            "schemaVersion": 1,
-            "runtimeContract": "real-execution-v1",
-            "qualificationContract": 1,
-            "build": serde_json::to_value(&build).expect("build should serialize"),
-            "workflowCatalog": { "schemaVersion": 1, "workflows": [] },
-            "deviceTargets": { "schemaVersion": 2, "targets": [] },
-        });
-        let temp = tempfile::tempdir().expect("test repository directory should be created");
-        let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
-            temp.path().to_path_buf(),
-            Box::new(DescriptionRunner { description }),
-            build.clone(),
-            crate::qualification_repository::QualificationSourceState {
-                head: build.git_commit.clone(),
-                tracked_worktree_clean: true,
-            },
-        );
-        let candidate = repository
-            .create_candidate(
-                CandidateKind::QualificationRun,
-                &json!({
-                    "capturedAt": "2026-08-23T12:00:00Z",
-                    "build": serde_json::to_value(&build).expect("build should serialize"),
-                }),
-                None,
-            )
-            .expect("run candidate should be stored");
-        let mut session = QualificationSession::for_test(&["device_behavior_verified"]);
-        session
-            .record_checkpoint_at(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass,
-                "2026-08-23T12:34:56Z",
-            )
-            .expect("checkpoint should be recorded");
-        let mut persisted = session.to_persisted();
-        persisted.session_handle = session_handle_for_candidate(&candidate)
-            .expect("candidate should map to an opaque session handle");
-        persisted.candidate_handle = candidate.clone();
-        repository
-            .save_session(&candidate, &persisted)
-            .expect("session should be persisted");
-        let provider = QualificationRepositoryProvider::for_test(repository);
-
-        let status = qualification_mode_status(
-            &QualificationModeState {
-                enabled: true,
-                build: Some(build),
-            },
-            &provider,
-        )
-        .expect("status should restore the persisted session");
-        let restored = status
-            .resumable_session
-            .as_ref()
-            .expect("run session should be exposed for restart recovery");
-
-        assert_eq!(restored.session_handle, persisted.session_handle);
-        assert_eq!(restored.target_id, "target-test");
-        assert_eq!(
-            restored.recorded_checkpoints[0].observed_at,
-            "2026-08-23T12:34:56Z"
-        );
-        assert_eq!(
-            restored
-                .candidate
-                .as_ref()
-                .map(|candidate| candidate.candidate_handle.as_str()),
-            Some(candidate.as_str())
-        );
-        let encoded = serde_json::to_value(status).expect("status should serialize");
-        assert!(encoded["resumableSession"].get("deviceHandle").is_none());
-        assert!(encoded["resumableSession"].get("candidatePath").is_none());
     }
 
     #[test]
@@ -2720,23 +1306,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn target_capture_projects_the_exact_trusted_observation_into_the_candidate() {
+        let mut source = FakeDeviceSource::returning(trusted_capture());
+        let payload =
+            capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                .expect("a trusted capture should produce a candidate");
+
+        assert_eq!(source.calls, 1);
+        assert_eq!(payload["target"]["profileId"]["value"], "ayaneo.pocket_s2");
+        assert_eq!(
+            payload["target"]["profileId"]["source"],
+            "production_observation"
+        );
+        assert_eq!(payload["target"]["androidVersion"]["value"], "15");
+        assert_eq!(payload["target"]["androidApi"]["value"], 35);
+        assert_eq!(payload["target"]["rootState"]["value"], "non_root");
+        assert_eq!(
+            payload["target"]["rootState"]["source"],
+            "explicit_root_check"
+        );
+        assert_eq!(payload["target"]["connectionType"]["value"], "usb3");
+        assert_eq!(
+            payload["target"]["connectionType"]["source"],
+            "operator_attestation"
+        );
+        assert_eq!(payload["target"]["capabilities"], json!(["apk_install"]));
+        assert_eq!(payload["build"]["qualificationContract"], 1);
+        assert!(payload["capturedAt"].as_str().is_some());
+        let encoded = payload.to_string();
+        assert!(!encoded.contains("device-opaque"));
+        assert!(!encoded.contains("serial"));
+    }
+
+    #[test]
+    fn target_capture_fails_closed_when_the_device_is_not_trusted() {
+        let mut source =
+            FakeDeviceSource::failing(&safe_qualification_error("qualification_target_unverified"));
+        let error =
+            capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                .expect_err("an untrusted device must not produce a candidate");
+
+        assert_eq!(source.calls, 1);
+        assert!(error.contains("qualification_target_unverified"));
+    }
+
+    #[test]
+    fn target_capture_rejects_root_checks_that_never_established_a_fact() {
+        for root_state in [
+            None,
+            Some(RootQualificationState::Unavailable),
+            Some(RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::TimedOut,
+                message: "timed out".to_string(),
+            }),
+            Some(RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::Transport,
+                message: "transport failed".to_string(),
+            }),
+            Some(RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::UnexpectedResponse,
+                message: "unexpected response".to_string(),
+            }),
+        ] {
+            let mut capture = trusted_capture();
+            capture.observation.root_state = root_state;
+            let mut source = FakeDeviceSource::returning(capture);
+            let error =
+                capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                    .expect_err("an unproven root check must not produce a target candidate");
+            assert!(
+                error.contains("qualification_target_unverified"),
+                "unexpected target-capture error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_capture_projects_completed_root_checks_both_ways() {
+        for (root, expected) in [
+            (RootQualificationState::Granted, "rooted"),
+            (RootQualificationState::Denied, "non_root"),
+        ] {
+            let mut capture = trusted_capture();
+            capture.observation.root_state = Some(root);
+            let mut source = FakeDeviceSource::returning(capture);
+            let payload =
+                capture_target_registration_payload(&mut source, &capture_request(), &test_build())
+                    .expect("completed root checks should project to the target contract");
+            assert_eq!(payload["target"]["rootState"]["value"], expected);
+            assert_eq!(
+                payload["target"]["rootState"]["source"],
+                "explicit_root_check"
+            );
+        }
+    }
+
     #[derive(Clone, Default)]
     struct RegistrationRunner {
         calls: Arc<Mutex<usize>>,
-    }
-
-    struct DescriptionRunner {
-        description: Value,
-    }
-
-    impl crate::qualification_repository::QualificationToolRunner for DescriptionRunner {
-        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
-            if args != ["--describe"] {
-                return Err("unexpected test operation".to_string());
-            }
-            serde_json::to_vec(&self.description)
-                .map_err(|_| "test response should serialize".to_string())
-        }
     }
 
     impl crate::qualification_repository::QualificationToolRunner for RegistrationRunner {
@@ -2756,114 +1424,11 @@ mod tests {
     }
 
     #[test]
-    fn target_capture_uses_the_production_observation_order() {
-        let mut source = observation_source();
-        let payload = capture_target_registration_payload_from(
-            &mut source,
-            &capture_request(),
-            &test_build(),
-        )
-        .expect("trusted observations should produce a candidate");
-
-        assert_eq!(
-            source.calls,
-            vec!["probe", "match", "qualification", "root"]
-        );
-        assert_eq!(payload["target"]["profileId"]["value"], "ayaneo.pocket_s2");
-        assert_eq!(payload["target"]["androidVersion"]["value"], "15");
-        assert_eq!(payload["target"]["rootState"]["value"], "non_root");
-        assert_eq!(
-            payload["target"]["rootState"]["source"],
-            "explicit_root_check"
-        );
-        assert_eq!(
-            payload["target"]["connectionType"]["source"],
-            "operator_attestation"
-        );
-    }
-
-    #[test]
-    fn target_capture_rejects_non_string_identity_observations() {
-        for field in ["manufacturer", "model", "firmware_build"] {
-            let mut source = observation_source();
-            source.facts[field] = json!(35);
-            assert!(
-                capture_target_registration_payload_from(
-                    &mut source,
-                    &capture_request(),
-                    &test_build(),
-                )
-                .is_err(),
-                "{field} must remain a string"
-            );
-        }
-    }
-
-    #[test]
-    fn target_capture_projects_root_observations_and_rejects_unverified_root_checks() {
-        let mut numeric_version = observation_source();
-        let payload = capture_target_registration_payload_from(
-            &mut numeric_version,
-            &capture_request(),
-            &test_build(),
-        )
-        .expect("numeric Android version should normalize");
-        assert_eq!(payload["target"]["androidVersion"]["value"], "15");
-
-        for (root, expected) in [
-            (RootQualificationState::Granted, "rooted"),
-            (RootQualificationState::Denied, "non_root"),
-        ] {
-            let mut source = observation_source();
-            source.root.qualification = root;
-            let payload = capture_target_registration_payload_from(
-                &mut source,
-                &capture_request(),
-                &test_build(),
-            )
-            .expect("completed root observations should project to the target contract");
-            assert_eq!(payload["target"]["rootState"]["value"], expected);
-            assert_eq!(
-                payload["target"]["rootState"]["source"],
-                "explicit_root_check"
-            );
-        }
-
-        for root in [
-            RootQualificationState::Unavailable,
-            RootQualificationState::CheckFailed {
-                reason: RootQualificationFailureReason::TimedOut,
-                message: "timed out".to_string(),
-            },
-            RootQualificationState::CheckFailed {
-                reason: RootQualificationFailureReason::Transport,
-                message: "transport failed".to_string(),
-            },
-            RootQualificationState::CheckFailed {
-                reason: RootQualificationFailureReason::UnexpectedResponse,
-                message: "unexpected response".to_string(),
-            },
-        ] {
-            let mut source = observation_source();
-            source.root.qualification = root;
-            let error = capture_target_registration_payload_from(
-                &mut source,
-                &capture_request(),
-                &test_build(),
-            )
-            .expect_err("failed root checks must not produce a target candidate");
-            assert!(
-                error.contains("qualification_target_unverified"),
-                "unexpected target-capture error: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn qualification_dtos_round_trip_the_camel_case_frontend_contract() {
         let input = json!({
             "enabled": true,
             "recordable": true,
+            "deviceSelectionLocked": false,
             "message": null,
             "build": {
                 "appVersion": "0.1.0",
@@ -2938,6 +1503,7 @@ mod tests {
         assert!(
             encoded["resumableCandidates"][0]["target"]["connectionType"]["source"].is_string()
         );
+        assert!(encoded.get("resumableSession").is_none());
         let consequence = serde_json::to_value(QualificationTargetRegistrationResult {
             target_id: "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_string(),
@@ -2993,42 +1559,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_projection_uses_only_production_availability() {
-        let snapshot = crate::device_qualification::DeviceQualificationSnapshotDto {
-            state: DeviceQualificationState::Supported,
-            summary: "supported",
-            limitations: Vec::new(),
-            android_major: Some(15),
-            android_api_level: Some(35),
-            abi_class: Some("arm64"),
-            storage: CapabilityAvailabilityDto::Available,
-            package_manager: CapabilityAvailabilityDto::Available,
-            activity_manager: CapabilityAvailabilityDto::Unavailable,
-            root: None,
-            runtime_generation: 1,
-            qualification_revision: 1,
-            device_identity: Some("device_opaque".to_string()),
-        };
-        assert_eq!(
-            capabilities_from_snapshot(&snapshot),
-            vec!["apk_install", "shared_storage_write"]
-        );
-    }
-
-    #[test]
-    fn selected_plan_resolves_only_from_production_match_projection() {
-        let result = json!({
-            "candidates": [{ "planId": "wrong", "profileId": "wrong.profile" }],
-            "safeGenericPlans": [{ "planId": "selected", "profileId": "selected.profile" }]
-        });
-        assert_eq!(
-            matched_profile_id(&result, "selected"),
-            Some("selected.profile".to_string())
-        );
-        assert_eq!(matched_profile_id(&result, "missing"), None);
-    }
-
-    #[test]
     fn target_summary_projects_v2_fact_values_without_reauthoring_them() {
         let target = json!({
             "id": "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -3072,7 +1602,6 @@ mod tests {
             build: None,
             payload: json!({ "target": target }),
             report: None,
-            report_bytes: None,
             promotable: false,
             non_promotable_reason: Some("source changed".to_string()),
         };
@@ -3089,335 +1618,5 @@ mod tests {
         );
         candidate.payload["target"]["model"]["value"] = json!("changed only in test");
         assert_eq!(preview.target.model.value, "Pocket");
-    }
-
-    #[test]
-    fn required_facts_fail_closed_but_normalize_numeric_android_release() {
-        let facts = json!({ "android_version": 15, "android_api_level": 35 });
-        assert_eq!(
-            required_fact_string(&facts, "android_version").unwrap(),
-            "15"
-        );
-        assert_eq!(required_fact_u64(&facts, "android_api_level").unwrap(), 35);
-        assert!(required_fact_string(&json!({}), "manufacturer").is_err());
-        assert!(required_fact_string(&json!({ "model": null }), "model").is_err());
-        assert!(
-            required_fact_u64(&json!({ "android_api_level": "35" }), "android_api_level").is_err()
-        );
-    }
-
-    fn test_session() -> QualificationSession {
-        QualificationSession::for_test(&["device_behavior_verified"])
-    }
-
-    fn checkpoint_session() -> QualificationSession {
-        QualificationSession::for_test(&["device_behavior_verified"])
-    }
-
-    fn test_observation() -> QualificationDeviceObservation {
-        QualificationDeviceObservation::for_test()
-    }
-
-    fn review_for_session(device_handle: &str) -> crate::handles::ReviewedPlanSnapshot {
-        crate::handles::ReviewedPlanSnapshot {
-            response: json!({
-                "devicePlan": "test-plan",
-                "selectedRecipes": ["test.recipe"],
-            }),
-            target: json!({
-                "id": "target-test",
-                "manufacturer": "Test",
-                "model": "Device",
-                "androidApiLevel": 35,
-            }),
-            catalog_identity: json!({}),
-            catalog_digest: "sha256:catalog".to_string(),
-            plan_digest: "sha256:plan".to_string(),
-            device_handle: device_handle.to_string(),
-            qualification_context: None,
-            platform_tools_identity: None,
-            created: Instant::now(),
-            last_access: Instant::now(),
-        }
-    }
-
-    #[test]
-    fn restored_refresh_associates_a_matching_live_device_without_rewriting_capture_metadata() {
-        let mut session = test_session();
-        let mut observation = test_observation();
-        observation.device_identity = "device-new-process".to_string();
-
-        let should_associate =
-            apply_qualification_refresh(&mut session, None, "device-new-process", Ok(observation));
-
-        assert!(should_associate);
-        assert_eq!(session.run_validity(), RunValidity::Valid);
-        assert_eq!(session.to_persisted().device_handle, "device-test");
-    }
-
-    #[test]
-    fn restored_refresh_invalidates_target_drift_without_association() {
-        let mut session = test_session();
-        let mut observation = test_observation();
-        observation.device_identity = "device-new-process".to_string();
-        observation.model = "Different Device".to_string();
-
-        let should_associate =
-            apply_qualification_refresh(&mut session, None, "device-new-process", Ok(observation));
-
-        assert!(!should_associate);
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(session.invalid_reason().as_deref(), Some("model_changed"));
-    }
-
-    #[test]
-    fn active_refresh_rejects_a_different_live_handle_before_observation() {
-        let mut session = test_session();
-
-        let should_associate = apply_qualification_refresh(
-            &mut session,
-            Some("device-test"),
-            "device-other",
-            Ok(test_observation()),
-        );
-
-        assert!(!should_associate);
-        assert_eq!(
-            session.invalid_reason().as_deref(),
-            Some("device_identity_changed")
-        );
-    }
-
-    #[test]
-    fn review_matching_uses_the_trusted_live_association() {
-        let session = test_session();
-        let review = review_for_session("device-new-process");
-
-        assert!(review_matches_session(
-            &session,
-            &review,
-            "device-new-process"
-        ));
-        assert!(!review_matches_session(&session, &review, "device-other"));
-    }
-
-    #[test]
-    fn binding_requires_a_current_process_association() {
-        let mut handles = SessionHandles::default();
-        let error = require_current_qualification_device_handle(
-            &handles,
-            "qualification-session-test",
-            "qualification_review_mismatch",
-        )
-        .expect_err("restored sessions must refresh before binding");
-        assert!(error.contains("qualification_review_mismatch"));
-
-        assert!(handles.associate_qualification_session_device(
-            "qualification-session-test",
-            "device-new-process"
-        ));
-        assert_eq!(
-            require_current_qualification_device_handle(
-                &handles,
-                "qualification-session-test",
-                "qualification_review_mismatch",
-            )
-            .expect("validated association should be available"),
-            "device-new-process"
-        );
-    }
-
-    #[test]
-    fn execution_matching_uses_the_trusted_live_association() {
-        let mut session = test_session();
-        session
-            .bind_review("review-new-process".to_string())
-            .unwrap();
-        let mut binding = crate::execution::QualificationExecutionBinding {
-            real: true,
-            terminal: true,
-            review_handle: "review-new-process".to_string(),
-            device_handle: "device-new-process".to_string(),
-            review: review_for_session("device-new-process"),
-            status: Some("succeeded".to_string()),
-            report_available: true,
-        };
-
-        assert!(execution_matches_session(
-            &session,
-            &binding,
-            "device-new-process"
-        ));
-        assert!(!execution_matches_session(
-            &session,
-            &binding,
-            "device-other"
-        ));
-
-        binding.device_handle = "device-other".to_string();
-        assert!(!execution_matches_session(
-            &session,
-            &binding,
-            "device-new-process"
-        ));
-    }
-
-    #[test]
-    fn resumed_observation_accepts_a_new_handle_only_when_all_target_facts_match() {
-        let mut session = test_session();
-        let mut observation = test_observation();
-        observation.device_identity = "device-new-process".to_string();
-
-        session.observe_matching_target(observation);
-
-        assert_eq!(session.run_validity(), RunValidity::Valid);
-        assert_eq!(session.to_persisted().device_handle, "device-test");
-    }
-
-    #[test]
-    fn resumed_observation_invalidates_material_target_drift() {
-        let mut session = test_session();
-        let mut observation = test_observation();
-        observation.device_identity = "device-new-process".to_string();
-        observation.firmware_build = "different-build".to_string();
-
-        session.observe_matching_target(observation);
-
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(
-            session.invalid_reason().as_deref(),
-            Some("firmware_build_changed")
-        );
-    }
-
-    #[test]
-    fn invalidated_session_never_returns_to_valid() {
-        let mut session = test_session();
-        session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        session.observe_matching_device(test_observation());
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-    }
-
-    #[test]
-    fn android_version_drift_permanently_invalidates_the_session() {
-        let mut session = test_session();
-        let mut observation = test_observation();
-        observation.android_version = "16".to_string();
-        session.observe_matching_device(observation);
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(
-            session.invalid_reason().as_deref(),
-            Some("android_version_changed")
-        );
-        session.observe_matching_device(test_observation());
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-    }
-
-    #[test]
-    fn checkpoint_ids_and_outcomes_must_come_from_the_workflow_contract() {
-        let mut session = checkpoint_session();
-        assert!(session
-            .record_checkpoint("device_behavior_verified", CheckpointOutcome::Pass)
-            .is_ok());
-        assert!(session
-            .record_checkpoint("invented", CheckpointOutcome::Pass)
-            .is_err());
-        assert!(session
-            .record_checkpoint(
-                "device_behavior_verified",
-                CheckpointOutcome::UnableToVerify
-            )
-            .is_ok());
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(
-            session.qualification_outcome(),
-            QualificationOutcome::NotObserved
-        );
-    }
-
-    #[test]
-    fn recorded_checkpoint_timestamp_survives_persistence_and_reload() {
-        let mut session = checkpoint_session();
-        session
-            .record_checkpoint_at(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass,
-                "2026-08-23T12:34:56Z",
-            )
-            .unwrap();
-        let restored = QualificationSession::from_persisted(session.to_persisted()).unwrap();
-        assert_eq!(
-            restored.recorded_checkpoints()[0].observed_at,
-            "2026-08-23T12:34:56Z"
-        );
-    }
-
-    #[test]
-    fn checkpoint_timestamps_require_rfc3339_and_preserve_original_bytes() {
-        let mut session = checkpoint_session();
-        let timestamp = "2026-08-23T12:34:56.123456789+05:30";
-        session
-            .record_checkpoint_at(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass,
-                timestamp,
-            )
-            .unwrap();
-        assert_eq!(session.recorded_checkpoints()[0].observed_at, timestamp);
-        let restored = QualificationSession::from_persisted(session.to_persisted()).unwrap();
-        assert_eq!(restored.recorded_checkpoints()[0].observed_at, timestamp);
-
-        let mut invalid_persisted = session.to_persisted();
-        invalid_persisted.recorded_checkpoints[0].observed_at = "not-rfc3339".to_string();
-        assert!(QualificationSession::from_persisted(invalid_persisted).is_err());
-        assert!(session
-            .record_checkpoint_at(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass,
-                "2026-08-23 12:34:56Z",
-            )
-            .is_err());
-    }
-
-    #[test]
-    fn prerequisite_checkpoint_failure_invalidates_before_review_binding() {
-        let mut session = QualificationSession::for_test(&["clean_or_deliberately_reset_device"]);
-        session
-            .record_checkpoint(
-                "clean_or_deliberately_reset_device",
-                CheckpointOutcome::Fail,
-            )
-            .unwrap();
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert!(!session.can_bind_product_workflow());
-    }
-
-    #[test]
-    fn execution_status_classification_preserves_reportable_product_failure() {
-        let mut session = checkpoint_session();
-        session
-            .record_checkpoint("device_behavior_verified", CheckpointOutcome::Pass)
-            .unwrap();
-        session.classify_execution("failed").unwrap();
-        assert_eq!(session.run_validity(), RunValidity::Valid);
-        assert_eq!(
-            session.qualification_outcome(),
-            QualificationOutcome::Failed
-        );
-    }
-
-    #[test]
-    fn cancelled_execution_invalidates_without_becoming_a_product_failure() {
-        let mut session = checkpoint_session();
-        session
-            .record_checkpoint("device_behavior_verified", CheckpointOutcome::Pass)
-            .unwrap();
-        session.classify_execution("cancelled").unwrap();
-        assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(
-            session.qualification_outcome(),
-            QualificationOutcome::NotObserved
-        );
     }
 }

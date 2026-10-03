@@ -15,6 +15,18 @@ internal engineering and evidence terminology; normal end-user compatibility
 language is **supported** or **not supported**. Registration or evidence state
 alone does not establish a user-facing support claim.
 
+## Qualification Domain
+
+**Device observation**: The trusted interpretation of the currently selected
+device used by ordinary EmuChef behavior. A committed typed observation may
+include inventory continuity, probe facts, authored profile matching, and
+passive support/capability interpretation. Explicit root checking remains a
+separate authority.
+
+**Qualification session**: One internal evidence-capture attempt bound to a registered target, canonical qualification workflow, ordinary product intent, and authoritative product observations. At most one qualification session is active, and it may observe but never authorize the ordinary product workflow.
+
+**Qualification candidate**: An immutable stored outcome of a closed qualification attempt. A candidate may be valid/passed, valid/failed, or invalid/not-observed; canonical evidence recording remains a separate explicit operator action.
+
 Rust is the sole product runtime. The Cargo package
 `crates/emuchef-rust-backend` builds the `emuchef` binary and owns:
 
@@ -1374,61 +1386,80 @@ evidence, executable, or process authority. No target or physical evidence is
 created by the qualification-mode implementation itself.
 
 The ordinary React application includes a development-only qualification
-overlay when the trusted mode status is enabled. Disabled mode renders no
-overlay and performs no qualification mutation. The overlay offers explicit
-target/workflow binding, target-candidate capture and review, register and
-discard actions, workflow-declared checkpoint recording, terminal
-classification, and explicit run recording. It displays stored typed values
-with their provenance and reconstructs resumable target-registration previews
-from persisted sanitized summaries without recapturing a device. The hook also
-hydrates the persisted run-session snapshot into the overlay after restart;
-the overlay renders its stored checkpoint outcomes and timestamps without
-re-probing or retimestamping. Checkpoint controls start with no selected
-outcome, and persisted outcomes and timestamps remain unchanged on reload.
+overlay when trusted mode status is enabled. Rust owns qualification lifecycle,
+device association and reassociation, validity, and candidate finalization.
+Product operations synchronously publish the exact committed typed device
+observation and the authoritative review, admission, terminal, or runtime-loss
+transition to the active session. The product-owned real-execution monitor
+retains terminal state and its report before qualification observes completion.
+Inventory observations include only currently available devices and retain the
+native session epoch, so an unavailable device or a reconnect under a reused
+opaque handle invalidates the associated attempt. Explicit root observations
+remain authoritative until the session closes, including while terminal
+evidence is pending. The final execution gate publishes its exact fresh probe
+facts before target validation; after validation, it resolves the selected plan's
+profile again from those same facts and the current trusted catalog. Failure to
+establish that qualification profile invalidates qualification without changing
+the product execution decision or adding a device probe.
+Execution reads and exports are projections; they do not observe or advance
+product execution lifecycle. Qualification status does not infer or observe new
+product transitions. Before projecting status, Rust may recover and reconcile
+persisted qualification-session state, including failing closed for an
+unproven process handoff, materializing an invalid candidate, or retrying
+terminal candidate materialization only when the current build matches the
+persisted session identity, retained execution-report and checkpoint evidence
+are complete, and the exact authored source again matches the session-start
+digests. React remains responsible for presentation and
+explicit operator actions only. A genuinely fresh `get_device_qualification`
+reconciliation is an authoritative observation and may be published at its
+commit seam. Explicit root checks remain outside device observation.
 
-The overlay observes the existing production review and execution state. It
-binds review and real-execution handles only after those normal workflow
-states exist, deduplicating binding and terminal finalization across React
-StrictMode. It never creates a review, starts execution, or renders a parallel
-device, configuration, review, confirmation, execution, or report flow. An
-active qualification session locks its device plan and required recipes by
-applying them once through the existing workflow reducer actions; the normal
-inputs, review, explicit real-execution confirmation, execution, and report
-surfaces remain authoritative. Qualification-mode implementation and
-automated tests do not perform physical qualification or add a qualification-
-only device command.
+The session snapshot and candidate summaries cross IPC as sanitized presentation
+data, including the backend-authored invalidation explanation and a backend-
+owned device-selection lock. React renders that state and sends explicit
+operator actions for target capture, registration, checkpoint outcomes,
+recording, discarding, or abandonment. Workflow changes may trigger a status
+refresh, but React does not reconstruct review, admission, finalization,
+validity, or process-local handle authority. There are no
+`refresh_qualification_session`, `bind_qualification_review`,
+`bind_qualification_execution`, or `finalize_qualification_candidate` IPC
+commands.
 
-The persisted qualification-session `deviceHandle` is capture-time metadata,
-not durable runtime authority. `SessionHandles` is the sole authority for the
-live device associated with a qualification session in the current process.
-New sessions establish that association immediately. Restored sessions begin
-without one, so their immutable device plan and recipe intent remain locked
-while normal connected-device selection stays available. After the operator
-selects and probes a device, the backend compares the authoritative observed
-profile, manufacturer, model, Android version and API, ABI/SOC class, firmware,
-and root state with the registered target before establishing the process-local
-association. Any mismatch follows monotonic session invalidation. Review,
-execution binding, and finalization require the current trusted association;
-they never rely on the historical persisted handle or run before successful
-refresh validation. The process-local association is cleared when device
-identity continuity or runtime authority is invalidated and when its candidate
-is discarded, finalized, or recorded; the persisted capture-time handle is
-never rewritten.
+The persisted session's device handle is capture-time metadata, not durable
+runtime authority. Process-local association lives only in Rust memory and is
+never restored from `session.json`. RecoveryStore captures the previous
+process's clean-handoff proof when it loads the native marker. A restored
+session has no device association, so product device selection remains unlocked
+until a trusted observation proves the registered target, including its
+authored profile identity and all material target facts. Once associated, the
+backend reports selection locked; a restored session awaiting reassociation or
+a closed session reports it unlocked. No UI query establishes reassociation.
+RecoveryStore captures the prior-process clean-handoff proof at native load and
+tracks which qualification candidate began in the current process separately
+from resettable frontend session state. This prevents a frontend reset from
+reclassifying a same-process attempt using the stale startup marker. A valid
+persisted attempt resumes only under the qualification build identity it
+captured; a different running build defers that valid session unchanged until
+its matching build is available. Recovery may still close and materialize an
+already-invalid persisted attempt under another build, but only as
+invalid/not_observed evidence that cannot be promoted.
 
-Qualification session state is Rust-owned and restartable. A session uses an
-opaque qualification-session-<32 lowercase hex> handle associated with its
-opaque run candidate and persists strict lifecycle state in a separate
-session.json file beside the candidate envelope. Device refresh invalidation
-is monotonic; identity, target-fact, prerequisite, checkpoint, execution, and
-report failures cannot be cleared by a later observation. Review and execution
-bindings must match the stored device plan, workflow production recipes,
-registered target identity, and the existing real production execution
-relationship. Finalization reuses the production sanitized execution-report
-serializer and stores the exact report bytes; canonical run IDs, fingerprints,
-record digests, and evidence mutation remain owned by
-tools/device-qualification.mjs. Invalid or interrupted sessions remain
-recordable audit candidates only when the canonical tool accepts their
-invalid/not_observed state.
+Qualification sessions use opaque handles and strict Rust-owned persistence
+beside the canonical candidate envelope. Source digests are captured when the
+trusted session starts and revalidated against the clean canonical checkout
+before valid candidate materialization. If source authority changes, the
+completed session remains safely pending until the original fingerprint can be
+verified again. Terminal observation time is captured when the product
+transition arrives. Automatic finalization uses those retained values and the
+exact sanitized execution report; a dirty later checkout cannot rewrite their
+provenance. Required checkpoints recorded after terminal
+execution can complete an awaiting candidate. Invalid, abandoned, corrupt, or
+unproven recovery states remain fail-closed and discardable; persistence or
+finalization failures are durably poisoned so a clean restart cannot resume
+them as valid. Persisted qualification-run candidates remain visible
+independently of an active session and require an explicit record or discard
+action. Canonical run IDs, fingerprints, record digests, and evidence mutation
+remain owned by `tools/device-qualification.mjs`.
 
 ## Phase 6D.6 physical interruption qualification
 

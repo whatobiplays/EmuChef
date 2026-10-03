@@ -514,6 +514,7 @@ export interface QualificationCandidateSummary {
 export interface QualificationModeStatus {
   enabled: boolean;
   recordable: boolean;
+  deviceSelectionLocked: boolean;
   message: string | null;
   build: QualificationBuildIdentity | null;
   runtimeContract: string | null;
@@ -536,6 +537,15 @@ export interface QualificationRecordedCheckpoint {
   observedAt: string;
 }
 
+export const qualificationSessionPhases = [
+  "executionPending",
+  "executionActive",
+  "terminalAwaitingEvidence",
+  "closed",
+] as const;
+
+export type QualificationSessionPhase = (typeof qualificationSessionPhases)[number];
+
 export interface QualificationSessionSnapshot {
   sessionHandle: string;
   targetId: string;
@@ -545,8 +555,16 @@ export interface QualificationSessionSnapshot {
   requiredRecipes: string[];
   humanCheckpoints: QualificationWorkflow["humanCheckpoints"];
   recordedCheckpoints: QualificationRecordedCheckpoint[];
+  /** Sanitized lifecycle phase authored by Rust. */
+  phase: QualificationSessionPhase;
   runValidity: "valid" | "invalid";
   qualificationOutcome: "passed" | "failed" | "not_observed";
+  /** Whether this attempt can still become recorded evidence. */
+  recordable: boolean;
+  /**
+   * Backend-authored operator explanation. It never carries an internal
+   * invalidation token, path, serial, or raw backend error text.
+   */
   invalidReason: string | null;
   candidate: QualificationCandidateSummary | null;
 }

@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import { DeviceQualificationOverlay } from "../src/DeviceQualificationOverlay";
@@ -13,6 +14,7 @@ function status(): QualificationModeStatus {
   return {
     enabled: true,
     recordable: true,
+    deviceSelectionLocked: false,
     message: null,
     build: {
       appVersion: "0.1.0",
@@ -40,8 +42,10 @@ function session(
     requiredRecipes: ["recipe.one"],
     humanCheckpoints: [],
     recordedCheckpoints: [],
+    phase: "executionActive",
     runValidity: "valid",
     qualificationOutcome: "not_observed",
+    recordable: true,
     invalidReason: null,
     candidate: {
       candidateHandle: "candidate-opaque",
@@ -87,6 +91,7 @@ function controller(
     status: status(),
     session: null,
     targetCandidate: null,
+    runCandidates: [],
     intentLock: null,
     deviceSelectionLocked: false,
     busy: false,
@@ -96,11 +101,22 @@ function controller(
     createTargetCandidate: vi.fn().mockResolvedValue(undefined),
     registerTarget: vi.fn().mockResolvedValue(undefined),
     recordCheckpoint: vi.fn().mockResolvedValue(undefined),
+    abandonSession: vi.fn().mockResolvedValue(undefined),
     recordRun: vi.fn().mockResolvedValue(undefined),
     discardCandidate: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
+
+test("the overlay is absent unless qualification mode is enabled", () => {
+  const { rerender } = render(
+    <DeviceQualificationOverlay controller={controller({ status: { ...status(), enabled: false } })} />,
+  );
+  expect(screen.queryByTestId("device-qualification-overlay")).toBeNull();
+
+  rerender(<DeviceQualificationOverlay controller={controller()} />);
+  expect(screen.getByRole("heading", { name: "Device qualification mode" })).toBeTruthy();
+});
 
 test("declared checkpoints have no default outcome", () => {
   const current = controller({
@@ -117,25 +133,232 @@ test("declared checkpoints have no default outcome", () => {
 
   render(<DeviceQualificationOverlay controller={current} />);
 
+  expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).disabled).toBe(false);
   expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByRole("radio", { name: "Fail" }) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByRole("radio", { name: "Unable to verify" }) as HTMLInputElement).checked).toBe(false);
   expect(current.recordCheckpoint).not.toHaveBeenCalled();
 });
 
-test("recording a run always requires an explicit click", () => {
+test("closed non-recordable attempts disable checkpoint controls", async () => {
+  const current = controller({
+    session: session({
+      phase: "closed",
+      recordable: false,
+      humanCheckpoints: [{
+        id: "clean-reset",
+        instruction: "Reset the device before the first reviewed run.",
+        fact: "The device is clean before execution.",
+        allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+        required: true,
+      }],
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const pass = screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement;
+  expect(pass.disabled).toBe(true);
+  await userEvent.click(pass);
+  expect(current.recordCheckpoint).not.toHaveBeenCalled();
+});
+
+test("inspection-only repository status disables checkpoint controls", async () => {
+  const current = controller({
+    status: { ...status(), recordable: false },
+    session: session({
+      humanCheckpoints: [{
+        id: "clean-reset",
+        instruction: "Reset the device before the first reviewed run.",
+        fact: "The device is clean before execution.",
+        allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+        required: true,
+      }],
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const pass = screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement;
+  expect(pass.disabled).toBe(true);
+  await userEvent.click(pass);
+  expect(current.recordCheckpoint).not.toHaveBeenCalled();
+});
+
+test("recording a run and abandoning an attempt always require an explicit click", () => {
   const current = controller({ session: session() });
 
   render(<DeviceQualificationOverlay controller={current} />);
 
   expect(current.recordRun).not.toHaveBeenCalled();
+  expect(current.abandonSession).not.toHaveBeenCalled();
+
   fireEvent.click(screen.getByRole("button", { name: "Record qualification run" }));
   expect(current.recordRun).toHaveBeenCalledTimes(1);
   expect(current.recordRun).toHaveBeenCalledWith("candidate-opaque");
+
+  fireEvent.click(screen.getByRole("button", { name: "Abandon qualification attempt" }));
+  expect(current.abandonSession).toHaveBeenCalledTimes(1);
+});
+
+test("an active-session candidate cannot be recorded when it is not promotable", () => {
+  const current = controller({
+    status: status(),
+    session: session({
+      recordable: true,
+      candidate: {
+        candidateHandle: "candidate-pending",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: false,
+        nonPromotableReason: "Terminal qualification evidence is not yet available.",
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const record = screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement;
+  expect(record.disabled).toBe(true);
+  fireEvent.click(record);
+  expect(current.recordRun).not.toHaveBeenCalled();
+});
+
+test("an active-session candidate cannot be recorded when the attempt is not recordable", () => {
+  const current = controller({
+    status: status(),
+    session: session({
+      recordable: false,
+      candidate: {
+        candidateHandle: "candidate-ready",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.getByText("This attempt can no longer be recorded as qualification evidence.")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("an active-session candidate cannot be recorded when repository status is not recordable", () => {
+  const current = controller({
+    status: { ...status(), recordable: false },
+    session: session({
+      recordable: true,
+      candidate: {
+        candidateHandle: "candidate-ready",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect((screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("an active-session candidate is recordable only when every authority allows it", () => {
+  const current = controller({ status: status(), session: session({ recordable: true }) });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const record = screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement;
+  expect(record.disabled).toBe(false);
+  fireEvent.click(record);
+  expect(current.recordRun).toHaveBeenCalledWith("candidate-opaque");
+});
+
+test("operator actions are disabled while the controller is busy", () => {
+  const current = controller({ session: session(), busy: true });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  for (const name of [
+    "Record qualification run",
+    "Abandon qualification attempt",
+    "Refresh qualification status",
+  ]) {
+    expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
+  }
+});
+
+test("terminal-awaiting-evidence is presented before a candidate is materialized", () => {
+  const current = controller({
+    session: session({
+      phase: "terminalAwaitingEvidence",
+      candidate: null,
+      recordedCheckpoints: [],
+      humanCheckpoints: [{
+        id: "device_state_verified",
+        instruction: "Confirm the device state after the run.",
+        fact: "The device is in the expected state.",
+        allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+        required: true,
+      }],
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.getByText("Terminal execution retained — awaiting required evidence")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Record qualification run" })).toBeNull();
+  expect(screen.getByRole("radio", { name: "Pass" })).toBeTruthy();
+});
+
+test("invalid attempts show the backend explanation and non-recordable state", () => {
+  const current = controller({
+    session: session({
+      phase: "executionPending",
+      runValidity: "invalid",
+      qualificationOutcome: "not_observed",
+      recordable: false,
+      invalidReason: "The observed device identity changed during the attempt.",
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.getByText("Invalid qualification run — not product evidence")).toBeTruthy();
+  expect(screen.getByText("The observed device identity changed during the attempt.")).toBeTruthy();
+  expect(
+    screen.getByText("This attempt can no longer be recorded as qualification evidence."),
+  ).toBeTruthy();
+});
+
+test("a valid attempt never claims an invalidation it was not given", () => {
+  const current = controller({ session: session({ runValidity: "valid" }) });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.queryByText("Invalid qualification run — not product evidence")).toBeNull();
+  expect(
+    screen.queryByText("This attempt can no longer be recorded as qualification evidence."),
+  ).toBeNull();
 });
 
 test("invalid and failed terminal classifications remain distinct", () => {
-  const invalid = controller({ session: session({ runValidity: "invalid", qualificationOutcome: "not_observed" }) });
+  const invalid = controller({
+    session: session({
+      runValidity: "invalid",
+      qualificationOutcome: "not_observed",
+      recordable: false,
+      invalidReason: "The device is no longer available.",
+    }),
+  });
   const failed = controller({ session: session({ qualificationOutcome: "failed" }) });
 
   const { rerender } = render(<DeviceQualificationOverlay controller={invalid} />);
@@ -143,6 +366,15 @@ test("invalid and failed terminal classifications remain distinct", () => {
 
   rerender(<DeviceQualificationOverlay controller={failed} />);
   expect(screen.getByText("Product qualification failure")).toBeTruthy();
+});
+
+test("refresh is an explicit operator read of sanitized status", () => {
+  const current = controller();
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Refresh qualification status" }));
+  expect(current.refresh).toHaveBeenCalledTimes(1);
 });
 
 test("a resumable target candidate renders stored values and provenance", () => {
@@ -153,6 +385,42 @@ test("a resumable target candidate renders stored values and provenance", () => 
   expect(screen.getByText("Konkr Pocket Fit")).toBeTruthy();
   expect(screen.getAllByText(/production_observation/).length).toBeGreaterThan(0);
   expect(screen.getByText(/explicit_root_check/)).toBeTruthy();
+});
+
+test("persisted qualification-run candidates remain actionable without a session", () => {
+  const runCandidates = [
+    {
+      candidateHandle: "run-one",
+      kind: "qualification_run" as const,
+      capturedAt: "2026-10-02T10:00:00Z",
+      promotable: true,
+      nonPromotableReason: null,
+      runValidity: "valid" as const,
+      qualificationOutcome: "passed" as const,
+    },
+    {
+      candidateHandle: "run-two",
+      kind: "qualification_run" as const,
+      capturedAt: "2026-10-02T11:00:00Z",
+      promotable: false,
+      nonPromotableReason: "Qualification source state is not clean.",
+      runValidity: "invalid" as const,
+      qualificationOutcome: "not_observed" as const,
+    },
+  ];
+  const current = controller({ runCandidates });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.getAllByTestId("qualification-run-candidate").length).toBe(2);
+  expect(screen.getByRole("article", { name: "Qualification run captured 2026-10-02T10:00:00Z" })).toBeTruthy();
+  expect(screen.queryByRole("article", { name: "Qualification run run-one" })).toBeNull();
+  expect(screen.getAllByRole("button", { name: "Record qualification run" }).length).toBe(2);
+  expect((screen.getAllByRole("button", { name: "Record qualification run" })[1] as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getAllByRole("button", { name: "Record qualification run" })[0]);
+  expect(current.recordRun).toHaveBeenCalledWith("run-one");
+  fireEvent.click(screen.getAllByRole("button", { name: "Discard candidate" })[1]);
+  expect(current.discardCandidate).toHaveBeenCalledWith("run-two");
 });
 
 test("persisted checkpoint outcomes are displayed without a new timestamp", () => {
@@ -177,6 +445,24 @@ test("persisted checkpoint outcomes are displayed without a new timestamp", () =
 
   expect((screen.getByRole("radio", { name: "Fail" }) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).checked).toBe(false);
+  expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).disabled).toBe(true);
   expect(screen.getByText(/2026-08-23T09:30:00Z/)).toBeTruthy();
   expect(current.recordCheckpoint).not.toHaveBeenCalled();
+});
+
+test("the overlay renders the sanitized backend-authored error explanation", () => {
+  const current = controller({
+    session: session({
+      runValidity: "invalid",
+      recordable: false,
+      invalidReason: "Qualification evidence was invalidated before it could be recorded.",
+    }),
+    error: "Qualification definitions are unavailable. Rebuild the qualification application.",
+  });
+
+  const { container } = render(<DeviceQualificationOverlay controller={current} />);
+  expect(screen.getByRole("alert").textContent).toBe(
+    "Qualification definitions are unavailable. Rebuild the qualification application.",
+  );
+  expect(container.textContent).toContain("Qualification evidence was invalidated before it could be recorded.");
 });
