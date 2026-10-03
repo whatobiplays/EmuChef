@@ -782,6 +782,22 @@ pub(crate) fn classify_complete(
                     device,
                 );
             };
+            if device.abi.is_none() {
+                return with_capabilities(
+                    snapshot(
+                        DeviceQualificationState::InsufficientlyQualified,
+                        "The connected device could not be fully qualified.",
+                        vec!["Refresh discovery before attempting real execution."],
+                        runtime_generation,
+                        qualification_revision,
+                        Some(device.opaque_identity),
+                        Some(android_major),
+                        Some(api_level),
+                        None,
+                    ),
+                    device,
+                );
+            }
             let Some(abi_class) = normalize_abi(device.abi) else {
                 return with_capabilities(
                     snapshot(
@@ -871,6 +887,9 @@ fn classify_online(
     let Some(api_level) = device.android_api_level else {
         return incomplete(runtime_generation, qualification_revision, device);
     };
+    if device.abi.is_none() {
+        return incomplete(runtime_generation, qualification_revision, device);
+    }
     let Some(abi_class) = normalize_abi(device.abi) else {
         return snapshot(
             DeviceQualificationState::Unsupported,
@@ -1479,6 +1498,52 @@ mod tests {
     }
 
     #[test]
+    fn qualification_command_errors_are_fixed_safe_ipc_messages() {
+        let mut native_handles = crate::handles::SessionHandles::default();
+        native_handles
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "private-device-serial",
+                    "state": "available"
+                }]
+            }))
+            .unwrap();
+        let handles = std::sync::Mutex::new(native_handles);
+        let roots =
+            std::sync::Mutex::new(crate::device_qualification::RootQualificationStore::default());
+        let mut request = |_: &str, _: Value| {
+            Err("/Users/example/private/tool adb output private-device-serial qualification_repository_unavailable".to_string())
+        };
+
+        let error = qualify_reconciled_current_with_runtime(
+            &handles,
+            &roots,
+            "/Users/example/private/tool",
+            1,
+            1,
+            None,
+            &mut request,
+        )
+        .expect_err("a backend failure should become a sanitized IPC error");
+        let payload: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(
+            payload,
+            json!({
+                "code": "device_qualification_failed",
+                "message": "Connected-device qualification could not be completed."
+            })
+        );
+        for private_value in [
+            "/Users/example/private/tool",
+            "private-device-serial",
+            "adb output",
+            "qualification_repository_unavailable",
+        ] {
+            assert!(!error.contains(private_value), "IPC leaked {private_value}");
+        }
+    }
+
+    #[test]
     fn feature_disabled_build_is_not_applicable_and_never_identifies_a_device() {
         let result = classify(
             false,
@@ -1576,6 +1641,16 @@ mod tests {
                 1,
                 1,
                 &[online("unknown", None, None, Some("arm64-v8a"))]
+            )
+            .state,
+            DeviceQualificationState::InsufficientlyQualified,
+        );
+        assert_eq!(
+            classify(
+                true,
+                1,
+                1,
+                &[online("missing-abi", Some(14), Some(34), None)]
             )
             .state,
             DeviceQualificationState::InsufficientlyQualified,

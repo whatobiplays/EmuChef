@@ -874,7 +874,42 @@ where
         }
         (device.serial.clone(), device.session_epoch)
     };
-    let facts = probe(&serial)?;
+    let failure_target = crate::qualification_session::capture_device_observation_failure_target(
+        state,
+        device_handle,
+        session_epoch,
+    );
+    let facts = match probe(&serial) {
+        Ok(facts) => facts,
+        Err(error) => {
+            let current = state
+                .handles
+                .lock()
+                .map_err(|_| {
+                    safe_error(
+                        "session_state_unavailable",
+                        "Device session state is unavailable.",
+                    )
+                })?
+                .device(device_handle)
+                .is_ok_and(|device| {
+                    device.state == "available"
+                        && device.serial == serial
+                        && device.session_epoch == session_epoch
+                });
+            if !current {
+                return Err(safe_error(
+                    "device_changed",
+                    "The selected device changed. Refresh device discovery and try again.",
+                ));
+            }
+            crate::qualification_session::observe_device_observation_failure(
+                state,
+                failure_target.clone(),
+            );
+            return Err(error);
+        }
+    };
     let typed = crate::device_observation::DeviceProbeFacts::decode(&facts);
     state
         .handles
@@ -893,6 +928,11 @@ where
                 .with_probe_facts(typed_facts)
                 .with_session_epoch(session_epoch),
         )?;
+    } else {
+        crate::qualification_session::observe_device_observation_failure(
+            state,
+            failure_target,
+        );
     }
     Ok(DeviceProbeResult {
         facts,

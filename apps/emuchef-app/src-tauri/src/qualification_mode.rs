@@ -343,6 +343,8 @@ pub fn get_device_qualification_mode_status(
                 |_| safe_qualification_error("qualification_session_recovery_unavailable"),
             )?;
         }
+        crate::qualification_session::retry_deferred_finalization(&state)
+            .map_err(|_| safe_qualification_error("qualification_session_recovery_unavailable"))?;
     }
     let mut status = qualification_mode_status(&mode, &state.qualification_repository)?;
     // Rust may reconcile persisted session state before projecting status, but

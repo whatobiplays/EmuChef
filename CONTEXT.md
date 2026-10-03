@@ -1405,11 +1405,13 @@ Execution reads and exports are projections; they do not observe or advance
 product execution lifecycle. Qualification status does not infer or observe new
 product transitions. Before projecting status, Rust may recover and reconcile
 persisted qualification-session state, including failing closed for an
-unproven process handoff or materializing an invalid candidate. React remains
-responsible for presentation and explicit operator actions only. A genuinely
-fresh `get_device_qualification` reconciliation is an authoritative observation
-and may be published at its commit seam. Explicit root checks remain outside
-device observation.
+unproven process handoff, materializing an invalid candidate, or retrying
+terminal candidate materialization only when retained execution-report and
+checkpoint evidence are complete and the exact authored source again matches
+the session-start digests. React remains responsible for presentation and
+explicit operator actions only. A genuinely fresh `get_device_qualification`
+reconciliation is an authoritative observation and may be published at its
+commit seam. Explicit root checks remain outside device observation.
 
 The session snapshot and candidate summaries cross IPC as sanitized presentation
 data, including the backend-authored invalidation explanation and a backend-

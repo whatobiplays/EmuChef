@@ -215,11 +215,11 @@ export function useDeviceQualificationMode({
     outcome: QualificationCheckpointOutcome,
   ) => {
     if (!enabled || !status?.enabled || !session) return;
-    await runOperation(
+    const result = await runOperation(
       () => api.recordQualificationCheckpoint(session.sessionHandle, checkpointId, outcome),
-      (nextSession) => setSession(nextSession),
     );
-  }, [enabled, runOperation, session, status?.enabled]);
+    if (result !== null) await refresh();
+  }, [enabled, refresh, runOperation, session, status?.enabled]);
 
   const abandonSession = useCallback(async () => {
     if (!enabled || !status?.enabled || !session) return;

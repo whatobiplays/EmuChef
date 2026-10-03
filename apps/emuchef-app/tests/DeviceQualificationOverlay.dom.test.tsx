@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import { DeviceQualificationOverlay } from "../src/DeviceQualificationOverlay";
@@ -132,9 +133,33 @@ test("declared checkpoints have no default outcome", () => {
 
   render(<DeviceQualificationOverlay controller={current} />);
 
+  expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).disabled).toBe(false);
   expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByRole("radio", { name: "Fail" }) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByRole("radio", { name: "Unable to verify" }) as HTMLInputElement).checked).toBe(false);
+  expect(current.recordCheckpoint).not.toHaveBeenCalled();
+});
+
+test("closed non-recordable attempts disable checkpoint controls", async () => {
+  const current = controller({
+    session: session({
+      phase: "closed",
+      recordable: false,
+      humanCheckpoints: [{
+        id: "clean-reset",
+        instruction: "Reset the device before the first reviewed run.",
+        fact: "The device is clean before execution.",
+        allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+        required: true,
+      }],
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const pass = screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement;
+  expect(pass.disabled).toBe(true);
+  await userEvent.click(pass);
   expect(current.recordCheckpoint).not.toHaveBeenCalled();
 });
 
@@ -366,6 +391,8 @@ test("persisted qualification-run candidates remain actionable without a session
   render(<DeviceQualificationOverlay controller={current} />);
 
   expect(screen.getAllByTestId("qualification-run-candidate").length).toBe(2);
+  expect(screen.getByRole("article", { name: "Qualification run captured 2026-10-02T10:00:00Z" })).toBeTruthy();
+  expect(screen.queryByRole("article", { name: "Qualification run run-one" })).toBeNull();
   expect(screen.getAllByRole("button", { name: "Record qualification run" }).length).toBe(2);
   expect((screen.getAllByRole("button", { name: "Record qualification run" })[1] as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getAllByRole("button", { name: "Record qualification run" })[0]);
@@ -396,11 +423,12 @@ test("persisted checkpoint outcomes are displayed without a new timestamp", () =
 
   expect((screen.getByRole("radio", { name: "Fail" }) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).checked).toBe(false);
+  expect((screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement).disabled).toBe(true);
   expect(screen.getByText(/2026-08-23T09:30:00Z/)).toBeTruthy();
   expect(current.recordCheckpoint).not.toHaveBeenCalled();
 });
 
-test("the overlay never renders repository paths, serials, or raw backend text", () => {
+test("the overlay renders the sanitized backend-authored error explanation", () => {
   const current = controller({
     session: session({
       runValidity: "invalid",
@@ -411,11 +439,8 @@ test("the overlay never renders repository paths, serials, or raw backend text",
   });
 
   const { container } = render(<DeviceQualificationOverlay controller={current} />);
-  const text = container.textContent ?? "";
-
-  expect(/\/Users\/|\/private\/|sensitive-serial|adb output/i.test(text)).toBe(false);
   expect(screen.getByRole("alert").textContent).toBe(
     "Qualification definitions are unavailable. Rebuild the qualification application.",
   );
-  expect(text).not.toContain("qualification_repository_unavailable");
+  expect(container.textContent).toContain("Qualification evidence was invalidated before it could be recorded.");
 });

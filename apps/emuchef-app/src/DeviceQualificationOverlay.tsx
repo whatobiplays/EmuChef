@@ -116,7 +116,7 @@ function RunCandidate({
   return (
     <article
       className="qualification-candidate"
-      aria-label={`Qualification run ${candidate.candidateHandle}`}
+      aria-label={`Qualification run captured ${candidate.capturedAt}`}
       data-testid="qualification-run-candidate"
     >
       <p>Captured {candidate.capturedAt}</p>
@@ -183,6 +183,7 @@ export function DeviceQualificationOverlay({
   if (!status?.enabled) return null;
 
   const classification = outcomeClassification(controller);
+  const sessionRecordable = controller.session?.recordable === true;
   const selectedTarget = status.targets.find((target) => target.id === targetId) ?? null;
   const selectedWorkflow = status.workflows.find((workflow) => workflow.id === workflowId) ?? null;
   const canBeginSession = Boolean(
@@ -335,7 +336,7 @@ export function DeviceQualificationOverlay({
                             type="radio"
                             name={`checkpoint-${checkpoint.id}`}
                             checked={recorded?.outcome === outcome}
-                            disabled={recorded !== undefined || controller.busy}
+                            disabled={recorded !== undefined || controller.busy || !sessionRecordable}
                             onChange={() => void controller.recordCheckpoint(checkpoint.id, outcome)}
                           />
                           {checkpointOutcomeLabels[outcome]}

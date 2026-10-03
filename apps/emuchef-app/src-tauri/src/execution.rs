@@ -1136,12 +1136,29 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     // invalidate and close the session before catalog profile matching runs.
     let qualification_device_plan =
         qualification_state.and_then(crate::qualification_session::active_device_plan);
-    let facts = runtime_request(
+    let observation_failure_target = qualification_state.and_then(|state| {
+        crate::qualification_session::capture_device_observation_failure_target(
+            state,
+            &refreshed_review.device_handle,
+            session_epoch,
+        )
+    });
+    let facts = match runtime_request(
         runtime,
         "probeDevice",
         json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
-    )
-    .map_err(|_| device_disconnected())?;
+    ) {
+        Ok(facts) => facts,
+        Err(_) => {
+            if let Some(state) = qualification_state {
+                crate::qualification_session::observe_device_observation_failure(
+                    state,
+                    observation_failure_target.clone(),
+                );
+            }
+            return Err(device_disconnected());
+        }
+    };
     let typed_probe_facts = crate::device_observation::DeviceProbeFacts::decode(&facts);
     {
         let mut handles = handles.lock().map_err(|_| session_error())?;
@@ -1165,7 +1182,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
             }
             None => crate::qualification_session::observe_device_observation_failure(
                 state,
-                &refreshed_review.device_handle,
+                observation_failure_target.clone(),
             ),
         }
     }
@@ -1254,7 +1271,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                 // already validated product execution decision.
                 crate::qualification_session::observe_device_observation_failure(
                     state,
-                    &refreshed_review.device_handle,
+                    observation_failure_target,
                 );
             }
         } else {
@@ -1797,38 +1814,106 @@ pub fn get_real_execution_events(
     after_sequence: u64,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let mapping = state
-        .executions
+    get_real_execution_events_inner_with_runtime(
+        &execution_handle,
+        after_sequence,
+        &state.executions,
+        &state.sidecar,
+    )
+}
+
+/// Poll one real execution's events, preferring a terminal report already
+/// retained by the product monitor. The runtime requester remains injectable
+/// so tests can prove retained terminal reads make no sidecar request.
+fn get_real_execution_events_inner_with_runtime<R>(
+    execution_handle: &str,
+    after_sequence: u64,
+    executions: &Mutex<ExecutionHandleStore>,
+    runtime: &R,
+) -> Result<Value, String>
+where
+    R: RuntimeRequester,
+{
+    if let Some(batch) = retained_real_event_batch(executions, execution_handle)? {
+        return Ok(batch);
+    }
+    let mapping = executions
         .lock()
         .map_err(|_| real_execution_state_error())?
         .mapping(
             ExecutionKind::Real,
-            &execution_handle,
+            execution_handle,
             REAL_EXECUTION_UNAVAILABLE,
         )?;
-    let response = match runtime_request(
-        &state.sidecar,
+    let response = runtime_request(
+        runtime,
         "getExecutionEvents",
         json!({
             "executionId": mapping.sidecar_id,
             "afterSequence": after_sequence,
         }),
-    ) {
-        Ok(response) => response,
-        Err(error) if execution_session_loss(&error).is_some() => {
-            return Err(safe_error(
-                "execution_unavailable",
-                REAL_EXECUTION_UNAVAILABLE,
-            ));
-        }
-        Err(_) => {
-            return Err(safe_error(
-                "execution_status_failed",
-                "Incremental real-device progress could not be refreshed.",
-            ));
-        }
-    };
-    Ok(project_real_event_batch(&mapping, &response))
+    );
+    if let Some(retained_batch) = retained_real_event_batch(executions, execution_handle)? {
+        return match response {
+            Ok(response) => Ok(retained_terminal_event_batch_with_runtime_events(
+                &mapping,
+                &response,
+                &retained_batch,
+            )),
+            Err(_) => Ok(retained_batch),
+        };
+    }
+    match response {
+        Ok(response) => Ok(project_real_event_batch(&mapping, &response)),
+        Err(error) if execution_session_loss(&error).is_some() => Err(safe_error(
+            "execution_unavailable",
+            REAL_EXECUTION_UNAVAILABLE,
+        )),
+        Err(_) => Err(safe_error(
+            "execution_status_failed",
+            "Incremental real-device progress could not be refreshed.",
+        )),
+    }
+}
+
+fn retained_real_event_batch(
+    executions: &Mutex<ExecutionHandleStore>,
+    execution_handle: &str,
+) -> Result<Option<Value>, String> {
+    let executions = executions
+        .lock()
+        .map_err(|_| real_execution_state_error())?;
+    if !executions.terminal_retained(ExecutionKind::Real, execution_handle) {
+        return Ok(None);
+    }
+    let mapping = executions.mapping(
+        ExecutionKind::Real,
+        execution_handle,
+        REAL_EXECUTION_UNAVAILABLE,
+    )?;
+    let stored = executions.terminal_report(execution_handle)?;
+    let response = json!({
+        "events": [],
+        "latestSequence": stored.report.get("latestSequence").and_then(Value::as_u64).unwrap_or(0),
+        "terminal": true,
+    });
+    Ok(Some(project_real_event_batch(&mapping, &response)))
+}
+
+fn retained_terminal_event_batch_with_runtime_events(
+    mapping: &ExecutionMapping,
+    response: &Value,
+    retained_batch: &Value,
+) -> Value {
+    let mut batch = project_real_event_batch(mapping, response);
+    batch["terminal"] = Value::Bool(true);
+    let latest_sequence = batch["latestSequence"].as_u64().unwrap_or_default().max(
+        retained_batch["latestSequence"]
+            .as_u64()
+            .unwrap_or_default(),
+    );
+    batch["latestSequence"] = json!(latest_sequence);
+    batch
 }
 
 #[tauri::command]
@@ -4796,6 +4881,33 @@ mod tests {
         }
     }
 
+    struct TerminalDuringPollRuntime<'a> {
+        executions: &'a Mutex<ExecutionHandleStore>,
+        execution_handle: &'a str,
+        response: Value,
+    }
+
+    impl RuntimeRequester for TerminalDuringPollRuntime<'_> {
+        fn request(&self, request_type: &str, _payload: Value) -> Result<Value, String> {
+            assert_eq!(request_type, "getExecutionEvents");
+            let mut executions = self.executions.lock().unwrap();
+            assert!(executions.mark_terminal_with_report(
+                ExecutionKind::Real,
+                self.execution_handle,
+                json!({
+                    "status": "failed",
+                    "finishedAt": "2026-10-03T10:02:00Z",
+                    "latestSequence": 8,
+                    "recipes": [],
+                    "errors": [],
+                    "warnings": []
+                }),
+                json!({ "status": "ready" }),
+            ));
+            Ok(self.response.clone())
+        }
+    }
+
     /// Build one application state around the exact authoritative stores a
     /// test prepared, so the product terminal monitor and the qualification
     /// session can be driven through the same process-wide seams production
@@ -6343,6 +6455,114 @@ mod tests {
                 "recipes": []
             }
         })
+    }
+
+    #[test]
+    fn retained_terminal_snapshot_and_event_poll_survive_runtime_loss() {
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-retained-terminal");
+        {
+            let mut store = executions.lock().unwrap();
+            let mapping = store
+                .mapping(
+                    ExecutionKind::Real,
+                    &execution_handle,
+                    REAL_EXECUTION_UNAVAILABLE,
+                )
+                .unwrap();
+            let report = json!({
+                "status": "succeeded",
+                "startedAt": "2026-10-03T10:00:00Z",
+                "finishedAt": "2026-10-03T10:01:00Z",
+                "latestSequence": 4,
+                "recipes": [],
+                "errors": [],
+                "warnings": []
+            });
+            store.launch_actions.insert(
+                "launch-retained".to_string(),
+                LaunchActionRecord {
+                    action_handle: "launch-retained".to_string(),
+                    label: "Open app".to_string(),
+                    mapping,
+                },
+            );
+            assert!(store.mark_terminal_with_report(
+                ExecutionKind::Real,
+                &execution_handle,
+                report,
+                json!({ "status": "ready" }),
+            ));
+        }
+        let (_temp, app) = test_app(
+            executions,
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+
+        let snapshot = get_real_execution(execution_handle.clone(), app.state())
+            .expect("the retained terminal report remains a pure projection");
+        assert_eq!(snapshot["status"], "succeeded");
+        assert_eq!(snapshot["launchAction"]["handle"], "launch-retained");
+
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(Vec::new()),
+        };
+        let events = get_real_execution_events_inner_with_runtime(
+            &execution_handle,
+            2,
+            &app.state::<AppState>().executions,
+            &runtime,
+        )
+        .expect("retained terminal state must end event polling after runtime loss");
+        assert_eq!(events["executionHandle"], execution_handle);
+        assert_eq!(events["events"], json!([]));
+        assert_eq!(events["latestSequence"], 4);
+        assert_eq!(events["terminal"], true);
+        assert!(runtime.requests.lock().unwrap().is_empty());
+
+        let still_retained = get_real_execution(execution_handle, app.state()).unwrap();
+        assert_eq!(still_retained["status"], "succeeded");
+        assert_eq!(still_retained["launchAction"]["handle"], "launch-retained");
+    }
+
+    #[test]
+    fn terminal_retention_during_event_poll_preserves_unseen_runtime_events() {
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-terminal-during-poll");
+        let (_temp, app) = test_app(
+            executions,
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let runtime = TerminalDuringPollRuntime {
+            executions: &state.executions,
+            execution_handle: &execution_handle,
+            response: json!({
+                "events": [{
+                    "sequence": 7,
+                    "timestamp": "2026-10-03T10:01:30Z",
+                    "status": "running"
+                }],
+                "latestSequence": 7,
+                "terminal": false
+            }),
+        };
+
+        let batch = get_real_execution_events_inner_with_runtime(
+            &execution_handle,
+            6,
+            &state.executions,
+            &runtime,
+        )
+        .expect("poll should retain runtime events and the authoritative terminal state");
+
+        assert_eq!(batch["executionHandle"], execution_handle);
+        assert_eq!(batch["events"][0]["sequence"], 7);
+        assert_eq!(batch["latestSequence"], 8);
+        assert_eq!(batch["terminal"], true);
     }
 
     #[test]

@@ -323,6 +323,57 @@ test("checkpoint recording forwards only the opaque handle and declared outcome"
   });
 });
 
+test("a delayed checkpoint response cannot replace newer finalized status", async () => {
+  let resolveCheckpoint!: (session: QualificationSessionSnapshot) => void;
+  let resolveFollowUpStatus!: (status: QualificationModeStatus) => void;
+  let statusCalls = 0;
+  const finalizedStatus = activeStatus({
+    resumableSession: null,
+    resumableCandidates: [{
+      candidateHandle: "finalized-run",
+      kind: "qualification_run",
+      capturedAt: "2026-10-03T10:00:00Z",
+      promotable: true,
+      nonPromotableReason: null,
+      runValidity: "valid",
+      qualificationOutcome: "passed",
+    }],
+  });
+  mockApi.deviceQualificationModeStatus.mockImplementation(() => {
+    statusCalls += 1;
+    if (statusCalls === 1) return Promise.resolve(activeStatus({ resumableSession: sessionSnapshot() }));
+    if (statusCalls === 2) return Promise.resolve(finalizedStatus);
+    if (statusCalls === 3) return new Promise((resolve) => { resolveFollowUpStatus = resolve; });
+    return Promise.resolve(finalizedStatus);
+  });
+  mockApi.recordQualificationCheckpoint.mockReturnValueOnce(
+    new Promise((resolve) => { resolveCheckpoint = resolve; }),
+  );
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Record checkpoint" }));
+  await waitFor(() => expect(mockApi.recordQualificationCheckpoint).toHaveBeenCalledTimes(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("finalized-run");
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("absent");
+  });
+
+  await act(async () => {
+    resolveCheckpoint(sessionSnapshot());
+    await Promise.resolve();
+  });
+  expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("finalized-run");
+  expect(screen.getByTestId("qualification-session-present").textContent).toBe("absent");
+  expect(statusCalls).toBe(3);
+  await act(async () => resolveFollowUpStatus(finalizedStatus));
+  await waitFor(() => expect(screen.getByTestId("qualification-busy").textContent).toBe("false"));
+});
+
 test("abandoning an attempt closes it and releases the projected locks", async () => {
   mockApi.deviceQualificationModeStatus
     .mockResolvedValueOnce(activeStatus({ deviceSelectionLocked: true, resumableSession: sessionSnapshot() }))

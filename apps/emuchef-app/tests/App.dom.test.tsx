@@ -1005,7 +1005,9 @@ describe("Phase 5B workflow surfaces", () => {
     await screen.findByRole("heading", { name: "Example Handheld" });
 
     await user.click(await openSupportAction(user, "Replace managed Platform-Tools", supportSnapshot({ platformActions: true })));
-    expect(await screen.findByText(/Your device was rediscovered/)).toBeTruthy();
+    expect(
+      await within(screen.getByRole("main")).findByText(/Your device was rediscovered/),
+    ).toBeTruthy();
     expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/selected device disconnected/i)).toBeNull();
   });
