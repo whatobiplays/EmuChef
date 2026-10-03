@@ -1406,9 +1406,10 @@ product execution lifecycle. Qualification status does not infer or observe new
 product transitions. Before projecting status, Rust may recover and reconcile
 persisted qualification-session state, including failing closed for an
 unproven process handoff, materializing an invalid candidate, or retrying
-terminal candidate materialization only when retained execution-report and
-checkpoint evidence are complete and the exact authored source again matches
-the session-start digests. React remains responsible for presentation and
+terminal candidate materialization only when the current build matches the
+persisted session identity, retained execution-report and checkpoint evidence
+are complete, and the exact authored source again matches the session-start
+digests. React remains responsible for presentation and
 explicit operator actions only. A genuinely fresh `get_device_qualification`
 reconciliation is an authoritative observation and may be published at its
 commit seam. Explicit root checks remain outside device observation.
@@ -1433,6 +1434,13 @@ until a trusted observation proves the registered target, including its
 authored profile identity and all material target facts. Once associated, the
 backend reports selection locked; a restored session awaiting reassociation or
 a closed session reports it unlocked. No UI query establishes reassociation.
+RecoveryStore captures the prior-process clean-handoff proof at native load and
+tracks which qualification candidate began in the current process separately
+from resettable frontend session state. This prevents a frontend reset from
+reclassifying a same-process attempt using the stale startup marker. A persisted
+attempt resumes only under the qualification build identity it captured; a
+different running build leaves the session deferred and unchanged for recovery
+when its matching build is available.
 
 Qualification sessions use opaque handles and strict Rust-owned persistence
 beside the canonical candidate envelope. Source digests are captured when the

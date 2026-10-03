@@ -1732,10 +1732,9 @@ fn resumable_candidates(
     Ok(resumable)
 }
 
-/// Perform launch recovery for persisted sessions. A session created in this
-/// process is already authoritative; only sessions restored from disk are
-/// recovered, and only after the existing native clean-handoff contract proves
-/// the previous process ended normally.
+/// Recover persisted sessions after either native proof of a clean prior
+/// process handoff or candidate-specific proof that the session began in this
+/// process. The latter survives frontend presentation resets.
 fn ensure_recovered(
     state: &AppState,
     provider: &QualificationRepository,
@@ -1744,15 +1743,17 @@ fn ensure_recovered(
     if store.active_candidate.is_some() {
         return Ok(());
     }
-    let handoff_proven = state
-        .recovery
-        .lock()
-        .map(|recovery| recovery.session_handoff_proven())
-        .unwrap_or(false);
     for candidate in resumable_candidates(provider)? {
         if store.is_pending(&candidate.candidate_handle) {
             continue;
         }
+        let handoff_proven = state
+            .recovery
+            .lock()
+            .map(|recovery| {
+                recovery.qualification_handoff_proven_for_candidate(&candidate.candidate_handle)
+            })
+            .unwrap_or(false);
         match recover_candidate(state, provider, store, &candidate, handoff_proven) {
             Ok(true) => return Ok(()),
             Ok(false) | Err(_) => continue,
@@ -1931,6 +1932,14 @@ fn recover_current_candidate(
     if session.run_validity() == RunValidity::Invalid {
         return finalize_recovered_invalid(state, provider, store, session);
     }
+    if crate::qualification_mode::current_build_identity(&state.qualification_repository).as_ref()
+        != Some(session.build_identity())
+    {
+        // A valid session is evidence for the exact qualification build that
+        // admitted it. Leave it intact when another build starts so returning
+        // to the captured build can recover it without relabeling provenance.
+        return Ok(false);
+    }
     if !handoff_proven {
         session.invalidate(QualificationInvalidation::UnprovenShutdown);
         if persist(provider, &session).is_err() {
@@ -1969,6 +1978,7 @@ fn finalize_recovered_invalid(
         Ok(()) => {
             let _ = provider.remove_session_report(&candidate_handle);
             store.forget(&candidate_handle);
+            forget_current_process_provenance(state, &candidate_handle);
             Ok(false)
         }
         Err(error) => {
@@ -2334,6 +2344,7 @@ fn finish_transition(
             return None;
         }
         store.forget(&candidate_handle);
+        forget_current_process_provenance(state, &candidate_handle);
         session = closed;
     }
     candidate_summary(provider, &candidate_handle)
@@ -2442,7 +2453,10 @@ pub(crate) fn begin(
             "The selected device does not match the registered qualification target.",
         ));
     }
+    let mut recovery = state.recovery.lock().map_err(|_| persistence_error())?;
     persist(provider, &session)?;
+    recovery.note_qualification_session_started(&request.candidate_handle);
+    drop(recovery);
     store.set_active(request.candidate_handle.clone());
     store.associate(
         request.observation.device_handle.clone(),
@@ -2523,6 +2537,13 @@ pub(crate) fn abandon(
 pub(crate) fn forget_candidate(state: &AppState, candidate_handle: &str) {
     if let Ok(mut store) = state.qualification_sessions.lock() {
         store.forget(candidate_handle);
+    }
+    forget_current_process_provenance(state, candidate_handle);
+}
+
+fn forget_current_process_provenance(state: &AppState, candidate_handle: &str) {
+    if let Ok(mut recovery) = state.recovery.lock() {
+        recovery.forget_qualification_session(candidate_handle);
     }
 }
 
@@ -2884,6 +2905,13 @@ mod tests {
     }
 
     fn test_repository(temp: &TempDir) -> QualificationRepository {
+        test_repository_with_build(temp, test_build())
+    }
+
+    fn test_repository_with_build(
+        temp: &TempDir,
+        build: QualificationBuildIdentity,
+    ) -> QualificationRepository {
         std::fs::create_dir_all(temp.path().join("authored/recipes"))
             .expect("recipe directory should be created");
         std::fs::write(
@@ -2894,9 +2922,9 @@ mod tests {
         QualificationRepository::new_for_test_with_source_state(
             temp.path().to_path_buf(),
             Box::new(UnusedToolRunner),
-            test_build(),
+            build.clone(),
             QualificationSourceState {
-                head: "1".repeat(40),
+                head: build.git_commit,
                 tracked_worktree_clean: true,
             },
         )
@@ -3537,10 +3565,8 @@ mod tests {
             begin_request(&previous_candidate, CAPTURED_AT, capture),
         )
         .unwrap();
-        let current_candidate = create_run_candidate(
-            state.qualification_repository.get().unwrap(),
-            CAPTURED_AT,
-        );
+        let current_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
 
         let result = crate::commands::probe_device_facts_with(&device_handle, &state, |_| {
             let previous = session_status(&state).unwrap().unwrap();
@@ -4780,6 +4806,156 @@ mod tests {
             Some("invalid")
         );
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+    }
+
+    #[test]
+    fn recovery_defers_a_session_until_its_captured_build_is_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let captured_build = test_build();
+        let repository = test_repository_with_build(&temp, captured_build.clone());
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(
+                &app.state::<AppState>(),
+                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+            )
+            .unwrap();
+        }
+
+        let mut other_build = captured_build.clone();
+        other_build.git_commit = "2".repeat(40);
+        other_build.material_build_digest = format!("sha256:{}", "b".repeat(64));
+        let other_repository = test_repository_with_build(&temp, other_build);
+        let other_provider = QualificationRepositoryProvider::for_test(other_repository);
+        let (_other_app_temp, other_app) = test_app(other_provider, true);
+        let other_state = other_app.state::<AppState>();
+        let other_repository = other_state.qualification_repository.get().unwrap();
+        let other_candidate = other_repository
+            .list_candidates()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.candidate_handle == candidate)
+            .expect("the provisional candidate should remain visible under another build");
+        let mut other_store = QualificationSessionStore::default();
+        assert!(!recover_candidate(
+            &other_state,
+            other_repository,
+            &mut other_store,
+            &other_candidate,
+            true,
+        )
+        .unwrap());
+        let deferred = other_repository
+            .load_session_json(&candidate)
+            .expect("a mismatched build must leave the session available for its build");
+        assert_eq!(deferred["build"]["gitCommit"], captured_build.git_commit);
+        drop(other_app);
+
+        let original_repository = test_repository_with_build(&temp, captured_build);
+        let original_provider = QualificationRepositoryProvider::for_test(original_repository);
+        let (_original_app_temp, original_app) = test_app(original_provider, true);
+        let original_state = original_app.state::<AppState>();
+        let original_repository = original_state.qualification_repository.get().unwrap();
+        let original_candidate = original_repository
+            .list_candidates()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.candidate_handle == candidate)
+            .expect("the provisional candidate should remain visible to its build");
+        let mut original_store = QualificationSessionStore::default();
+        assert!(recover_candidate(
+            &original_state,
+            original_repository,
+            &mut original_store,
+            &original_candidate,
+            true,
+        )
+        .unwrap());
+        assert_eq!(original_store.active_candidate(), Some(candidate.as_str()));
+    }
+
+    #[test]
+    fn build_mismatch_does_not_strand_an_already_invalid_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let captured_build = test_build();
+        let repository = test_repository_with_build(&temp, captured_build.clone());
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            begin(
+                &state,
+                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+            )
+            .unwrap();
+            let provider = state.qualification_repository.get().unwrap();
+            let store = state.qualification_sessions.lock().unwrap();
+            let mut session = load_active_session(provider, &store, &candidate).unwrap();
+            session.invalidate(QualificationInvalidation::ObservationFailed);
+            persist(provider, &session).unwrap();
+        }
+
+        let mut other_build = captured_build;
+        other_build.git_commit = "2".repeat(40);
+        other_build.material_build_digest = format!("sha256:{}", "b".repeat(64));
+        let other_repository = test_repository_with_build(&temp, other_build);
+        let other_provider = QualificationRepositoryProvider::for_test(other_repository);
+        let (_other_app_temp, other_app) = test_app(other_provider, true);
+        let other_state = other_app.state::<AppState>();
+        let repository = other_state.qualification_repository.get().unwrap();
+        let summary = repository
+            .list_candidates()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.candidate_handle == candidate)
+            .expect("the invalid provisional candidate should remain visible");
+        let mut store = QualificationSessionStore::default();
+
+        assert!(!recover_candidate(&other_state, repository, &mut store, &summary, true,).unwrap());
+        let finalized = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(finalized.payload["runValidity"], "invalid");
+        assert!(!finalized.promotable);
+    }
+
+    #[test]
+    fn session_started_in_this_process_keeps_its_provenance_after_frontend_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, false);
+        let state = app.state::<AppState>();
+        let begun = begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        assert!(!state.recovery.lock().unwrap().session_handoff_proven());
+        assert!(state
+            .recovery
+            .lock()
+            .unwrap()
+            .qualification_handoff_proven_for_candidate(&candidate));
+
+        crate::commands::begin_app_session(app.state()).unwrap();
+
+        assert!(!state.recovery.lock().unwrap().session_handoff_proven());
+        assert!(state
+            .recovery
+            .lock()
+            .unwrap()
+            .qualification_handoff_proven_for_candidate(&candidate));
+        let provider = state.qualification_repository.get().unwrap();
+        recover_persisted_sessions(&state, provider).unwrap();
+        let resumed = session_status(&state)
+            .unwrap()
+            .expect("a same-process session remains recoverable after presentation reset");
+        assert_eq!(resumed.session_handle, begun.session_handle);
+        assert_eq!(resumed.run_validity, RunValidity::Valid);
+        assert_eq!(resumed.phase, QualificationSessionPhase::ExecutionPending);
     }
 
     #[test]

@@ -74,6 +74,9 @@ pub struct RecoveryStore {
     /// Keep the active-process marker when a durable qualification poison
     /// marker could not be written. The next process must then fail closed.
     preserve_marker_on_exit: bool,
+    /// Qualification candidates begun in this process. Unlike the presentation
+    /// session store, this provenance survives frontend session resets.
+    current_process_qualification_candidates: HashSet<String>,
 }
 
 impl RecoveryStore {
@@ -98,6 +101,7 @@ impl RecoveryStore {
             required_reentry: HashSet::new(),
             clean_handoff_proven,
             preserve_marker_on_exit: false,
+            current_process_qualification_candidates: HashSet::new(),
         }
     }
 
@@ -182,6 +186,37 @@ impl RecoveryStore {
     /// proof when it writes the current process marker.
     pub fn session_handoff_proven(&self) -> bool {
         self.clean_handoff_proven.unwrap_or(false)
+    }
+
+    /// Record that native code began this qualification candidate in the
+    /// current process. This is process-local provenance, not durable session
+    /// authority, and remains available if presentation state is reset.
+    pub(crate) fn note_qualification_session_started(&mut self, candidate_handle: &str) {
+        self.current_process_qualification_candidates
+            .insert(candidate_handle.to_string());
+    }
+
+    /// Forget process-local qualification provenance after a candidate reaches
+    /// a durable terminal state or is explicitly discarded.
+    pub(crate) fn forget_qualification_session(&mut self, candidate_handle: &str) {
+        self.current_process_qualification_candidates
+            .remove(candidate_handle);
+    }
+
+    /// A candidate begun in this process does not depend on the stale
+    /// prior-process handoff proof. A failed durable poison write overrides
+    /// that exception and keeps every candidate fail-closed.
+    pub(crate) fn qualification_handoff_proven_for_candidate(
+        &self,
+        candidate_handle: &str,
+    ) -> bool {
+        if self.preserve_marker_on_exit {
+            return false;
+        }
+        self.session_handoff_proven()
+            || self
+                .current_process_qualification_candidates
+                .contains(candidate_handle)
     }
 
     /// Record that a fail-closed qualification persistence fallback could not
@@ -998,6 +1033,25 @@ mod tests {
         fs::write(&marker, b"1").unwrap();
         let interrupted = RecoveryStore::load(temp.path().join("recovery.json"), marker);
         assert!(!interrupted.session_handoff_proven());
+    }
+
+    #[test]
+    fn process_started_qualification_provenance_is_candidate_scoped_and_persistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("active");
+        fs::write(&marker, b"1").unwrap();
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker);
+        assert!(!store.session_handoff_proven());
+
+        store.note_qualification_session_started("candidate-one");
+        store.note_qualification_session_started("candidate-two");
+
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-one"));
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-two"));
+        assert!(!store.qualification_handoff_proven_for_candidate("candidate-other"));
+        store.begin_session().unwrap();
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-one"));
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-two"));
     }
 
     #[test]

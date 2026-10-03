@@ -19,6 +19,7 @@ import { useDeviceQualificationMode } from "../src/useDeviceQualificationMode";
 import type {
   QualificationModeStatus,
   QualificationSessionSnapshot,
+  QualificationTargetCandidatePreview,
 } from "../src/types";
 import { initialWorkflowState, type WorkflowState } from "../src/workflow";
 
@@ -99,6 +100,46 @@ function reviewWorkflow(): WorkflowState {
   };
 }
 
+function targetCandidate(
+  candidateHandle: string,
+  model: string,
+): QualificationTargetCandidatePreview {
+  const observed = <T,>(value: T) => ({ value, source: "production_observation" as const });
+  return {
+    candidateHandle,
+    kind: "target_registration",
+    capturedAt: "2026-08-23T09:00:00Z",
+    target: {
+      profileId: observed("profile.one"),
+      manufacturer: observed("Ayaneo"),
+      model: observed(model),
+      androidVersion: observed("14"),
+      androidApi: observed(34),
+      abiSocClass: observed("arm64"),
+      rootState: { value: "non_root", source: "explicit_root_check" },
+      connectionType: { value: "usb3", source: "operator_attestation" },
+      firmwareBuild: observed("firmware-opaque"),
+      capabilities: ["apk_install"],
+      deferredWorkflows: [],
+    },
+    promotable: true,
+    nonPromotableReason: null,
+  };
+}
+
+function targetCandidateSummary(
+  candidate: QualificationTargetCandidatePreview,
+): QualificationModeStatus["resumableCandidates"][number] {
+  return {
+    candidateHandle: candidate.candidateHandle,
+    kind: "target_registration",
+    capturedAt: candidate.capturedAt,
+    promotable: candidate.promotable,
+    nonPromotableReason: candidate.nonPromotableReason,
+    target: candidate.target,
+  };
+}
+
 function Harness({ workflow }: { workflow: WorkflowState }) {
   const workflowRef = useRef(workflow);
   workflowRef.current = workflow;
@@ -115,6 +156,7 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
       <output data-testid="qualification-plan">{controller.intentLock?.devicePlan ?? ""}</output>
       <output data-testid="qualification-recipes">{controller.intentLock?.selectedRecipes.join(",") ?? ""}</output>
       <output data-testid="qualification-candidate">{controller.targetCandidate?.target.model.value ?? ""}</output>
+      <output data-testid="qualification-candidate-handle">{controller.targetCandidate?.candidateHandle ?? ""}</output>
       <output data-testid="qualification-run-candidates">{controller.runCandidates.map((candidate) => candidate.candidateHandle).join(",")}</output>
       <output data-testid="qualification-checkpoint">{controller.session?.recordedCheckpoints[0]?.observedAt ?? ""}</output>
       <output data-testid="qualification-phase">{controller.session?.phase ?? ""}</output>
@@ -153,6 +195,18 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
           Record session
         </button>
       )}
+      <button
+        type="button"
+        onClick={() => {
+          const candidateHandle = controller.session?.candidate?.candidateHandle;
+          if (candidateHandle) {
+            void controller.recordRun(candidateHandle);
+            void controller.recordRun(candidateHandle);
+          }
+        }}
+      >
+        Record session twice
+      </button>
     </>
   );
 }
@@ -206,6 +260,37 @@ test("refresh restores the stored target candidate without recapturing it", asyn
 
   expect((await screen.findByTestId("qualification-candidate")).textContent).toBe("Stored model");
   expect(mockApi.createQualificationTargetCandidate).not.toHaveBeenCalled();
+});
+
+test("status refresh preserves the currently selected target candidate", async () => {
+  let resolveRefresh!: (status: QualificationModeStatus) => void;
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus())
+    .mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+  const latestCandidate = targetCandidate("zzz-latest", "Latest capture");
+  mockApi.createQualificationTargetCandidate.mockResolvedValue(latestCandidate);
+  const workflow = reviewWorkflow();
+  const { rerender } = render(<Harness workflow={workflow} />);
+
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Capture target" }));
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-candidate-handle").textContent).toBe("zzz-latest");
+  });
+
+  rerender(<Harness workflow={{ ...workflow, step: "execution" }} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    resolveRefresh(activeStatus({
+      resumableCandidates: [
+        targetCandidateSummary(targetCandidate("aaa-earlier", "Earlier capture")),
+        targetCandidateSummary(latestCandidate),
+      ],
+    }));
+  });
+
+  expect(screen.getByTestId("qualification-candidate-handle").textContent).toBe("zzz-latest");
+  expect(screen.getByTestId("qualification-candidate").textContent).toBe("Latest capture");
 });
 
 test("a restored attempt projects sanitized locks and checkpoints without trusted calls", async () => {
@@ -399,7 +484,9 @@ test("abandonment applies the returned closed snapshot even when status refresh 
     .mockRejectedValueOnce(new Error("status temporarily unavailable"));
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("true");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
   fireEvent.click(screen.getByRole("button", { name: "Abandon" }));
 
   await waitFor(() => {
@@ -519,13 +606,38 @@ test("successful run recording clears the active qualification session", async (
     .mockResolvedValue(activeStatus());
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("true");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
 
   fireEvent.click(screen.getByRole("button", { name: "Record session" }));
 
   await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("false"));
   expect(screen.queryByRole("button", { name: "Record session" })).toBeNull();
   expect(mockApi.recordQualificationRun).toHaveBeenCalledTimes(1);
+});
+
+test("duplicate record requests for one candidate share an in-flight guard", async () => {
+  let resolveRecord!: (result: { runId: string }) => void;
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus({ resumableSession: sessionSnapshot() }))
+    .mockResolvedValue(activeStatus());
+  mockApi.recordQualificationRun.mockReturnValueOnce(
+    new Promise((resolve) => { resolveRecord = resolve; }),
+  );
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Record session twice" }));
+
+  expect(mockApi.recordQualificationRun).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    resolveRecord({ runId: "qualification-run-opaque" });
+    await Promise.resolve();
+  });
+  await waitFor(() => expect(screen.getByTestId("qualification-busy").textContent).toBe("false"));
 });
 
 test("authoritative lifecycle progress appears only through a sanitized status refresh", async () => {
@@ -547,7 +659,9 @@ test("authoritative lifecycle progress appears only through a sanitized status r
     }));
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("true");
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
   expect(screen.getByTestId("qualification-phase").textContent).toBe("executionActive");
 
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));

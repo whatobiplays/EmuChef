@@ -19,7 +19,22 @@ itself imply support.
 3. On the new clean build: begin a qualification attempt by choosing the registered target and canonical workflow.
 4. Complete the workflow-declared checkpoints that must pass before the run. A required prerequisite checkpoint that is missing, failed, or unable to verify invalidates the attempt.
 5. Complete normal EmuChef inputs, review, and explicit real-execution confirmation. The attempt observes these product transitions automatically.
-6. Complete any remaining workflow-declared checkpoints after the terminal execution. Missing required checkpoints keep the attempt in terminal-awaiting-evidence while that evidence remains obtainable. A completed attempt may also remain pending while its retained terminal report cannot be verified against terminal status or current authored recipes do not match the session-start fingerprint. After completing required checkpoints and restoring the exact session-start recipe source, refresh qualification status to retry materialization from retained evidence. If the attempt remains pending after those conditions hold, the terminal report/status integrity is still unproven; abandon the attempt rather than trying to record it. Marking any required checkpoint unable to verify immediately invalidates and closes the attempt; later evidence cannot repair it.
+6. After terminal execution, complete any remaining workflow-declared checkpoints. An attempt may remain pending while required non-prerequisite checkpoint evidence is still obtainable. Recording `unable_to_verify` for any required checkpoint immediately invalidates and closes the attempt; later evidence cannot repair it.
+
+   Even after checkpoint evidence is complete, candidate materialization may
+   be deferred if the retained terminal report is unavailable or inconsistent
+   with the product's retained terminal classification, if required authored
+   recipe source differs from the immutable session-start digest, or if the
+   running qualification build differs from the build that captured the
+   attempt. Restore the exact required recipe source and the complete captured
+   source/build identity, including its commit and material build digest, then
+   run that matching qualification build and refresh qualification status.
+   Status may safely retry materialization from the execution report and
+   checkpoint evidence already retained; it does not rerun or re-observe the
+   product execution. A build mismatch defers the session without closing it.
+   There is no operator finalization step. If the report remains unavailable
+   or inconsistent after the source/build conditions are restored, treat the
+   terminal result as unproven and abandon the attempt.
 7. Inspect the automatically materialized candidate classification, then explicitly Record qualification run, including invalid/not_observed audit runs only when intentionally preserving harness history.
 8. If the attempt cannot continue, use Abandon qualification attempt to close it as an invalid candidate. Abandoning never changes the product execution.
 9. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.

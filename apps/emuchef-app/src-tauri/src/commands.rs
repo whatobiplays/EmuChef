@@ -929,10 +929,7 @@ where
                 .with_session_epoch(session_epoch),
         )?;
     } else {
-        crate::qualification_session::observe_device_observation_failure(
-            state,
-            failure_target,
-        );
+        crate::qualification_session::observe_device_observation_failure(state, failure_target);
     }
     Ok(DeviceProbeResult {
         facts,

@@ -336,7 +336,12 @@ export function DeviceQualificationOverlay({
                             type="radio"
                             name={`checkpoint-${checkpoint.id}`}
                             checked={recorded?.outcome === outcome}
-                            disabled={recorded !== undefined || controller.busy || !sessionRecordable}
+                            disabled={
+                              recorded !== undefined
+                                || controller.busy
+                                || !status.recordable
+                                || !sessionRecordable
+                            }
                             onChange={() => void controller.recordCheckpoint(checkpoint.id, outcome)}
                           />
                           {checkpointOutcomeLabels[outcome]}

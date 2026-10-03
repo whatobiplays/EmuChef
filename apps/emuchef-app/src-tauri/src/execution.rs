@@ -1822,9 +1822,10 @@ pub fn get_real_execution_events(
     )
 }
 
-/// Poll one real execution's events, preferring a terminal report already
-/// retained by the product monitor. The runtime requester remains injectable
-/// so tests can prove retained terminal reads make no sidecar request.
+/// Poll one real execution's events, using terminal state already retained by
+/// the product monitor as authoritative fallback. If the runtime remains
+/// available, unread events are still projected before that terminal state is
+/// applied to the batch.
 fn get_real_execution_events_inner_with_runtime<R>(
     execution_handle: &str,
     after_sequence: u64,
@@ -1834,17 +1835,23 @@ fn get_real_execution_events_inner_with_runtime<R>(
 where
     R: RuntimeRequester,
 {
-    if let Some(batch) = retained_real_event_batch(executions, execution_handle)? {
-        return Ok(batch);
-    }
-    let mapping = executions
+    let retained_before_request = retained_real_event_batch(executions, execution_handle)?;
+    let mapping = match executions
         .lock()
-        .map_err(|_| real_execution_state_error())?
-        .mapping(
-            ExecutionKind::Real,
-            execution_handle,
-            REAL_EXECUTION_UNAVAILABLE,
-        )?;
+        .map_err(|_| real_execution_state_error())
+        .and_then(|executions| {
+            executions.mapping(
+                ExecutionKind::Real,
+                execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+        }) {
+        Ok(mapping) => mapping,
+        Err(_) if retained_before_request.is_some() => {
+            return Ok(retained_before_request.expect("retained state was checked above"));
+        }
+        Err(error) => return Err(error),
+    };
     let response = runtime_request(
         runtime,
         "getExecutionEvents",
@@ -1853,7 +1860,13 @@ where
             "afterSequence": after_sequence,
         }),
     );
-    if let Some(retained_batch) = retained_real_event_batch(executions, execution_handle)? {
+    let retained_after_request = match retained_real_event_batch(executions, execution_handle) {
+        Ok(Some(batch)) => Some(batch),
+        Ok(None) => retained_before_request,
+        Err(_) if retained_before_request.is_some() => retained_before_request,
+        Err(error) => return Err(error),
+    };
+    if let Some(retained_batch) = retained_after_request {
         return match response {
             Ok(response) => Ok(retained_terminal_event_batch_with_runtime_events(
                 &mapping,
@@ -1883,6 +1896,25 @@ fn retained_real_event_batch(
     let executions = executions
         .lock()
         .map_err(|_| real_execution_state_error())?;
+    if executions.is_lost(execution_handle) {
+        let response = json!({
+            "events": [],
+            "latestSequence": 0,
+            "terminal": true,
+        });
+        let batch = executions
+            .lost_mapping(execution_handle)
+            .map(|mapping| project_real_event_batch(&mapping, &response))
+            .unwrap_or_else(|| {
+                json!({
+                    "executionHandle": execution_handle,
+                    "events": [],
+                    "latestSequence": 0,
+                    "terminal": true,
+                })
+            });
+        return Ok(Some(batch));
+    }
     if !executions.terminal_retained(ExecutionKind::Real, execution_handle) {
         return Ok(None);
     }
@@ -6458,6 +6490,114 @@ mod tests {
     }
 
     #[test]
+    fn lost_execution_returns_a_terminal_empty_event_batch() {
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-lost-events");
+        {
+            let mut store = executions.lock().unwrap();
+            let mapping = store
+                .mapping(
+                    ExecutionKind::Real,
+                    &execution_handle,
+                    REAL_EXECUTION_UNAVAILABLE,
+                )
+                .unwrap();
+            store.mark_lost(&execution_handle, Some(mapping));
+        }
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err("the sidecar session was lost".to_string()),
+        };
+
+        let snapshot =
+            get_real_execution_inner_with_runtime(&execution_handle, &executions, &runtime)
+                .expect("lost execution state remains an authoritative terminal projection");
+        assert_eq!(snapshot["executionHandle"], execution_handle);
+        assert_eq!(snapshot["status"], "failed");
+
+        let events = get_real_execution_events_inner_with_runtime(
+            &execution_handle,
+            9,
+            &executions,
+            &runtime,
+        )
+        .expect("authoritative loss should project as an empty terminal batch");
+
+        assert_eq!(events["executionHandle"], execution_handle);
+        assert_eq!(events["events"], json!([]));
+        assert_eq!(events["latestSequence"], 0);
+        assert_eq!(events["terminal"], true);
+        assert!(runtime.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retained_terminal_event_poll_preserves_unseen_runtime_tail() {
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = bind_monitor_execution(&executions, "sidecar-retained-event-tail");
+        {
+            let mut store = executions.lock().unwrap();
+            assert!(store.mark_terminal_with_report(
+                ExecutionKind::Real,
+                &execution_handle,
+                json!({
+                    "status": "succeeded",
+                    "latestSequence": 25,
+                    "recipes": [],
+                    "errors": [],
+                    "warnings": []
+                }),
+                json!({ "status": "ready" }),
+            ));
+        }
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Ok(json!({
+                "events": [
+                    {
+                        "sequence": 21,
+                        "timestamp": "2026-10-03T10:01:21Z",
+                        "eventType": "execution_started",
+                        "status": "running"
+                    },
+                    {
+                        "sequence": 25,
+                        "timestamp": "2026-10-03T10:01:25Z",
+                        "eventType": "execution_completed",
+                        "status": "succeeded"
+                    }
+                ],
+                "latestSequence": 24,
+                "terminal": false
+            })),
+        };
+
+        let batch = get_real_execution_events_inner_with_runtime(
+            &execution_handle,
+            20,
+            &executions,
+            &runtime,
+        )
+        .expect("retained terminal state should include any still-readable event tail");
+
+        assert_eq!(batch["executionHandle"], execution_handle);
+        assert_eq!(
+            batch["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![21, 25]
+        );
+        assert_eq!(batch["terminal"], true);
+        assert_eq!(batch["latestSequence"], 25);
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "getExecutionEvents");
+        assert_eq!(requests[0].1["afterSequence"], 20);
+    }
+
+    #[test]
     fn retained_terminal_snapshot_and_event_poll_survive_runtime_loss() {
         let executions = Mutex::new(ExecutionHandleStore::default());
         let execution_handle = bind_monitor_execution(&executions, "sidecar-retained-terminal");
@@ -6505,9 +6645,9 @@ mod tests {
         assert_eq!(snapshot["status"], "succeeded");
         assert_eq!(snapshot["launchAction"]["handle"], "launch-retained");
 
-        let runtime = ScriptedRuntime {
+        let runtime = FakeRuntime {
             requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(Vec::new()),
+            result: Err("the sidecar session was lost".to_string()),
         };
         let events = get_real_execution_events_inner_with_runtime(
             &execution_handle,
@@ -6515,12 +6655,16 @@ mod tests {
             &app.state::<AppState>().executions,
             &runtime,
         )
-        .expect("retained terminal state must end event polling after runtime loss");
+        .expect("retained terminal state remains available after runtime loss");
         assert_eq!(events["executionHandle"], execution_handle);
         assert_eq!(events["events"], json!([]));
         assert_eq!(events["latestSequence"], 4);
         assert_eq!(events["terminal"], true);
-        assert!(runtime.requests.lock().unwrap().is_empty());
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "getExecutionEvents");
+        assert_eq!(requests[0].1["afterSequence"], 2);
+        drop(requests);
 
         let still_retained = get_real_execution(execution_handle, app.state()).unwrap();
         assert_eq!(still_retained["status"], "succeeded");

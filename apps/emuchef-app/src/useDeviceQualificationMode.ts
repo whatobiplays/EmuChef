@@ -97,6 +97,7 @@ export function useDeviceQualificationMode({
   const [error, setError] = useState<string | null>(null);
   const busyCountRef = useRef(0);
   const refreshGenerationRef = useRef(0);
+  const recordingCandidateHandlesRef = useRef(new Set<string>());
 
   const startBusy = useCallback(() => {
     busyCountRef.current += 1;
@@ -136,12 +137,18 @@ export function useDeviceQualificationMode({
     }
     setSession(nextStatus.resumableSession ?? null);
     setRunCandidates(nextStatus.resumableCandidates.filter((candidate) => candidate.kind === "qualification_run"));
-    setTargetCandidate(
-      nextStatus.resumableCandidates
-        .map(candidatePreviewFromSummary)
-        .find((candidate): candidate is QualificationTargetCandidatePreview => candidate !== null)
-        ?? null,
-    );
+    setTargetCandidate((current) => {
+      const retainedCurrent = current === null
+        ? null
+        : nextStatus.resumableCandidates
+          .find((candidate) => candidate.candidateHandle === current.candidateHandle)
+          ?? null;
+      return (retainedCurrent && candidatePreviewFromSummary(retainedCurrent))
+        ?? nextStatus.resumableCandidates
+          .map(candidatePreviewFromSummary)
+          .find((candidate): candidate is QualificationTargetCandidatePreview => candidate !== null)
+        ?? null;
+    });
   }, []);
 
   const refresh = useCallback(async () => {
@@ -232,12 +239,17 @@ export function useDeviceQualificationMode({
   }, [enabled, refresh, runOperation, session, status?.enabled]);
 
   const recordRun = useCallback(async (candidateHandle: string) => {
-    if (!enabled || !status?.enabled) return;
-    const result = await runOperation<QualificationRunRecordingResult>(
-      () => api.recordQualificationRun(candidateHandle),
-    );
-    if (result === null) return;
-    await refresh();
+    if (!enabled || !status?.enabled || recordingCandidateHandlesRef.current.has(candidateHandle)) return;
+    recordingCandidateHandlesRef.current.add(candidateHandle);
+    try {
+      const result = await runOperation<QualificationRunRecordingResult>(
+        () => api.recordQualificationRun(candidateHandle),
+      );
+      if (result === null) return;
+      await refresh();
+    } finally {
+      recordingCandidateHandlesRef.current.delete(candidateHandle);
+    }
   }, [enabled, refresh, runOperation, status?.enabled]);
 
   const discardCandidate = useCallback(async (candidateHandle: string) => {

@@ -244,6 +244,14 @@ impl QualificationModeState {
     }
 }
 
+/// Return the build identity currently trusted by qualification mode. Persisted
+/// sessions use it to avoid resuming evidence under a different binary.
+pub(crate) fn current_build_identity(
+    provider: &QualificationRepositoryProvider,
+) -> Option<QualificationBuildIdentity> {
+    QualificationModeState::current(provider).build
+}
+
 /// Guard shared by every qualification command that changes trusted state.
 fn require_recordable_mode(
     state: &QualificationModeState,

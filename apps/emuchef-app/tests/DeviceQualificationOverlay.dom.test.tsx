@@ -163,6 +163,28 @@ test("closed non-recordable attempts disable checkpoint controls", async () => {
   expect(current.recordCheckpoint).not.toHaveBeenCalled();
 });
 
+test("inspection-only repository status disables checkpoint controls", async () => {
+  const current = controller({
+    status: { ...status(), recordable: false },
+    session: session({
+      humanCheckpoints: [{
+        id: "clean-reset",
+        instruction: "Reset the device before the first reviewed run.",
+        fact: "The device is clean before execution.",
+        allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+        required: true,
+      }],
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const pass = screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement;
+  expect(pass.disabled).toBe(true);
+  await userEvent.click(pass);
+  expect(current.recordCheckpoint).not.toHaveBeenCalled();
+});
+
 test("recording a run and abandoning an attempt always require an explicit click", () => {
   const current = controller({ session: session() });
 
