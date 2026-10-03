@@ -19,7 +19,7 @@ itself imply support.
 3. On the new clean build: begin a qualification attempt by choosing the registered target and canonical workflow.
 4. Complete the workflow-declared checkpoints that must pass before the run. A required prerequisite checkpoint that is missing, failed, or unable to verify invalidates the attempt.
 5. Complete normal EmuChef inputs, review, and explicit real-execution confirmation. The attempt observes these product transitions automatically.
-6. Complete any remaining workflow-declared checkpoints after the terminal execution. The attempt stays in terminal-awaiting-evidence only while each required checkpoint remains obtainable. Marking any required checkpoint unable to verify immediately invalidates and closes the attempt; later evidence cannot repair it.
+6. Complete any remaining workflow-declared checkpoints after the terminal execution. Missing required checkpoints keep the attempt in terminal-awaiting-evidence while that evidence remains obtainable. A completed attempt may also remain pending while its retained terminal report cannot be verified against terminal status or current authored recipes do not match the session-start fingerprint. After completing required checkpoints and restoring the exact session-start recipe source, refresh qualification status to retry materialization from retained evidence. If the attempt remains pending after those conditions hold, the terminal report/status integrity is still unproven; abandon the attempt rather than trying to record it. Marking any required checkpoint unable to verify immediately invalidates and closes the attempt; later evidence cannot repair it.
 7. Inspect the automatically materialized candidate classification, then explicitly Record qualification run, including invalid/not_observed audit runs only when intentionally preserving harness history.
 8. If the attempt cannot continue, use Abandon qualification attempt to close it as an invalid candidate. Abandoning never changes the product execution.
 9. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.
@@ -122,10 +122,16 @@ execution, never finalizes a candidate, and never retries a trusted transition.
   source again matches the session-start fingerprint.
 - A terminal execution that is still missing required non-prerequisite
   checkpoints remains in terminal-awaiting-evidence only while the required
-  evidence can still be obtained. The immutable candidate is materialized
-  automatically once the required evidence is complete or the attempt becomes
-  invalid; there is no operator finalization step. A required checkpoint marked
-  unable to verify immediately invalidates and closes the attempt.
+  evidence can still be obtained. A completed attempt also remains pending if
+  its retained terminal report does not match the terminal status or authored
+  source no longer matches the session-start fingerprint. After required
+  checkpoints are complete and the exact source is restored, refreshing
+  qualification status retries materialization from retained evidence. If the
+  attempt remains pending then, report/status integrity is still unproven and
+  the operator should abandon it. The immutable candidate is otherwise
+  materialized automatically once required evidence is complete or the attempt
+  becomes invalid; there is no operator finalization step. A required checkpoint
+  marked unable to verify immediately invalidates and closes the attempt.
 - A recorded checkpoint is immutable. A second submission for the same
   checkpoint is rejected and never replaces the retained outcome or timestamp.
   While an attempt is in terminal-awaiting-evidence, only unrecorded required
