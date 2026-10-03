@@ -1,0 +1,75 @@
+apps/emuchef-app/tests/useDeviceQualificationMode.dom.test.tsx
+  s_09b05cf592369e::t_0a8e21977c608b 487-489,609-611,620-642,662-664
+  s_09b05cf592369e::t_16a23aa94a843d 22,159,198-209
+  s_09b05cf592369e::t_4269a4200b678d 265-295
+  s_09b05cf592369e::t_8f13a626addfad 103-142
+apps/emuchef-app/src-tauri/src/qualification_mode.rs
+  s_09b05cf592369e::t_db4c328906a154 247-254
+apps/emuchef-app/src/useDeviceQualificationMode.ts
+  s_09b05cf592369e::t_40cc2d2cbc2e0b 100,140-151,242-252
+apps/emuchef-app/src-tauri/src/commands.rs
+  s_09b05cf592369e::t_0539905af17823 932
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_e26f5fbde7a87c 1935,2456,3568-3569,4860
+  s_09b05cf592369e::t_268a773bea8b74 1735-1737
+  s_09b05cf592369e::t_e70bff9453974c 4833-4836,4838-4850,4859,4861-4862,4864-4876
+  s_09b05cf592369e::t_b1ef9fc2cfd285 4917
+  s_09b05cf592369e::t_0cbc2f9fe1c475 4951-4952
+  s_09b05cf592369e::t_c1b2233b074528 1942,2547,4812-4832,4837,4851-4858,4863,4877-4879,4924-4936,4942-4945,4953-4960
+  s_09b05cf592369e::t_84fd58b08bce4d 4811,4880-4916,4918-4923
+  s_09b05cf592369e::t_5dd3d396ba7d42 1981,2347,2541-2546
+  s_09b05cf592369e::t_c21898e7e19e4f 2908-2914,2925,2927
+  s_09b05cf592369e::t_7ab2b60c1811e0 4937-4941,4946-4950
+  s_09b05cf592369e::t_3456d7c9f1b6aa 1938
+  s_09b05cf592369e::t_de8c24b2cf438b 1750-1756,1936-1937,1939-1941
+  s_09b05cf592369e::t_d4f7e1491fc19b 2458-2459
+apps/emuchef-app/src/DeviceQualificationOverlay.tsx
+  s_09b05cf592369e::t_40cc2d2cbc2e0b 339-344
+docs/testing/phase-6d6/ui-binding-index.json
+  s_09b05cf592369e::t_e5a006cc3371ee 6,203
+apps/emuchef-app/tests/DeviceQualificationOverlay.dom.test.tsx
+  s_09b05cf592369e::t_caabd173a45578 166-175
+  s_09b05cf592369e::t_395e980572cd74 163-165
+  s_09b05cf592369e::t_8fccac6d72bef7 154-162
+CONTEXT.md
+  s_09b05cf592369e::t_b38e0b02002208 1437-1443
+  s_09b05cf592369e::t_465560071593b1 1409-1412
+apps/emuchef-app/src-tauri/src/execution.rs
+  s_09b05cf592369e::t_0539905af17823 1848
+  s_09b05cf592369e::t_2cd5e781a68c6c 6492-6506,6508,6510,6517-6533
+  s_09b05cf592369e::t_7545180db377e3 1899-1917
+  s_09b05cf592369e::t_a9a1b0846369f1 6507,6509,6511,6515-6516
+  s_09b05cf592369e::t_e26f5fbde7a87c 6512-6514
+  s_09b05cf592369e::t_c87f6cd259e0e6 1825-1828,1838-1839,1841-1847,1849-1854,1863-1869
+  s_09b05cf592369e::t_9d5fa6f0a032ba 6534-6599,6648,6650,6658,6663-6667
+apps/emuchef-app/src-tauri/src/recovery.rs
+  s_09b05cf592369e::t_033b0131940bb4 220,1039-1056
+  s_09b05cf592369e::t_e54e16917db17f 77,79,104,195-196,199-205,217-219
+  s_09b05cf592369e::t_4382f90ea44f14 78,191-194,197-198,206-216
+  s_09b05cf592369e::t_c970700ea7cb52 221
+  s_09b05cf592369e::t_fb973070ba1cad 1038
+docs/manual/device-qualification-operator.md
+  s_09b05cf592369e::t_4ffeac4fdec350 22,24-37
+  s_09b05cf592369e::t_af3dedd7bb24cc 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2cd469ae36f87e58f95e8d7de1f0a3f94dda0825",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
