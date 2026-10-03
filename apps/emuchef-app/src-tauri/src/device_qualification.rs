@@ -291,6 +291,8 @@ pub struct RootQualificationCheckDto {
     pub runtime_generation: u64,
     pub qualification_revision: u64,
     pub device_identity: String,
+    #[serde(skip)]
+    pub(crate) session_epoch: u64,
 }
 #[tauri::command]
 pub fn check_device_root(
@@ -408,12 +410,27 @@ pub(crate) fn check_device_root_observation(
             "The device changed while root access was being checked. Try again.",
         ));
     }
+    let mut handles = state
+        .handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?;
+    let current_device = handles.device(device_handle).map_err(|_| {
+        safe_error(
+            "root_check_stale",
+            "The device changed while root access was being checked. Try again.",
+        )
+    })?;
+    if current_device.state != "available"
+        || current_device.session_epoch != context.session_epoch
+        || current_device.serial != target.serial
+    {
+        return Err(safe_error(
+            "root_check_stale",
+            "The device changed while root access was being checked. Try again.",
+        ));
+    }
     if changed {
-        state
-            .handles
-            .lock()
-            .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
-            .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
+        handles.invalidate_reviews_for_device(device_handle, "root_qualification_changed");
     }
     // Feed the committed explicit root-check result to the active attempt. The
     // root check stays the only root authority; qualification only observes the
@@ -422,14 +439,17 @@ pub(crate) fn check_device_root_observation(
         state,
         crate::qualification_session::QualificationLifecycleObservation::RootChecked {
             device_handle: device_handle.to_string(),
+            session_epoch: context.session_epoch,
             root_state: qualification.clone(),
         },
     );
+    drop(handles);
     Ok(RootQualificationCheckDto {
         qualification,
         runtime_generation,
         qualification_revision: context.qualification_revision,
         device_identity: device_handle.to_string(),
+        session_epoch: context.session_epoch,
     })
 }
 

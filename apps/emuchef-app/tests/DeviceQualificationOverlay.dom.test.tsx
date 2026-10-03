@@ -154,11 +154,11 @@ test("recording a run and abandoning an attempt always require an explicit click
   expect(current.abandonSession).toHaveBeenCalledTimes(1);
 });
 
-test("an active-session candidate cannot be recorded before backend promotion allows it", () => {
+test("an active-session candidate cannot be recorded when it is not promotable", () => {
   const current = controller({
-    status: { ...status(), recordable: false },
+    status: status(),
     session: session({
-      recordable: false,
+      recordable: true,
       candidate: {
         candidateHandle: "candidate-pending",
         kind: "qualification_run",
@@ -177,6 +177,62 @@ test("an active-session candidate cannot be recorded before backend promotion al
   expect(record.disabled).toBe(true);
   fireEvent.click(record);
   expect(current.recordRun).not.toHaveBeenCalled();
+});
+
+test("an active-session candidate cannot be recorded when the attempt is not recordable", () => {
+  const current = controller({
+    status: status(),
+    session: session({
+      recordable: false,
+      candidate: {
+        candidateHandle: "candidate-ready",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.getByText("This attempt can no longer be recorded as qualification evidence.")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("an active-session candidate cannot be recorded when repository status is not recordable", () => {
+  const current = controller({
+    status: { ...status(), recordable: false },
+    session: session({
+      recordable: true,
+      candidate: {
+        candidateHandle: "candidate-ready",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect((screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("an active-session candidate is recordable only when every authority allows it", () => {
+  const current = controller({ status: status(), session: session({ recordable: true }) });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const record = screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement;
+  expect(record.disabled).toBe(false);
+  fireEvent.click(record);
+  expect(current.recordRun).toHaveBeenCalledWith("candidate-opaque");
 });
 
 test("operator actions are disabled while the controller is busy", () => {

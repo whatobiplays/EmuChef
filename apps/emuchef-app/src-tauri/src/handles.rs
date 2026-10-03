@@ -25,6 +25,7 @@ pub struct DeviceRecord {
     pub transport_id: Option<String>,
     pub session_epoch: u64,
     pub facts: Option<Value>,
+    pub facts_session_epoch: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -117,7 +118,6 @@ impl SessionHandles {
                 .map(str::to_string);
             let handle = self.handle_for_serial(serial);
             let previous = self.devices_by_handle.get(&handle);
-            let previous_facts = previous.and_then(|record| record.facts.clone());
             let continuity_lost = previous.is_some_and(|previous| {
                 !(previous.state == "available"
                     && state == "available"
@@ -135,6 +135,10 @@ impl SessionHandles {
                 }
                 *entry
             };
+            let (previous_facts, previous_facts_epoch) = previous
+                .filter(|record| record.session_epoch == epoch)
+                .map(|record| (record.facts.clone(), record.facts_session_epoch))
+                .unwrap_or((None, None));
             if continuity_lost && !forced_epoch_handles.contains(&handle) {
                 self.qualification_context_by_handle.remove(&handle);
                 self.invalidate_reviews_for_device(&handle, "device_qualification_changed");
@@ -149,6 +153,7 @@ impl SessionHandles {
                     transport_id,
                     session_epoch: epoch,
                     facts: previous_facts,
+                    facts_session_epoch: previous_facts_epoch,
                 },
             );
         }
@@ -259,6 +264,30 @@ impl SessionHandles {
     }
 
     pub fn set_facts(&mut self, handle: &str, facts: Value) -> Result<(), String> {
+        let epoch = self.device_session_epoch(handle).ok_or_else(|| {
+            stable_handle_error("device_unknown", "This device is no longer available.")
+        })?;
+        self.set_facts_for_epoch(handle, epoch, facts)
+    }
+
+    /// Retain facts only for the native device session that produced them.
+    /// Callers capture the epoch before asynchronous observation and must pass
+    /// that same epoch after revalidating continuity.
+    pub fn set_facts_for_epoch(
+        &mut self,
+        handle: &str,
+        expected_epoch: u64,
+        facts: Value,
+    ) -> Result<(), String> {
+        let device = self.devices_by_handle.get(handle).ok_or_else(|| {
+            stable_handle_error("device_unknown", "This device is no longer available.")
+        })?;
+        if device.state != "available" || device.session_epoch != expected_epoch {
+            return Err(stable_handle_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
         let changed = self
             .devices_by_handle
             .get(handle)
@@ -275,6 +304,10 @@ impl SessionHandles {
             .get_mut(handle)
             .expect("device was checked above")
             .facts = Some(facts);
+        self.devices_by_handle
+            .get_mut(handle)
+            .expect("device was checked above")
+            .facts_session_epoch = Some(expected_epoch);
         Ok(())
     }
 
@@ -314,9 +347,26 @@ impl SessionHandles {
     }
 
     pub fn facts(&self, handle: &str) -> Result<&Value, String> {
-        self.device(handle)?.facts.as_ref().ok_or_else(|| {
+        let device = self.device(handle)?;
+        if device.facts_session_epoch != Some(device.session_epoch) {
+            return Err(stable_handle_error(
+                "device_not_probed",
+                "Read the device information again.",
+            ));
+        }
+        device.facts.as_ref().ok_or_else(|| {
             stable_handle_error("device_not_probed", "Read the device information again.")
         })
+    }
+
+    /// Return the retained typed-probe payload with its capture epoch.
+    pub fn facts_with_epoch(&self, handle: &str) -> Result<(&Value, u64), String> {
+        let device = self.device(handle)?;
+        let facts = self.facts(handle)?;
+        let epoch = device.facts_session_epoch.ok_or_else(|| {
+            stable_handle_error("device_not_probed", "Read the device information again.")
+        })?;
+        Ok((facts, epoch))
     }
 
     pub fn insert_review(&mut self, mut snapshot: ReviewedPlanSnapshot) -> String {
@@ -1002,6 +1052,51 @@ mod tests {
             .unwrap();
         assert_eq!(reappeared[0].device_handle, handle);
         assert!(store.device(&handle).unwrap().session_epoch > epoch);
+        assert!(store.facts(&handle).is_err());
+    }
+
+    #[test]
+    fn facts_from_a_prior_device_epoch_are_not_retained_after_reconnect() {
+        let mut store = SessionHandles::default();
+        let handle = store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-1"
+                }]
+            }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        store
+            .set_facts(
+                &handle,
+                json!({ "model": "Pocket", "firmwareBuild": "old" }),
+            )
+            .unwrap();
+        let captured_epoch = store.device_session_epoch(&handle).unwrap();
+
+        store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-2"
+                }]
+            }))
+            .unwrap();
+
+        assert!(store.device_session_epoch(&handle).unwrap() > captured_epoch);
+        assert!(store
+            .set_facts_for_epoch(
+                &handle,
+                captured_epoch,
+                json!({ "model": "Pocket", "firmwareBuild": "stale" }),
+            )
+            .is_err());
         assert!(store.facts(&handle).is_err());
     }
 

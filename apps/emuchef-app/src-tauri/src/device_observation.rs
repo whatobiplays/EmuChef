@@ -379,7 +379,13 @@ impl SelectedDeviceObservation {
     /// so neither is inferred here. Partial observations may accumulate facts,
     /// but absent facts never prove compatibility.
     pub(crate) fn proves_target_compatibility(&self) -> bool {
-        self.profile_id.is_some()
+        self.session_epoch.is_some()
+            && self
+                .root_state
+                .as_ref()
+                .and_then(crate::qualification_session::project_root_state)
+                .is_some()
+            && self.profile_id.is_some()
             && self.manufacturer.is_some()
             && self.model.is_some()
             && self.android_version.is_some()
@@ -484,6 +490,17 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
         {
             return Err(unverified_device_error());
         }
+        let current_epoch = current
+            .context
+            .as_ref()
+            .ok_or_else(unverified_device_error)?
+            .session_epoch;
+        if current_epoch != probe.session_epoch {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
         // This seam composes passive observation only. Explicit root authority
         // is composed by the qualification-specific target setup, which
         // attaches its committed typed result to the returned capture.
@@ -491,17 +508,12 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
             .with_probe_facts(&facts)
             .with_profile_id(profile_id)
             .with_snapshot(&snapshot)
-            .with_session_epoch(
-                current
-                    .context
-                    .ok_or_else(unverified_device_error)?
-                    .session_epoch,
-            );
+            .with_session_epoch(probe.session_epoch);
         if observation.android_api != snapshot.android_api_level.map(u64::from) {
             return Err(unverified_device_error());
         }
         let capabilities = capabilities_from_snapshot(&snapshot);
-        commit_selected_observation(state, observation.clone());
+        commit_selected_observation(state, observation.clone())?;
         Ok(SelectedDeviceCapture {
             observation,
             capabilities,
@@ -552,19 +564,30 @@ pub(crate) fn capabilities_from_snapshot(snapshot: &DeviceQualificationSnapshotD
 /// a no-persistence no-op.
 pub(crate) fn commit_selected_observation(
     state: &AppState,
-    mut observation: SelectedDeviceObservation,
-) {
-    let session_epoch = match state.handles.lock() {
-        Ok(handles) => handles.device_session_epoch(&observation.device_handle),
+    observation: SelectedDeviceObservation,
+) -> Result<(), String> {
+    let session_epoch = observation
+        .session_epoch
+        .ok_or_else(unverified_device_error)?;
+    let handles = match state.handles.lock() {
+        Ok(handles) => handles,
         Err(poisoned) => {
+            let handles = poisoned.into_inner();
             state.handles.clear_poison();
-            poisoned
-                .into_inner()
-                .device_session_epoch(&observation.device_handle)
+            handles
         }
     };
-    if let Some(session_epoch) = session_epoch {
-        observation = observation.with_session_epoch(session_epoch);
+    let current = handles
+        .qualification_devices()
+        .into_iter()
+        .find(|device| device.handle == observation.device_handle);
+    if !current
+        .is_some_and(|device| device.state == "available" && device.session_epoch == session_epoch)
+    {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
     }
     crate::qualification_session::observe(
         state,
@@ -572,6 +595,8 @@ pub(crate) fn commit_selected_observation(
             observation,
         )),
     );
+    drop(handles);
+    Ok(())
 }
 
 pub fn classify(
@@ -1041,7 +1066,7 @@ where
         requested_handle,
         request,
     )?;
-    commit_snapshot_observation(state, &current);
+    commit_snapshot_observation(state, &current)?;
     Ok(current)
 }
 
@@ -1049,17 +1074,26 @@ where
 /// an authoritative device observation. Only a supported device whose identity
 /// the run actually established can be observed this way; every other result
 /// leaves the attempt untouched.
-fn commit_snapshot_observation(state: &AppState, current: &CurrentQualification) {
+fn commit_snapshot_observation(
+    state: &AppState,
+    current: &CurrentQualification,
+) -> Result<(), String> {
     if current.snapshot.state != DeviceQualificationState::Supported {
-        return;
+        return Ok(());
     }
     let Some(identity) = current.snapshot.device_identity.as_deref() else {
-        return;
+        return Ok(());
     };
+    let context = current
+        .context
+        .as_ref()
+        .ok_or_else(unverified_device_error)?;
     commit_selected_observation(
         state,
-        SelectedDeviceObservation::new(identity).with_snapshot(&current.snapshot),
-    );
+        SelectedDeviceObservation::new(identity)
+            .with_snapshot(&current.snapshot)
+            .with_session_epoch(context.session_epoch),
+    )
 }
 
 /// Qualify the single target from an already reconciled native inventory.
@@ -1191,7 +1225,7 @@ where
 
     let response = request(
         "qualifyDevice",
-        json!({ "adbPath": adb_path, "serial": target.serial }),
+        json!({ "adbPath": adb_path, "serial": &target.serial }),
     )
     .map_err(|_| {
         safe_error(
@@ -1219,11 +1253,27 @@ where
         qualification_revision,
         qualification_fingerprint(&observed_qualification),
     );
-    let root_key = RootQualificationKey::from_context(&context);
-    handles
+    let mut handles_guard = handles
         .lock()
-        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
-        .set_qualification_context(context.clone());
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?;
+    let current_device = handles_guard.device(&identity).map_err(|_| {
+        safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        )
+    })?;
+    if current_device.state != "available"
+        || current_device.session_epoch != target.session_epoch
+        || current_device.serial != target.serial
+    {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
+    handles_guard.set_qualification_context(context.clone());
+    drop(handles_guard);
+    let root_key = RootQualificationKey::from_context(&context);
     let root_invalidation = root_qualification
         .lock()
         .map_err(|_| {

@@ -96,6 +96,7 @@ export function useDeviceQualificationMode({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyCountRef = useRef(0);
+  const refreshGenerationRef = useRef(0);
 
   const startBusy = useCallback(() => {
     busyCountRef.current += 1;
@@ -145,12 +146,14 @@ export function useDeviceQualificationMode({
 
   const refresh = useCallback(async () => {
     if (!enabled) return;
+    const generation = ++refreshGenerationRef.current;
     startBusy();
     setError(null);
     try {
-      applyStatus(await api.deviceQualificationModeStatus());
+      const nextStatus = await api.deviceQualificationModeStatus();
+      if (generation === refreshGenerationRef.current) applyStatus(nextStatus);
     } catch (refreshError) {
-      setError(errorMessage(refreshError));
+      if (generation === refreshGenerationRef.current) setError(errorMessage(refreshError));
     } finally {
       finishBusy();
     }
@@ -159,6 +162,9 @@ export function useDeviceQualificationMode({
   useEffect(() => {
     if (!enabled) return;
     void refresh();
+    return () => {
+      refreshGenerationRef.current += 1;
+    };
   // Product lifecycle is owned by Rust. Workflow changes are a presentation
   // signal only: reread its sanitized projection after ordinary product work.
   }, [enabled, refresh, workflow]);

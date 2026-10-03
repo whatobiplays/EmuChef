@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -119,6 +119,7 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
       <output data-testid="qualification-checkpoint">{controller.session?.recordedCheckpoints[0]?.observedAt ?? ""}</output>
       <output data-testid="qualification-phase">{controller.session?.phase ?? ""}</output>
       <output data-testid="qualification-error">{controller.error ?? ""}</output>
+      <output data-testid="qualification-busy">{String(controller.busy)}</output>
       <button type="button" onClick={() => void controller.refresh()}>Refresh</button>
       <button
         type="button"
@@ -398,6 +399,53 @@ test("workflow transitions trigger a presentation-only status refresh", async ()
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
   expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
   expect(mockApi.recordQualificationCheckpoint).not.toHaveBeenCalled();
+});
+
+test("a late earlier status refresh cannot replace the latest presentation", async () => {
+  let resolveFirst!: (status: QualificationModeStatus) => void;
+  let resolveSecond!: (status: QualificationModeStatus) => void;
+  const first = new Promise<QualificationModeStatus>((resolve) => { resolveFirst = resolve; });
+  const second = new Promise<QualificationModeStatus>((resolve) => { resolveSecond = resolve; });
+  mockApi.deviceQualificationModeStatus.mockReturnValueOnce(first).mockReturnValueOnce(second);
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2);
+  expect(screen.getByTestId("qualification-busy").textContent).toBe("true");
+
+  const latest = activeStatus({
+    resumableCandidates: [{
+      candidateHandle: "latest-run",
+      kind: "qualification_run",
+      capturedAt: "latest",
+      promotable: true,
+      nonPromotableReason: null,
+      runValidity: "valid",
+      qualificationOutcome: "passed",
+    }],
+  });
+  await act(async () => resolveSecond(latest));
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("latest-run");
+  });
+  expect(screen.getByTestId("qualification-busy").textContent).toBe("true");
+
+  await act(async () => resolveFirst(activeStatus({
+    resumableSession: sessionSnapshot(),
+    resumableCandidates: [{
+      candidateHandle: "stale-run",
+      kind: "qualification_run",
+      capturedAt: "stale",
+      promotable: false,
+      nonPromotableReason: "Stale presentation",
+      runValidity: "invalid",
+      qualificationOutcome: "not_observed",
+    }],
+  })));
+
+  expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("latest-run");
+  expect(screen.getByTestId("qualification-session-present").textContent).toBe("absent");
+  expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
 });
 
 test("a failed operator action surfaces a bounded error without changing locks", async () => {

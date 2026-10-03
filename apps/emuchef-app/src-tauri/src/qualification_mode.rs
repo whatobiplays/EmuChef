@@ -717,11 +717,13 @@ impl SelectedDeviceObservationSource for QualificationObservationSource<'_> {
         let capture = passive.capture_selected_device(device_handle, device_plan)?;
         let root =
             crate::device_qualification::check_device_root_observation(device_handle, self.state)?;
-        if root.device_identity != device_handle {
+        if root.device_identity != device_handle
+            || root.session_epoch != capture.observation.session_epoch.unwrap_or_default()
+        {
             return Err(crate::device_observation::unverified_device_error());
         }
         let observation = capture.observation.with_root_state(root.qualification);
-        crate::device_observation::commit_selected_observation(self.state, observation.clone());
+        crate::device_observation::commit_selected_observation(self.state, observation.clone())?;
         Ok(SelectedDeviceCapture {
             observation,
             capabilities: capture.capabilities,

@@ -1120,7 +1120,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     // Resolve the retained handle only after fresh reconciliation. A changed
     // transport, cardinality transition, or disappeared record therefore
     // produces a stable stale/disconnected error before any start request.
-    let (serial, refreshed_review) = {
+    let (serial, session_epoch, refreshed_review) = {
         let mut handles = handles.lock().map_err(|_| session_error())?;
         let refreshed = handles.review(review_handle)?.clone();
         let device = handles
@@ -1129,7 +1129,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         if device.state != "available" {
             return Err(device_disconnected());
         }
-        (device.serial.clone(), refreshed)
+        (device.serial.clone(), device.session_epoch, refreshed)
     };
     // Keep the active session's immutable product intent available for the
     // remaining final-gate projections. The authoritative probe below may
@@ -1142,17 +1142,26 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     )
     .map_err(|_| device_disconnected())?;
-    let mut final_probe_observation = crate::device_observation::DeviceProbeFacts::decode(&facts)
-        .map(|probe_facts| {
-            crate::device_observation::SelectedDeviceObservation::new(
+    let typed_probe_facts = crate::device_observation::DeviceProbeFacts::decode(&facts);
+    {
+        let mut handles = handles.lock().map_err(|_| session_error())?;
+        handles
+            .set_facts_for_epoch(
                 &refreshed_review.device_handle,
+                session_epoch,
+                facts.clone(),
             )
+            .map_err(|_| device_disconnected())?;
+    }
+    let mut final_probe_observation = typed_probe_facts.as_ref().map(|probe_facts| {
+        crate::device_observation::SelectedDeviceObservation::new(&refreshed_review.device_handle)
             .with_probe_facts(&probe_facts)
-        });
+            .with_session_epoch(session_epoch)
+    });
     if let Some(state) = qualification_state {
         match final_probe_observation.as_ref() {
             Some(observation) => {
-                crate::device_observation::commit_selected_observation(state, observation.clone())
+                crate::device_observation::commit_selected_observation(state, observation.clone())?
             }
             None => crate::qualification_session::observe_device_observation_failure(
                 state,
@@ -1175,6 +1184,13 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         Some(&refreshed_review.device_handle),
         &mut qualification_request,
     )?;
+    if current
+        .context
+        .as_ref()
+        .is_none_or(|context| context.session_epoch != session_epoch)
+    {
+        return Err(device_disconnected());
+    }
     let root_granted = if review_requires_root(&refreshed_review) {
         let current_context = current.context.as_ref().ok_or_else(|| {
             safe_error(
@@ -1212,13 +1228,26 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         crate::device_observation::matched_profile_id(&projection, device_plan)
     });
 
+    {
+        let handles = handles.lock().map_err(|_| session_error())?;
+        let device = handles
+            .device(&refreshed_review.device_handle)
+            .map_err(|_| device_disconnected())?;
+        if device.state != "available"
+            || device.session_epoch != session_epoch
+            || device.facts_session_epoch != Some(session_epoch)
+        {
+            return Err(device_disconnected());
+        }
+    }
+
     if let (Some(state), Some(observation)) = (qualification_state, final_probe_observation.take())
     {
         let mut observation = observation.with_snapshot(&current.snapshot);
         if qualification_device_plan.is_some() {
             if let Some(profile_id) = current_profile_id {
                 observation = observation.with_profile_id(profile_id);
-                crate::device_observation::commit_selected_observation(state, observation);
+                crate::device_observation::commit_selected_observation(state, observation)?;
             } else {
                 // Catalog matching is qualification-only at this point. Its
                 // failure invalidates the attempt but never changes the
@@ -1229,7 +1258,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                 );
             }
         } else {
-            crate::device_observation::commit_selected_observation(state, observation);
+            crate::device_observation::commit_selected_observation(state, observation)?;
         }
     }
 

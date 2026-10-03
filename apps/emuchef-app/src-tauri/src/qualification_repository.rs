@@ -202,6 +202,8 @@ pub struct QualificationRepository {
     fail_next_finalize: AtomicBool,
     #[cfg(test)]
     fail_after_candidate_envelope_publication: AtomicBool,
+    #[cfg(test)]
+    fail_candidate_publication_staging_cleanup: AtomicBool,
 }
 
 /// Lazily resolves the trusted qualification repository only when the mode is
@@ -343,6 +345,8 @@ impl QualificationRepository {
             fail_next_finalize: AtomicBool::new(false),
             #[cfg(test)]
             fail_after_candidate_envelope_publication: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_candidate_publication_staging_cleanup: AtomicBool::new(false),
         }
     }
 
@@ -433,6 +437,12 @@ impl QualificationRepository {
     #[cfg(test)]
     fn fail_after_candidate_envelope_publication_for_test(&self) {
         self.fail_after_candidate_envelope_publication
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_candidate_publication_staging_cleanup_for_test(&self) {
+        self.fail_candidate_publication_staging_cleanup
             .store(true, Ordering::SeqCst);
     }
 
@@ -785,7 +795,13 @@ impl QualificationRepository {
             .swap(false, Ordering::SeqCst);
         #[cfg(not(test))]
         let fail_after_envelope = false;
-        publish_candidate_publication(&directory, fail_after_envelope)?;
+        #[cfg(test)]
+        let fail_staging_cleanup = self
+            .fail_candidate_publication_staging_cleanup
+            .swap(false, Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fail_staging_cleanup = false;
+        publish_candidate_publication(&directory, fail_after_envelope, fail_staging_cleanup)?;
         self.load_candidate_unlocked(candidate_handle)
     }
 
@@ -1454,6 +1470,7 @@ fn stage_candidate_publication(
 fn publish_candidate_publication(
     directory: &Path,
     fail_after_candidate_envelope: bool,
+    fail_staging_cleanup: bool,
 ) -> Result<(), String> {
     let transaction_path = directory.join(CANDIDATE_PUBLICATION_FILE);
     let transaction_bytes =
@@ -1526,13 +1543,27 @@ fn publish_candidate_publication(
         "qualification publication transaction",
     )?;
     sync_directory(directory)?;
-    remove_candidate_publication_staging(directory)
+    let _cleanup = if fail_staging_cleanup {
+        Err("injected staging cleanup failure".to_string())
+    } else {
+        remove_candidate_publication_staging(directory)
+    };
+    // The candidate/report pair is committed once the transaction is durably
+    // removed and the candidate directory is synced. Staging cleanup can be
+    // retried on a later repository operation and cannot roll back publication.
+    Ok(())
 }
 
 fn recover_candidate_publication(directory: &Path) -> Result<(), String> {
     match fs::symlink_metadata(directory.join(CANDIDATE_PUBLICATION_FILE)) {
-        Ok(_) => publish_candidate_publication(directory, false),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => publish_candidate_publication(directory, false, false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // A previous publication may have committed before its best-effort
+            // staging cleanup completed. Retry that housekeeping without
+            // changing the already-published candidate authority.
+            let _ = remove_candidate_publication_staging(directory);
+            Ok(())
+        }
         Err(_) => Err("qualification publication transaction could not be inspected".to_string()),
     }
 }
