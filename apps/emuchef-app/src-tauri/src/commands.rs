@@ -102,7 +102,16 @@ pub(crate) fn report_device_inventory_to_qualification(state: &AppState) {
             .into_iter()
             .map(|device| device.handle)
             .collect::<Vec<_>>(),
-        Err(_) => return,
+        Err(poisoned) => {
+            let handles = poisoned
+                .into_inner()
+                .qualification_devices()
+                .into_iter()
+                .map(|device| device.handle)
+                .collect::<Vec<_>>();
+            state.handles.clear_poison();
+            handles
+        }
     };
     crate::qualification_session::observe_device_inventory(state, &handles);
 }
@@ -929,6 +938,16 @@ fn match_device_result(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
+    if let Some(device_plan) = crate::qualification_session::active_device_plan(state) {
+        let mut observation =
+            crate::device_observation::SelectedDeviceObservation::new(device_handle);
+        if let Some(profile_id) =
+            crate::device_observation::matched_profile_id(&projection, &device_plan)
+        {
+            observation = observation.with_profile_id(profile_id);
+        }
+        crate::device_observation::commit_selected_observation(state, observation);
+    }
     Ok((public, projection))
 }
 

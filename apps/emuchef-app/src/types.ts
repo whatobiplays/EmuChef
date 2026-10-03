@@ -514,6 +514,7 @@ export interface QualificationCandidateSummary {
 export interface QualificationModeStatus {
   enabled: boolean;
   recordable: boolean;
+  deviceSelectionLocked: boolean;
   message: string | null;
   build: QualificationBuildIdentity | null;
   runtimeContract: string | null;

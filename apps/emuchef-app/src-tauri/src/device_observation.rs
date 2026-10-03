@@ -369,7 +369,8 @@ impl SelectedDeviceObservation {
     /// partially observed device never proves compatibility, because absent
     /// facts are not evidence of a match.
     pub(crate) fn proves_target_compatibility(&self) -> bool {
-        self.manufacturer.is_some()
+        self.profile_id.is_some()
+            && self.manufacturer.is_some()
             && self.model.is_some()
             && self.android_version.is_some()
             && self.android_api.is_some()

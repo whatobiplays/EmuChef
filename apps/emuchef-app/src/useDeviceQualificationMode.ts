@@ -6,6 +6,7 @@ import type {
   QualificationCheckpointOutcome,
   QualificationConnectionType,
   QualificationModeStatus,
+  QualificationCandidateSummary,
   QualificationRunRecordingResult,
   QualificationSessionSnapshot,
   QualificationTargetCandidatePreview,
@@ -23,6 +24,8 @@ export interface DeviceQualificationModeController {
   status: QualificationModeStatus | null;
   session: QualificationSessionSnapshot | null;
   targetCandidate: QualificationTargetCandidatePreview | null;
+  /** Persisted run candidates remain available after the active session closes. */
+  runCandidates: QualificationCandidateSummary[];
   intentLock: QualificationIntentLock | null;
   /** Whether an active attempt owns the product device selection. */
   deviceSelectionLocked: boolean;
@@ -83,11 +86,13 @@ function candidatePreviewFromSummary(
  */
 export function useDeviceQualificationMode({
   enabled = true,
+  workflow,
   workflowRef,
 }: UseDeviceQualificationModeOptions): DeviceQualificationModeController {
   const [status, setStatus] = useState<QualificationModeStatus | null>(null);
   const [session, setSession] = useState<QualificationSessionSnapshot | null>(null);
   const [targetCandidate, setTargetCandidate] = useState<QualificationTargetCandidatePreview | null>(null);
+  const [runCandidates, setRunCandidates] = useState<QualificationCandidateSummary[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyCountRef = useRef(0);
@@ -125,9 +130,11 @@ export function useDeviceQualificationMode({
     if (!nextStatus.enabled) {
       setSession(null);
       setTargetCandidate(null);
+      setRunCandidates([]);
       return;
     }
     setSession(nextStatus.resumableSession ?? null);
+    setRunCandidates(nextStatus.resumableCandidates.filter((candidate) => candidate.kind === "qualification_run"));
     setTargetCandidate(
       nextStatus.resumableCandidates
         .map(candidatePreviewFromSummary)
@@ -152,7 +159,9 @@ export function useDeviceQualificationMode({
   useEffect(() => {
     if (!enabled) return;
     void refresh();
-  }, [enabled, refresh]);
+  // Product lifecycle is owned by Rust. Workflow changes are a presentation
+  // signal only: reread its sanitized projection after ordinary product work.
+  }, [enabled, refresh, workflow]);
 
   const beginSession = useCallback(async (request: {
     deviceHandle: string;
@@ -161,11 +170,12 @@ export function useDeviceQualificationMode({
     workflowId: string;
   }) => {
     if (!enabled || !status?.enabled) return;
-    await runOperation(
+    const result = await runOperation(
       () => api.beginQualificationSession(request),
       (nextSession) => setSession(nextSession),
     );
-  }, [enabled, runOperation, status?.enabled]);
+    if (result !== null) await refresh();
+  }, [enabled, refresh, runOperation, status?.enabled]);
 
   const createTargetCandidate = useCallback(async (connectionType: QualificationConnectionType) => {
     if (!enabled || !status?.enabled) return;
@@ -209,6 +219,7 @@ export function useDeviceQualificationMode({
     if (!enabled || !status?.enabled || !session) return;
     const result = await runOperation(
       () => api.abandonQualificationSession(session.sessionHandle),
+      (closedSession) => setSession(closedSession),
     );
     if (result === null) return;
     await refresh();
@@ -234,21 +245,18 @@ export function useDeviceQualificationMode({
     await refresh();
   }, [enabled, refresh, runOperation, session, status?.enabled]);
 
-  const intentLock = session
+  const deviceSelectionLocked = session?.phase === "closed"
+    ? false
+    : status?.deviceSelectionLocked ?? false;
+  const intentLock = session && deviceSelectionLocked
     ? { devicePlan: session.devicePlan, selectedRecipes: [...session.requiredRecipes] }
     : null;
-  /**
-   * An active attempt owns the product device selection: any other device
-   * would invalidate the attempt, so selection stays locked until the attempt
-   * closes. This is a projection of sanitized session state, not an inference
-   * about restored process-local handles.
-   */
-  const deviceSelectionLocked = session !== null;
 
   return {
     status,
     session,
     targetCandidate,
+    runCandidates,
     intentLock,
     deviceSelectionLocked,
     busy,

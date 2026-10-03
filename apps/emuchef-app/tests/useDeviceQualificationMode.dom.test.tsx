@@ -26,6 +26,7 @@ function disabledStatus(): QualificationModeStatus {
   return {
     enabled: false,
     recordable: false,
+    deviceSelectionLocked: false,
     message: null,
     build: null,
     runtimeContract: null,
@@ -41,6 +42,7 @@ function activeStatus(
   return {
     enabled: true,
     recordable: true,
+    deviceSelectionLocked: false,
     message: null,
     build: {
       appVersion: "0.1.0",
@@ -104,12 +106,16 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
   return (
     <>
       <output data-testid="qualification-active">{String(controller.intentLock !== null)}</output>
+      <output data-testid="qualification-session-present">
+        {controller.session === null ? "absent" : "present"}
+      </output>
       <output data-testid="qualification-device-selection-locked">
         {controller.deviceSelectionLocked ? "locked" : "unlocked"}
       </output>
       <output data-testid="qualification-plan">{controller.intentLock?.devicePlan ?? ""}</output>
       <output data-testid="qualification-recipes">{controller.intentLock?.selectedRecipes.join(",") ?? ""}</output>
       <output data-testid="qualification-candidate">{controller.targetCandidate?.target.model.value ?? ""}</output>
+      <output data-testid="qualification-run-candidates">{controller.runCandidates.map((candidate) => candidate.candidateHandle).join(",")}</output>
       <output data-testid="qualification-checkpoint">{controller.session?.recordedCheckpoints[0]?.observedAt ?? ""}</output>
       <output data-testid="qualification-phase">{controller.session?.phase ?? ""}</output>
       <output data-testid="qualification-error">{controller.error ?? ""}</output>
@@ -156,7 +162,7 @@ beforeEach(() => {
   mockApi.beginQualificationSession.mockResolvedValue(sessionSnapshot());
   mockApi.recordQualificationCheckpoint.mockResolvedValue(sessionSnapshot());
   mockApi.abandonQualificationSession.mockResolvedValue(
-    sessionSnapshot({ runValidity: "invalid", recordable: false }),
+    sessionSnapshot({ phase: "closed", runValidity: "invalid", recordable: false }),
   );
   mockApi.recordQualificationRun.mockResolvedValue({ runId: "qualification-run-opaque" });
 });
@@ -204,6 +210,7 @@ test("refresh restores the stored target candidate without recapturing it", asyn
 test("a restored attempt projects sanitized locks and checkpoints without trusted calls", async () => {
   const recordedAt = "2026-08-23T09:30:00Z";
   mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus({
+    deviceSelectionLocked: true,
     resumableSession: sessionSnapshot({
       phase: "executionActive",
       humanCheckpoints: [{
@@ -235,7 +242,12 @@ test("a restored attempt projects sanitized locks and checkpoints without truste
 });
 
 test("an active attempt exposes only its bound plan and recipes without starting product work", async () => {
-  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus());
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus())
+    .mockResolvedValue(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }));
 
   render(<Harness workflow={reviewWorkflow()} />);
   await screen.findByText("false");
@@ -293,11 +305,12 @@ test("candidate capture resolves the selected device from live operator intent",
 
 test("checkpoint recording forwards only the opaque handle and declared outcome", async () => {
   mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus({
+    deviceSelectionLocked: true,
     resumableSession: sessionSnapshot(),
   }));
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("true");
+  await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("true"));
   fireEvent.click(screen.getByRole("button", { name: "Record checkpoint" }));
 
   await waitFor(() => {
@@ -311,11 +324,11 @@ test("checkpoint recording forwards only the opaque handle and declared outcome"
 
 test("abandoning an attempt closes it and releases the projected locks", async () => {
   mockApi.deviceQualificationModeStatus
-    .mockResolvedValueOnce(activeStatus({ resumableSession: sessionSnapshot() }))
+    .mockResolvedValueOnce(activeStatus({ deviceSelectionLocked: true, resumableSession: sessionSnapshot() }))
     .mockResolvedValue(activeStatus());
 
   render(<Harness workflow={reviewWorkflow()} />);
-  await screen.findByText("true");
+  await waitFor(() => expect(screen.getByTestId("qualification-active").textContent).toBe("true"));
   fireEvent.click(screen.getByRole("button", { name: "Abandon" }));
 
   await waitFor(() => {
@@ -323,6 +336,67 @@ test("abandoning an attempt closes it and releases the projected locks", async (
     expect(screen.getByTestId("qualification-active").textContent).toBe("false");
   });
   expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+});
+
+test("abandonment applies the returned closed snapshot even when status refresh fails", async () => {
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }))
+    .mockRejectedValueOnce(new Error("status temporarily unavailable"));
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await screen.findByText("true");
+  fireEvent.click(screen.getByRole("button", { name: "Abandon" }));
+
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-phase").textContent).toBe("closed");
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+  });
+  expect(mockApi.abandonQualificationSession).toHaveBeenCalledTimes(1);
+});
+
+test("a restored session awaiting device reassociation leaves product selection unlocked", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus({
+    deviceSelectionLocked: false,
+    resumableSession: sessionSnapshot(),
+  }));
+
+  render(<Harness workflow={reviewWorkflow()} />);
+
+  await waitFor(() => expect(screen.getByTestId("qualification-session-present").textContent).toBe("present"));
+  expect(screen.getByTestId("qualification-active").textContent).toBe("false");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+  expect(screen.getByTestId("qualification-plan").textContent).toBe("");
+});
+
+test("run candidates are projected independently of the resumable session", async () => {
+  mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus({
+    resumableCandidates: [
+      { candidateHandle: "run-one", kind: "qualification_run", capturedAt: "now", promotable: true, nonPromotableReason: null, runValidity: "valid", qualificationOutcome: "passed" },
+      { candidateHandle: "run-two", kind: "qualification_run", capturedAt: "later", promotable: false, nonPromotableReason: "Source state is not clean.", runValidity: "invalid", qualificationOutcome: "not_observed" },
+    ],
+  }));
+
+  render(<Harness workflow={reviewWorkflow()} />);
+
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("run-one,run-two");
+  });
+  expect(screen.getByTestId("qualification-active").textContent).toBe("false");
+});
+
+test("workflow transitions trigger a presentation-only status refresh", async () => {
+  const initial = reviewWorkflow();
+  const { rerender } = render(<Harness workflow={initial} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(1));
+
+  rerender(<Harness workflow={{ ...initial, step: "execution" }} />);
+
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+  expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
+  expect(mockApi.recordQualificationCheckpoint).not.toHaveBeenCalled();
 });
 
 test("a failed operator action surfaces a bounded error without changing locks", async () => {
@@ -341,7 +415,7 @@ test("a failed operator action surfaces a bounded error without changing locks",
 
 test("successful run recording clears the active qualification session", async () => {
   mockApi.deviceQualificationModeStatus
-    .mockResolvedValueOnce(activeStatus({ resumableSession: sessionSnapshot() }))
+    .mockResolvedValueOnce(activeStatus({ deviceSelectionLocked: true, resumableSession: sessionSnapshot() }))
     .mockResolvedValue(activeStatus());
 
   render(<Harness workflow={reviewWorkflow()} />);
@@ -356,8 +430,9 @@ test("successful run recording clears the active qualification session", async (
 
 test("authoritative lifecycle progress appears only through a sanitized status refresh", async () => {
   mockApi.deviceQualificationModeStatus
-    .mockResolvedValueOnce(activeStatus({ resumableSession: sessionSnapshot() }))
+    .mockResolvedValueOnce(activeStatus({ deviceSelectionLocked: true, resumableSession: sessionSnapshot() }))
     .mockResolvedValueOnce(activeStatus({
+      deviceSelectionLocked: true,
       resumableSession: sessionSnapshot({
         phase: "terminalAwaitingEvidence",
         candidate: null,

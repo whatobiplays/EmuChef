@@ -172,6 +172,7 @@ pub(crate) struct QualificationCandidateSummaryDto {
 pub(crate) struct QualificationModeStatus {
     pub(crate) enabled: bool,
     pub(crate) recordable: bool,
+    pub(crate) device_selection_locked: bool,
     pub(crate) message: Option<String>,
     pub(crate) build: Option<QualificationBuildIdentity>,
     pub(crate) runtime_contract: Option<String>,
@@ -296,6 +297,22 @@ fn safe_qualification_error(code: &str) -> String {
     safe_error(code, message)
 }
 
+/// Hold the begin gate across the complete observation and candidate-creation
+/// sequence so a second start is rejected before any device or root side effect.
+pub(crate) fn with_inactive_qualification_session<T>(
+    state: &AppState,
+    repository: &crate::qualification_repository::QualificationRepository,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _begin_guard = repository
+        .lock_begin()
+        .map_err(|_| safe_qualification_error("qualification_session_active"))?;
+    if crate::qualification_session::session_status(state)?.is_some() {
+        return Err(safe_qualification_error("qualification_session_active"));
+    }
+    operation()
+}
+
 #[tauri::command]
 pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
@@ -308,6 +325,8 @@ pub fn get_device_qualification_mode_status(
     // and must not resolve or initialize the repository to prove it.
     if status.enabled {
         status.resumable_session = crate::qualification_session::session_status(&state)?;
+        status.device_selection_locked =
+            crate::qualification_session::device_selection_locked(&state)?;
     }
     Ok(status)
 }
@@ -348,6 +367,7 @@ fn qualification_mode_status(
     Ok(QualificationModeStatus {
         enabled: true,
         recordable,
+        device_selection_locked: false,
         message,
         build: Some(description.build),
         runtime_contract: Some(description.runtime_contract),
@@ -362,6 +382,7 @@ fn disabled_mode_status() -> QualificationModeStatus {
     QualificationModeStatus {
         enabled: false,
         recordable: false,
+        device_selection_locked: false,
         message: Some(
             "Device qualification mode is unavailable in this application build.".to_string(),
         ),
@@ -400,6 +421,12 @@ pub fn create_qualification_target_candidate(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    let _begin_guard = repository
+        .lock_begin()
+        .map_err(|_| safe_qualification_error("qualification_session_active"))?;
+    if crate::qualification_session::session_status(&state)?.is_some() {
+        return Err(safe_qualification_error("qualification_session_active"));
+    }
     repository
         .require_recordable()
         .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
@@ -496,77 +523,79 @@ pub fn begin_qualification_session(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    repository
-        .require_recordable()
-        .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
-    let description = repository
-        .describe()
-        .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
-    if description.build != build {
-        return Err(safe_qualification_error("qualification_source_changed"));
-    }
-    let workflow = workflows_from_description(&description)?
-        .into_iter()
-        .find(|workflow| workflow.id == request.workflow_id)
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let target = targets_from_description(&description)?
-        .into_iter()
-        .find(|target| target.id == request.target_id)
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let capture = {
-        let mut source = QualificationObservationSource { state: &state };
-        source.capture_selected_device(&request.device_handle, &request.device_plan)?
-    };
-    if workflow.required_capabilities.iter().any(|required| {
-        !capture
-            .capabilities
-            .iter()
-            .any(|available| available == required)
-    }) {
-        return Err(safe_qualification_error("qualification_target_unverified"));
-    }
-    let captured_at = current_timestamp()?;
-    let provisional_payload = serde_json::json!({
-        "capturedAt": captured_at,
-        "build": build,
-        "workflowId": request.workflow_id,
-        "workflowVersion": workflow.version,
-        "deviceTargetId": request.target_id,
-    });
-    let candidate_handle = repository
-        .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let session_handle =
-        match crate::qualification_session::session_handle_for_candidate(&candidate_handle) {
-            Ok(handle) => handle,
-            Err(error) => {
-                let _ = repository.discard_candidate(&candidate_handle);
-                return Err(error);
-            }
-        };
-    let started = crate::qualification_session::begin(
-        &state,
-        crate::qualification_session::BeginSessionRequest {
-            session_handle,
-            candidate_handle: candidate_handle.clone(),
-            captured_at,
-            device_plan: request.device_plan.clone(),
-            target: target_binding_from_summary(&target),
-            workflow,
-            build,
-            runtime_contract: description.runtime_contract,
-            observation: capture.observation,
-        },
-    );
-    match started {
-        Ok(snapshot) => Ok(snapshot),
-        Err(error) => {
-            // An attempt that never became active must not leave a provisional
-            // candidate behind.
-            let _ = repository.discard_candidate(&candidate_handle);
-            Err(error)
+    with_inactive_qualification_session(&state, repository, || {
+        repository
+            .require_recordable()
+            .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
+        let description = repository
+            .describe()
+            .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
+        if description.build != build {
+            return Err(safe_qualification_error("qualification_source_changed"));
         }
-    }
+        let workflow = workflows_from_description(&description)?
+            .into_iter()
+            .find(|workflow| workflow.id == request.workflow_id)
+            .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        let target = targets_from_description(&description)?
+            .into_iter()
+            .find(|target| target.id == request.target_id)
+            .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        let capture = {
+            let mut source = QualificationObservationSource { state: &state };
+            source.capture_selected_device(&request.device_handle, &request.device_plan)?
+        };
+        if workflow.required_capabilities.iter().any(|required| {
+            !capture
+                .capabilities
+                .iter()
+                .any(|available| available == required)
+        }) {
+            return Err(safe_qualification_error("qualification_target_unverified"));
+        }
+        let captured_at = current_timestamp()?;
+        let provisional_payload = serde_json::json!({
+            "capturedAt": captured_at,
+            "build": build,
+            "workflowId": request.workflow_id,
+            "workflowVersion": workflow.version,
+            "deviceTargetId": request.target_id,
+        });
+        let candidate_handle = repository
+            .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
+            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        let session_handle =
+            match crate::qualification_session::session_handle_for_candidate(&candidate_handle) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = repository.discard_candidate(&candidate_handle);
+                    return Err(error);
+                }
+            };
+        let started = crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle,
+                candidate_handle: candidate_handle.clone(),
+                captured_at,
+                device_plan: request.device_plan.clone(),
+                target: target_binding_from_summary(&target),
+                workflow,
+                build,
+                runtime_contract: description.runtime_contract,
+                observation: capture.observation,
+            },
+        );
+        match started {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                // An attempt that never became active must not leave a provisional
+                // candidate behind.
+                let _ = repository.discard_candidate(&candidate_handle);
+                Err(error)
+            }
+        }
+    })
 }
 
 #[tauri::command]
@@ -1359,6 +1388,7 @@ mod tests {
         let input = json!({
             "enabled": true,
             "recordable": true,
+            "deviceSelectionLocked": false,
             "message": null,
             "build": {
                 "appVersion": "0.1.0",

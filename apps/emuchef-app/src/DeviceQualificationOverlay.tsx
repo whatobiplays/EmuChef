@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type {
+  QualificationCandidateSummary,
   QualificationCheckpointOutcome,
   QualificationFactPreview,
   QualificationSessionPhase,
@@ -102,6 +103,47 @@ function TargetCandidate({
         </button>
       </div>
     </section>
+  );
+}
+
+function RunCandidate({
+  candidate,
+  controller,
+}: {
+  candidate: QualificationCandidateSummary;
+  controller: DeviceQualificationModeController;
+}) {
+  return (
+    <article
+      className="qualification-candidate"
+      aria-label={`Qualification run ${candidate.candidateHandle}`}
+      data-testid="qualification-run-candidate"
+    >
+      <p>Captured {candidate.capturedAt}</p>
+      <p>
+        Run validity: {candidate.runValidity ?? "pending"}; outcome: {candidate.qualificationOutcome ?? "not observed"}
+      </p>
+      {!candidate.promotable && candidate.nonPromotableReason && (
+        <p className="warning">{candidate.nonPromotableReason}</p>
+      )}
+      <div className="button-row">
+        <button
+          type="button"
+          disabled={controller.busy || !controller.status?.recordable || !candidate.promotable}
+          onClick={() => void controller.recordRun(candidate.candidateHandle)}
+        >
+          Record qualification run
+        </button>
+        <button
+          className="secondary"
+          type="button"
+          disabled={controller.busy}
+          onClick={() => void controller.discardCandidate(candidate.candidateHandle)}
+        >
+          Discard candidate
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -257,7 +299,13 @@ export function DeviceQualificationOverlay({
           <div className="qualification-section-heading">
             <div>
               <p className="eyebrow">Active session</p>
-              <h3 id="qualification-session-state-heading">Normal workflow intent is locked</h3>
+              <h3 id="qualification-session-state-heading">
+                {controller.deviceSelectionLocked
+                  ? "Normal workflow intent is locked"
+                  : controller.session.phase === "closed"
+                  ? "Qualification attempt is closed"
+                  : "Select the registered device to resume qualification"}
+              </h3>
             </div>
             <span className="status qualification-supported" role="status">
               {sessionPhaseLabels[controller.session.phase]}
@@ -337,6 +385,29 @@ export function DeviceQualificationOverlay({
             normal workflow commits its own transitions. Abandoning closes this attempt as an invalid
             candidate and never changes the product execution.
           </p>
+        </section>
+      )}
+      {controller.runCandidates.some(
+        (candidate) => candidate.candidateHandle !== controller.session?.candidate?.candidateHandle,
+      ) && (
+        <section aria-labelledby="qualification-run-candidates-heading">
+          <div className="qualification-section-heading">
+            <div>
+              <p className="eyebrow">Persisted evidence</p>
+              <h3 id="qualification-run-candidates-heading">Qualification run candidates</h3>
+            </div>
+          </div>
+          <div className="qualification-candidate-list">
+            {controller.runCandidates
+              .filter((candidate) => candidate.candidateHandle !== controller.session?.candidate?.candidateHandle)
+              .map((candidate) => (
+                <RunCandidate
+                  candidate={candidate}
+                  controller={controller}
+                  key={candidate.candidateHandle}
+                />
+              ))}
+          </div>
         </section>
       )}
     </aside>

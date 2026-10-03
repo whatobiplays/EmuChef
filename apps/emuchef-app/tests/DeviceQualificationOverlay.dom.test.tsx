@@ -13,6 +13,7 @@ function status(): QualificationModeStatus {
   return {
     enabled: true,
     recordable: true,
+    deviceSelectionLocked: false,
     message: null,
     build: {
       appVersion: "0.1.0",
@@ -89,6 +90,7 @@ function controller(
     status: status(),
     session: null,
     targetCandidate: null,
+    runCandidates: [],
     intentLock: null,
     deviceSelectionLocked: false,
     busy: false,
@@ -257,6 +259,40 @@ test("a resumable target candidate renders stored values and provenance", () => 
   expect(screen.getByText(/explicit_root_check/)).toBeTruthy();
 });
 
+test("persisted qualification-run candidates remain actionable without a session", () => {
+  const runCandidates = [
+    {
+      candidateHandle: "run-one",
+      kind: "qualification_run" as const,
+      capturedAt: "2026-10-02T10:00:00Z",
+      promotable: true,
+      nonPromotableReason: null,
+      runValidity: "valid" as const,
+      qualificationOutcome: "passed" as const,
+    },
+    {
+      candidateHandle: "run-two",
+      kind: "qualification_run" as const,
+      capturedAt: "2026-10-02T11:00:00Z",
+      promotable: false,
+      nonPromotableReason: "Qualification source state is not clean.",
+      runValidity: "invalid" as const,
+      qualificationOutcome: "not_observed" as const,
+    },
+  ];
+  const current = controller({ runCandidates });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  expect(screen.getAllByTestId("qualification-run-candidate").length).toBe(2);
+  expect(screen.getAllByRole("button", { name: "Record qualification run" }).length).toBe(2);
+  expect((screen.getAllByRole("button", { name: "Record qualification run" })[1] as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getAllByRole("button", { name: "Record qualification run" })[0]);
+  expect(current.recordRun).toHaveBeenCalledWith("run-one");
+  fireEvent.click(screen.getAllByRole("button", { name: "Discard candidate" })[1]);
+  expect(current.discardCandidate).toHaveBeenCalledWith("run-two");
+});
+
 test("persisted checkpoint outcomes are displayed without a new timestamp", () => {
   const current = controller({
     session: session({
@@ -290,12 +326,15 @@ test("the overlay never renders repository paths, serials, or raw backend text",
       recordable: false,
       invalidReason: "Qualification evidence was invalidated before it could be recorded.",
     }),
-    error: "qualification_repository_unavailable",
+    error: "Qualification definitions are unavailable. Rebuild the qualification application.",
   });
 
   const { container } = render(<DeviceQualificationOverlay controller={current} />);
   const text = container.textContent ?? "";
 
   expect(/\/Users\/|\/private\/|sensitive-serial|adb output/i.test(text)).toBe(false);
-  expect(screen.getByRole("alert").textContent).toBe("qualification_repository_unavailable");
+  expect(screen.getByRole("alert").textContent).toBe(
+    "Qualification definitions are unavailable. Rebuild the qualification application.",
+  );
+  expect(text).not.toContain("qualification_repository_unavailable");
 });

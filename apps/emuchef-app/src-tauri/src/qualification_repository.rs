@@ -35,10 +35,12 @@ const CANDIDATE_DIRECTORY: &str = ".emuchef_runtime/qualification-candidates";
 const QUALIFICATION_TOOL: &str = "tools/device-qualification.mjs";
 const CANDIDATE_FILE: &str = "candidate.json";
 const SESSION_FILE: &str = "session.json";
+const SESSION_POISON_FILE: &str = "session-poison.json";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
 const SESSION_REPORT_FILE: &str = "session-terminal-report.json";
 const CANDIDATE_STAGING_PREFIX: &str = ".qualification-candidate-tmp-";
 const SESSION_STAGING_PREFIX: &str = ".qualification-session-tmp-";
+const SESSION_POISON_STAGING_PREFIX: &str = ".qualification-session-poison-tmp-";
 const SESSION_REPORT_STAGING_PREFIX: &str = ".qualification-session-report-tmp-";
 const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -149,6 +151,15 @@ pub(crate) struct QualificationSourceState {
     pub(crate) tracked_worktree_clean: bool,
 }
 
+/// Content identity for an authored recipe captured when a trusted session
+/// starts and carried with that qualification session across restart.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AuthoredRecipeDigest {
+    pub(crate) id: String,
+    pub(crate) sha256: String,
+}
+
 /// A repository status snapshot is read while the repository operation gate is
 /// held so candidate projection cannot observe a half-completed mutation.
 pub(crate) struct QualificationRepositoryStatus {
@@ -169,9 +180,12 @@ pub struct QualificationRepository {
     runner: Box<dyn QualificationToolRunner>,
     embedded_build_identity: Option<QualificationBuildIdentity>,
     operation_gate: Mutex<()>,
+    begin_gate: Mutex<()>,
     lifecycle_dirty: AtomicBool,
     #[cfg(test)]
     source_state_override: Option<std::sync::Arc<Mutex<QualificationSourceState>>>,
+    #[cfg(test)]
+    fail_next_finalize: AtomicBool,
 }
 
 /// Lazily resolves the trusted qualification repository only when the mode is
@@ -305,9 +319,12 @@ impl QualificationRepository {
             runner,
             embedded_build_identity: embedded_build_identity(),
             operation_gate: Mutex::new(()),
+            begin_gate: Mutex::new(()),
             lifecycle_dirty: AtomicBool::new(false),
             #[cfg(test)]
             source_state_override: None,
+            #[cfg(test)]
+            fail_next_finalize: AtomicBool::new(false),
         }
     }
 
@@ -315,6 +332,59 @@ impl QualificationRepository {
         self.operation_gate
             .lock()
             .map_err(|_| "qualification repository operation is unavailable".to_string())
+    }
+
+    /// Serialize qualification starts before any device capture or observation
+    /// side effect can occur.
+    pub(crate) fn lock_begin(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.begin_gate
+            .lock()
+            .map_err(|_| "qualification session start is unavailable".to_string())
+    }
+
+    /// Capture canonical authored recipe content identities at a trusted
+    /// session or review boundary. Candidate finalization uses these retained
+    /// digests instead of re-reading mutable working-tree files.
+    pub(crate) fn capture_authored_recipe_digests(
+        &self,
+        recipe_ids: &[String],
+    ) -> Result<Vec<AuthoredRecipeDigest>, String> {
+        let mut digests = Vec::with_capacity(recipe_ids.len());
+        for id in recipe_ids {
+            if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+                return Err("qualification authored source identity is invalid".to_string());
+            }
+            let path = self
+                .repo_root
+                .join("authored/recipes")
+                .join(format!("{id}.yaml"));
+            let bytes = fs::read(path)
+                .map_err(|_| "qualification authored source could not be read".to_string())?;
+            digests.push(AuthoredRecipeDigest {
+                id: id.clone(),
+                sha256: hex::encode(Sha256::digest(bytes)),
+            });
+        }
+        Ok(digests)
+    }
+
+    /// Revalidate the canonical source bound to a session before valid evidence
+    /// is materialized. A dirty, changed, or unavailable checkout leaves the
+    /// completed session pending so a later source change cannot seal a
+    /// mismatched fingerprint into a candidate.
+    pub(crate) fn authored_recipe_digests_match(&self, expected: &[AuthoredRecipeDigest]) -> bool {
+        let Ok(_operation) = self.lock_operation() else {
+            return false;
+        };
+        if self.ensure_recordable_unlocked().is_err() {
+            return false;
+        }
+        let recipe_ids = expected
+            .iter()
+            .map(|digest| digest.id.clone())
+            .collect::<Vec<_>>();
+        self.capture_authored_recipe_digests(&recipe_ids)
+            .is_ok_and(|current| current == expected)
     }
 
     fn current_source_state(&self) -> Result<QualificationSourceState, String> {
@@ -329,12 +399,17 @@ impl QualificationRepository {
     }
 
     #[cfg(test)]
-    fn set_source_state_for_test(&self, state: QualificationSourceState) {
+    pub(crate) fn set_source_state_for_test(&self, state: QualificationSourceState) {
         if let Some(source_state) = &self.source_state_override {
             *source_state
                 .lock()
                 .expect("test source state should not be poisoned") = state;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_finalize_for_test(&self) {
+        self.fail_next_finalize.store(true, Ordering::SeqCst);
     }
 
     /// Rechecks the trusted source/worktree lifecycle before capture begins.
@@ -497,6 +572,11 @@ impl QualificationRepository {
         let _operation = self.lock_operation()?;
         let directory = self.candidate_directory_unlocked(candidate_handle)?;
         validate_candidate_files(&directory)?;
+        match fs::symlink_metadata(directory.join(SESSION_POISON_FILE)) {
+            Ok(_) => return Err("qualification session has durable fail-closed state".to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err("qualification poison marker could not be inspected".to_string()),
+        }
         if persisted.candidate_handle != candidate_handle {
             return Err("qualification session candidate binding is inconsistent".to_string());
         }
@@ -533,8 +613,12 @@ impl QualificationRepository {
         let directory = self.candidate_directory_unlocked(candidate_handle)?;
         validate_candidate_files(&directory)?;
         let bytes = read_regular_file(&directory.join(SESSION_FILE), "qualification session")?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| "qualification session JSON is invalid".to_string())
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "qualification session JSON is invalid".to_string())?;
+        if value.get("candidateHandle").and_then(Value::as_str) != Some(candidate_handle) {
+            return Err("qualification session candidate binding is inconsistent".to_string());
+        }
+        Ok(value)
     }
 
     /// Removes authoritative session state once an attempt has closed. The
@@ -543,7 +627,36 @@ impl QualificationRepository {
         let _operation = self.lock_operation()?;
         let directory = self.candidate_directory_unlocked(candidate_handle)?;
         validate_candidate_files(&directory)?;
-        remove_optional_regular_file(&directory, SESSION_FILE, "qualification session")
+        remove_optional_regular_file(&directory, SESSION_FILE, "qualification session")?;
+        sync_directory(&directory)
+    }
+
+    /// Durably record that a session transition failed. Recovery must never
+    /// resume a session while this marker remains in its candidate directory.
+    pub(crate) fn mark_session_poisoned(&self, candidate_handle: &str) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        write_synced_replaced_file(
+            &directory,
+            SESSION_POISON_FILE,
+            SESSION_POISON_STAGING_PREFIX,
+            b"Qualification session evidence could not be retained.\n",
+        )?;
+        sync_directory(&directory)
+    }
+
+    /// Report whether durable fail-closed state exists for one session.
+    pub(crate) fn session_is_poisoned(&self, candidate_handle: &str) -> Result<bool, String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        match fs::symlink_metadata(directory.join(SESSION_POISON_FILE)) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+            Ok(_) => Err("qualification poison marker is not a regular file".to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err("qualification poison marker could not be inspected".to_string()),
+        }
     }
 
     /// Persists the authoritative terminal execution report captured by the
@@ -592,7 +705,8 @@ impl QualificationRepository {
             &directory,
             SESSION_REPORT_FILE,
             "qualification terminal report",
-        )
+        )?;
+        sync_directory(&directory)
     }
 
     /// Replaces a provisional candidate payload with the terminal run
@@ -605,6 +719,10 @@ impl QualificationRepository {
         report_bytes: Option<&[u8]>,
     ) -> Result<StoredQualificationCandidate, String> {
         let _operation = self.lock_operation()?;
+        #[cfg(test)]
+        if self.fail_next_finalize.swap(false, Ordering::SeqCst) {
+            return Err("injected qualification candidate finalization failure".to_string());
+        }
         let directory = self.candidate_directory_unlocked(candidate_handle)?;
         validate_candidate_files(&directory)?;
         let existing = self.load_candidate_unlocked(candidate_handle)?;
@@ -685,8 +803,20 @@ impl QualificationRepository {
             envelope.report.as_ref(),
             declared_report_sha256.as_deref(),
         )?;
-        let (promotable, non_promotable_reason) =
-            self.candidate_promotion_status(envelope.build.as_ref());
+        let poisoned = match fs::symlink_metadata(directory.join(SESSION_POISON_FILE)) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
+            Ok(_) => return Err("qualification poison marker is not a regular file".to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => return Err("qualification poison marker could not be inspected".to_string()),
+        };
+        let (promotable, non_promotable_reason) = if poisoned {
+            (
+                false,
+                Some("qualification session persistence failed and cannot be promoted".to_string()),
+            )
+        } else {
+            self.candidate_promotion_status(envelope.build.as_ref())
+        };
         let (promotable, non_promotable_reason) = if envelope.kind
             == CandidateKind::QualificationRun
             && !is_terminal_run_candidate(&envelope.payload)
@@ -2707,6 +2837,85 @@ mod tests {
             .load_candidate(&candidate_handle)
             .expect("candidate should remain loadable");
         assert!(candidate.payload.get("sessionHandle").is_none());
+    }
+
+    #[test]
+    fn raw_session_load_rejects_a_session_substituted_from_another_candidate() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let create = || {
+            repository
+                .create_candidate(
+                    CandidateKind::QualificationRun,
+                    &json!({
+                        "capturedAt": "2026-08-23T12:00:00Z",
+                        "build": build_identity_json(),
+                    }),
+                    None,
+                )
+                .expect("candidate should be stored")
+        };
+        let source = create();
+        let destination = create();
+        let mut persisted =
+            QualificationSession::for_test(&["device_behavior_verified"]).to_persisted();
+        persisted.candidate_handle = source.clone();
+        repository
+            .save_session(&source, &persisted)
+            .expect("source session should be persisted");
+        let source_path = repository.candidate_root().join(&source).join(SESSION_FILE);
+        let destination_path = repository
+            .candidate_root()
+            .join(&destination)
+            .join(SESSION_FILE);
+        std::fs::copy(source_path, destination_path)
+            .expect("test should substitute one candidate session for another");
+
+        assert!(repository.load_session_json(&destination).is_err());
+    }
+
+    #[test]
+    fn removing_session_and_terminal_report_survives_repository_restart() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let candidate_handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": build_identity_json(),
+                }),
+                None,
+            )
+            .expect("session candidate should be stored");
+        let mut persisted =
+            QualificationSession::for_test(&["device_behavior_verified"]).to_persisted();
+        persisted.candidate_handle = candidate_handle.clone();
+        repository
+            .save_session(&candidate_handle, &persisted)
+            .expect("session should be persisted");
+        repository
+            .save_session_report(&candidate_handle, b"{\"status\":\"succeeded\"}")
+            .expect("terminal report should be persisted");
+
+        repository
+            .remove_session(&candidate_handle)
+            .expect("session removal should be durable");
+        repository
+            .remove_session_report(&candidate_handle)
+            .expect("report removal should be durable");
+
+        let restarted =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        assert!(restarted.load_session(&candidate_handle).is_err());
+        assert_eq!(
+            restarted
+                .load_session_report(&candidate_handle)
+                .expect("removed report should remain absent"),
+            None
+        );
     }
 
     fn build_identity_json() -> Value {

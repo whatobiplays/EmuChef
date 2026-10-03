@@ -635,9 +635,12 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
   for (const passive of [qualification, observation]) {
     assert.doesNotMatch(passive, /Command::new|std::process|listAdbDevices|probeDevice|startExecution/);
   }
-  // Passive device observation consumes committed root state and never runs a
-  // root check of its own.
-  assert.doesNotMatch(observation, /"checkRoot"|probe_root|rootProbe/);
+  // Device observation may consume committed root state, but the explicit
+  // root authority stays in its dedicated product command and helpers.
+  assert.doesNotMatch(
+    observation,
+    /check_device_root_observation|checkDeviceRoot|["']checkRoot["']|probe_root|rootProbe|check_root|root_probe/,
+  );
   assert.doesNotMatch(execution, /DeviceQualificationSnapshotDto|qualification_revision/);
 });
 

@@ -33,6 +33,7 @@ const targetPreview: QualificationTargetCandidatePreview = {
 const enabledStatus: QualificationModeStatus = {
   enabled: true,
   recordable: true,
+  deviceSelectionLocked: false,
   message: null,
   build: {
     appVersion: "0.1.0",
