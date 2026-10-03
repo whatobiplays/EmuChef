@@ -1437,10 +1437,12 @@ a closed session reports it unlocked. No UI query establishes reassociation.
 RecoveryStore captures the prior-process clean-handoff proof at native load and
 tracks which qualification candidate began in the current process separately
 from resettable frontend session state. This prevents a frontend reset from
-reclassifying a same-process attempt using the stale startup marker. A persisted
-attempt resumes only under the qualification build identity it captured; a
-different running build leaves the session deferred and unchanged for recovery
-when its matching build is available.
+reclassifying a same-process attempt using the stale startup marker. A valid
+persisted attempt resumes only under the qualification build identity it
+captured; a different running build defers that valid session unchanged until
+its matching build is available. Recovery may still close and materialize an
+already-invalid persisted attempt under another build, but only as
+invalid/not_observed evidence that cannot be promoted.
 
 Qualification sessions use opaque handles and strict Rust-owned persistence
 beside the canonical candidate envelope. Source digests are captured when the
