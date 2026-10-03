@@ -1131,12 +1131,35 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         }
         (device.serial.clone(), refreshed)
     };
+    // Keep the active session's immutable product intent available for the
+    // remaining final-gate projections. The authoritative probe below may
+    // invalidate and close the session before catalog profile matching runs.
+    let qualification_device_plan =
+        qualification_state.and_then(crate::qualification_session::active_device_plan);
     let facts = runtime_request(
         runtime,
         "probeDevice",
         json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     )
     .map_err(|_| device_disconnected())?;
+    let mut final_probe_observation = crate::device_observation::DeviceProbeFacts::decode(&facts)
+        .map(|probe_facts| {
+            crate::device_observation::SelectedDeviceObservation::new(
+                &refreshed_review.device_handle,
+            )
+            .with_probe_facts(&probe_facts)
+        });
+    if let Some(state) = qualification_state {
+        match final_probe_observation.as_ref() {
+            Some(observation) => {
+                crate::device_observation::commit_selected_observation(state, observation.clone())
+            }
+            None => crate::qualification_session::observe_device_observation_failure(
+                state,
+                &refreshed_review.device_handle,
+            ),
+        }
+    }
     validate_target(&refreshed_review.target, &serial, &facts)?;
     validate_plan_digest(&refreshed_review)?;
     validate_retained_byo_inputs(&refreshed_review, &SystemInputReadability)?;
@@ -1175,27 +1198,38 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     };
     validate_final_qualification(&refreshed_review, &current, root_granted)?;
 
-    if let Some(state) = qualification_state {
-        match crate::device_observation::DeviceProbeFacts::decode(&facts) {
-            Some(probe_facts) => {
-                let mut observation = crate::device_observation::SelectedDeviceObservation::new(
-                    &refreshed_review.device_handle,
-                )
-                .with_probe_facts(&probe_facts)
-                .with_snapshot(&current.snapshot);
-                if let Some(profile_id) = refreshed_review
-                    .target
-                    .get("profileId")
-                    .and_then(Value::as_str)
-                {
-                    observation = observation.with_profile_id(profile_id.to_string());
-                }
+    let current_profile_id = qualification_device_plan.as_ref().and_then(|device_plan| {
+        let state = qualification_state?;
+        let catalog = crate::commands::catalog(state).ok()?.internal_payload();
+        let match_result = runtime_request(
+            runtime,
+            "matchDevice",
+            json!({ "catalog": catalog, "facts": facts }),
+        )
+        .ok()?;
+        let public = crate::commands::public_match(&match_result, Some(&serial));
+        let projection = crate::device_observation::DeviceMatchProjection::decode(&public)?;
+        crate::device_observation::matched_profile_id(&projection, device_plan)
+    });
+
+    if let (Some(state), Some(observation)) = (qualification_state, final_probe_observation.take())
+    {
+        let mut observation = observation.with_snapshot(&current.snapshot);
+        if qualification_device_plan.is_some() {
+            if let Some(profile_id) = current_profile_id {
+                observation = observation.with_profile_id(profile_id);
                 crate::device_observation::commit_selected_observation(state, observation);
+            } else {
+                // Catalog matching is qualification-only at this point. Its
+                // failure invalidates the attempt but never changes the
+                // already validated product execution decision.
+                crate::qualification_session::observe_device_observation_failure(
+                    state,
+                    &refreshed_review.device_handle,
+                );
             }
-            None => crate::qualification_session::observe_device_observation_failure(
-                state,
-                &refreshed_review.device_handle,
-            ),
+        } else {
+            crate::device_observation::commit_selected_observation(state, observation);
         }
     }
 
@@ -1723,7 +1757,7 @@ fn lost_real_execution_snapshot(
             "authorityInvalidated": true,
             "recoveryState": "fresh_review_required",
             "partialChangePresentation": "indeterminate",
-            "availableControls": ["export_report", "fresh_workflow"],
+        "availableControls": ["fresh_workflow"],
         },
     })
 }
@@ -4758,9 +4792,12 @@ mod tests {
     ) -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
         let temp = tempfile::tempdir().expect("test app directory should be created");
         let app_root = temp.path();
+        let app = tauri::test::mock_app();
+        let catalog = crate::catalog::CatalogDescriptor::for_test()
+            .expect("the repository catalog should be available to execution tests");
         let app_state = AppState {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
-            catalog: Err("test catalog is not needed by execution monitor tests".to_string()),
+            catalog: Ok(catalog),
             qualification_repository,
             adb: Mutex::new(crate::adb::AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(
@@ -4789,7 +4826,6 @@ mod tests {
                 .expect("test update trust should be available"),
             update_activity: crate::updates::ActivityGate::default(),
         };
-        let app = tauri::test::mock_app();
         assert!(app.manage(app_state));
         (temp, app)
     }
@@ -4814,6 +4850,29 @@ mod tests {
             "storage": "available",
             "packageManager": "available",
             "activityManager": "available",
+        })
+    }
+
+    fn match_result(profile_id: &str) -> Value {
+        json!({
+            "confidence": "high",
+            "recommendedPlanId": "test-plan",
+            "requiresExplicitChoice": false,
+            "candidates": [{
+                "planId": "test-plan",
+                "profileId": profile_id,
+                "name": "Test plan",
+                "description": null,
+                "profileName": "Test profile",
+                "confidence": "high",
+                "reasons": [],
+                "requiresExplicitChoice": false,
+                "selectionMode": "automatic",
+            }],
+            "safeGenericPlans": [],
+            "blankSetupPlans": [],
+            "blocked": false,
+            "blockReason": null,
         })
     }
 
@@ -5896,6 +5955,7 @@ mod tests {
     fn qualification_session_observation() -> crate::device_observation::SelectedDeviceObservation {
         crate::device_observation::SelectedDeviceObservation {
             device_handle: "device-one".to_string(),
+            session_epoch: Some(1),
             profile_id: Some("profile.test".to_string()),
             manufacturer: Some("Test".to_string()),
             model: Some("Device".to_string()),
@@ -6638,6 +6698,11 @@ mod tests {
             .unwrap()
             .device_handle
             .clone();
+        let device_session_epoch = handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .expect("prepared review must retain the device epoch");
         let provider =
             crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
         let (_app_root, app) = test_app_with_qualification(
@@ -6658,6 +6723,7 @@ mod tests {
         target.firmware_build = "original/build".to_string();
         let mut observation = qualification_session_observation();
         observation.device_handle = device_handle.clone();
+        observation.session_epoch = Some(device_session_epoch);
         observation.manufacturer = Some(target.manufacturer.clone());
         observation.model = Some(target.model.clone());
         observation.android_version = Some(target.android_version.clone());
@@ -6700,6 +6766,7 @@ mod tests {
                     "firmware_build": "changed/build",
                 })),
                 Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
                 Ok(json!({ "execution": { "executionId": "sidecar-final-gate" } })),
             ]),
         };
@@ -6721,7 +6788,14 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "qualification invalidation must not change product admission"
+            "qualification invalidation must not change product admission: {result:?}; requests: {:?}",
+            runtime
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>()
         );
         let requests = runtime.requests.lock().unwrap();
         assert_eq!(
@@ -6731,6 +6805,14 @@ mod tests {
                 .count(),
             1,
             "final device facts must come from the product probe"
+        );
+        let profile_match = requests
+            .iter()
+            .find(|(request_type, _)| request_type == "matchDevice")
+            .expect("qualification should refresh the catalog profile from final probe facts");
+        assert_eq!(
+            profile_match.1["facts"]["firmware_build"], "changed/build",
+            "the current profile match must consume the exact final probe payload"
         );
         assert_eq!(
             requests
@@ -6750,6 +6832,298 @@ mod tests {
             stored.payload.get("runValidity").and_then(Value::as_str),
             Some("invalid"),
             "the exact final probe observation must invalidate the drifted target"
+        );
+    }
+
+    #[test]
+    fn final_catalog_profile_drift_invalidates_qualification_without_blocking_execution() {
+        let repository_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            repository_root
+                .path()
+                .join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let repository =
+            crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                repository_root.path().to_path_buf(),
+                Box::new(NoQualificationToolRunner),
+                serde_json::from_value(qualification_build_json()).unwrap(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: "1".repeat(40),
+                    tracked_worktree_clean: true,
+                },
+            );
+        let candidate = repository
+            .create_candidate(
+                crate::qualification_repository::CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": qualification_build_json(),
+                }),
+                None,
+            )
+            .unwrap();
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let device_handle = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .device_handle
+            .clone();
+        let device_session_epoch = handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .expect("prepared review must retain the device epoch");
+        let provider =
+            crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
+        let (_app_root, app) = test_app_with_qualification(
+            Mutex::new(ExecutionHandleStore::default()),
+            handles,
+            root,
+            provider,
+        );
+        let state = app.state::<AppState>();
+        let session_handle =
+            crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
+        let mut observation = qualification_session_observation();
+        observation.device_handle = device_handle.clone();
+        observation.session_epoch = Some(device_session_epoch);
+        crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle,
+                candidate_handle: candidate.clone(),
+                captured_at: "2026-08-23T12:00:00Z".to_string(),
+                device_plan: "test-plan".to_string(),
+                target: qualification_session_target(),
+                workflow: qualification_session_workflow(),
+                build: serde_json::from_value(qualification_build_json()).unwrap(),
+                runtime_contract: "real-execution-v1".to_string(),
+                observation,
+            },
+        )
+        .unwrap();
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(json!({
+                    "manufacturer": "AYANEO",
+                    "model": "Pocket S",
+                    "android_version": "15",
+                    "android_api_level": 33,
+                    "firmware_build": "original/build",
+                })),
+                Ok(supported_qualification()),
+                Ok(match_result("profile.changed")),
+                Ok(json!({ "execution": { "executionId": "sidecar-final-gate" } })),
+            ]),
+        };
+        let platform_tools = PlatformToolsSnapshot {
+            adb_path: "/trusted/adb",
+            runtime_generation: 1,
+            platform_tools_revision: 2,
+        };
+
+        let result = start_real_execution_inner_with_runtime(
+            &review_handle,
+            Some(&state),
+            &state.handles,
+            &state.root_qualification,
+            &mut executions,
+            &runtime,
+            &platform_tools,
+        );
+
+        assert!(
+            result.is_ok(),
+            "profile drift must remain qualification-only: {result:?}; requests: {:?}",
+            runtime
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>()
+        );
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(request_type, _)| request_type == "probeDevice")
+                .count(),
+            1,
+            "profile revalidation must reuse the product's final probe facts"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(request_type, _)| request_type == "startExecution")
+                .count(),
+            1
+        );
+        drop(requests);
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn final_probe_target_mismatch_is_observed_before_product_validation_returns() {
+        let repository_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            repository_root
+                .path()
+                .join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let repository =
+            crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                repository_root.path().to_path_buf(),
+                Box::new(NoQualificationToolRunner),
+                serde_json::from_value(qualification_build_json()).unwrap(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: "1".repeat(40),
+                    tracked_worktree_clean: true,
+                },
+            );
+        let candidate = repository
+            .create_candidate(
+                crate::qualification_repository::CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": qualification_build_json(),
+                }),
+                None,
+            )
+            .unwrap();
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let device_handle = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .device_handle
+            .clone();
+        let provider =
+            crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
+        let (_app_root, app) = test_app_with_qualification(
+            Mutex::new(ExecutionHandleStore::default()),
+            handles,
+            root,
+            provider,
+        );
+        let state = app.state::<AppState>();
+        let session_handle =
+            crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
+        let mut target = qualification_session_target();
+        target.manufacturer = "AYANEO".to_string();
+        target.model = "Pocket S".to_string();
+        target.android_version = "15".to_string();
+        target.android_api = 33;
+        target.abi_soc_class = "arm64-v8a".to_string();
+        target.firmware_build = "original/build".to_string();
+        let mut observation = qualification_session_observation();
+        observation.device_handle = device_handle;
+        observation.manufacturer = Some(target.manufacturer.clone());
+        observation.model = Some(target.model.clone());
+        observation.android_version = Some(target.android_version.clone());
+        observation.android_api = Some(target.android_api);
+        observation.abi_soc_class = Some(target.abi_soc_class.clone());
+        observation.firmware_build = Some(target.firmware_build.clone());
+        crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle,
+                candidate_handle: candidate.clone(),
+                captured_at: "2026-08-23T12:00:00Z".to_string(),
+                device_plan: "test-plan".to_string(),
+                target,
+                workflow: qualification_session_workflow(),
+                build: serde_json::from_value(qualification_build_json()).unwrap(),
+                runtime_contract: "real-execution-v1".to_string(),
+                observation,
+            },
+        )
+        .unwrap();
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(json!({
+                    "manufacturer": "Different Manufacturer",
+                    "model": "Pocket S",
+                    "android_version": "15",
+                    "android_api_level": 33,
+                    "firmware_build": "original/build",
+                })),
+            ]),
+        };
+        let platform_tools = PlatformToolsSnapshot {
+            adb_path: "/trusted/adb",
+            runtime_generation: 1,
+            platform_tools_revision: 2,
+        };
+
+        let result = start_real_execution_inner_with_runtime(
+            &review_handle,
+            Some(&state),
+            &state.handles,
+            &state.root_qualification,
+            &mut executions,
+            &runtime,
+            &platform_tools,
+        );
+
+        assert!(
+            result.is_err(),
+            "product target validation must still reject drift"
+        );
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(request_type, _)| request_type == "probeDevice")
+                .count(),
+            1,
+            "qualification must consume the same final probe as product validation"
+        );
+        assert!(!requests
+            .iter()
+            .any(|(request_type, _)| request_type == "startExecution"));
+        drop(requests);
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn lost_execution_without_retained_report_does_not_offer_report_export() {
+        let snapshot = lost_real_execution_snapshot("execution-lost", None);
+
+        assert_eq!(
+            snapshot["terminalPolicy"]["availableControls"],
+            json!(["fresh_workflow"]),
+            "report export is only available when the report is retained"
         );
     }
 

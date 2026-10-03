@@ -366,9 +366,10 @@ test("a restored session awaiting device reassociation leaves product selection 
   render(<Harness workflow={reviewWorkflow()} />);
 
   await waitFor(() => expect(screen.getByTestId("qualification-session-present").textContent).toBe("present"));
-  expect(screen.getByTestId("qualification-active").textContent).toBe("false");
+  expect(screen.getByTestId("qualification-active").textContent).toBe("true");
   expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
-  expect(screen.getByTestId("qualification-plan").textContent).toBe("");
+  expect(screen.getByTestId("qualification-plan").textContent).toBe("plan.bound");
+  expect(screen.getByTestId("qualification-recipes").textContent).toBe("recipe.one,recipe.dependency");
 });
 
 test("run candidates are projected independently of the resumable session", async () => {

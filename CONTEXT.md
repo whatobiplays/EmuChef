@@ -1392,10 +1392,24 @@ Product operations synchronously publish the exact committed typed device
 observation and the authoritative review, admission, terminal, or runtime-loss
 transition to the active session. The product-owned real-execution monitor
 retains terminal state and its report before qualification observes completion.
-Execution reads, exports, and qualification status are projections; they do not
-advance lifecycle state. A genuinely fresh `get_device_qualification`
-reconciliation is an authoritative observation and may be published at its
-commit seam. Explicit root checks remain outside device observation.
+Inventory observations include only currently available devices and retain the
+native session epoch, so an unavailable device or a reconnect under a reused
+opaque handle invalidates the associated attempt. Explicit root observations
+remain authoritative until the session closes, including while terminal
+evidence is pending. The final execution gate publishes its exact fresh probe
+facts before target validation; after validation, it resolves the selected plan's
+profile again from those same facts and the current trusted catalog. Failure to
+establish that qualification profile invalidates qualification without changing
+the product execution decision or adding a device probe.
+Execution reads and exports are projections; they do not observe or advance
+product execution lifecycle. Qualification status does not infer or observe new
+product transitions. Before projecting status, Rust may recover and reconcile
+persisted qualification-session state, including failing closed for an
+unproven process handoff or materializing an invalid candidate. React remains
+responsible for presentation and explicit operator actions only. A genuinely
+fresh `get_device_qualification` reconciliation is an authoritative observation
+and may be published at its commit seam. Explicit root checks remain outside
+device observation.
 
 The session snapshot and candidate summaries cross IPC as sanitized presentation
 data, including the backend-authored invalidation explanation and a backend-

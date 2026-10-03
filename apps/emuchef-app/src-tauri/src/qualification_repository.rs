@@ -34,6 +34,10 @@ const CANDIDATE_SCHEMA_VERSION: u64 = 1;
 const CANDIDATE_DIRECTORY: &str = ".emuchef_runtime/qualification-candidates";
 const QUALIFICATION_TOOL: &str = "tools/device-qualification.mjs";
 const CANDIDATE_FILE: &str = "candidate.json";
+const CANDIDATE_PUBLICATION_FILE: &str = ".qualification-candidate-publication.json";
+const CANDIDATE_PUBLICATION_STAGING_DIR: &str = ".qualification-candidate-publication";
+const CANDIDATE_PUBLICATION_STAGING_PREFIX: &str = ".qualification-candidate-publication-tmp-";
+const CANDIDATE_PUBLICATION_SCHEMA_VERSION: u64 = 1;
 const SESSION_FILE: &str = "session.json";
 const SESSION_POISON_FILE: &str = "session-poison.json";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
@@ -97,6 +101,16 @@ struct CandidateFileEnvelope {
     build: Option<QualificationBuildIdentity>,
     payload: Value,
     report: Option<QualificationReportMetadata>,
+}
+
+/// Durable intent to finish replacing a candidate and its optional report as
+/// one recoverable publication. Staged files remain available until both
+/// final paths have been synced.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidatePublicationTransaction {
+    schema_version: u64,
+    report_present: bool,
 }
 
 /// A candidate loaded from the fixed runtime directory.
@@ -186,6 +200,8 @@ pub struct QualificationRepository {
     source_state_override: Option<std::sync::Arc<Mutex<QualificationSourceState>>>,
     #[cfg(test)]
     fail_next_finalize: AtomicBool,
+    #[cfg(test)]
+    fail_after_candidate_envelope_publication: AtomicBool,
 }
 
 /// Lazily resolves the trusted qualification repository only when the mode is
@@ -325,6 +341,8 @@ impl QualificationRepository {
             source_state_override: None,
             #[cfg(test)]
             fail_next_finalize: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_candidate_envelope_publication: AtomicBool::new(false),
         }
     }
 
@@ -410,6 +428,12 @@ impl QualificationRepository {
     #[cfg(test)]
     pub(crate) fn fail_next_finalize_for_test(&self) {
         self.fail_next_finalize.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn fail_after_candidate_envelope_publication_for_test(&self) {
+        self.fail_after_candidate_envelope_publication
+            .store(true, Ordering::SeqCst);
     }
 
     /// Rechecks the trusted source/worktree lifecycle before capture begins.
@@ -754,29 +778,14 @@ impl QualificationRepository {
         let mut bytes = serde_json::to_vec_pretty(&envelope)
             .map_err(|_| "qualification candidate could not be serialized".to_string())?;
         bytes.push(b'\n');
-        write_synced_replaced_file(&directory, CANDIDATE_FILE, CANDIDATE_STAGING_PREFIX, &bytes)?;
-        let report_path = directory.join(EXECUTION_REPORT_FILE);
-        match report_bytes {
-            Some(report_bytes) => write_synced_replaced_file(
-                &directory,
-                EXECUTION_REPORT_FILE,
-                CANDIDATE_STAGING_PREFIX,
-                report_bytes,
-            )?,
-            None => match fs::symlink_metadata(&report_path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err("qualification execution report is not regular".to_string())
-                }
-                Ok(_) => fs::remove_file(report_path).map_err(|_| {
-                    "qualification execution report could not be removed".to_string()
-                })?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => {
-                    return Err("qualification execution report could not be inspected".to_string())
-                }
-            },
-        }
-        sync_directory(&directory)?;
+        stage_candidate_publication(&directory, &bytes, report_bytes)?;
+        #[cfg(test)]
+        let fail_after_envelope = self
+            .fail_after_candidate_envelope_publication
+            .swap(false, Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fail_after_envelope = false;
+        publish_candidate_publication(&directory, fail_after_envelope)?;
         self.load_candidate_unlocked(candidate_handle)
     }
 
@@ -785,6 +794,7 @@ impl QualificationRepository {
         handle: &str,
     ) -> Result<StoredQualificationCandidate, String> {
         let directory = self.candidate_directory_unlocked(handle)?;
+        recover_candidate_publication(&directory)?;
         let candidate_bytes =
             read_regular_file(&directory.join(CANDIDATE_FILE), "qualification candidate")?;
         let envelope = decode_candidate_envelope(&candidate_bytes)?;
@@ -1378,6 +1388,7 @@ fn validate_candidate_binding(
 }
 
 fn validate_candidate_files(directory: &Path) -> Result<(), String> {
+    recover_candidate_publication(directory)?;
     validate_regular_file_path(
         &directory.join(CANDIDATE_FILE),
         true,
@@ -1389,6 +1400,160 @@ fn validate_candidate_files(directory: &Path) -> Result<(), String> {
         "qualification execution report",
     )?;
     Ok(())
+}
+
+/// Stage a complete candidate/report pair before recording durable publication
+/// intent. A reader can replay the staged pair if the process exits mid-update.
+fn stage_candidate_publication(
+    directory: &Path,
+    candidate_bytes: &[u8],
+    report_bytes: Option<&[u8]>,
+) -> Result<(), String> {
+    remove_candidate_publication_staging(directory)?;
+    let staging = directory.join(CANDIDATE_PUBLICATION_STAGING_DIR);
+    fs::create_dir(&staging)
+        .map_err(|_| "qualification candidate publication could not be staged".to_string())?;
+
+    let result = (|| {
+        write_synced_new_file(&staging.join(CANDIDATE_FILE), candidate_bytes)?;
+        if let Some(report_bytes) = report_bytes {
+            write_synced_new_file(&staging.join(EXECUTION_REPORT_FILE), report_bytes)?;
+        }
+        sync_directory(&staging)?;
+        sync_directory(directory)?;
+
+        let transaction = CandidatePublicationTransaction {
+            schema_version: CANDIDATE_PUBLICATION_SCHEMA_VERSION,
+            report_present: report_bytes.is_some(),
+        };
+        let mut transaction_bytes = serde_json::to_vec_pretty(&transaction).map_err(|_| {
+            "qualification candidate publication could not be serialized".to_string()
+        })?;
+        transaction_bytes.push(b'\n');
+        write_synced_replaced_file(
+            directory,
+            CANDIDATE_PUBLICATION_FILE,
+            CANDIDATE_PUBLICATION_STAGING_PREFIX,
+            &transaction_bytes,
+        )
+    })();
+
+    if result.is_err()
+        && matches!(
+            fs::symlink_metadata(directory.join(CANDIDATE_PUBLICATION_FILE)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        )
+    {
+        let _ = remove_candidate_publication_staging(directory);
+    }
+    result
+}
+
+/// Replay a durable candidate update. Rewriting a partially published file is
+/// safe because the complete synced pair remains staged until commit finishes.
+fn publish_candidate_publication(
+    directory: &Path,
+    fail_after_candidate_envelope: bool,
+) -> Result<(), String> {
+    let transaction_path = directory.join(CANDIDATE_PUBLICATION_FILE);
+    let transaction_bytes =
+        read_regular_file(&transaction_path, "qualification publication transaction")?;
+    let transaction: CandidatePublicationTransaction =
+        serde_json::from_slice(&transaction_bytes)
+            .map_err(|_| "qualification publication transaction is invalid".to_string())?;
+    if transaction.schema_version != CANDIDATE_PUBLICATION_SCHEMA_VERSION {
+        return Err("qualification publication transaction version is unsupported".to_string());
+    }
+
+    let staging = directory.join(CANDIDATE_PUBLICATION_STAGING_DIR);
+    let staging_metadata = fs::symlink_metadata(&staging)
+        .map_err(|_| "qualification candidate publication staging is unavailable".to_string())?;
+    if staging_metadata.file_type().is_symlink() || !staging_metadata.is_dir() {
+        return Err("qualification candidate publication staging is invalid".to_string());
+    }
+    let candidate_bytes = read_regular_file(
+        &staging.join(CANDIDATE_FILE),
+        "staged qualification candidate",
+    )?;
+    let envelope = decode_candidate_envelope(&candidate_bytes)?;
+    let handle = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "qualification candidate directory name is invalid".to_string())?;
+    validate_candidate_binding(&envelope, handle)?;
+    let declared_sha256 = candidate_report_sha256(&envelope.payload)?;
+    let staged_report = staging.join(EXECUTION_REPORT_FILE);
+    load_report_bytes(
+        &staged_report,
+        envelope.report.as_ref(),
+        declared_sha256.as_deref(),
+    )?;
+    if transaction.report_present != envelope.report.is_some() {
+        return Err(
+            "qualification publication transaction report state is inconsistent".to_string(),
+        );
+    }
+
+    write_synced_replaced_file(
+        directory,
+        CANDIDATE_FILE,
+        CANDIDATE_STAGING_PREFIX,
+        &candidate_bytes,
+    )?;
+    if fail_after_candidate_envelope {
+        return Err("injected interruption after candidate envelope publication".to_string());
+    }
+    if transaction.report_present {
+        let report_bytes =
+            read_regular_file(&staged_report, "staged qualification execution report")?;
+        write_synced_replaced_file(
+            directory,
+            EXECUTION_REPORT_FILE,
+            CANDIDATE_STAGING_PREFIX,
+            &report_bytes,
+        )?;
+    } else {
+        remove_optional_regular_file(
+            directory,
+            EXECUTION_REPORT_FILE,
+            "qualification execution report",
+        )?;
+    }
+    sync_directory(directory)?;
+    remove_optional_regular_file(
+        directory,
+        CANDIDATE_PUBLICATION_FILE,
+        "qualification publication transaction",
+    )?;
+    sync_directory(directory)?;
+    remove_candidate_publication_staging(directory)
+}
+
+fn recover_candidate_publication(directory: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(directory.join(CANDIDATE_PUBLICATION_FILE)) {
+        Ok(_) => publish_candidate_publication(directory, false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("qualification publication transaction could not be inspected".to_string()),
+    }
+}
+
+fn remove_candidate_publication_staging(directory: &Path) -> Result<(), String> {
+    let staging = directory.join(CANDIDATE_PUBLICATION_STAGING_DIR);
+    match fs::symlink_metadata(&staging) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err("qualification candidate publication staging is invalid".to_string())
+        }
+        Ok(_) => {
+            fs::remove_dir_all(&staging).map_err(|_| {
+                "qualification candidate publication staging could not be removed".to_string()
+            })?;
+            sync_directory(directory)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => {
+            Err("qualification candidate publication staging could not be inspected".to_string())
+        }
+    }
 }
 
 fn validate_regular_file_path(path: &Path, required: bool, label: &str) -> Result<(), String> {
@@ -1900,6 +2065,70 @@ mod tests {
         .expect("report should be removable for the regression setup");
 
         assert!(repository.load_candidate(&handle).is_err());
+    }
+
+    #[test]
+    fn interrupted_candidate_and_report_publication_recovers_before_listing() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let captured_at = "2026-08-23T12:00:00Z";
+        let initial_payload = json!({
+            "capturedAt": captured_at,
+            "build": build_identity_json(),
+        });
+        let handle = repository
+            .create_candidate(CandidateKind::QualificationRun, &initial_payload, None)
+            .expect("provisional candidate should be stored");
+        let report = b"{\"status\":\"completed\"}";
+        let final_payload = json!({
+            "capturedAt": captured_at,
+            "build": build_identity_json(),
+            "artifacts": [{
+                "path": "execution-report.json",
+                "sha256": hex::encode(sha2::Sha256::digest(report)),
+            }],
+        });
+
+        repository.fail_after_candidate_envelope_publication_for_test();
+        assert!(repository
+            .finalize_candidate(
+                &handle,
+                CandidateKind::QualificationRun,
+                &final_payload,
+                Some(report),
+            )
+            .is_err());
+
+        let reopened = QualificationRepository::new_for_test(
+            repository.repo_root().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let listed = reopened
+            .list_candidates()
+            .expect("restart should complete the pending candidate publication");
+        assert_eq!(listed.len(), 1);
+        let stored = reopened
+            .load_candidate(&handle)
+            .expect("the recovered candidate should remain readable");
+        assert_eq!(
+            std::fs::read(
+                reopened
+                    .candidate_root()
+                    .join(&handle)
+                    .join(EXECUTION_REPORT_FILE),
+            )
+            .expect("execution report should be retained"),
+            report
+        );
+        assert!(stored.report.is_some());
+        assert!(!reopened
+            .candidate_root()
+            .join(&handle)
+            .join(CANDIDATE_PUBLICATION_FILE)
+            .exists());
     }
 
     #[test]

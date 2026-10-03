@@ -307,10 +307,29 @@ pub(crate) fn with_inactive_qualification_session<T>(
     let _begin_guard = repository
         .lock_begin()
         .map_err(|_| safe_qualification_error("qualification_session_active"))?;
+    crate::qualification_session::recover_persisted_sessions(state, repository)?;
     if crate::qualification_session::session_status(state)?.is_some() {
         return Err(safe_qualification_error("qualification_session_active"));
     }
     operation()
+}
+
+/// Recover restart-stable qualification attempts while native app state is
+/// being initialized. This runs after RecoveryStore loads the process marker
+/// and before any UI status projection is available.
+pub(crate) fn recover_sessions_at_process_start(state: &AppState) {
+    let mode = QualificationModeState::current(&state.qualification_repository);
+    if !mode.enabled || mode.build.is_none() {
+        return;
+    }
+    let Some(repository) = state.qualification_repository.get() else {
+        return;
+    };
+    if crate::qualification_session::recover_persisted_sessions(state, repository).is_err() {
+        eprintln!(
+            "Qualification session startup recovery could not complete; persisted attempts remain fail-closed."
+        );
+    }
 }
 
 #[tauri::command]
@@ -318,11 +337,17 @@ pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
 ) -> Result<QualificationModeStatus, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
+    if mode.enabled && mode.build.is_some() {
+        if let Some(repository) = state.qualification_repository.get() {
+            crate::qualification_session::recover_persisted_sessions(&state, repository).map_err(
+                |_| safe_qualification_error("qualification_session_recovery_unavailable"),
+            )?;
+        }
+    }
     let mut status = qualification_mode_status(&mode, &state.qualification_repository)?;
-    // Active attempt state is owned by the qualification session module. This
-    // command only projects the sanitized snapshot that module publishes, and
-    // only for an enabled build: a disabled build can never hold an attempt,
-    // and must not resolve or initialize the repository to prove it.
+    // Rust may reconcile persisted session state before projecting status, but
+    // the command never infers or observes new product transitions. Disabled
+    // builds cannot hold an attempt and must not initialize the repository.
     if status.enabled {
         status.resumable_session = crate::qualification_session::session_status(&state)?;
         status.device_selection_locked =

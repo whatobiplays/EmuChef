@@ -234,6 +234,13 @@ impl SessionHandles {
         devices
     }
 
+    /// Return the native continuity epoch for one currently retained device.
+    pub fn device_session_epoch(&self, handle: &str) -> Option<u64> {
+        self.devices_by_handle
+            .get(handle)
+            .map(|device| device.session_epoch)
+    }
+
     pub fn single_available_device_handle(&self) -> Option<String> {
         if self.devices_by_handle.len() != 1 {
             return None;

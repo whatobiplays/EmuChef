@@ -66,10 +66,10 @@ pub struct RecoveryStore {
     disposition: Option<DraftDisposition>,
     sensitivity: HashMap<String, bool>,
     required_reentry: HashSet<String>,
-    /// Proof, established on the first application session of this process,
-    /// that the previous process ended through the accepted termination
-    /// contract. Other native authorities that must fail closed after an
-    /// unproven shutdown read this without inspecting recovery drafts.
+    /// Prior-process handoff proof captured from the marker at native store
+    /// load. An absent marker proves a clean handoff; a present or ambiguous
+    /// marker fails closed. This fact is available before frontend startup and
+    /// does not depend on recovery-draft contents.
     clean_handoff_proven: Option<bool>,
     /// Keep the active-process marker when a durable qualification poison
     /// marker could not be written. The next process must then fail closed.
@@ -101,6 +101,9 @@ impl RecoveryStore {
         }
     }
 
+    /// Begin frontend recovery presentation and mark the current process as
+    /// active. The previous-process handoff proof was fixed at native store
+    /// load and is not established or changed by this operation.
     pub fn begin_session(&mut self) -> Result<Value, String> {
         let first_process_session = self.session_generation == 0;
         let interrupted_session = first_process_session && !self.session_handoff_proven();
@@ -172,9 +175,11 @@ impl RecoveryStore {
         keys
     }
 
-    /// Whether this process proved that the previous application process ended
-    /// through the accepted termination contract. Returns false until the first
-    /// application session of this process begins, so callers fail closed.
+    /// Whether the marker state observed during `RecoveryStore::load` proves
+    /// that the previous application process ended through the accepted
+    /// termination contract. An absent marker proves the handoff; a present or
+    /// ambiguous marker returns false. `begin_session` does not change this
+    /// proof when it writes the current process marker.
     pub fn session_handoff_proven(&self) -> bool {
         self.clean_handoff_proven.unwrap_or(false)
     }

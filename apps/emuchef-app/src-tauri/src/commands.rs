@@ -96,19 +96,18 @@ where
 /// device that is gone can no longer prove attempt continuity, so the session
 /// fails closed instead of staying active on an absent device.
 pub(crate) fn report_device_inventory_to_qualification(state: &AppState) {
-    let handles = match state.handles.lock() {
-        Ok(handles) => handles
+    let available_devices = |handles: &SessionHandles| {
+        handles
             .qualification_devices()
             .into_iter()
-            .map(|device| device.handle)
-            .collect::<Vec<_>>(),
+            .filter(|device| device.state == "available")
+            .map(|device| (device.handle, device.session_epoch))
+            .collect::<Vec<_>>()
+    };
+    let handles = match state.handles.lock() {
+        Ok(handles) => available_devices(&handles),
         Err(poisoned) => {
-            let handles = poisoned
-                .into_inner()
-                .qualification_devices()
-                .into_iter()
-                .map(|device| device.handle)
-                .collect::<Vec<_>>();
+            let handles = available_devices(&poisoned.into_inner());
             state.handles.clear_poison();
             handles
         }
@@ -1568,7 +1567,7 @@ fn public_device_facts(device_handle: &str, facts: &Value, exact_serial: &str) -
     public
 }
 
-fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
+pub(crate) fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
     let candidates = |field: &str| {
         result
             .get(field)

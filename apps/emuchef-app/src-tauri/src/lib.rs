@@ -56,7 +56,7 @@ pub fn run() {
                 app.handle().exit(exit_code);
                 return Ok(());
             }
-            app.manage(commands::AppState {
+            let app_state = commands::AppState {
                 sidecar,
                 catalog,
                 qualification_repository: qualification_repository::QualificationRepositoryProvider::default(),
@@ -85,7 +85,9 @@ pub fn run() {
                 support: Mutex::new(support::SupportStore::new(cache_root)),
                 updates: updates::UpdateService::from_production_document()?,
                 update_activity: updates::ActivityGate::default(),
-            });
+            };
+            qualification_mode::recover_sessions_at_process_start(&app_state);
+            app.manage(app_state);
             app.manage(phase6d6_ui_smoke::Phase6d6UiSmokeStore::default());
             Ok(())
         })

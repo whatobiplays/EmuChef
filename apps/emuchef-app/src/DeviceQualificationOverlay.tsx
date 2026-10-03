@@ -365,7 +365,11 @@ export function DeviceQualificationOverlay({
             {controller.session.candidate && (
               <button
                 type="button"
-                disabled={controller.busy}
+                disabled={
+                  controller.busy
+                    || !status.recordable
+                    || !controller.session.candidate.promotable
+                }
                 onClick={() => void controller.recordRun(controller.session!.candidate!.candidateHandle)}
               >
                 Record qualification run

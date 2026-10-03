@@ -295,6 +295,9 @@ impl DeviceMatchProjection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SelectedDeviceObservation {
     pub(crate) device_handle: String,
+    /// Native inventory epoch associated with this observation. It is
+    /// process-local continuity metadata and never becomes candidate evidence.
+    pub(crate) session_epoch: Option<u64>,
     pub(crate) profile_id: Option<String>,
     pub(crate) manufacturer: Option<String>,
     pub(crate) model: Option<String>,
@@ -312,6 +315,7 @@ impl SelectedDeviceObservation {
     pub(crate) fn new(device_handle: impl Into<String>) -> Self {
         Self {
             device_handle: device_handle.into(),
+            session_epoch: None,
             profile_id: None,
             manufacturer: None,
             model: None,
@@ -339,6 +343,12 @@ impl SelectedDeviceObservation {
         self
     }
 
+    /// Attach the native inventory epoch that identifies this device session.
+    pub(crate) fn with_session_epoch(mut self, session_epoch: u64) -> Self {
+        self.session_epoch = Some(session_epoch);
+        self
+    }
+
     /// Attach the passive support interpretation for the selected device.
     pub(crate) fn with_snapshot(mut self, snapshot: &DeviceQualificationSnapshotDto) -> Self {
         self.abi_soc_class = snapshot.abi_class.map(str::to_string);
@@ -357,17 +367,17 @@ impl SelectedDeviceObservation {
         self
     }
 
-    /// Whether this observation establishes every passive fact needed to prove
-    /// compatibility with an immutable registered target.
+    /// Whether this observation establishes every trusted identity fact needed
+    /// to reassociate with an immutable registered target.
     ///
     /// The registered target contract treats manufacturer, model, Android
     /// release, Android API level, ABI class, and firmware build as the
-    /// observed compatibility facts. Profile identity is resolved from the
-    /// catalog rather than observed directly, connection type is operator
-    /// attestation, and root state comes from explicit root authority, so none
-    /// of those three can be required of a passive device observation. A
-    /// partially observed device never proves compatibility, because absent
-    /// facts are not evidence of a match.
+    /// material device facts. A trusted catalog match must also supply the
+    /// authored profile identity; matching hardware alone cannot associate a
+    /// restored session with a possibly changed profile. Connection type is
+    /// operator attestation and root state comes from explicit root authority,
+    /// so neither is inferred here. Partial observations may accumulate facts,
+    /// but absent facts never prove compatibility.
     pub(crate) fn proves_target_compatibility(&self) -> bool {
         self.profile_id.is_some()
             && self.manufacturer.is_some()
@@ -387,6 +397,9 @@ impl SelectedDeviceObservation {
         newer: &SelectedDeviceObservation,
     ) -> SelectedDeviceObservation {
         debug_assert_eq!(self.device_handle, newer.device_handle);
+        if self.session_epoch != newer.session_epoch {
+            return newer.clone();
+        }
         let mut merged = self.clone();
         if newer.profile_id.is_some() {
             merged.profile_id = newer.profile_id.clone();
@@ -462,7 +475,8 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
                 "The selected device plan is not a trusted match for this device.",
             )
         })?;
-        let snapshot = refresh_current_qualification(state, Some(device_handle))?.snapshot;
+        let current = refresh_current_qualification(state, Some(device_handle))?;
+        let snapshot = &current.snapshot;
         if snapshot.state != DeviceQualificationState::Supported
             || snapshot.device_identity.as_deref() != Some(device_handle)
             || snapshot.android_api_level.is_none()
@@ -476,7 +490,13 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
         let observation = SelectedDeviceObservation::new(device_handle)
             .with_probe_facts(&facts)
             .with_profile_id(profile_id)
-            .with_snapshot(&snapshot);
+            .with_snapshot(&snapshot)
+            .with_session_epoch(
+                current
+                    .context
+                    .ok_or_else(unverified_device_error)?
+                    .session_epoch,
+            );
         if observation.android_api != snapshot.android_api_level.map(u64::from) {
             return Err(unverified_device_error());
         }
@@ -532,8 +552,20 @@ pub(crate) fn capabilities_from_snapshot(snapshot: &DeviceQualificationSnapshotD
 /// a no-persistence no-op.
 pub(crate) fn commit_selected_observation(
     state: &AppState,
-    observation: SelectedDeviceObservation,
+    mut observation: SelectedDeviceObservation,
 ) {
+    let session_epoch = match state.handles.lock() {
+        Ok(handles) => handles.device_session_epoch(&observation.device_handle),
+        Err(poisoned) => {
+            state.handles.clear_poison();
+            poisoned
+                .into_inner()
+                .device_session_epoch(&observation.device_handle)
+        }
+    };
+    if let Some(session_epoch) = session_epoch {
+        observation = observation.with_session_epoch(session_epoch);
+    }
     crate::qualification_session::observe(
         state,
         crate::qualification_session::QualificationLifecycleObservation::DeviceObserved(Box::new(

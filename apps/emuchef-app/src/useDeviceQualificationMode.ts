@@ -248,7 +248,7 @@ export function useDeviceQualificationMode({
   const deviceSelectionLocked = session?.phase === "closed"
     ? false
     : status?.deviceSelectionLocked ?? false;
-  const intentLock = session && deviceSelectionLocked
+  const intentLock = session && session.phase !== "closed"
     ? { devicePlan: session.devicePlan, selectedRecipes: [...session.requiredRecipes] }
     : null;
 

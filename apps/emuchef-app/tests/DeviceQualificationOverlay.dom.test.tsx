@@ -154,6 +154,31 @@ test("recording a run and abandoning an attempt always require an explicit click
   expect(current.abandonSession).toHaveBeenCalledTimes(1);
 });
 
+test("an active-session candidate cannot be recorded before backend promotion allows it", () => {
+  const current = controller({
+    status: { ...status(), recordable: false },
+    session: session({
+      recordable: false,
+      candidate: {
+        candidateHandle: "candidate-pending",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: false,
+        nonPromotableReason: "Terminal qualification evidence is not yet available.",
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    }),
+  });
+
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const record = screen.getByRole("button", { name: "Record qualification run" }) as HTMLButtonElement;
+  expect(record.disabled).toBe(true);
+  fireEvent.click(record);
+  expect(current.recordRun).not.toHaveBeenCalled();
+});
+
 test("operator actions are disabled while the controller is busy", () => {
   const current = controller({ session: session(), busy: true });
 

@@ -416,7 +416,12 @@ impl QualificationSession {
             "real-execution-v1".to_string(),
         )
         .expect("test session should be valid");
-        session.with_device_plan("test-plan".to_string())
+        let mut session = session.with_device_plan("test-plan".to_string());
+        session.set_authored_recipe_digests(vec![AuthoredRecipeDigest {
+            id: "test.recipe".to_string(),
+            sha256: "a".repeat(64),
+        }]);
+        session
     }
 
     pub(crate) fn candidate_handle(&self) -> &str {
@@ -500,7 +505,7 @@ impl QualificationSession {
     pub(crate) fn phase(&self) -> QualificationSessionPhase {
         if self.closed {
             QualificationSessionPhase::Closed
-        } else if self.awaiting_evidence {
+        } else if self.terminal_execution_status.is_some() || self.awaiting_evidence {
             QualificationSessionPhase::TerminalAwaitingEvidence
         } else if self.bound_execution_handle.is_some() {
             QualificationSessionPhase::ExecutionActive
@@ -656,10 +661,7 @@ impl QualificationSession {
 
     /// Compare one committed explicit root-check result with the target.
     pub(crate) fn observe_root_authority(&mut self, root_state: RootQualificationState) {
-        if self.run_validity() == RunValidity::Invalid
-            || self.closed
-            || self.terminal_execution_status.is_some()
-        {
+        if self.run_validity() == RunValidity::Invalid || self.closed {
             return;
         }
         if let Some(reason) = self.matching_root_mismatch(Some(root_state)) {
@@ -977,6 +979,36 @@ impl QualificationSession {
         {
             return Err("qualification session binding is inconsistent".to_string());
         }
+        let required_recipe_ids = persisted
+            .required_recipes
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let Some(authored_recipe_digests) = persisted.authored_recipe_digests.as_ref() else {
+            return Err("qualification session recipe digests are missing".to_string());
+        };
+        let digest_recipe_ids = authored_recipe_digests
+            .iter()
+            .map(|digest| digest.id.as_str())
+            .collect::<BTreeSet<_>>();
+        if required_recipe_ids.len() != persisted.required_recipes.len()
+            || digest_recipe_ids.len() != authored_recipe_digests.len()
+            || digest_recipe_ids != required_recipe_ids
+            || persisted
+                .required_recipes
+                .iter()
+                .any(|recipe| !valid_qualification_recipe_id(recipe))
+            || authored_recipe_digests.iter().any(|digest| {
+                !valid_qualification_recipe_id(&digest.id)
+                    || digest.sha256.len() != 64
+                    || !digest
+                        .sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            return Err("qualification session recipe digests are inconsistent".to_string());
+        }
         let mut ids = BTreeSet::new();
         for checkpoint in &persisted.recorded_checkpoints {
             if !ids.insert(checkpoint.checkpoint_id.clone()) {
@@ -1102,6 +1134,14 @@ fn validate_session_handle(handle: &str) -> Result<(), String> {
         return Err("qualification session handle is invalid".to_string());
     }
     Ok(())
+}
+
+fn valid_qualification_recipe_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn validate_checkpoint_timestamp(timestamp: &str) -> Result<(), String> {
@@ -1285,6 +1325,7 @@ pub(crate) enum QualificationLifecycleObservation {
 pub(crate) struct QualificationSessionStore {
     active_candidate: Option<String>,
     associated_device_handle: Option<String>,
+    associated_device_session_epoch: Option<u64>,
     /// Trusted observation state accumulated for the currently selected
     /// device in this process. The trusted seams observe different subsets of
     /// the target facts, so reassociation waits until this state proves
@@ -1310,6 +1351,10 @@ impl QualificationSessionStore {
 
     pub(crate) fn associated_device_handle(&self) -> Option<&str> {
         self.associated_device_handle.as_deref()
+    }
+
+    fn associated_device_session_epoch(&self) -> Option<u64> {
+        self.associated_device_session_epoch
     }
 
     pub(crate) fn observed_device(&self) -> Option<&SelectedDeviceObservation> {
@@ -1364,13 +1409,19 @@ impl QualificationSessionStore {
         self.pending_candidates.remove(&candidate_handle);
         self.active_candidate = Some(candidate_handle);
         self.associated_device_handle = None;
+        self.associated_device_session_epoch = None;
         self.observed_device = None;
         self.bound_review_handle = None;
         self.bound_execution_handle = None;
     }
 
-    fn associate(&mut self, device_handle: String) {
+    fn associate(&mut self, device_handle: String, session_epoch: Option<u64>) {
         self.associated_device_handle = Some(device_handle);
+        self.associated_device_session_epoch = session_epoch;
+    }
+
+    fn clear_observed_device(&mut self) {
+        self.observed_device = None;
     }
 
     fn poison(&mut self, candidate_handle: String) {
@@ -1380,6 +1431,7 @@ impl QualificationSessionStore {
             self.active_candidate = None;
         }
         self.associated_device_handle = None;
+        self.associated_device_session_epoch = None;
         self.observed_device = None;
         self.bound_review_handle = None;
         self.bound_execution_handle = None;
@@ -1392,6 +1444,7 @@ impl QualificationSessionStore {
         if self.active_candidate.as_deref() == Some(candidate_handle) {
             self.active_candidate = None;
             self.associated_device_handle = None;
+            self.associated_device_session_epoch = None;
             self.observed_device = None;
             self.bound_review_handle = None;
             self.bound_execution_handle = None;
@@ -1691,6 +1744,23 @@ fn ensure_recovered(
         }
     }
     Ok(())
+}
+
+/// Recover restart-stable attempts from the native process startup path or an
+/// authoritative product transition. Presentation reads never call this
+/// function, so status queries cannot advance qualification lifecycle state.
+pub(crate) fn recover_persisted_sessions(
+    state: &AppState,
+    provider: &QualificationRepository,
+) -> Result<(), String> {
+    let mut store = match state.qualification_sessions.lock() {
+        Ok(store) => store,
+        Err(poisoned) => {
+            state.qualification_sessions.clear_poison();
+            poisoned.into_inner()
+        }
+    };
+    ensure_recovered(state, provider, &mut store)
 }
 
 /// Recover one persisted candidate. Returns true when it resumed as the active
@@ -2053,6 +2123,11 @@ fn apply_device_observation(
     if let Some(associated) = store.associated_device_handle().map(str::to_string) {
         if associated != observation.device_handle {
             session.invalidate(QualificationInvalidation::DeviceIdentityChanged);
+        } else if store
+            .associated_device_session_epoch()
+            .is_some_and(|epoch| observation.session_epoch != Some(epoch))
+        {
+            session.invalidate(QualificationInvalidation::DeviceUnavailable);
         } else {
             session.observe_matching_target(observation);
         }
@@ -2071,8 +2146,8 @@ fn apply_device_observation(
     };
     session.observe_matching_target(&accumulated);
     if session.run_validity() == RunValidity::Valid && !session.is_closed() {
-        if accumulated.proves_target_compatibility() {
-            store.associate(observation.device_handle.clone());
+        if accumulated.proves_target_compatibility() && accumulated.session_epoch.is_some() {
+            store.associate(observation.device_handle.clone(), accumulated.session_epoch);
         } else {
             store.observe_device(accumulated);
         }
@@ -2233,7 +2308,10 @@ pub(crate) fn begin(
     }
     persist(provider, &session)?;
     store.set_active(request.candidate_handle.clone());
-    store.associate(request.observation.device_handle.clone());
+    store.associate(
+        request.observation.device_handle.clone(),
+        request.observation.session_epoch,
+    );
     let candidate = candidate_summary(provider, session.candidate_handle())?;
     Ok(session.snapshot(Some(candidate)))
 }
@@ -2326,7 +2404,7 @@ pub(crate) fn reset(state: &AppState) {
 /// When the device an attempt is associated with is no longer present, the
 /// product has dropped that device's authority, so the attempt can no longer
 /// prove it ran against the same device and fails closed.
-pub(crate) fn observe_device_inventory(state: &AppState, present_device_handles: &[String]) {
+pub(crate) fn observe_device_inventory(state: &AppState, available_devices: &[(String, u64)]) {
     let Some(provider) = state.qualification_repository.get() else {
         return;
     };
@@ -2348,12 +2426,21 @@ pub(crate) fn observe_device_inventory(state: &AppState, present_device_handles:
         return;
     }
     let Some(associated) = store.associated_device_handle().map(str::to_string) else {
+        if let Some(observed) = store.observed_device() {
+            if !available_devices.iter().any(|(handle, epoch)| {
+                handle == &observed.device_handle && observed.session_epoch == Some(*epoch)
+            }) {
+                store.clear_observed_device();
+            }
+        }
         return;
     };
-    if present_device_handles
-        .iter()
-        .any(|handle| handle == &associated)
-    {
+    if available_devices.iter().any(|(handle, epoch)| {
+        handle == &associated
+            && store
+                .associated_device_session_epoch()
+                .is_none_or(|expected| expected == *epoch)
+    }) {
         return;
     }
     let mut session = match load_active_session(provider, &store, &candidate_handle) {
@@ -2378,11 +2465,13 @@ pub(crate) fn session_status(
     let Some(provider) = state.qualification_repository.get() else {
         return Ok(None);
     };
-    let mut store = state
-        .qualification_sessions
-        .lock()
-        .map_err(|_| persistence_error())?;
-    ensure_recovered(state, provider, &mut store)?;
+    let store = match state.qualification_sessions.lock() {
+        Ok(store) => store,
+        Err(poisoned) => {
+            state.qualification_sessions.clear_poison();
+            poisoned.into_inner()
+        }
+    };
     let Some(candidate_handle) = store.active_candidate.clone() else {
         return Ok(None);
     };
@@ -2398,7 +2487,10 @@ pub(crate) fn active_device_plan(state: &AppState) -> Option<String> {
     let provider = state.qualification_repository.get()?;
     let mut store = match state.qualification_sessions.lock() {
         Ok(store) => store,
-        Err(_) => return None,
+        Err(poisoned) => {
+            state.qualification_sessions.clear_poison();
+            poisoned.into_inner()
+        }
     };
     if ensure_recovered(state, provider, &mut store).is_err() {
         return None;
@@ -2416,17 +2508,16 @@ pub(crate) fn active_device_plan(state: &AppState) -> Option<String> {
 /// device. A restored session remains selectable until a trusted observation
 /// reestablishes its process-local association.
 pub(crate) fn device_selection_locked(state: &AppState) -> Result<bool, String> {
-    let Some(provider) = state.qualification_repository.get() else {
+    if state.qualification_repository.get().is_none() {
         return Ok(false);
-    };
-    let mut store = match state.qualification_sessions.lock() {
+    }
+    let store = match state.qualification_sessions.lock() {
         Ok(store) => store,
         Err(poisoned) => {
             state.qualification_sessions.clear_poison();
             poisoned.into_inner()
         }
     };
-    ensure_recovered(state, provider, &mut store)?;
     let Some(candidate_handle) = store.active_candidate.clone() else {
         return Ok(false);
     };
@@ -2588,6 +2679,7 @@ mod tests {
     fn observation(device_handle: &str) -> SelectedDeviceObservation {
         SelectedDeviceObservation {
             device_handle: device_handle.to_string(),
+            session_epoch: Some(1),
             profile_id: Some("profile.test".to_string()),
             manufacturer: Some("Test".to_string()),
             model: Some("Device".to_string()),
@@ -2605,6 +2697,7 @@ mod tests {
     fn partial_observation(device_handle: &str) -> SelectedDeviceObservation {
         SelectedDeviceObservation {
             device_handle: device_handle.to_string(),
+            session_epoch: Some(1),
             profile_id: None,
             manufacturer: Some("Test".to_string()),
             model: Some("Device".to_string()),
@@ -2710,11 +2803,130 @@ mod tests {
     fn clean_restart(temp: &TempDir) -> (TempDir, tauri::App<tauri::test::MockRuntime>) {
         let repository = test_repository(temp);
         let provider = QualificationRepositoryProvider::for_test(repository);
-        test_app(provider, true)
+        let (app_temp, app) = test_app(provider, true);
+        crate::qualification_mode::recover_sessions_at_process_start(&app.state::<AppState>());
+        (app_temp, app)
+    }
+
+    fn persisted_session_for_recipe_digests(
+        required_recipes: &[&str],
+        digests: &[(&str, &str)],
+    ) -> PersistedQualificationSession {
+        let mut persisted = QualificationSession::for_test(&[]).to_persisted();
+        persisted.required_recipes = required_recipes
+            .iter()
+            .map(|recipe| (*recipe).to_string())
+            .collect();
+        persisted.authored_recipe_digests = Some(
+            digests
+                .iter()
+                .map(|(id, sha256)| AuthoredRecipeDigest {
+                    id: (*id).to_string(),
+                    sha256: (*sha256).to_string(),
+                })
+                .collect(),
+        );
+        persisted
     }
 
     #[test]
-    fn qualification_status_can_recover_before_begin_app_session() {
+    fn restored_session_rejects_empty_or_missing_authored_recipe_digests() {
+        let digest = "a".repeat(64);
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["test.recipe"],
+                &[],
+            ))
+            .is_err()
+        );
+
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one", "recipe.two"],
+                &[("recipe.one", &digest)],
+            ))
+            .is_err()
+        );
+
+        let mut missing_set =
+            persisted_session_for_recipe_digests(&["test.recipe"], &[("test.recipe", &digest)]);
+        missing_set.authored_recipe_digests = None;
+        assert!(QualificationSession::from_persisted(missing_set).is_err());
+    }
+
+    #[test]
+    fn restored_session_rejects_duplicate_recipe_ids_in_required_and_digest_sets() {
+        let digest = "a".repeat(64);
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one", "recipe.one"],
+                &[("recipe.one", &digest), ("recipe.one", &digest)],
+            ))
+            .is_err()
+        );
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one"],
+                &[("recipe.one", &digest), ("recipe.one", &digest)],
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restored_session_rejects_extra_or_malformed_authored_recipe_digests() {
+        let digest = "a".repeat(64);
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one"],
+                &[("recipe.one", &digest), ("recipe.extra", &digest)],
+            ))
+            .is_err()
+        );
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["bad recipe id"],
+                &[("bad recipe id", &digest)],
+            ))
+            .is_err()
+        );
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one"],
+                &[("recipe.one", "abc")],
+            ))
+            .is_err()
+        );
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one"],
+                &[("recipe.one", &"g".repeat(64))],
+            ))
+            .is_err()
+        );
+        assert!(
+            QualificationSession::from_persisted(persisted_session_for_recipe_digests(
+                &["recipe.one"],
+                &[("recipe.one", &"A".repeat(64))],
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restored_session_accepts_complete_recipe_digests_in_different_order() {
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let persisted = persisted_session_for_recipe_digests(
+            &["recipe.one", "recipe.two"],
+            &[("recipe.two", &second), ("recipe.one", &first)],
+        );
+
+        assert!(QualificationSession::from_persisted(persisted).is_ok());
+    }
+
+    #[test]
+    fn native_startup_recovers_session_before_begin_app_session() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -2737,16 +2949,72 @@ mod tests {
             .unwrap()
             .session_handoff_proven());
 
+        crate::qualification_mode::recover_sessions_at_process_start(&app.state::<AppState>());
         let recovered = session_status(&app.state::<AppState>())
             .unwrap()
-            .expect("qualification status should recover the cleanly handed-off session");
+            .expect("native process startup should recover the cleanly handed-off session");
         assert_eq!(recovered.phase, QualificationSessionPhase::ExecutionPending);
         assert!(recovered.recordable);
         assert!(!device_selection_locked(&app.state::<AppState>()).unwrap());
     }
 
     #[test]
-    fn malformed_current_session_becomes_discardable_and_is_not_recovered_again() {
+    fn qualification_status_recovers_persisted_sessions_before_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(
+                &app.state::<AppState>(),
+                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+            )
+            .unwrap();
+        }
+
+        let provider = QualificationRepositoryProvider::for_test(test_repository(&temp));
+        let (_app_temp, app) = test_app_before_frontend_session(provider, true);
+        let status = crate::qualification_mode::get_device_qualification_mode_status(app.state());
+        assert!(
+            status.is_err(),
+            "this minimal fixture intentionally omits the workflow catalog needed for projection"
+        );
+        assert_eq!(
+            app.state::<AppState>()
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .active_candidate(),
+            Some(candidate.as_str())
+        );
+    }
+
+    #[test]
+    fn active_device_plan_recovers_a_poisoned_session_store_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _store = state.qualification_sessions.lock().unwrap();
+            panic!("inject a poisoned session-store mutex");
+        }));
+
+        assert_eq!(active_device_plan(&state).as_deref(), Some("test-plan"));
+        assert!(!state.qualification_sessions.is_poisoned());
+    }
+
+    #[test]
+    fn empty_current_recipe_digest_set_is_recovered_as_discardable() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -2762,13 +3030,17 @@ mod tests {
                 begin_request(&candidate, CAPTURED_AT, observation("device-one")),
             )
             .unwrap();
+            let mut persisted = app
+                .state::<AppState>()
+                .qualification_repository
+                .get()
+                .expect("qualification repository should be available")
+                .load_session_json(&candidate)
+                .expect("the admitted session should have been persisted");
+            persisted["authoredRecipeDigests"] = json!([]);
             std::fs::write(
                 &session_path,
-                json!({
-                    "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
-                    "candidateHandle": candidate,
-                })
-                .to_string(),
+                serde_json::to_vec_pretty(&persisted).unwrap(),
             )
             .unwrap();
             drop(app);
@@ -2778,7 +3050,8 @@ mod tests {
         let provider = QualificationRepositoryProvider::for_test(test_repository(&temp));
         let (_app_temp, app) = test_app_before_frontend_session(provider, true);
         let app_state = app.state::<AppState>();
-        assert!(session_status(&app_state).unwrap().is_none());
+        let status = crate::qualification_mode::get_device_qualification_mode_status(app.state());
+        assert!(status.is_err());
         assert!(session_status(&app_state).unwrap().is_none());
 
         let repository = app_state.qualification_repository.get().unwrap();
@@ -3586,9 +3859,7 @@ mod tests {
             let (_app_temp, app) = test_app(provider, true);
             begin(&app.state::<AppState>(), captured).unwrap();
         }
-        let restarted = test_repository(&temp);
-        let provider = QualificationRepositoryProvider::for_test(restarted);
-        let (_app_temp, app) = test_app(provider, true);
+        let (_app_temp, app) = clean_restart(&temp);
         let resumed = session_status(&app.state::<AppState>()).unwrap().unwrap();
         assert_eq!(
             resumed.session_handle,
@@ -3828,6 +4099,124 @@ mod tests {
     }
 
     #[test]
+    fn root_change_after_terminal_retention_invalidates_an_open_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        begin(
+            &app.state::<AppState>(),
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        begin_with_prerequisite_and_admission(&app, &candidate);
+
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+                TerminalExecutionObservation {
+                    execution_handle: "execution-one".to_string(),
+                    status: Some("succeeded".to_string()),
+                    observed_at: "2026-10-02T19:27:12Z".to_string(),
+                    report_available: true,
+                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    authority_invalidated: false,
+                },
+            )),
+        );
+        assert_eq!(
+            session_status(&app.state::<AppState>())
+                .unwrap()
+                .unwrap()
+                .phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::RootChecked {
+                device_handle: "device-one".to_string(),
+                root_state: RootQualificationState::Granted,
+            },
+        );
+
+        assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+        let stored = app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn offline_inventory_invalidates_the_associated_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        begin(
+            &app.state::<AppState>(),
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+
+        observe_device_inventory(&app.state::<AppState>(), &[]);
+
+        assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+        let stored = app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn changed_inventory_epoch_invalidates_even_when_the_handle_is_reused() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        begin(
+            &app.state::<AppState>(),
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+
+        observe_device_inventory(&app.state::<AppState>(), &[("device-one".to_string(), 2)]);
+
+        assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+        let stored = app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn retained_terminal_phase_overrides_a_process_local_execution_binding() {
+        let mut session = QualificationSession::for_test(&[]);
+        session.bound_execution_handle = Some("execution-one".to_string());
+        session.terminal_execution_status = Some("succeeded".to_string());
+
+        assert_eq!(
+            session.phase(),
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+    }
+
+    #[test]
     fn partial_device_observations_do_not_reassociate_a_resumed_attempt() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -3839,11 +4228,11 @@ mod tests {
             begin(&app.state::<AppState>(), captured).unwrap();
         }
         let (_app_temp, app) = clean_restart(&temp);
+        let mut probe = partial_observation("device-two");
+        probe.session_epoch = Some(9);
         observe(
             &app.state::<AppState>(),
-            QualificationLifecycleObservation::DeviceObserved(Box::new(partial_observation(
-                "device-two",
-            ))),
+            QualificationLifecycleObservation::DeviceObserved(Box::new(probe)),
         );
         {
             let state = app.state::<AppState>();
@@ -3929,15 +4318,16 @@ mod tests {
             begin(&app.state::<AppState>(), captured).unwrap();
         }
         let (_app_temp, app) = clean_restart(&temp);
+        let mut probe = partial_observation("device-two");
+        probe.session_epoch = Some(9);
         observe(
             &app.state::<AppState>(),
-            QualificationLifecycleObservation::DeviceObserved(Box::new(partial_observation(
-                "device-two",
-            ))),
+            QualificationLifecycleObservation::DeviceObserved(Box::new(probe)),
         );
         // The passive support projection observes the facts the probe does
         // not: ABI class, Android API level, and the committed root state.
         let mut support = SelectedDeviceObservation::new("device-two");
+        support.session_epoch = Some(9);
         support.profile_id = Some("profile.test".to_string());
         support.android_api = Some(35);
         support.abi_soc_class = Some("arm64".to_string());
@@ -4037,6 +4427,7 @@ mod tests {
         let restarted = test_repository(&temp);
         let provider = QualificationRepositoryProvider::for_test(restarted);
         let (_app_temp, app) = test_app(provider, false);
+        crate::qualification_mode::recover_sessions_at_process_start(&app.state::<AppState>());
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
         let stored = app
             .state::<AppState>()
@@ -4101,6 +4492,7 @@ mod tests {
         legacy["sessionSchemaVersion"] = json!(1);
         let provider = QualificationRepositoryProvider::for_test(repository);
         let (_app_temp, app) = test_app(provider, true);
+        crate::qualification_mode::recover_sessions_at_process_start(&app.state::<AppState>());
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
         let stored = app
             .state::<AppState>()
@@ -4169,6 +4561,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
         let provider = QualificationRepositoryProvider::for_test(repository);
         let (_app_temp, app) = test_app(provider, true);
+        crate::qualification_mode::recover_sessions_at_process_start(&app.state::<AppState>());
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
         {
             let state = app.state::<AppState>();
@@ -4464,10 +4857,12 @@ mod tests {
         store.forget("qualification-candidate-one");
         assert_eq!(store.poisoned_candidate(), None);
         store.set_active("qualification-candidate-two".to_string());
-        store.associate("device-one".to_string());
+        store.associate("device-one".to_string(), Some(3));
         assert_eq!(store.associated_device_handle(), Some("device-one"));
+        assert_eq!(store.associated_device_session_epoch(), Some(3));
         store.forget("qualification-candidate-two");
         assert_eq!(store.associated_device_handle(), None);
+        assert_eq!(store.associated_device_session_epoch(), None);
         store.reset();
         assert!(store.active_candidate().is_none());
     }
