@@ -119,6 +119,8 @@ pub enum ObservedDeviceState {
     Unauthorized,
     Offline,
     Online,
+    /// The observation did not establish a recognized online/offline state.
+    Unverified,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -649,6 +651,9 @@ pub fn classify(
 
     let device = &devices[0];
     match device.state {
+        ObservedDeviceState::Unverified => {
+            incomplete(runtime_generation, qualification_revision, device)
+        }
         ObservedDeviceState::Unauthorized => snapshot(
             DeviceQualificationState::Unauthorized,
             "The connected device has not authorized this Mac.",
@@ -727,6 +732,20 @@ pub(crate) fn classify_complete(
     }
     let device = &observed[0];
     match device.state {
+        ObservedDeviceState::Unverified => with_capabilities(
+            snapshot(
+                DeviceQualificationState::InsufficientlyQualified,
+                "The connected device could not be fully qualified.",
+                vec!["Refresh discovery before attempting real execution."],
+                runtime_generation,
+                qualification_revision,
+                Some(device.opaque_identity),
+                device.android_major,
+                device.android_api_level,
+                normalize_abi(device.abi),
+            ),
+            device,
+        ),
         ObservedDeviceState::Unauthorized => snapshot(
             DeviceQualificationState::Unauthorized,
             "The connected device has not authorized this Mac.",
@@ -1264,6 +1283,12 @@ where
         &observed,
         Some(&identity),
     );
+    if observed_qualification.state == ObservedDeviceState::Unverified {
+        return Ok(CurrentQualification {
+            snapshot,
+            context: None,
+        });
+    }
     let context = QualificationContextKey::new(
         &identity,
         target.session_epoch,
@@ -1335,7 +1360,8 @@ fn classify_observed_complete<'a>(
         state: match state {
             Some("unauthorized") => ObservedDeviceState::Unauthorized,
             Some("offline") => ObservedDeviceState::Offline,
-            _ => ObservedDeviceState::Online,
+            Some("online") => ObservedDeviceState::Online,
+            _ => ObservedDeviceState::Unverified,
         },
         android_major: observed.android_major,
         android_api_level: observed.android_api_level,
@@ -1393,9 +1419,14 @@ fn classify_observed(
             ObservedDeviceState::Offline,
             identity.unwrap_or("qualification-device"),
         )],
-        _ => vec![observed_device(
+        Some("online") => vec![observed_device(
             observed,
             ObservedDeviceState::Online,
+            identity.unwrap_or("qualification-device"),
+        )],
+        _ => vec![observed_device(
+            observed,
+            ObservedDeviceState::Unverified,
             identity.unwrap_or("qualification-device"),
         )],
     };
@@ -1480,6 +1511,23 @@ mod tests {
     /// Decode one fixture probe payload exactly like the production seam does.
     fn probe_facts(value: Value) -> DeviceProbeFacts {
         DeviceProbeFacts::decode(&value).expect("test probe facts should decode")
+    }
+
+    fn qualification_snapshot_with_state(state: Option<&str>) -> DeviceQualificationSnapshotDto {
+        let mut payload = json!({
+            "androidMajor": 14,
+            "androidApiLevel": 34,
+            "abi": "arm64-v8a",
+            "storage": "available",
+            "packageManager": "available",
+            "activityManager": "available"
+        });
+        if let Some(state) = state {
+            payload["state"] = json!(state);
+        }
+        let observed = QualifyDeviceObservation::decode(&payload)
+            .expect("well-shaped qualification facts should decode");
+        classify_observed_complete(1, 2, &observed, Some("opaque-device")).0
     }
 
     fn online<'a>(
@@ -1710,6 +1758,26 @@ mod tests {
         unknown.package_manager = CapabilityOutcome::Unknown;
         assert_eq!(
             classify_complete(true, 8, 13, &[unknown]).state,
+            DeviceQualificationState::InsufficientlyQualified
+        );
+    }
+
+    #[test]
+    fn missing_qualification_state_is_not_treated_as_online() {
+        let result = qualification_snapshot_with_state(None);
+
+        assert_eq!(
+            result.state,
+            DeviceQualificationState::InsufficientlyQualified
+        );
+    }
+
+    #[test]
+    fn unknown_qualification_state_is_not_treated_as_online() {
+        let result = qualification_snapshot_with_state(Some("connected-ish"));
+
+        assert_eq!(
+            result.state,
             DeviceQualificationState::InsufficientlyQualified
         );
     }
