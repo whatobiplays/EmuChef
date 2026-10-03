@@ -305,8 +305,9 @@ fn safe_qualification_error(code: &str) -> String {
     safe_error(code, message)
 }
 
-/// Hold the begin gate across the complete observation and candidate-creation
-/// sequence so a second start is rejected before any device or root side effect.
+/// Serialize operations that require no active attempt. Session start holds the
+/// same gate across observation and candidate creation, before device or root
+/// side effects can occur.
 pub(crate) fn with_inactive_qualification_session<T>(
     state: &AppState,
     repository: &crate::qualification_repository::QualificationRepository,
@@ -674,24 +675,26 @@ pub fn record_qualification_run(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let result = repository
-        .record_run(&candidate_handle)
-        .map_err(|error| qualification_repository_command_error(&error))?;
-    if result.operation != QualificationOperation::RecordRun
-        || result.candidate_kind != CandidateKind::QualificationRun
-        || result.candidate_handle != candidate_handle
-    {
-        return Err(safe_qualification_error("qualification_candidate_invalid"));
-    }
-    let run_id = result
-        .payload
-        .get("runId")
-        .and_then(Value::as_str)
-        .filter(|run_id| !run_id.is_empty())
-        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    crate::qualification_session::forget_candidate(&state, &candidate_handle);
-    Ok(QualificationRunRecordingResult {
-        run_id: run_id.to_string(),
+    with_inactive_qualification_session(&state, repository, || {
+        let result = repository
+            .record_run(&candidate_handle)
+            .map_err(|error| qualification_repository_command_error(&error))?;
+        if result.operation != QualificationOperation::RecordRun
+            || result.candidate_kind != CandidateKind::QualificationRun
+            || result.candidate_handle != candidate_handle
+        {
+            return Err(safe_qualification_error("qualification_candidate_invalid"));
+        }
+        let run_id = result
+            .payload
+            .get("runId")
+            .and_then(Value::as_str)
+            .filter(|run_id| !run_id.is_empty())
+            .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        crate::qualification_session::forget_candidate(&state, &candidate_handle);
+        Ok(QualificationRunRecordingResult {
+            run_id: run_id.to_string(),
+        })
     })
 }
 

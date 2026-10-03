@@ -3202,6 +3202,102 @@ mod tests {
         assert!(!state.qualification_sessions.is_poisoned());
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingQualificationToolRunner {
+        record_calls: Arc<Mutex<usize>>,
+    }
+
+    impl QualificationToolRunner for RecordingQualificationToolRunner {
+        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            if args.first().map(String::as_str) != Some("--record-run") {
+                return Err("unexpected qualification tool operation".to_string());
+            }
+            *self.record_calls.lock().unwrap() += 1;
+            serde_json::to_vec(&json!({
+                "operation": "record_run",
+                "candidateHandle": args[1],
+                "candidateKind": "qualification_run",
+                "payload": { "runId": format!("qualification-run-sha256:{}", "a".repeat(64)) }
+            }))
+            .map_err(|_| "recording response should serialize".to_string())
+        }
+    }
+
+    #[test]
+    fn active_attempt_blocks_recording_an_older_finalized_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            temp.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let runner = RecordingQualificationToolRunner::default();
+        let record_calls = Arc::clone(&runner.record_calls);
+        let build = test_build();
+        let repository = QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(runner),
+            build.clone(),
+            QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        );
+        let older_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        repository
+            .finalize_candidate(
+                &older_candidate,
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": CAPTURED_AT,
+                    "build": build_json(),
+                    "workflowId": "test-workflow",
+                    "workflowVersion": 1,
+                    "deviceTargetId": "target-test",
+                    "runValidity": "invalid",
+                    "qualificationOutcome": "not_observed"
+                }),
+                None,
+            )
+            .unwrap();
+        let active_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        begin(
+            &state,
+            begin_request(&active_candidate, CAPTURED_AT, observation("device-active")),
+        )
+        .unwrap();
+
+        let error = crate::qualification_mode::record_qualification_run(
+            older_candidate.clone(),
+            app.state(),
+        )
+        .expect_err("an older candidate cannot be promoted during an active attempt");
+        let error: Value = serde_json::from_str(&error).unwrap();
+
+        assert_eq!(error["code"], "qualification_session_active");
+        assert_eq!(*record_calls.lock().unwrap(), 0);
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .active_candidate(),
+            Some(active_candidate.as_str())
+        );
+        let retained = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&older_candidate)
+            .unwrap();
+        assert!(retained.promotable);
+        assert_eq!(retained.payload["runValidity"], "invalid");
+    }
+
     #[test]
     fn begin_requires_a_complete_trusted_target_capture() {
         for missing_fact in [
