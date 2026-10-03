@@ -1,0 +1,27 @@
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_bd34346a5eb833 3270
+  s_09b05cf592369e::t_1cdc8dea1771ab 3205-3269,3271-3300
+apps/emuchef-app/src-tauri/src/qualification_mode.rs
+  s_09b05cf592369e::t_f6d2c8d4b20fc0 308-310,678-697
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "27329a54fabd3ba12a5b15a8889d875ab10f815f",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
