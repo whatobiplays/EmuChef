@@ -603,7 +603,7 @@ pub(crate) fn commit_selected_observation_in_transition(
         ));
     }
     drop(handles);
-    crate::qualification_session::observe(
+    crate::qualification_session::observe_in_transition(
         state,
         crate::qualification_session::QualificationLifecycleObservation::DeviceObserved(Box::new(
             observation,
@@ -1118,13 +1118,13 @@ where
             return fail_qualification_refresh(state, observation_failure_target, error);
         }
     };
-    let current = match qualify_reconciled_current_with_runtime(
-        &state.handles,
-        &state.root_qualification,
+    let current = match qualify_reconciled_current_for_state(
+        state,
         &adb_path,
         runtime_generation,
         qualification_revision,
         requested_handle,
+        observation_failure_target.clone(),
         request,
     ) {
         Ok(current) => current,
@@ -1233,6 +1233,72 @@ pub(crate) fn qualify_reconciled_current_with_runtime<F>(
     runtime_generation: u64,
     qualification_revision: u64,
     requested_handle: Option<&str>,
+    request: &mut F,
+) -> Result<CurrentQualification, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    qualify_reconciled_current_with_context(
+        handles,
+        root_qualification,
+        adb_path,
+        runtime_generation,
+        qualification_revision,
+        requested_handle,
+        ObservationFailureContext::ProductOnly,
+        request,
+    )
+}
+
+/// Run the same passive observation while retaining the active qualification
+/// attempt captured for the target's current native session. Failed observations
+/// clear product authority and notify that exact attempt atomically.
+pub(crate) fn qualify_reconciled_current_for_state<F>(
+    state: &AppState,
+    adb_path: &str,
+    runtime_generation: u64,
+    qualification_revision: u64,
+    requested_handle: Option<&str>,
+    failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+    request: &mut F,
+) -> Result<CurrentQualification, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    qualify_reconciled_current_with_context(
+        &state.handles,
+        &state.root_qualification,
+        adb_path,
+        runtime_generation,
+        qualification_revision,
+        requested_handle,
+        ObservationFailureContext::Qualification {
+            state,
+            failure_target,
+        },
+        request,
+    )
+}
+
+/// Failure handling for a passive observation path. Product-only callers clear
+/// stale native authority; app-state callers also notify the exact captured
+/// qualification attempt when one exists.
+enum ObservationFailureContext<'a> {
+    ProductOnly,
+    Qualification {
+        state: &'a AppState,
+        failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+    },
+}
+
+fn qualify_reconciled_current_with_context<F>(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    adb_path: &str,
+    runtime_generation: u64,
+    qualification_revision: u64,
+    requested_handle: Option<&str>,
+    failure_context: ObservationFailureContext<'_>,
     request: &mut F,
 ) -> Result<CurrentQualification, String>
 where
@@ -1358,9 +1424,10 @@ where
     let response = match response {
         Ok(response) => response,
         Err(_) => {
-            clear_unverified_device_authority(
+            clear_unverified_device_authority_for_observation(
                 handles,
                 root_qualification,
+                &failure_context,
                 &identity,
                 target.session_epoch,
             )?;
@@ -1368,9 +1435,10 @@ where
         }
     };
     let Some(observed) = QualifyDeviceObservation::decode(&response) else {
-        clear_unverified_device_authority(
+        clear_unverified_device_authority_for_observation(
             handles,
             root_qualification,
+            &failure_context,
             &identity,
             target.session_epoch,
         )?;
@@ -1383,9 +1451,10 @@ where
         Some(&identity),
     );
     if observed_qualification.state == ObservedDeviceState::Unverified {
-        clear_unverified_device_authority(
+        clear_unverified_device_authority_for_observation(
             handles,
             root_qualification,
+            &failure_context,
             &identity,
             target.session_epoch,
         )?;
@@ -1484,6 +1553,78 @@ fn ensure_target_session_current(
         ));
     }
     Ok(())
+}
+
+fn clear_unverified_device_authority_for_observation(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    failure_context: &ObservationFailureContext<'_>,
+    device_handle: &str,
+    expected_session_epoch: u64,
+) -> Result<(), String> {
+    match failure_context {
+        ObservationFailureContext::ProductOnly => clear_unverified_device_authority(
+            handles,
+            root_qualification,
+            device_handle,
+            expected_session_epoch,
+        ),
+        ObservationFailureContext::Qualification {
+            state,
+            failure_target,
+        } => clear_unverified_device_authority_and_observe_failure_with(
+            state,
+            device_handle,
+            expected_session_epoch,
+            failure_target.clone(),
+            || {},
+        ),
+    }
+}
+
+fn clear_unverified_device_authority_and_observe_failure_with<F>(
+    state: &AppState,
+    device_handle: &str,
+    expected_session_epoch: u64,
+    failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+    after_product_clear: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    let _transition = crate::commands::qualification_transition_lock(state);
+    clear_unverified_device_authority(
+        &state.handles,
+        &state.root_qualification,
+        device_handle,
+        expected_session_epoch,
+    )?;
+    after_product_clear();
+    crate::qualification_session::observe_device_observation_failure_in_transition(
+        state,
+        failure_target,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn clear_unverified_device_authority_and_observe_failure_with_hook<F>(
+    state: &AppState,
+    device_handle: &str,
+    expected_session_epoch: u64,
+    failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+    after_product_clear: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    clear_unverified_device_authority_and_observe_failure_with(
+        state,
+        device_handle,
+        expected_session_epoch,
+        failure_target,
+        after_product_clear,
+    )
 }
 
 /// Drop product qualification and root authority after an observation cannot

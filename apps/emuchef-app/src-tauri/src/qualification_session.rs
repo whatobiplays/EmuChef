@@ -1338,6 +1338,18 @@ pub(crate) struct DeviceObservationFailureTarget {
 /// here, never trusted across restart, and re-established automatically on the
 /// first trusted device observation after a clean restart.
 #[derive(Default)]
+enum DeferredFinalization {
+    #[default]
+    Idle,
+    Pending {
+        candidate_handle: String,
+    },
+    Checking {
+        candidate_handle: String,
+    },
+}
+
+#[derive(Default)]
 pub(crate) struct QualificationSessionStore {
     active_candidate: Option<String>,
     associated_device_handle: Option<String>,
@@ -1360,6 +1372,9 @@ pub(crate) struct QualificationSessionStore {
     pending_candidates: BTreeSet<String>,
     /// Highest native inventory generation applied to qualification.
     latest_inventory_generation: u64,
+    /// One candidate's terminal materialization state, including any source
+    /// check currently running outside the product-transition gate.
+    deferred_finalization: DeferredFinalization,
 }
 
 impl QualificationSessionStore {
@@ -1412,6 +1427,66 @@ impl QualificationSessionStore {
         self.poisoned_candidate.as_deref() == Some(candidate_handle)
     }
 
+    fn is_finalization_pending(&self, candidate_handle: &str) -> bool {
+        match &self.deferred_finalization {
+            DeferredFinalization::Pending {
+                candidate_handle: pending,
+            }
+            | DeferredFinalization::Checking {
+                candidate_handle: pending,
+            } => pending == candidate_handle,
+            DeferredFinalization::Idle => false,
+        }
+    }
+
+    fn mark_finalization_pending(&mut self, candidate_handle: &str) {
+        if !matches!(
+            &self.deferred_finalization,
+            DeferredFinalization::Checking { .. }
+        ) {
+            self.deferred_finalization = DeferredFinalization::Pending {
+                candidate_handle: candidate_handle.to_string(),
+            };
+        }
+    }
+
+    fn finalization_check_in_progress(&self, candidate_handle: &str) -> bool {
+        matches!(
+            &self.deferred_finalization,
+            DeferredFinalization::Checking { candidate_handle: checking }
+                if checking == candidate_handle
+        )
+    }
+
+    fn begin_finalization_check(&mut self, candidate_handle: &str) -> bool {
+        match &self.deferred_finalization {
+            DeferredFinalization::Checking { .. } => false,
+            DeferredFinalization::Pending {
+                candidate_handle: pending,
+            } if pending != candidate_handle => false,
+            DeferredFinalization::Idle | DeferredFinalization::Pending { .. } => {
+                self.deferred_finalization = DeferredFinalization::Checking {
+                    candidate_handle: candidate_handle.to_string(),
+                };
+                true
+            }
+        }
+    }
+
+    fn complete_finalization_check(&mut self, candidate_handle: &str) {
+        if self.finalization_check_in_progress(candidate_handle) {
+            self.deferred_finalization = DeferredFinalization::Pending {
+                candidate_handle: candidate_handle.to_string(),
+            };
+        }
+    }
+
+    fn clear_finalization_for(&mut self, candidate_handle: &str) {
+        if self.is_finalization_pending(candidate_handle) {
+            self.deferred_finalization = DeferredFinalization::Idle;
+        }
+    }
+
     /// Record one freshly created run candidate as pending in this process.
     pub(crate) fn mark_pending(&mut self, candidate_handle: &str) {
         self.pending_candidates.insert(candidate_handle.to_string());
@@ -1425,6 +1500,7 @@ impl QualificationSessionStore {
 
     fn set_active(&mut self, candidate_handle: String) {
         self.pending_candidates.remove(&candidate_handle);
+        self.deferred_finalization = DeferredFinalization::Idle;
         self.active_candidate = Some(candidate_handle);
         self.associated_device_handle = None;
         self.associated_device_session_epoch = None;
@@ -1444,6 +1520,7 @@ impl QualificationSessionStore {
 
     fn poison(&mut self, candidate_handle: String) {
         self.pending_candidates.remove(&candidate_handle);
+        self.clear_finalization_for(&candidate_handle);
         self.poisoned_candidate = Some(candidate_handle.clone());
         if self.active_candidate.as_deref() == Some(candidate_handle.as_str()) {
             self.active_candidate = None;
@@ -1459,6 +1536,7 @@ impl QualificationSessionStore {
     /// candidate is discarded or recorded, regardless of session outcome.
     pub(crate) fn forget(&mut self, candidate_handle: &str) {
         self.pending_candidates.remove(candidate_handle);
+        self.clear_finalization_for(candidate_handle);
         if self.active_candidate.as_deref() == Some(candidate_handle) {
             self.active_candidate = None;
             self.associated_device_handle = None;
@@ -1474,6 +1552,17 @@ impl QualificationSessionStore {
 
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
+    }
+}
+
+fn lock_session_store(state: &AppState) -> std::sync::MutexGuard<'_, QualificationSessionStore> {
+    match state.qualification_sessions.lock() {
+        Ok(store) => store,
+        Err(poisoned) => {
+            let store = poisoned.into_inner();
+            state.qualification_sessions.clear_poison();
+            store
+        }
     }
 }
 
@@ -1786,46 +1875,85 @@ pub(crate) fn recover_persisted_sessions(
 /// temporarily unavailable at its final checkpoint. The caller must recover
 /// persisted sessions before invoking this operation. It uses only retained
 /// terminal and checkpoint evidence and does not observe product lifecycle.
-pub(crate) fn retry_deferred_finalization(state: &AppState) -> Result<(), String> {
+pub(crate) fn retry_deferred_finalization(
+    state: &AppState,
+) -> Result<Option<QualificationSessionSnapshot>, String> {
     let Some(provider) = state.qualification_repository.get() else {
-        return Ok(());
+        return Ok(None);
     };
-    let mut store = match state.qualification_sessions.lock() {
-        Ok(store) => store,
-        Err(poisoned) => {
-            state.qualification_sessions.clear_poison();
-            poisoned.into_inner()
+    let ready_session = {
+        let _transition = crate::commands::qualification_transition_lock(state);
+        let mut store = lock_session_store(state);
+        ensure_recovered(state, provider, &mut store)?;
+        let Some(candidate_handle) = store.active_candidate.clone() else {
+            return Ok(None);
+        };
+        if store.is_poisoned(&candidate_handle) {
+            return Err(persistence_error());
         }
+        if store.finalization_check_in_progress(&candidate_handle) {
+            return Ok(None);
+        }
+        let session = load_active_session(provider, &store, &candidate_handle)?;
+        if !deferred_session_has_complete_evidence(&session) {
+            return Ok(None);
+        }
+        if !store.begin_finalization_check(&candidate_handle) {
+            return Ok(None);
+        }
+        (
+            candidate_handle,
+            session
+                .authored_recipe_digests()
+                .unwrap_or_default()
+                .to_vec(),
+        )
     };
-    if let Some(candidate_handle) = store.active_candidate.clone() {
-        if !store.is_poisoned(&candidate_handle) {
-            let session = load_active_session(provider, &store, &candidate_handle)?;
-            if deferred_session_is_ready(provider, &session) {
-                let _ = finish_transition(state, provider, &mut store, session);
-                if store.is_poisoned(&candidate_handle) {
-                    return Err(persistence_error());
-                }
-            }
-        }
-    }
 
-    Ok(())
+    // Source identity may invoke Git and read authored files. Keep that work
+    // outside both the transition gate and the qualification-session mutex.
+    let source_matches = provider.authored_recipe_digests_match(&ready_session.1);
+
+    let _transition = crate::commands::qualification_transition_lock(state);
+    let mut store = lock_session_store(state);
+    store.complete_finalization_check(&ready_session.0);
+    ensure_recovered(state, provider, &mut store)?;
+    if !source_matches {
+        return Ok(None);
+    }
+    if store.active_candidate() != Some(ready_session.0.as_str())
+        || !store.is_finalization_pending(&ready_session.0)
+        || store.is_poisoned(&ready_session.0)
+    {
+        return Ok(None);
+    }
+    let session = load_active_session(provider, &store, &ready_session.0)?;
+    if !deferred_session_has_complete_evidence(&session)
+        || session.authored_recipe_digests() != Some(ready_session.1.as_slice())
+    {
+        return Ok(None);
+    }
+    let snapshot = finish_transition(
+        state,
+        provider,
+        &mut store,
+        session,
+        AuthoredSourceVerification::Verified,
+    )
+    .ok_or_else(persistence_error)?;
+    Ok(Some(snapshot))
 }
 
-fn deferred_session_is_ready(
-    provider: &QualificationRepository,
-    session: &QualificationSession,
-) -> bool {
+fn deferred_session_has_complete_evidence(session: &QualificationSession) -> bool {
     if session.is_closed()
         || session.run_validity() != RunValidity::Valid
         || !session.terminal_evidence_ready()
         || !terminal_report_matches_status(session)
+        || session.authored_recipe_digests().is_none()
     {
         return false;
     }
-    session
-        .authored_recipe_digests()
-        .is_some_and(|expected| provider.authored_recipe_digests_match(expected))
+    true
 }
 
 /// Recover one persisted candidate. Returns true when it resumed as the active
@@ -1935,14 +2063,6 @@ fn recover_current_candidate(
     if session.run_validity() == RunValidity::Invalid {
         return finalize_recovered_invalid(state, provider, store, session);
     }
-    if crate::qualification_mode::current_build_identity(&state.qualification_repository).as_ref()
-        != Some(session.build_identity())
-    {
-        // A valid session is evidence for the exact qualification build that
-        // admitted it. Leave it intact when another build starts so returning
-        // to the captured build can recover it without relabeling provenance.
-        return Ok(false);
-    }
     if !handoff_proven {
         session.invalidate(QualificationInvalidation::UnprovenShutdown);
         if persist(provider, &session).is_err() {
@@ -1950,6 +2070,14 @@ fn recover_current_candidate(
             return Err(persistence_error());
         }
         return finalize_recovered_invalid(state, provider, store, session);
+    }
+    if crate::qualification_mode::current_build_identity(&state.qualification_repository).as_ref()
+        != Some(session.build_identity())
+    {
+        // A valid session is evidence for the exact qualification build that
+        // admitted it. Leave it intact when another build starts so returning
+        // to the captured build can recover it without relabeling provenance.
+        return Ok(false);
     }
     if session.execution_admitted() && session.terminal_execution_status().is_none() {
         // The previous process admitted a real execution but never retained
@@ -2091,6 +2219,21 @@ fn legacy_session_for_recovery(value: &Value) -> Result<QualificationSession, St
 /// records the transition, becomes invalid, or becomes poisoned/non-recordable.
 /// When no attempt is active this is a no-persistence no-op.
 pub(crate) fn observe(state: &AppState, observation: QualificationLifecycleObservation) {
+    let transition = crate::commands::qualification_transition_lock(state);
+    observe_in_transition(state, observation);
+    if transition.release_and_retry().is_err() {
+        eprintln!(
+            "Qualification lifecycle state was retained, but deferred candidate materialization remains pending."
+        );
+    }
+}
+
+/// Apply a product lifecycle observation while the caller already owns the
+/// shared product-transition gate.
+pub(crate) fn observe_in_transition(
+    state: &AppState,
+    observation: QualificationLifecycleObservation,
+) {
     let Some(provider) = state.qualification_repository.get() else {
         return;
     };
@@ -2194,7 +2337,13 @@ pub(crate) fn observe(state: &AppState, observation: QualificationLifecycleObser
             }
         }
     }
-    let _ = finish_transition(state, provider, &mut store, session);
+    let _ = finish_transition(
+        state,
+        provider,
+        &mut store,
+        session,
+        AuthoredSourceVerification::NotVerified,
+    );
 }
 
 /// Invalidate an associated attempt when an authoritative observation cannot
@@ -2246,7 +2395,7 @@ pub(crate) fn observe_device_observation_failure_in_transition(
     let Some(target) = target else {
         return;
     };
-    observe(
+    observe_in_transition(
         state,
         QualificationLifecycleObservation::DeviceObservationFailed(target),
     );
@@ -2297,11 +2446,18 @@ fn apply_device_observation(
 /// Persist the new session state and materialize immutable evidence when the
 /// attempt closed (terminal evidence complete, or invalid). Every failure here
 /// stays inside qualification evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthoredSourceVerification {
+    NotVerified,
+    Verified,
+}
+
 fn finish_transition(
     state: &AppState,
     provider: &QualificationRepository,
     store: &mut QualificationSessionStore,
     mut session: QualificationSession,
+    source_verification: AuthoredSourceVerification,
 ) -> Option<QualificationSessionSnapshot> {
     session.resolve_terminal_outcome();
     // Retain the process-local review and execution bindings this transition
@@ -2333,15 +2489,11 @@ fn finish_transition(
                 .ok()
                 .map(|candidate| session.snapshot(Some(candidate)));
         }
-        if !invalid
-            && !session
-                .authored_recipe_digests()
-                .is_some_and(|expected| provider.authored_recipe_digests_match(expected))
-        {
-            // Source authority can change temporarily while an execution is
-            // active. Retain the terminal observation and keep the attempt
-            // pending until canonical source again matches its session-start
-            // fingerprint; never close it with evidence that cannot be recorded.
+        if !invalid && source_verification != AuthoredSourceVerification::Verified {
+            // The source recheck may invoke Git and read authored files. Mark
+            // the completed attempt pending while still under the transition
+            // gate, then let the guard retry after releasing that gate.
+            store.mark_finalization_pending(&candidate_handle);
             return candidate_summary(provider, &candidate_handle)
                 .ok()
                 .map(|candidate| session.snapshot(Some(candidate)));
@@ -2524,13 +2676,17 @@ pub(crate) fn record_checkpoint(
         .get()
         .ok_or_else(unavailable_error)?;
     let candidate_handle = candidate_handle_for_session(session_handle)?;
-    let mut store = state
-        .qualification_sessions
-        .lock()
-        .map_err(|_| persistence_error())?;
+    let transition = crate::commands::qualification_transition_lock(state);
+    let mut store = lock_session_store(state);
     ensure_recovered(state, provider, &mut store)?;
     if store.is_poisoned(&candidate_handle) {
         return Err(persistence_error());
+    }
+    if store.is_finalization_pending(&candidate_handle) {
+        return Err(session_error(
+            "qualification_session_finalization_pending",
+            "The completed attempt is waiting for its authored source to be verified.",
+        ));
     }
     if store.active_candidate() != Some(candidate_handle.as_str()) {
         return Err(inactive_error());
@@ -2544,7 +2700,22 @@ pub(crate) fn record_checkpoint(
                 "The checkpoint is not allowed by the selected production workflow.",
             )
         })?;
-    finish_transition(state, provider, &mut store, session).ok_or_else(persistence_error)
+    let snapshot = finish_transition(
+        state,
+        provider,
+        &mut store,
+        session,
+        AuthoredSourceVerification::NotVerified,
+    )
+    .ok_or_else(persistence_error)?;
+    drop(store);
+    if let Some(finalized) = transition.release_and_retry()? {
+        return Ok(finalized);
+    }
+    if snapshot.phase != QualificationSessionPhase::Closed && session_status(state)?.is_none() {
+        return Err(inactive_error());
+    }
+    Ok(snapshot)
 }
 
 /// Abandon the active attempt. The attempt closes as invalid/not-observed and
@@ -2573,7 +2744,14 @@ pub(crate) fn abandon(
     }
     let mut session = load_active_session(provider, &store, &candidate_handle)?;
     session.invalidate(QualificationInvalidation::OperatorAbandoned);
-    finish_transition(state, provider, &mut store, session).ok_or_else(persistence_error)
+    finish_transition(
+        state,
+        provider,
+        &mut store,
+        session,
+        AuthoredSourceVerification::NotVerified,
+    )
+    .ok_or_else(persistence_error)
 }
 
 /// Drop process-local authority for one candidate. Called after the operator
@@ -2606,6 +2784,15 @@ pub(crate) fn reset(state: &AppState) {
 /// product has dropped that device's authority, so the attempt can no longer
 /// prove it ran against the same device and fails closed.
 pub(crate) fn observe_device_inventory(
+    state: &AppState,
+    generation: u64,
+    available_devices: &[(String, u64)],
+) {
+    let _transition = crate::commands::qualification_transition_lock(state);
+    observe_device_inventory_in_transition(state, generation, available_devices);
+}
+
+pub(crate) fn observe_device_inventory_in_transition(
     state: &AppState,
     generation: u64,
     available_devices: &[(String, u64)],
@@ -2682,7 +2869,13 @@ pub(crate) fn observe_device_inventory(
         return;
     }
     session.invalidate(QualificationInvalidation::DeviceUnavailable);
-    let _ = finish_transition(state, provider, &mut store, session);
+    let _ = finish_transition(
+        state,
+        provider,
+        &mut store,
+        session,
+        AuthoredSourceVerification::NotVerified,
+    );
 }
 
 /// Sanitized snapshot of the active session, if one exists.
@@ -2807,7 +3000,8 @@ mod tests {
     use crate::execution::ExecutionHandleStore;
     use crate::handles::SessionHandles;
     use crate::qualification_repository::{
-        QualificationRepositoryProvider, QualificationSourceState, QualificationToolRunner,
+        QualificationRepository, QualificationRepositoryProvider, QualificationSourceState,
+        QualificationToolRunner,
     };
     use crate::recovery::RecoveryStore;
     use crate::saved_configurations::SavedConfigurationStore;
@@ -3506,6 +3700,369 @@ mod tests {
     }
 
     #[test]
+    fn passive_qualification_request_failure_invalidates_its_captured_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "passive-failure");
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch);
+        assert!(failure_target.is_some());
+        let mut requested = Vec::new();
+        let mut request = |operation: &str, _payload: Value| {
+            requested.push(operation.to_string());
+            Err("native probe failed".to_string())
+        };
+
+        let result = crate::device_observation::qualify_reconciled_current_for_state(
+            &state,
+            "adb",
+            1,
+            1,
+            Some(&device_handle),
+            failure_target,
+            &mut request,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(requested, ["qualifyDevice"]);
+        assert!(session_status(&state).unwrap().is_none());
+        assert_eq!(
+            state
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&candidate)
+                .unwrap()
+                .payload["runValidity"],
+            "invalid"
+        );
+    }
+
+    #[test]
+    fn failed_observation_and_terminal_retention_share_one_transition() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "failure-terminal-race",
+                        "state": "available",
+                        "model": "Device",
+                        "transportId": "race-transport"
+                    }]
+                }))
+                .unwrap();
+            let device = handles.qualification_devices().remove(0);
+            (device.handle, device.session_epoch)
+        };
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        let active = begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        record_checkpoint(
+            &state,
+            &active.session_handle,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-race",
+                &device_handle,
+            ))),
+        );
+        observe(
+            &state,
+            QualificationLifecycleObservation::RealExecutionAdmitted(Box::new(
+                ExecutionAdmissionObservation {
+                    execution_handle: "execution-race".to_string(),
+                    review: review("review-race", &device_handle),
+                    device_handle: device_handle.clone(),
+                },
+            )),
+        );
+        assert!(
+            session_status(&state).unwrap().is_some(),
+            "execution admission should leave the attempt active"
+        );
+        record_checkpoint(
+            &state,
+            &active.session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch);
+        assert!(failure_target.is_some());
+
+        let cleared = Arc::new(std::sync::Barrier::new(2));
+        let continue_failure = Arc::new(std::sync::Barrier::new(2));
+        let terminal_check = Arc::new(std::sync::Barrier::new(2));
+        let (terminal_gate_tx, terminal_gate_rx) = std::sync::mpsc::sync_channel(1);
+        let terminal = QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+            TerminalExecutionObservation {
+                execution_handle: "execution-race".to_string(),
+                status: Some("succeeded".to_string()),
+                observed_at: CAPTURED_AT.to_string(),
+                report_available: true,
+                report_bytes: Some(
+                    serde_json::to_vec(&json!({ "execution": { "status": "succeeded" } })).unwrap(),
+                ),
+                authority_invalidated: false,
+            },
+        ));
+
+        std::thread::scope(|scope| {
+            let state_for_failure = &state;
+            let cleared_for_failure = Arc::clone(&cleared);
+            let continue_for_failure = Arc::clone(&continue_failure);
+            let failure = scope.spawn(move || {
+                crate::device_observation::clear_unverified_device_authority_and_observe_failure_with_hook(
+                    state_for_failure,
+                    &device_handle,
+                    session_epoch,
+                    failure_target,
+                    || {
+                        cleared_for_failure.wait();
+                        continue_for_failure.wait();
+                    },
+                )
+                .unwrap();
+            });
+
+            cleared.wait();
+            let state_for_terminal = &state;
+            let terminal_check_for_thread = Arc::clone(&terminal_check);
+            let terminal_thread = scope.spawn(move || {
+                terminal_check_for_thread.wait();
+                let acquired = state_for_terminal
+                    .qualification_transition_gate
+                    .try_lock()
+                    .is_ok();
+                terminal_gate_tx.send(acquired).unwrap();
+                observe(state_for_terminal, terminal);
+            });
+            terminal_check.wait();
+            let acquired_during_failure = terminal_gate_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("terminal worker should check the transition gate");
+            continue_failure.wait();
+            failure.join().unwrap();
+            terminal_thread.join().unwrap();
+            assert!(
+                !acquired_during_failure,
+                "terminal retention must wait until authority clearing and failure observation commit together"
+            );
+        });
+
+        assert!(session_status(&state).unwrap().is_none());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
+        );
+    }
+
+    #[test]
+    fn final_checkpoint_waits_for_authority_loss_before_candidate_closure() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "checkpoint-loss-race");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch)
+                .expect("the active attempt should own the observed device session");
+
+        let (authority_cleared_tx, authority_cleared_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_failure_tx, continue_failure_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_started_tx, checkpoint_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_result_tx, checkpoint_result_rx) = std::sync::mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| {
+            let state_for_failure = &state;
+            let failure = scope.spawn(move || {
+                crate::device_observation::clear_unverified_device_authority_and_observe_failure_with_hook(
+                    state_for_failure,
+                    &device_handle,
+                    session_epoch,
+                    Some(failure_target),
+                    || {
+                        authority_cleared_tx.send(()).unwrap();
+                        continue_failure_rx.recv().unwrap();
+                    },
+                )
+            });
+
+            authority_cleared_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("authority loss should pause while owning the transition gate");
+            assert!(state.qualification_transition_gate.try_lock().is_err());
+
+            let state_for_checkpoint = &state;
+            let checkpoint = scope.spawn(move || {
+                checkpoint_started_tx.send(()).unwrap();
+                let result = record_checkpoint(
+                    state_for_checkpoint,
+                    &session_handle,
+                    "device_state_verified",
+                    CheckpointOutcome::Pass,
+                );
+                checkpoint_result_tx.send(result).unwrap();
+            });
+            checkpoint_started_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("checkpoint worker should start while authority loss owns the gate");
+            assert!(checkpoint_result_rx.try_recv().is_err());
+
+            continue_failure_tx.send(()).unwrap();
+            failure.join().unwrap().unwrap();
+            checkpoint.join().unwrap();
+        });
+
+        assert!(checkpoint_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("checkpoint worker should finish after invalidation")
+            .is_err());
+        assert!(session_status(&state).unwrap().is_none());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
+    fn deferred_materialization_rechecks_authority_after_source_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "deferred-loss-race");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        let recipe_path = temp.path().join("authored/recipes/test.recipe.yaml");
+        std::fs::write(
+            &recipe_path,
+            b"id: test.recipe\nsteps:\n  - temporary change\n",
+        )
+        .unwrap();
+        let pending = record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        assert_eq!(
+            pending.phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+        assert_eq!(
+            state
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&candidate)
+                .unwrap()
+                .payload
+                .get("runValidity"),
+            None
+        );
+
+        std::fs::write(&recipe_path, b"id: test.recipe\n").unwrap();
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch)
+                .expect("the deferred attempt should still be associated");
+        let repository = state.qualification_repository.get().unwrap();
+        let (source_read_started_rx, release_source_read_tx) =
+            block_next_source_state_read(repository);
+        let (retry_result_tx, retry_result_rx) = std::sync::mpsc::sync_channel(1);
+        let (authority_cleared_tx, authority_cleared_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_failure_tx, continue_failure_rx) = std::sync::mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| {
+            let state_for_retry = &state;
+            let retry = scope.spawn(move || {
+                retry_result_tx
+                    .send(retry_deferred_finalization(state_for_retry))
+                    .unwrap();
+            });
+            source_read_started_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("deferred materialization should begin its authored-source check");
+            let transition = crate::commands::qualification_transition_lock(&state);
+            drop(transition);
+
+            let state_for_failure = &state;
+            let failure = scope.spawn(move || {
+                crate::device_observation::clear_unverified_device_authority_and_observe_failure_with_hook(
+                    state_for_failure,
+                    &device_handle,
+                    session_epoch,
+                    Some(failure_target),
+                    || {
+                        authority_cleared_tx.send(()).unwrap();
+                        continue_failure_rx.recv().unwrap();
+                    },
+                )
+            });
+            authority_cleared_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("authority loss should own the gate while source verification is paused");
+            release_source_read_tx.send(()).unwrap();
+            continue_failure_tx.send(()).unwrap();
+            failure.join().unwrap().unwrap();
+            retry.join().unwrap();
+        });
+
+        assert!(retry_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("deferred retry should finish after the authority transition")
+            .unwrap()
+            .is_none());
+        assert!(session_status(&state).unwrap().is_none());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
     fn reconnect_during_probe_rejects_result_and_preserves_the_new_attempt() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -4024,9 +4581,20 @@ mod tests {
         app: &tauri::App<tauri::test::MockRuntime>,
         candidate: &str,
     ) {
+        begin_with_prerequisite_and_admission_for_device(app, candidate, "device-one", 1);
+    }
+
+    fn begin_with_prerequisite_and_admission_for_device(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        candidate: &str,
+        device_handle: &str,
+        session_epoch: u64,
+    ) {
+        let mut device_observation = observation(device_handle);
+        device_observation.session_epoch = Some(session_epoch);
         observe(
             &app.state::<AppState>(),
-            QualificationLifecycleObservation::DeviceObserved(Box::new(observation("device-one"))),
+            QualificationLifecycleObservation::DeviceObserved(Box::new(device_observation)),
         );
         let session_handle = session_handle_for_candidate(candidate).unwrap();
         let snapshot = record_checkpoint(
@@ -4041,7 +4609,7 @@ mod tests {
             &app.state::<AppState>(),
             QualificationLifecycleObservation::ReviewCreated(Box::new(review(
                 "review-one",
-                "device-one",
+                device_handle,
             ))),
         );
         observe(
@@ -4049,11 +4617,161 @@ mod tests {
             QualificationLifecycleObservation::RealExecutionAdmitted(Box::new(
                 ExecutionAdmissionObservation {
                     execution_handle: "execution-one".to_string(),
-                    review: review("review-one", "device-one"),
-                    device_handle: "device-one".to_string(),
+                    review: review("review-one", device_handle),
+                    device_handle: device_handle.to_string(),
                 },
             )),
         );
+    }
+
+    fn available_test_device(state: &AppState, serial: &str) -> (String, u64) {
+        let mut handles = state.handles.lock().unwrap();
+        handles
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": serial,
+                    "state": "available",
+                    "model": "Device",
+                    "transportId": format!("transport-{serial}")
+                }]
+            }))
+            .unwrap();
+        let device = handles.qualification_devices().remove(0);
+        (device.handle, device.session_epoch)
+    }
+
+    fn terminal_awaiting_device_checkpoint(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        candidate: &str,
+        device_handle: &str,
+        session_epoch: u64,
+    ) -> String {
+        let mut capture = observation(device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(
+            &app.state::<AppState>(),
+            begin_request(candidate, CAPTURED_AT, capture),
+        )
+        .unwrap();
+        begin_with_prerequisite_and_admission_for_device(
+            app,
+            candidate,
+            device_handle,
+            session_epoch,
+        );
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+                TerminalExecutionObservation {
+                    execution_handle: "execution-one".to_string(),
+                    status: Some("succeeded".to_string()),
+                    observed_at: CAPTURED_AT.to_string(),
+                    report_available: true,
+                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    authority_invalidated: false,
+                },
+            )),
+        );
+        let snapshot = session_status(&app.state::<AppState>())
+            .unwrap()
+            .expect("terminal evidence should await its final checkpoint");
+        assert_eq!(
+            snapshot.phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+        snapshot.session_handle
+    }
+
+    fn block_next_source_state_read(
+        repository: &QualificationRepository,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let first_read = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        repository.set_source_state_read_hook_for_test(Arc::new(move || {
+            if first_read.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+        }));
+        (started_rx, release_tx)
+    }
+
+    #[test]
+    fn dropping_transition_guard_does_not_run_deferred_source_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "drop-source-check");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        let recipe_path = temp.path().join("authored/recipes/test.recipe.yaml");
+        std::fs::write(
+            &recipe_path,
+            b"id: test.recipe\nsteps:\n  - temporary change\n",
+        )
+        .unwrap();
+        let pending = record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        assert_eq!(
+            pending.phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+
+        std::fs::write(&recipe_path, b"id: test.recipe\n").unwrap();
+        let repository = state.qualification_repository.get().unwrap();
+        let (source_read_started_rx, release_source_read_tx) =
+            block_next_source_state_read(repository);
+        release_source_read_tx
+            .send(())
+            .expect("the source-read hook should be ready for an optional release");
+
+        drop(crate::commands::qualification_transition_lock(&state));
+
+        assert!(
+            source_read_started_rx.try_recv().is_err(),
+            "scope exit must release the gate without running authored-source verification"
+        );
+    }
+
+    #[test]
+    fn deferred_finalization_state_keeps_one_candidate_identity() {
+        let mut store = QualificationSessionStore::default();
+        store.mark_finalization_pending("candidate-a");
+
+        assert!(store.is_finalization_pending("candidate-a"));
+        assert!(store.begin_finalization_check("candidate-a"));
+        assert!(store.finalization_check_in_progress("candidate-a"));
+        assert!(store.is_finalization_pending("candidate-a"));
+        store.mark_finalization_pending("candidate-b");
+        assert!(store.finalization_check_in_progress("candidate-a"));
+        assert!(!store.is_finalization_pending("candidate-b"));
+        assert!(!store.begin_finalization_check("candidate-a"));
+        assert!(!store.begin_finalization_check("candidate-b"));
+
+        store.complete_finalization_check("candidate-a");
+        assert!(!store.finalization_check_in_progress("candidate-a"));
+        assert!(store.is_finalization_pending("candidate-a"));
+        assert!(!store.is_finalization_pending("candidate-b"));
+
+        store.forget("candidate-a");
+        assert!(!store.is_finalization_pending("candidate-a"));
+        assert!(store.begin_finalization_check("candidate-b"));
+        assert!(store.finalization_check_in_progress("candidate-b"));
     }
 
     #[test]
@@ -5136,6 +5854,167 @@ mod tests {
         )
         .unwrap());
         assert_eq!(original_store.active_candidate(), Some(candidate.as_str()));
+    }
+
+    #[test]
+    fn unproven_handoff_invalidates_before_build_mismatch_can_defer_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let captured_build = test_build();
+        let repository = test_repository_with_build(&temp, captured_build.clone());
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(
+                &app.state::<AppState>(),
+                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+            )
+            .unwrap();
+        }
+
+        let mut other_build = captured_build.clone();
+        other_build.git_commit = "2".repeat(40);
+        other_build.material_build_digest = format!("sha256:{}", "b".repeat(64));
+        let other_repository = test_repository_with_build(&temp, other_build);
+        let other_provider = QualificationRepositoryProvider::for_test(other_repository);
+        let (_other_app_temp, other_app) = test_app(other_provider, false);
+        let other_state = other_app.state::<AppState>();
+        crate::qualification_mode::recover_sessions_at_process_start(&other_state);
+        assert!(session_status(&other_state).unwrap().is_none());
+        let stored = other_state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
+        );
+        let invalidated = other_state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_session_json(&candidate)
+            .expect("the invalid session should remain durably fail-closed");
+        assert_eq!(invalidated["runValidity"], "invalid");
+        drop(other_app);
+
+        let original_repository = test_repository_with_build(&temp, captured_build);
+        let original_provider = QualificationRepositoryProvider::for_test(original_repository);
+        let (_original_app_temp, original_app) = test_app(original_provider, true);
+        crate::qualification_mode::recover_sessions_at_process_start(
+            &original_app.state::<AppState>(),
+        );
+        assert!(session_status(&original_app.state::<AppState>())
+            .unwrap()
+            .is_none());
+        let stored_again = original_app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored_again
+                .payload
+                .get("runValidity")
+                .and_then(Value::as_str),
+            Some("invalid")
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct SessionRegistrationRunner {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl QualificationToolRunner for SessionRegistrationRunner {
+        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            if args.first().map(String::as_str) != Some("--register-target") {
+                return Err("unexpected qualification tool operation".to_string());
+            }
+            *self
+                .calls
+                .lock()
+                .expect("registration count should be available") += 1;
+            serde_json::to_vec(&json!({
+                "operation": "register_target",
+                "candidateHandle": args[1],
+                "candidateKind": "target_registration",
+                "payload": { "id": "registered-target" }
+            }))
+            .map_err(|_| "registration response should serialize".to_string())
+        }
+    }
+
+    #[test]
+    fn target_registration_waits_until_the_active_attempt_closes() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            temp.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let runner = SessionRegistrationRunner::default();
+        let calls = Arc::clone(&runner.calls);
+        let build = test_build();
+        let repository = QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(runner),
+            build.clone(),
+            QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        );
+        let run_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let registration_candidate = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_json() }),
+                None,
+            )
+            .unwrap();
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let active = begin(
+            &state,
+            begin_request(&run_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        let repository = state.qualification_repository.get().unwrap();
+        let payload_before = repository
+            .load_candidate(&registration_candidate)
+            .unwrap()
+            .payload;
+
+        let error = crate::qualification_mode::register_qualification_target(
+            registration_candidate.clone(),
+            app.state(),
+        )
+        .expect_err("registration must not mutate definitions during an active attempt");
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], "qualification_session_active");
+        assert_eq!(*calls.lock().unwrap(), 0);
+        assert_eq!(
+            repository
+                .load_candidate(&registration_candidate)
+                .unwrap()
+                .payload,
+            payload_before
+        );
+
+        abandon(&state, &active.session_handle).unwrap();
+        crate::qualification_mode::register_qualification_target(
+            registration_candidate,
+            app.state(),
+        )
+        .expect("registration should proceed after the attempt closes");
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[test]

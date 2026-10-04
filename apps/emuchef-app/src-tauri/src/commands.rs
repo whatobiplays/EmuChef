@@ -183,20 +183,51 @@ fn report_device_inventory_to_qualification(
     generation: u64,
     available_devices: &[(String, u64)],
 ) {
-    crate::qualification_session::observe_device_inventory(state, generation, available_devices);
+    crate::qualification_session::observe_device_inventory_in_transition(
+        state,
+        generation,
+        available_devices,
+    );
 }
 
 /// Serialize a product observation commit and its qualification notification.
 /// A poisoned mutex is recovered because losing this ordering boundary must
-/// never silently drop a committed product transition.
-pub(crate) fn qualification_transition_lock(state: &AppState) -> MutexGuard<'_, ()> {
-    match state.qualification_transition_gate.lock() {
+/// never silently drop a committed product transition. Deferred source checks
+/// run only after this guard releases the product-transition gate.
+pub(crate) struct QualificationTransitionGuard<'a> {
+    state: &'a AppState,
+    guard: Option<MutexGuard<'a, ()>>,
+}
+
+impl QualificationTransitionGuard<'_> {
+    /// Release the transition gate before retrying materialization that may
+    /// inspect the current authored-source checkout.
+    pub(crate) fn release_and_retry(
+        mut self,
+    ) -> Result<Option<crate::qualification_session::QualificationSessionSnapshot>, String> {
+        drop(self.guard.take());
+        crate::qualification_session::retry_deferred_finalization(self.state)
+    }
+}
+
+impl Drop for QualificationTransitionGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+    }
+}
+
+pub(crate) fn qualification_transition_lock(state: &AppState) -> QualificationTransitionGuard<'_> {
+    let guard = match state.qualification_transition_gate.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             let guard = poisoned.into_inner();
             state.qualification_transition_gate.clear_poison();
             guard
         }
+    };
+    QualificationTransitionGuard {
+        state,
+        guard: Some(guard),
     }
 }
 
@@ -1347,7 +1378,7 @@ pub fn create_review(
     handles.invalidate_catalog(catalog(&state)?.digest());
     let review_handle = handles.insert_review(snapshot.clone());
     drop(handles);
-    crate::qualification_session::observe(
+    crate::qualification_session::observe_in_transition(
         &state,
         crate::qualification_session::QualificationLifecycleObservation::ReviewCreated(Box::new(
             crate::qualification_session::review_observation(&review_handle, &snapshot),

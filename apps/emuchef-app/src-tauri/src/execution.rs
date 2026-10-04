@@ -1222,15 +1222,26 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
 
     let mut qualification_request =
         |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
-    let current = qualify_reconciled_current_with_runtime(
-        handles,
-        root_qualification,
-        platform_tools.adb_path,
-        platform_tools.runtime_generation,
-        platform_tools.platform_tools_revision,
-        Some(&refreshed_review.device_handle),
-        &mut qualification_request,
-    )?;
+    let current = match qualification_state {
+        Some(state) => crate::device_observation::qualify_reconciled_current_for_state(
+            state,
+            platform_tools.adb_path,
+            platform_tools.runtime_generation,
+            platform_tools.platform_tools_revision,
+            Some(&refreshed_review.device_handle),
+            observation_failure_target.clone(),
+            &mut qualification_request,
+        )?,
+        None => qualify_reconciled_current_with_runtime(
+            handles,
+            root_qualification,
+            platform_tools.adb_path,
+            platform_tools.runtime_generation,
+            platform_tools.platform_tools_revision,
+            Some(&refreshed_review.device_handle),
+            &mut qualification_request,
+        )?,
+    };
     if current
         .context
         .as_ref()
@@ -1395,7 +1406,7 @@ fn observe_real_admission(
     if !cfg!(feature = "real-execution") {
         return;
     }
-    crate::qualification_session::observe(
+    crate::qualification_session::observe_in_transition(
         state,
         crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
             Box::new(
@@ -1635,7 +1646,7 @@ fn retain_terminal_real_execution(
             "Real-device execution state is unavailable.",
         )
     })?;
-    let _transition = crate::commands::qualification_transition_lock(state);
+    let transition = crate::commands::qualification_transition_lock(state);
     if executions.terminal_retained(ExecutionKind::Real, &mapping.public_handle) {
         return Ok(None);
     }
@@ -1674,12 +1685,18 @@ fn retain_terminal_real_execution(
         report_bytes: Some(report_bytes),
         authority_invalidated: identity_failed || root_failed,
     };
-    crate::qualification_session::observe(
+    crate::qualification_session::observe_in_transition(
         state,
         crate::qualification_session::QualificationLifecycleObservation::RealExecutionTerminal(
             Box::new(observation.clone()),
         ),
     );
+    drop(executions);
+    if transition.release_and_retry().is_err() {
+        eprintln!(
+            "The retained execution terminal is safe; qualification candidate materialization remains pending for status recovery."
+        );
+    }
     Ok(Some(RealExecutionMonitorEvent::Terminal { observation }))
 }
 
@@ -2357,7 +2374,7 @@ fn recover_from_real_execution_loss(
     // The product no longer holds any authority for this execution, so an
     // active attempt fails closed instead of waiting for evidence that can
     // never arrive.
-    crate::qualification_session::observe(
+    crate::qualification_session::observe_in_transition(
         state,
         crate::qualification_session::QualificationLifecycleObservation::RealExecutionLost {
             execution_handle: public_handle.to_string(),

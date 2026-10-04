@@ -485,11 +485,17 @@ pub fn register_qualification_target(
     state: State<'_, AppState>,
 ) -> Result<QualificationTargetRegistrationResult, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
-    register_qualification_target_with_repository(
-        &candidate_handle,
-        &mode,
-        &state.qualification_repository,
-    )
+    let repository = state
+        .qualification_repository
+        .get()
+        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    with_inactive_qualification_session(&state, repository, || {
+        register_qualification_target_with_repository(
+            &candidate_handle,
+            &mode,
+            &state.qualification_repository,
+        )
+    })
 }
 
 fn register_qualification_target_with_repository(

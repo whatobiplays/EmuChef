@@ -457,7 +457,7 @@ pub(crate) fn check_device_root_observation(
     // Feed the committed explicit root-check result to the active attempt. The
     // root check stays the only root authority; qualification only observes the
     // result it committed.
-    crate::qualification_session::observe(
+    crate::qualification_session::observe_in_transition(
         state,
         crate::qualification_session::QualificationLifecycleObservation::RootChecked {
             device_handle: device_handle.to_string(),

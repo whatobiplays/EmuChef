@@ -31,11 +31,15 @@ itself imply support.
    run that matching qualification build and refresh qualification status.
    Status may safely retry materialization from the execution report and
    checkpoint evidence already retained; it does not rerun or re-observe the
-   product execution. A build mismatch defers the session without closing it.
-   This deferral applies only while the attempt remains valid. An already-invalid
-   attempt may be recovered under another build only as an invalid/not_observed,
-   non-promotable audit candidate; operators do not need to restore the captured
-   build solely to preserve that invalid result.
+   product execution. Recovery first verifies that the previous process ended
+   with a proven clean handoff. If that proof is absent, the attempt is
+   invalidated and retained as invalid/not_observed under the current build,
+   even when the attempt was captured by another build. Only a cleanly handed-off
+   valid attempt is deferred unchanged when the running build differs from its
+   captured build. An already-invalid attempt may likewise be recovered under
+   another build only as an invalid/not_observed, non-promotable audit candidate;
+   operators do not need to restore the captured build solely to preserve that
+   invalid result.
    There is no operator finalization step. If the report remains unavailable
    or inconsistent after the source/build conditions are restored, treat the
    terminal result as unproven and abandon the attempt.

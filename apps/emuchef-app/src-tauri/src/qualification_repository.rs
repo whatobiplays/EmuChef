@@ -199,6 +199,8 @@ pub struct QualificationRepository {
     #[cfg(test)]
     source_state_override: Option<std::sync::Arc<Mutex<QualificationSourceState>>>,
     #[cfg(test)]
+    source_state_read_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
     fail_next_finalize: AtomicBool,
     #[cfg(test)]
     fail_after_candidate_envelope_publication: AtomicBool,
@@ -342,6 +344,8 @@ impl QualificationRepository {
             #[cfg(test)]
             source_state_override: None,
             #[cfg(test)]
+            source_state_read_hook: Mutex::new(None),
+            #[cfg(test)]
             fail_next_finalize: AtomicBool::new(false),
             #[cfg(test)]
             fail_after_candidate_envelope_publication: AtomicBool::new(false),
@@ -411,6 +415,15 @@ impl QualificationRepository {
 
     fn current_source_state(&self) -> Result<QualificationSourceState, String> {
         #[cfg(test)]
+        if let Some(hook) = self
+            .source_state_read_hook
+            .lock()
+            .map_err(|_| "qualification source state is unavailable".to_string())?
+            .clone()
+        {
+            hook();
+        }
+        #[cfg(test)]
         if let Some(source_state) = &self.source_state_override {
             return source_state
                 .lock()
@@ -427,6 +440,17 @@ impl QualificationRepository {
                 .lock()
                 .expect("test source state should not be poisoned") = state;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_source_state_read_hook_for_test(
+        &self,
+        hook: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) {
+        *self
+            .source_state_read_hook
+            .lock()
+            .expect("source-state read hook should not be poisoned") = Some(hook);
     }
 
     #[cfg(test)]
