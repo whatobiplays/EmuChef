@@ -1392,6 +1392,11 @@ Product operations synchronously publish the exact committed typed device
 observation and the authoritative review, admission, terminal, or runtime-loss
 transition to the active session. The product-owned real-execution monitor
 retains terminal state and its report before qualification observes completion.
+Successful Platform-Tools replacement resets root and runtime device authority
+under the same transition boundary and invalidates any currently associated
+qualification attempt before another checkpoint or finalization can proceed;
+qualification persistence failure does not change the successful product
+replacement result.
 Inventory observations include only currently available devices and retain the
 native session epoch, so an unavailable device or a reconnect under a reused
 opaque handle invalidates the associated attempt. Explicit root observations

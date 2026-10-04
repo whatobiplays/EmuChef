@@ -345,24 +345,57 @@ pub(crate) fn recover_sessions_at_process_start(state: &AppState) {
 pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
 ) -> Result<QualificationModeStatus, String> {
+    qualification_mode_status_for_state(&state, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn get_device_qualification_mode_status_with_hook<F>(
+    state: &AppState,
+    after_initial_projection: F,
+) -> Result<QualificationModeStatus, String>
+where
+    F: FnOnce(),
+{
+    qualification_mode_status_for_state(state, after_initial_projection)
+}
+
+fn qualification_mode_status_for_state<F>(
+    state: &AppState,
+    after_initial_projection: F,
+) -> Result<QualificationModeStatus, String>
+where
+    F: FnOnce(),
+{
     let mode = QualificationModeState::current(&state.qualification_repository);
     if mode.enabled && mode.build.is_some() {
         if let Some(repository) = state.qualification_repository.get() {
-            crate::qualification_session::recover_persisted_sessions(&state, repository).map_err(
+            crate::qualification_session::recover_persisted_sessions(state, repository).map_err(
                 |_| safe_qualification_error("qualification_session_recovery_unavailable"),
             )?;
         }
-        crate::qualification_session::retry_deferred_finalization(&state)
+        crate::qualification_session::retry_deferred_finalization(state)
             .map_err(|_| safe_qualification_error("qualification_session_recovery_unavailable"))?;
     }
     let mut status = qualification_mode_status(&mode, &state.qualification_repository)?;
+    after_initial_projection();
     // Rust may reconcile persisted session state before projecting status, but
     // the command never infers or observes new product transitions. Disabled
     // builds cannot hold an attempt and must not initialize the repository.
     if status.enabled {
-        status.resumable_session = crate::qualification_session::session_status(&state)?;
-        status.device_selection_locked =
-            crate::qualification_session::device_selection_locked(&state)?;
+        if let Some(repository) = state.qualification_repository.get() {
+            let _transition = crate::commands::qualification_transition_lock(state);
+            let projection = crate::qualification_session::project_lifecycle_status_in_transition(
+                state, repository,
+            )
+            .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
+            status.resumable_candidates = projection
+                .candidates
+                .into_iter()
+                .map(candidate_summary_from_repository)
+                .collect::<Result<Vec<_>, _>>()?;
+            status.resumable_session = projection.session;
+            status.device_selection_locked = projection.device_selection_locked;
+        }
     }
     Ok(status)
 }

@@ -1316,6 +1316,16 @@ pub(crate) struct TerminalExecutionObservation {
 pub(crate) enum QualificationLifecycleObservation {
     DeviceObserved(Box<SelectedDeviceObservation>),
     DeviceObservationFailed(DeviceObservationFailureTarget),
+    /// Product authority for one exact native device session was cleared
+    /// after an observation failed. The currently associated attempt, rather
+    /// than the request's originating attempt, owns the cleared authority.
+    DeviceAuthorityCleared {
+        device_handle: String,
+        session_epoch: u64,
+    },
+    /// Platform-Tools replacement invalidated all process-local device
+    /// authority. Only a currently associated attempt depends on that state.
+    ProductDeviceAuthorityReset,
     RootChecked {
         device_handle: String,
         session_epoch: u64,
@@ -2389,6 +2399,21 @@ fn observe_recovered_in_transition(
                 session.invalidate(QualificationInvalidation::ObservationFailed);
             }
         }
+        QualificationLifecycleObservation::DeviceAuthorityCleared {
+            device_handle,
+            session_epoch,
+        } => {
+            if store.associated_device_handle() == Some(device_handle.as_str())
+                && store.associated_device_session_epoch() == Some(*session_epoch)
+            {
+                session.invalidate(QualificationInvalidation::ObservationFailed);
+            }
+        }
+        QualificationLifecycleObservation::ProductDeviceAuthorityReset => {
+            if store.associated_device_handle().is_some() {
+                session.invalidate(QualificationInvalidation::DeviceUnavailable);
+            }
+        }
         QualificationLifecycleObservation::RootChecked {
             device_handle,
             session_epoch,
@@ -2509,6 +2534,31 @@ pub(crate) fn observe_device_observation_failure_in_transition(
     observe_in_transition(
         state,
         QualificationLifecycleObservation::DeviceObservationFailed(target),
+    );
+}
+
+/// Apply one committed clear of device-specific product authority to whichever
+/// active attempt currently owns that exact native device session.
+pub(crate) fn observe_current_device_authority_cleared_in_transition(
+    state: &AppState,
+    device_handle: &str,
+    session_epoch: u64,
+) {
+    observe_in_transition(
+        state,
+        QualificationLifecycleObservation::DeviceAuthorityCleared {
+            device_handle: device_handle.to_string(),
+            session_epoch,
+        },
+    );
+}
+
+/// Apply a committed infrastructure reset to the currently associated attempt
+/// while the caller owns the product-transition gate.
+pub(crate) fn observe_platform_tools_authority_reset_in_transition(state: &AppState) {
+    observe_in_transition(
+        state,
+        QualificationLifecycleObservation::ProductDeviceAuthorityReset,
     );
 }
 
@@ -3063,6 +3113,35 @@ pub(crate) fn session_status(
     session_snapshot(provider, &store, &candidate_handle).map(Some)
 }
 
+/// One lifecycle-consistent view used by qualification status. Callers hold
+/// the shared transition gate while this function projects repository
+/// candidates and the session/device association from one session-store lock.
+pub(crate) struct QualificationLifecycleStatusProjection {
+    pub(crate) candidates: Vec<QualificationCandidateSummary>,
+    pub(crate) session: Option<QualificationSessionSnapshot>,
+    pub(crate) device_selection_locked: bool,
+}
+
+pub(crate) fn project_lifecycle_status_in_transition(
+    state: &AppState,
+    provider: &QualificationRepository,
+) -> Result<QualificationLifecycleStatusProjection, String> {
+    let store = lock_session_store(state);
+    let candidates = provider.list_candidates()?;
+    let (session, device_selection_locked) = match store.active_candidate.as_deref() {
+        Some(candidate_handle) if !store.is_poisoned(candidate_handle) => (
+            session_snapshot(provider, &store, candidate_handle).map(Some)?,
+            store.associated_device_handle().is_some(),
+        ),
+        _ => (None, false),
+    };
+    Ok(QualificationLifecycleStatusProjection {
+        candidates,
+        session,
+        device_selection_locked,
+    })
+}
+
 /// Resolve the active session's device plan for product match observations.
 /// The plan is durable session intent; no device association is inferred here.
 pub(crate) fn active_device_plan(state: &AppState) -> Option<String> {
@@ -3089,6 +3168,7 @@ pub(crate) fn active_device_plan(state: &AppState) -> Option<String> {
 /// Project whether the active attempt currently owns the selected product
 /// device. A restored session remains selectable until a trusted observation
 /// reestablishes its process-local association.
+#[cfg(test)]
 pub(crate) fn device_selection_locked(state: &AppState) -> Result<bool, String> {
     if state.qualification_repository.get().is_none() {
         return Ok(false);
@@ -3182,6 +3262,20 @@ mod tests {
     impl QualificationToolRunner for UnusedToolRunner {
         fn run(&self, _repo_root: &Path, _args: &[String]) -> Result<Vec<u8>, String> {
             Err("session tests must not invoke the canonical qualification tool".to_string())
+        }
+    }
+
+    struct StatusDescriptionRunner {
+        description: Value,
+    }
+
+    impl QualificationToolRunner for StatusDescriptionRunner {
+        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            if args == ["--describe"] {
+                return serde_json::to_vec(&self.description)
+                    .map_err(|_| "test description should serialize".to_string());
+            }
+            Err("status projection should only request the repository description".to_string())
         }
     }
 
@@ -3323,6 +3417,53 @@ mod tests {
         QualificationRepository::new_for_test_with_source_state(
             temp.path().to_path_buf(),
             Box::new(UnusedToolRunner),
+            build.clone(),
+            QualificationSourceState {
+                head: build.git_commit,
+                tracked_worktree_clean: true,
+            },
+        )
+    }
+
+    fn status_test_repository(temp: &TempDir) -> QualificationRepository {
+        std::fs::create_dir_all(temp.path().join("authored/recipes"))
+            .expect("recipe directory should be created");
+        std::fs::write(
+            temp.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .expect("recipe fixture should be written");
+        let build = test_build();
+        let description = json!({
+            "schemaVersion": 1,
+            "runtimeContract": "real-execution-v1",
+            "qualificationContract": 1,
+            "build": build,
+            "workflowCatalog": {
+                "schemaVersion": 1,
+                "workflows": [workflow(true)]
+            },
+            "deviceTargets": {
+                "schemaVersion": 2,
+                "targets": [{
+                    "id": "target-test",
+                    "profileId": { "value": "profile.test", "source": "production_observation" },
+                    "manufacturer": { "value": "Test", "source": "production_observation" },
+                    "model": { "value": "Device", "source": "production_observation" },
+                    "androidVersion": { "value": "15", "source": "production_observation" },
+                    "androidApi": { "value": 35, "source": "production_observation" },
+                    "abiSocClass": { "value": "arm64", "source": "production_observation" },
+                    "rootState": { "value": "non_root", "source": "explicit_root_check" },
+                    "connectionType": { "value": "usb3", "source": "operator_attestation" },
+                    "firmwareBuild": { "value": "test/build", "source": "production_observation" },
+                    "capabilities": [],
+                    "deferredWorkflows": []
+                }]
+            }
+        });
+        QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(StatusDescriptionRunner { description }),
             build.clone(),
             QualificationSourceState {
                 head: build.git_commit,
@@ -3579,6 +3720,75 @@ mod tests {
                 .active_candidate(),
             Some(candidate.as_str())
         );
+    }
+
+    #[test]
+    fn qualification_status_reprojects_candidates_with_the_session_lifecycle_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = status_test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "status-linearization");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        let (candidate_projection_tx, candidate_projection_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_projection_tx, continue_projection_rx) = std::sync::mpsc::sync_channel(1);
+        let (status_result_tx, status_result_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_result_tx, checkpoint_result_rx) = std::sync::mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| {
+            let state_for_status = state.inner();
+            let status = scope.spawn(move || {
+                let result =
+                    crate::qualification_mode::get_device_qualification_mode_status_with_hook(
+                        state_for_status,
+                        || {
+                            candidate_projection_tx.send(()).unwrap();
+                            continue_projection_rx.recv().unwrap();
+                        },
+                    );
+                status_result_tx.send(result).unwrap();
+            });
+
+            candidate_projection_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("the initial repository candidate projection should finish first");
+            let state_for_checkpoint = state.inner();
+            let checkpoint = scope.spawn(move || {
+                let result = record_checkpoint(
+                    state_for_checkpoint,
+                    &session_handle,
+                    "device_state_verified",
+                    CheckpointOutcome::Pass,
+                );
+                checkpoint_result_tx.send(result).unwrap();
+            });
+            checkpoint_result_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("finalization should commit while status is between its two projections")
+                .expect("the final checkpoint should finalize the candidate");
+
+            continue_projection_tx.send(()).unwrap();
+            status.join().unwrap();
+            checkpoint.join().unwrap();
+        });
+
+        let status = status_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("status projection should return")
+            .expect("the repository description should be valid");
+        assert!(status.resumable_session.is_none());
+        assert!(!status.device_selection_locked);
+        let candidate = status
+            .resumable_candidates
+            .iter()
+            .find(|summary| summary.candidate_handle == candidate)
+            .expect("the finalized run candidate should remain visible");
+        assert_eq!(candidate.run_validity.as_deref(), Some("valid"));
+        assert!(candidate.promotable);
     }
 
     #[test]
@@ -3968,10 +4178,6 @@ mod tests {
             CheckpointOutcome::Pass,
         )
         .unwrap();
-        let failure_target =
-            capture_device_observation_failure_target(&state, &device_handle, session_epoch);
-        assert!(failure_target.is_some());
-
         let cleared = Arc::new(std::sync::Barrier::new(2));
         let continue_failure = Arc::new(std::sync::Barrier::new(2));
         let terminal_check = Arc::new(std::sync::Barrier::new(2));
@@ -3998,7 +4204,6 @@ mod tests {
                     state_for_failure,
                     &device_handle,
                     session_epoch,
-                    failure_target,
                     || {
                         cleared_for_failure.wait();
                         continue_for_failure.wait();
@@ -4056,10 +4261,6 @@ mod tests {
         let (device_handle, session_epoch) = available_test_device(&state, "checkpoint-loss-race");
         let session_handle =
             terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
-        let failure_target =
-            capture_device_observation_failure_target(&state, &device_handle, session_epoch)
-                .expect("the active attempt should own the observed device session");
-
         let (authority_cleared_tx, authority_cleared_rx) = std::sync::mpsc::sync_channel(1);
         let (continue_failure_tx, continue_failure_rx) = std::sync::mpsc::sync_channel(1);
         let (checkpoint_started_tx, checkpoint_started_rx) = std::sync::mpsc::sync_channel(1);
@@ -4072,7 +4273,6 @@ mod tests {
                     state_for_failure,
                     &device_handle,
                     session_epoch,
-                    Some(failure_target),
                     || {
                         authority_cleared_tx.send(()).unwrap();
                         continue_failure_rx.recv().unwrap();
@@ -4163,9 +4363,6 @@ mod tests {
         );
 
         std::fs::write(&recipe_path, b"id: test.recipe\n").unwrap();
-        let failure_target =
-            capture_device_observation_failure_target(&state, &device_handle, session_epoch)
-                .expect("the deferred attempt should still be associated");
         let repository = state.qualification_repository.get().unwrap();
         let (source_read_started_rx, release_source_read_tx) =
             block_next_source_state_read(repository);
@@ -4192,7 +4389,6 @@ mod tests {
                     state_for_failure,
                     &device_handle,
                     session_epoch,
-                    Some(failure_target),
                     || {
                         authority_cleared_tx.send(()).unwrap();
                         continue_failure_rx.recv().unwrap();
@@ -4213,6 +4409,250 @@ mod tests {
             .expect("deferred retry should finish after the authority transition")
             .unwrap()
             .is_none());
+        assert!(session_status(&state).unwrap().is_none());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
+    fn committed_observation_failure_invalidates_the_current_same_device_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let first_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "failure-rebind-race");
+
+        let first_session = terminal_awaiting_device_checkpoint(
+            &app,
+            &first_candidate,
+            &device_handle,
+            session_epoch,
+        );
+        let old_failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch)
+                .expect("attempt A should own the device when the failed request begins");
+        assert_eq!(old_failure_target.candidate_handle, first_candidate);
+        abandon(&state, &first_session).unwrap();
+
+        let second_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+        let second_session = terminal_awaiting_device_checkpoint(
+            &app,
+            &second_candidate,
+            &device_handle,
+            session_epoch,
+        );
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().run_validity,
+            RunValidity::Valid
+        );
+
+        crate::device_observation::clear_unverified_device_authority_and_observe_failure_with_hook(
+            &state,
+            &device_handle,
+            session_epoch,
+            || {},
+        )
+        .unwrap();
+
+        let second_candidate_state = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&second_candidate)
+            .unwrap();
+        assert_eq!(second_candidate_state.payload["runValidity"], "invalid");
+        assert_eq!(
+            second_candidate_state.payload["qualificationOutcome"],
+            "not_observed"
+        );
+        assert!(record_checkpoint(
+            &state,
+            &second_session,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn committed_observation_failure_leaves_an_unrelated_device_attempt_valid() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let first_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "failure-other-device");
+
+        let first_session = terminal_awaiting_device_checkpoint(
+            &app,
+            &first_candidate,
+            &device_handle,
+            session_epoch,
+        );
+        let old_failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch)
+                .expect("attempt A should own the device when the failed request begins");
+        assert_eq!(old_failure_target.candidate_handle, first_candidate);
+        abandon(&state, &first_session).unwrap();
+
+        let second_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+        let mut other_device = observation("different-device");
+        other_device.session_epoch = Some(session_epoch.saturating_add(1));
+        let second_session = begin(
+            &state,
+            begin_request(&second_candidate, CAPTURED_AT, other_device),
+        )
+        .unwrap()
+        .session_handle;
+
+        crate::device_observation::clear_unverified_device_authority_and_observe_failure_with_hook(
+            &state,
+            &device_handle,
+            session_epoch,
+            || {},
+        )
+        .unwrap();
+
+        let second_status = session_status(&state).unwrap().unwrap();
+        assert_eq!(second_status.session_handle, second_session);
+        assert_eq!(second_status.run_validity, RunValidity::Valid);
+    }
+
+    #[test]
+    fn platform_tools_replacement_serializes_authority_reset_with_finalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "platform-tools-race");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        let imported_status = crate::adb::AdbSetupStatusDto {
+            status: "ready",
+            version: Some("35.0.2".to_string()),
+            warning: None,
+            error: None,
+            can_import: true,
+            can_replace: true,
+            can_remove: true,
+        };
+        let (product_reset_tx, product_reset_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_reset_tx, continue_reset_rx) = std::sync::mpsc::sync_channel(1);
+        let (product_result_tx, product_result_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_started_tx, checkpoint_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_result_tx, checkpoint_result_rx) = std::sync::mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| {
+            let state_for_reset = &state;
+            let reset = scope.spawn(move || {
+                let result = crate::commands::finish_platform_tools_import_with_hook(
+                    state_for_reset,
+                    &imported_status,
+                    || {
+                        product_reset_tx.send(()).unwrap();
+                        continue_reset_rx.recv().unwrap();
+                    },
+                );
+                product_result_tx.send(result).unwrap();
+            });
+
+            product_reset_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("product authority should be reset before qualification invalidation");
+            assert!(state.qualification_transition_gate.try_lock().is_err());
+
+            let state_for_checkpoint = &state;
+            let checkpoint = scope.spawn(move || {
+                checkpoint_started_tx.send(()).unwrap();
+                let result = record_checkpoint(
+                    state_for_checkpoint,
+                    &session_handle,
+                    "device_state_verified",
+                    CheckpointOutcome::Pass,
+                );
+                checkpoint_result_tx.send(result).unwrap();
+            });
+            checkpoint_started_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("checkpoint transition should start while authority reset is paused");
+            assert!(matches!(
+                checkpoint_result_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+
+            continue_reset_tx.send(()).unwrap();
+            reset.join().unwrap();
+            checkpoint.join().unwrap();
+        });
+
+        let product_result = product_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("successful Platform-Tools import should return its status")
+            .expect("qualification persistence failure must not fail Platform-Tools setup");
+        assert_eq!(product_result["status"], "ready");
+        assert!(checkpoint_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("checkpoint should resume after the reset commits")
+            .is_err());
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
+    fn platform_tools_replacement_recovers_poisoned_handle_authority_and_still_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "platform-tools-poison");
+        terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _handles = state.handles.lock().unwrap();
+            panic!("inject a poisoned native handle store");
+        }));
+
+        let imported_status = crate::adb::AdbSetupStatusDto {
+            status: "ready",
+            version: Some("35.0.2".to_string()),
+            warning: None,
+            error: None,
+            can_import: true,
+            can_replace: true,
+            can_remove: true,
+        };
+        let result = crate::commands::finish_platform_tools_import_with_hook(
+            &state,
+            &imported_status,
+            || {},
+        )
+        .expect("a poisoned authority lock must be recovered after import succeeds");
+
+        assert_eq!(result["status"], "ready");
+        assert!(!state.handles.is_poisoned());
         assert!(session_status(&state).unwrap().is_none());
         let stored = state
             .qualification_repository

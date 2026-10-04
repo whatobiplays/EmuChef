@@ -285,6 +285,8 @@ export interface RealTerminalPolicy {
   recoveryState: RecoveryStateId;
   partialChangePresentation: PartialChangePresentation;
   availableControls: TerminalControl[];
+  /** Explicit product-owned terminal resolution for authoritative runtime loss. */
+  terminalResolution?: "runtime_lost";
 }
 
 /** Production-authored cancellation guidance for real terminal snapshots. */

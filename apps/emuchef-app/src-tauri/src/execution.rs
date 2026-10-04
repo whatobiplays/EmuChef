@@ -1896,6 +1896,8 @@ fn lost_real_execution_snapshot(
         let mut public = project_real_snapshot(mapping, &report);
         public["executionHandle"] = Value::String(execution_handle.to_string());
         public["launchAction"] = Value::Null;
+        public["terminalPolicy"]["terminalResolution"] = Value::String("runtime_lost".to_string());
+        public["terminalPolicy"]["availableControls"] = json!(["fresh_workflow"]);
         return public;
     }
     json!({
@@ -1932,6 +1934,7 @@ fn lost_real_execution_snapshot(
             "authorityInvalidated": true,
             "recoveryState": "fresh_review_required",
             "partialChangePresentation": "indeterminate",
+            "terminalResolution": "runtime_lost",
         "availableControls": ["fresh_workflow"],
         },
     })
@@ -6912,6 +6915,16 @@ mod tests {
                 .expect("lost execution state remains an authoritative terminal projection");
         assert_eq!(snapshot["executionHandle"], execution_handle);
         assert_eq!(snapshot["status"], "failed");
+        assert_eq!(
+            snapshot["terminalPolicy"]["terminalResolution"],
+            "runtime_lost",
+            "the reducer may treat only an explicitly authored runtime-loss snapshot as a sequence-resetting terminal"
+        );
+        assert_eq!(
+            snapshot["terminalPolicy"]["availableControls"],
+            json!(["fresh_workflow"]),
+            "a synthetic lost snapshot has no report to export and must retain fresh-workflow recovery"
+        );
 
         let events = get_real_execution_events_inner_with_runtime(
             &execution_handle,

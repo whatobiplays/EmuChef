@@ -760,27 +760,66 @@ pub async fn install_platform_tools_selection(
     .await?;
 
     let state = app.state::<AppState>();
-    state
-        .root_qualification
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
-            )
-        })?
-        .invalidate();
-    state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "The device session could not be reset.",
-            )
-        })?
-        .invalidate_runtime_authority_preserving_identities();
-    Ok(public_adb_status(&result))
+    finish_platform_tools_import(&state, &result)
+}
+
+/// Commit Platform-Tools replacement effects after the import has completed.
+/// The expensive archive work stays outside the qualification transition gate;
+/// the product authority reset and its qualification invalidation are one
+/// serialized commit before the imported status is returned.
+fn finish_platform_tools_import(
+    state: &AppState,
+    imported_status: &AdbSetupStatusDto,
+) -> Result<Value, String> {
+    finish_platform_tools_import_after_clear(state, imported_status, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn finish_platform_tools_import_with_hook<F>(
+    state: &AppState,
+    imported_status: &AdbSetupStatusDto,
+    after_product_authority_clear: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+{
+    finish_platform_tools_import_after_clear(state, imported_status, after_product_authority_clear)
+}
+
+fn finish_platform_tools_import_after_clear<F>(
+    state: &AppState,
+    imported_status: &AdbSetupStatusDto,
+    after_product_authority_clear: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+{
+    let transition = qualification_transition_lock(state);
+    let mut root_authority = match state.root_qualification.lock() {
+        Ok(root_authority) => root_authority,
+        Err(poisoned) => {
+            let root_authority = poisoned.into_inner();
+            state.root_qualification.clear_poison();
+            root_authority
+        }
+    };
+    root_authority.invalidate();
+    drop(root_authority);
+
+    let mut handles = match state.handles.lock() {
+        Ok(handles) => handles,
+        Err(poisoned) => {
+            let handles = poisoned.into_inner();
+            state.handles.clear_poison();
+            handles
+        }
+    };
+    handles.invalidate_runtime_authority_preserving_identities();
+    drop(handles);
+    after_product_authority_clear();
+    crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
+    transition.release_and_retry_best_effort();
+    Ok(public_adb_status(imported_status))
 }
 
 pub(crate) type PickerCompletion<T> = Box<dyn FnOnce(Option<T>) + Send>;
