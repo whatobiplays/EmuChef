@@ -2474,6 +2474,22 @@ pub(crate) fn observe_device_observation_failure_in_transition(
     );
 }
 
+/// Fail an attempt captured for an older native epoch while the caller owns
+/// the product-transition gate. Targets captured for the current epoch are
+/// stale-response fences and must not invalidate the current attempt.
+pub(crate) fn observe_device_observation_failure_after_epoch_change_in_transition(
+    state: &AppState,
+    target: Option<DeviceObservationFailureTarget>,
+    current_epoch: u64,
+) {
+    if target
+        .as_ref()
+        .is_some_and(|target| target.session_epoch != current_epoch)
+    {
+        observe_device_observation_failure_in_transition(state, target);
+    }
+}
+
 fn apply_device_observation(
     session: &mut QualificationSession,
     store: &mut QualificationSessionStore,
@@ -7135,6 +7151,74 @@ mod tests {
             session_status(&state).unwrap().unwrap().run_validity,
             RunValidity::Valid
         );
+    }
+
+    #[test]
+    fn stale_supported_observation_fails_its_captured_attempt_before_checkpoint_can_finalize() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "stale-commit");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch);
+        assert!(failure_target.is_some());
+
+        // Model a product authority change that outpaces this delayed supported
+        // snapshot. The retained session is still associated with the old epoch.
+        let current_epoch = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "stale-commit",
+                        "state": "available",
+                        "model": "Device",
+                        "transportId": "replacement-transport"
+                    }]
+                }))
+                .unwrap();
+            handles.device_session_epoch(&device_handle).unwrap()
+        };
+        assert_ne!(current_epoch, session_epoch);
+
+        let old_context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch,
+            1,
+            1,
+            1,
+            "old-supported-context",
+        );
+        let result = crate::device_observation::commit_snapshot_observation(
+            &state,
+            &supported_current_for_context(&device_handle, old_context),
+            failure_target,
+        );
+
+        assert!(result.is_err());
+        assert!(session_status(&state).unwrap().is_none());
+        assert_eq!(
+            state
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&candidate)
+                .unwrap()
+                .payload["runValidity"],
+            "invalid"
+        );
+        assert!(record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            QualificationCheckpointOutcome::Pass,
+        )
+        .is_err());
     }
 
     #[test]

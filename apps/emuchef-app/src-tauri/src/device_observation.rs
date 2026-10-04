@@ -1204,23 +1204,41 @@ pub(crate) fn commit_snapshot_observation(
             );
             return Ok(());
         };
-        {
+        let (device_found, device_available, current_epoch) = {
             let mut handles = state.handles.lock().map_err(|_| {
                 safe_error("session_state_unavailable", "Session state is unavailable.")
             })?;
-            let device = handles.device(identity).map_err(|_| {
-                safe_error(
-                    "device_changed",
-                    "The selected device changed. Refresh device discovery and try again.",
-                )
-            })?;
-            if device.state != "available" || device.session_epoch != context.session_epoch {
-                return Err(safe_error(
-                    "device_changed",
-                    "The selected device changed. Refresh device discovery and try again.",
-                ));
+            let continuity = handles
+                .device(identity)
+                .ok()
+                .map(|device| (device.state == "available", device.session_epoch));
+            let device_found = continuity.is_some();
+            let (device_available, current_epoch) = continuity.unwrap_or((false, 0));
+            if device_available && current_epoch == context.session_epoch {
+                handles.set_qualification_context(context.clone());
             }
-            handles.set_qualification_context(context.clone());
+            (device_found, device_available, current_epoch)
+        };
+        if !device_found || !device_available {
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target.clone(),
+            );
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+        if current_epoch != context.session_epoch {
+            crate::qualification_session::observe_device_observation_failure_after_epoch_change_in_transition(
+                state,
+                failure_target.clone(),
+                current_epoch,
+            );
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
         }
         let root_key = RootQualificationKey::from_context(context);
         let root_invalidation = state
