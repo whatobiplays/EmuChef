@@ -947,7 +947,16 @@ pub fn start_real_execution(
                 "Another execution is already starting or active.",
             )
         })?;
-    match start_real_execution_inner(&request.review_handle, &state, &mut executions) {
+    let admission_fence = crate::qualification_session::capture_execution_admission_fence(
+        &state,
+        &request.review_handle,
+    );
+    match start_real_execution_inner(
+        &request.review_handle,
+        &state,
+        &mut executions,
+        admission_fence,
+    ) {
         Ok(public) => {
             // The product owns terminal retention for every real execution, so
             // the monitor starts before the start result reaches React.
@@ -991,6 +1000,7 @@ fn start_real_execution_inner(
     review_handle: &str,
     state: &AppState,
     executions: &mut ExecutionHandleStore,
+    admission_fence: Option<crate::qualification_session::QualificationAdmissionFence>,
 ) -> Result<Value, String> {
     let review = state
         .handles
@@ -1050,7 +1060,7 @@ fn start_real_execution_inner(
         runtime_generation,
         platform_tools_revision,
     };
-    start_real_execution_inner_with_runtime(
+    start_real_execution_inner_with_admission_fence(
         review_handle,
         Some(state),
         &state.handles,
@@ -1058,6 +1068,7 @@ fn start_real_execution_inner(
         executions,
         &state.sidecar,
         &platform_tools,
+        admission_fence,
     )
 }
 
@@ -1082,6 +1093,31 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     executions: &mut ExecutionHandleStore,
     runtime: &R,
     platform_tools: &PlatformToolsSnapshot<'_>,
+) -> Result<Value, String> {
+    let admission_fence = qualification_state.and_then(|state| {
+        crate::qualification_session::capture_execution_admission_fence(state, review_handle)
+    });
+    start_real_execution_inner_with_admission_fence(
+        review_handle,
+        qualification_state,
+        handles,
+        root_qualification,
+        executions,
+        runtime,
+        platform_tools,
+        admission_fence,
+    )
+}
+
+fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
+    review_handle: &str,
+    qualification_state: Option<&AppState>,
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    executions: &mut ExecutionHandleStore,
+    runtime: &R,
+    platform_tools: &PlatformToolsSnapshot<'_>,
+    admission_fence: Option<crate::qualification_session::QualificationAdmissionFence>,
 ) -> Result<Value, String> {
     let review = handles
         .lock()
@@ -1359,7 +1395,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                     execution_handle,
                     REAL_EXECUTION_UNAVAILABLE,
                 )?;
-                observe_real_admission(state, &mapping, &mapping.review);
+                observe_real_admission(state, admission_fence.as_ref(), &mapping, &mapping.review);
             }
             Ok(public)
         })();
@@ -1418,26 +1454,24 @@ fn bind_real_start_result(
 /// execution the product has not started.
 fn observe_real_admission(
     state: &AppState,
+    admission_fence: Option<&crate::qualification_session::QualificationAdmissionFence>,
     mapping: &ExecutionMapping,
     review: &ReviewedPlanSnapshot,
 ) {
     if !cfg!(feature = "real-execution") {
         return;
     }
-    crate::qualification_session::observe_in_transition(
+    crate::qualification_session::observe_reserved_real_execution_admission_in_transition(
         state,
-        crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
-            Box::new(
-                crate::qualification_session::ExecutionAdmissionObservation {
-                    execution_handle: mapping.public_handle.clone(),
-                    review: crate::qualification_session::review_observation(
-                        &mapping.review_handle,
-                        review,
-                    ),
-                    device_handle: review.device_handle.clone(),
-                },
+        admission_fence,
+        crate::qualification_session::ExecutionAdmissionObservation {
+            execution_handle: mapping.public_handle.clone(),
+            review: crate::qualification_session::review_observation(
+                &mapping.review_handle,
+                review,
             ),
-        ),
+            device_handle: review.device_handle.clone(),
+        },
     );
 }
 

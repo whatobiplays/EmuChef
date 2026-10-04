@@ -1134,7 +1134,6 @@ where
             return fail_qualification_refresh(state, observation_failure_target, error);
         }
     };
-    commit_snapshot_observation(state, &current, observation_failure_target)?;
     Ok(current)
 }
 
@@ -1205,16 +1204,54 @@ pub(crate) fn commit_snapshot_observation(
             );
             return Ok(());
         };
+        {
+            let mut handles = state.handles.lock().map_err(|_| {
+                safe_error("session_state_unavailable", "Session state is unavailable.")
+            })?;
+            let device = handles.device(identity).map_err(|_| {
+                safe_error(
+                    "device_changed",
+                    "The selected device changed. Refresh device discovery and try again.",
+                )
+            })?;
+            if device.state != "available" || device.session_epoch != context.session_epoch {
+                return Err(safe_error(
+                    "device_changed",
+                    "The selected device changed. Refresh device discovery and try again.",
+                ));
+            }
+            handles.set_qualification_context(context.clone());
+        }
+        let root_key = RootQualificationKey::from_context(context);
+        let root_invalidation = state
+            .root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .invalidate_if_not_key(Some(&root_key));
+        if root_invalidation.device_handle.is_some() {
+            state
+                .handles
+                .lock()
+                .map_err(|_| {
+                    safe_error("session_state_unavailable", "Session state is unavailable.")
+                })?
+                .invalidate_reviews_for_device(identity, "root_qualification_changed");
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target.clone(),
+            );
+        }
         if let Err(error) = commit_selected_observation_in_transition(
             state,
             SelectedDeviceObservation::new(identity)
                 .with_snapshot(&current.snapshot)
                 .with_session_epoch(context.session_epoch),
         ) {
-            crate::qualification_session::observe_device_observation_failure_in_transition(
-                state,
-                failure_target,
-            );
             return Err(error);
         }
         if current.snapshot.state != DeviceQualificationState::Supported {
@@ -1271,7 +1308,7 @@ pub(crate) fn qualify_reconciled_current_for_state<F>(
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
-    qualify_reconciled_current_with_context(
+    let mut current = qualify_reconciled_current_with_context(
         &state.handles,
         &state.root_qualification,
         adb_path,
@@ -1280,10 +1317,25 @@ where
         requested_handle,
         ObservationFailureContext::Qualification {
             state,
-            failure_target,
+            failure_target: failure_target.clone(),
         },
         request,
-    )
+    )?;
+    commit_snapshot_observation(state, &current, failure_target)?;
+    if let Some(context) = current.context.as_ref() {
+        let root_key = RootQualificationKey::from_context(context);
+        current.snapshot.root = state
+            .root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .get(&root_key);
+    }
+    Ok(current)
 }
 
 /// Failure handling for a passive observation path. Product-only callers clear
@@ -1477,51 +1529,55 @@ where
         qualification_revision,
         qualification_fingerprint(&observed_qualification),
     );
-    let mut handles_guard = handles
-        .lock()
-        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?;
-    let current_device = handles_guard.device(&identity).map_err(|_| {
-        safe_error(
-            "device_changed",
-            "The selected device changed. Refresh device discovery and try again.",
-        )
-    })?;
-    if current_device.state != "available"
-        || current_device.session_epoch != target.session_epoch
-        || current_device.serial != target.serial
-    {
-        return Err(safe_error(
-            "device_changed",
-            "The selected device changed. Refresh device discovery and try again.",
-        ));
-    }
-    handles_guard.set_qualification_context(context.clone());
-    drop(handles_guard);
-    let root_key = RootQualificationKey::from_context(&context);
-    let root_invalidation = root_qualification
-        .lock()
-        .map_err(|_| {
+    if matches!(&failure_context, ObservationFailureContext::ProductOnly) {
+        let mut handles_guard = handles.lock().map_err(|_| {
+            safe_error("session_state_unavailable", "Session state is unavailable.")
+        })?;
+        let current_device = handles_guard.device(&identity).map_err(|_| {
             safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
             )
-        })?
-        .invalidate_if_not_key(Some(&root_key));
-    if root_invalidation.device_handle.is_some() {
-        handles
+        })?;
+        if current_device.state != "available"
+            || current_device.session_epoch != target.session_epoch
+            || current_device.serial != target.serial
+        {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+        handles_guard.set_qualification_context(context.clone());
+        drop(handles_guard);
+        let root_key = RootQualificationKey::from_context(&context);
+        let root_invalidation = root_qualification
             .lock()
-            .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
-            .invalidate_reviews_for_device(&identity, "root_qualification_changed");
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .invalidate_if_not_key(Some(&root_key));
+        if root_invalidation.device_handle.is_some() {
+            handles
+                .lock()
+                .map_err(|_| {
+                    safe_error("session_state_unavailable", "Session state is unavailable.")
+                })?
+                .invalidate_reviews_for_device(&identity, "root_qualification_changed");
+        }
+        snapshot.root = root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .get(&root_key);
     }
-    snapshot.root = root_qualification
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
-            )
-        })?
-        .get(&root_key);
     Ok(CurrentQualification {
         snapshot,
         context: Some(context),

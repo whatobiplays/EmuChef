@@ -1287,6 +1287,14 @@ pub(crate) struct ExecutionAdmissionObservation {
     pub(crate) device_handle: String,
 }
 
+/// Process-local identity captured when a real-execution start is reserved.
+/// A delayed admission may affect only this exact attempt and review.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QualificationAdmissionFence {
+    candidate_handle: String,
+    review_handle: String,
+}
+
 /// One committed terminal real-execution retention.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TerminalExecutionObservation {
@@ -2248,6 +2256,50 @@ pub(crate) fn observe(state: &AppState, observation: QualificationLifecycleObser
     transition.release_and_retry_best_effort();
 }
 
+/// Capture the active attempt and bound review at the real-execution start
+/// reservation. The fence is process-local and is never persisted or sent over
+/// IPC.
+pub(crate) fn capture_execution_admission_fence(
+    state: &AppState,
+    review_handle: &str,
+) -> Option<QualificationAdmissionFence> {
+    let _transition = crate::commands::qualification_transition_lock(state);
+    let store = lock_session_store(state);
+    let candidate_handle = store.active_candidate.clone()?;
+    if store.is_poisoned(&candidate_handle) || store.bound_review_handle() != Some(review_handle) {
+        return None;
+    }
+    Some(QualificationAdmissionFence {
+        candidate_handle,
+        review_handle: review_handle.to_string(),
+    })
+}
+
+/// Route a committed product admission only when its reservation-time attempt
+/// and review still own the active qualification session.
+pub(crate) fn observe_reserved_real_execution_admission_in_transition(
+    state: &AppState,
+    fence: Option<&QualificationAdmissionFence>,
+    admission: ExecutionAdmissionObservation,
+) {
+    let Some(fence) = fence else {
+        return;
+    };
+    let store = lock_session_store(state);
+    let matches_reservation = store.active_candidate() == Some(fence.candidate_handle.as_str())
+        && store.bound_review_handle() == Some(fence.review_handle.as_str())
+        && admission.review.review_handle == fence.review_handle
+        && !store.is_poisoned(&fence.candidate_handle);
+    drop(store);
+    if !matches_reservation {
+        return;
+    }
+    observe_in_transition(
+        state,
+        QualificationLifecycleObservation::RealExecutionAdmitted(Box::new(admission)),
+    );
+}
+
 /// Apply a product lifecycle observation while the caller already owns the
 /// shared product-transition gate.
 pub(crate) fn observe_in_transition(
@@ -2706,6 +2758,14 @@ pub(crate) fn record_checkpoint(
     if store.active_candidate() != Some(candidate_handle.as_str()) {
         return Err(inactive_error());
     }
+    if store.associated_device_handle().is_none()
+        || store.associated_device_session_epoch().is_none()
+    {
+        return Err(session_error(
+            "qualification_target_unverified",
+            "A fresh device observation is required before recording checkpoints.",
+        ));
+    }
     let mut session = load_active_session(provider, &store, &candidate_handle)?;
     session
         .record_checkpoint(checkpoint_id, outcome)
@@ -2813,9 +2873,15 @@ fn forget_current_process_provenance(state: &AppState, candidate_handle: &str) {
 /// Reset all process-local qualification session authority for a new frontend
 /// session. Persisted candidates are unaffected.
 pub(crate) fn reset(state: &AppState) {
-    if let Ok(mut store) = state.qualification_sessions.lock() {
-        store.reset();
-    }
+    let transition = crate::commands::qualification_transition_lock(state);
+    reset_in_transition(state);
+    drop(transition);
+}
+
+/// Clear process-local qualification authority while the caller owns the
+/// product-transition gate.
+pub(crate) fn reset_in_transition(state: &AppState) {
+    lock_session_store(state).reset();
 }
 
 /// Whether one candidate handle is currently the active in-process attempt.
@@ -6529,6 +6595,546 @@ mod tests {
         assert_eq!(resumed.session_handle, begun.session_handle);
         assert_eq!(resumed.run_validity, RunValidity::Valid);
         assert_eq!(resumed.phase, QualificationSessionPhase::ExecutionPending);
+
+        let checkpoint_error = record_checkpoint(
+            &state,
+            &begun.session_handle,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .expect_err("a reset session must wait for fresh native device authority");
+        assert!(checkpoint_error.contains("qualification_target_unverified"));
+
+        let (device_handle, session_epoch) = available_test_device(&state, "reassociated-device");
+        let mut fresh_observation = observation(&device_handle);
+        fresh_observation.session_epoch = Some(session_epoch);
+        observe(
+            &state,
+            QualificationLifecycleObservation::DeviceObserved(Box::new(fresh_observation)),
+        );
+        assert!(state
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .associated_device_handle()
+            .is_some());
+        record_checkpoint(
+            &state,
+            &begun.session_handle,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .expect("fresh trusted device authority should restore checkpoint recording");
+    }
+
+    #[test]
+    fn reserved_admission_is_ignored_after_attempt_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let first_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+
+        begin(
+            &state,
+            begin_request(&first_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-first",
+                "device-one",
+            ))),
+        );
+        let fence = capture_execution_admission_fence(&state, "review-first")
+            .expect("the reserved start should capture attempt A and its review");
+
+        abandon(
+            &state,
+            &session_handle_for_candidate(&first_candidate).unwrap(),
+        )
+        .unwrap();
+        let second_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+        begin(
+            &state,
+            begin_request(&second_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-second",
+                "device-one",
+            ))),
+        );
+
+        let transition = crate::commands::qualification_transition_lock(&state);
+        observe_reserved_real_execution_admission_in_transition(
+            &state,
+            Some(&fence),
+            ExecutionAdmissionObservation {
+                execution_handle: "execution-first".to_string(),
+                review: review("review-first", "device-one"),
+                device_handle: "device-one".to_string(),
+            },
+        );
+        drop(transition);
+
+        let current = session_status(&state).unwrap().unwrap();
+        assert_eq!(
+            current.session_handle,
+            session_handle_for_candidate(&second_candidate).unwrap()
+        );
+        assert_eq!(current.run_validity, RunValidity::Valid);
+        assert_eq!(current.phase, QualificationSessionPhase::ExecutionPending);
+        let store = state.qualification_sessions.lock().unwrap();
+        assert_eq!(store.bound_execution_handle(), None);
+        assert_eq!(store.bound_review_handle(), Some("review-second"));
+    }
+
+    #[test]
+    fn reserved_admission_is_ignored_after_review_replacement_but_binds_when_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let replaced_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+
+        begin(
+            &state,
+            begin_request(&replaced_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-before-replacement",
+                "device-one",
+            ))),
+        );
+        let stale_fence = capture_execution_admission_fence(&state, "review-before-replacement")
+            .expect("the first review should be reserved");
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-after-replacement",
+                "device-one",
+            ))),
+        );
+        let transition = crate::commands::qualification_transition_lock(&state);
+        observe_reserved_real_execution_admission_in_transition(
+            &state,
+            Some(&stale_fence),
+            ExecutionAdmissionObservation {
+                execution_handle: "execution-old-review".to_string(),
+                review: review("review-before-replacement", "device-one"),
+                device_handle: "device-one".to_string(),
+            },
+        );
+        drop(transition);
+        let current = session_status(&state).unwrap().unwrap();
+        assert_eq!(current.run_validity, RunValidity::Valid);
+        assert_eq!(current.phase, QualificationSessionPhase::ExecutionPending);
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .bound_execution_handle(),
+            None
+        );
+
+        abandon(
+            &state,
+            &session_handle_for_candidate(&replaced_candidate).unwrap(),
+        )
+        .unwrap();
+        let normal_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+
+        begin(
+            &state,
+            begin_request(&normal_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        record_checkpoint(
+            &state,
+            &session_handle_for_candidate(&normal_candidate).unwrap(),
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-normal",
+                "device-one",
+            ))),
+        );
+        let normal_fence = capture_execution_admission_fence(&state, "review-normal")
+            .expect("the unchanged review should be reserved");
+        let transition = crate::commands::qualification_transition_lock(&state);
+        observe_reserved_real_execution_admission_in_transition(
+            &state,
+            Some(&normal_fence),
+            ExecutionAdmissionObservation {
+                execution_handle: "execution-normal".to_string(),
+                review: review("review-normal", "device-one"),
+                device_handle: "device-one".to_string(),
+            },
+        );
+        drop(transition);
+        let current = session_status(&state).unwrap().unwrap();
+        assert_eq!(current.run_validity, RunValidity::Valid);
+        assert_eq!(current.phase, QualificationSessionPhase::ExecutionActive);
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .bound_execution_handle(),
+            Some("execution-normal")
+        );
+    }
+
+    #[test]
+    fn missing_profile_match_invalidates_only_the_captured_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let first_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+
+        let (first_device, first_epoch) = available_test_device(&state, "profile-match-first");
+        let mut first_observation = observation(&first_device);
+        first_observation.session_epoch = Some(first_epoch);
+        begin(
+            &state,
+            begin_request(&first_candidate, CAPTURED_AT, first_observation),
+        )
+        .unwrap();
+        let transition = crate::commands::qualification_transition_lock(&state);
+        crate::commands::commit_match_device_observation_in_transition(
+            &state,
+            &first_device,
+            first_epoch,
+            Some("test-plan"),
+            Some("profile.test"),
+            None,
+        )
+        .unwrap();
+        drop(transition);
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().run_validity,
+            RunValidity::Valid
+        );
+        let target = capture_device_observation_failure_target(&state, &first_device, first_epoch);
+        assert!(target.is_some());
+        let transition = crate::commands::qualification_transition_lock(&state);
+        crate::commands::commit_match_device_observation_in_transition(
+            &state,
+            &first_device,
+            first_epoch,
+            Some("test-plan"),
+            None,
+            target,
+        )
+        .unwrap();
+        drop(transition);
+        assert!(session_status(&state).unwrap().is_none());
+        assert_eq!(
+            state
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&first_candidate)
+                .unwrap()
+                .payload["runValidity"],
+            "invalid"
+        );
+
+        let second_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+        let (second_device, second_epoch) = available_test_device(&state, "profile-match-second");
+        let mut second_observation = observation(&second_device);
+        second_observation.session_epoch = Some(second_epoch);
+        begin(
+            &state,
+            begin_request(&second_candidate, CAPTURED_AT, second_observation),
+        )
+        .unwrap();
+        let stale_target = DeviceObservationFailureTarget {
+            candidate_handle: first_candidate.clone(),
+            device_handle: second_device.clone(),
+            session_epoch: first_epoch,
+        };
+        let transition = crate::commands::qualification_transition_lock(&state);
+        crate::commands::commit_match_device_observation_in_transition(
+            &state,
+            &second_device,
+            second_epoch,
+            Some("test-plan"),
+            None,
+            Some(stale_target),
+        )
+        .unwrap();
+        drop(transition);
+        let current = session_status(&state).unwrap().unwrap();
+        assert_eq!(current.run_validity, RunValidity::Valid);
+        assert_eq!(current.phase, QualificationSessionPhase::ExecutionPending);
+    }
+
+    #[test]
+    fn supported_context_change_revokes_root_and_fails_the_captured_attempt_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "context-refresh");
+        let old_context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch,
+            1,
+            1,
+            1,
+            "old-supported-context",
+        );
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .set_qualification_context(old_context.clone());
+        let old_root_key =
+            crate::device_qualification::RootQualificationKey::from_context(&old_context);
+        let root_attempt = state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .begin(old_root_key.clone())
+            .unwrap();
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .complete(root_attempt, RootQualificationState::Denied));
+
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        let review_handle =
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .insert_review(crate::handles::ReviewedPlanSnapshot {
+                    response: json!({ "plan": { "id": "plan" } }),
+                    target: json!({ "deviceHandle": device_handle.clone() }),
+                    catalog_identity: json!({ "sourceId": "catalog" }),
+                    catalog_digest: "sha256:catalog".to_string(),
+                    plan_digest: "sha256:plan".to_string(),
+                    device_handle: device_handle.clone(),
+                    qualification_context: Some(old_context.clone()),
+                    platform_tools_identity: None,
+                    created: std::time::Instant::now(),
+                    last_access: std::time::Instant::now(),
+                });
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch);
+        assert!(failure_target.is_some());
+        let mut request = |operation: &str, _payload: Value| {
+            assert_eq!(operation, "qualifyDevice");
+            Ok(json!({
+                "state": "online",
+                "androidMajor": 15,
+                "androidApiLevel": 35,
+                "abi": "arm64-v8a",
+                "storage": "available",
+                "packageManager": "available",
+                "activityManager": "available"
+            }))
+        };
+
+        let current = crate::device_observation::qualify_reconciled_current_for_state(
+            &state,
+            "/trusted/adb",
+            1,
+            1,
+            Some(&device_handle),
+            failure_target,
+            &mut request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            current.snapshot.state,
+            crate::device_observation::DeviceQualificationState::Supported
+        );
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .is_err());
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .get(&old_root_key)
+            .is_none());
+        assert!(session_status(&state).unwrap().is_none());
+        assert_eq!(
+            state
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&candidate)
+                .unwrap()
+                .payload["runValidity"],
+            "invalid"
+        );
+    }
+
+    fn supported_current_for_context(
+        device_handle: &str,
+        context: crate::device_observation::QualificationContextKey,
+    ) -> crate::device_observation::CurrentQualification {
+        let mut current = crate::device_observation::test_current_qualification(
+            crate::device_observation::DeviceQualificationState::Supported,
+            Some(context),
+        );
+        current.snapshot.device_identity = Some(device_handle.to_string());
+        current.snapshot.android_major = Some(15);
+        current.snapshot.android_api_level = Some(35);
+        current.snapshot.abi_class = Some("arm64");
+        current
+    }
+
+    #[test]
+    fn unchanged_supported_context_preserves_root_and_active_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "unchanged-context");
+        let context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch,
+            1,
+            1,
+            1,
+            "same-supported-context",
+        );
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .set_qualification_context(context.clone());
+        let root_key = crate::device_qualification::RootQualificationKey::from_context(&context);
+        let root_attempt = state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .begin(root_key.clone())
+            .unwrap();
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .complete(root_attempt, RootQualificationState::Denied));
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+
+        crate::device_observation::commit_snapshot_observation(
+            &state,
+            &supported_current_for_context(&device_handle, context),
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(RootQualificationState::Denied)
+        );
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().run_validity,
+            RunValidity::Valid
+        );
+    }
+
+    #[test]
+    fn stale_supported_context_cannot_revoke_current_root_or_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "stale-context");
+        let current_context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch,
+            1,
+            1,
+            1,
+            "current-supported-context",
+        );
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .set_qualification_context(current_context.clone());
+        let root_key =
+            crate::device_qualification::RootQualificationKey::from_context(&current_context);
+        let root_attempt = state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .begin(root_key.clone())
+            .unwrap();
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .complete(root_attempt, RootQualificationState::Denied));
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        let failure_target =
+            capture_device_observation_failure_target(&state, &device_handle, session_epoch);
+        let stale_context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch.saturating_sub(1),
+            1,
+            1,
+            1,
+            "stale-supported-context",
+        );
+
+        let result = crate::device_observation::commit_snapshot_observation(
+            &state,
+            &supported_current_for_context(&device_handle, stale_context),
+            failure_target,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(RootQualificationState::Denied)
+        );
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().run_validity,
+            RunValidity::Valid
+        );
     }
 
     #[test]
@@ -6995,6 +7601,23 @@ mod tests {
             QualificationSessionPhase::TerminalAwaitingEvidence
         );
         assert!(resumed.recordable);
+        // A restored process has no durable device-handle authority. Rebuild
+        // the association from current passive facts and an explicit root
+        // observation tied to the same native session epoch.
+        let mut current_device = observation("device-one");
+        current_device.root_state = None;
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::DeviceObserved(Box::new(current_device)),
+        );
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::RootChecked {
+                device_handle: "device-one".to_string(),
+                session_epoch: 1,
+                root_state: RootQualificationState::Denied,
+            },
+        );
         record_checkpoint(
             &app.state::<AppState>(),
             &resumed.session_handle,

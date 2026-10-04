@@ -486,6 +486,29 @@ fn public_runtime_status(status: RuntimeStatusDto) -> Value {
 }
 
 fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), String> {
+    reset_app_session_with_hook(state, close_documents, || {})
+}
+
+fn reset_app_session_with_hook<F>(
+    state: &AppState,
+    close_documents: bool,
+    after_execution_lock: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    // Real execution start holds this store while reserving, admitting, and
+    // retaining product authority. Acquire it before the transition gate so a
+    // reset cannot interleave with an admission commit or reverse lock order.
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    after_execution_lock();
+    let transition = qualification_transition_lock(state);
+
     state
         .root_qualification
         .lock()
@@ -526,6 +549,26 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             )
         })?
         .drain_document_ids();
+    state
+        .handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+        .invalidate_all();
+    executions.reset();
+    // A new frontend session drops process-local attempt authority. Persisted
+    // candidates stay resumable and are re-adopted from the first trusted
+    // observation of the new process session.
+    crate::qualification_session::reset_in_transition(state);
+    state
+        .support
+        .lock()
+        .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
+        .invalidate();
+    drop(transition);
+    drop(executions);
+
+    // Closing sidecar documents may be slow; their process-local handles have
+    // already been removed atomically with the other reset authority.
     if close_documents {
         for document_id in document_ids {
             let _ = state.sidecar.request(
@@ -534,30 +577,6 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             );
         }
     }
-    state
-        .handles
-        .lock()
-        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
-        .invalidate_all();
-    state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .reset();
-    // A new frontend session drops process-local attempt authority. Persisted
-    // candidates stay resumable and are re-adopted from the first trusted
-    // observation of the new process session.
-    crate::qualification_session::reset(state);
-    state
-        .support
-        .lock()
-        .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
-        .invalidate();
     Ok(())
 }
 
@@ -1121,6 +1140,13 @@ fn match_device_result(
         let (facts, epoch) = handles.facts_with_epoch(device_handle)?;
         (facts.clone(), epoch)
     };
+    let qualification_device_plan = crate::qualification_session::active_device_plan(state);
+    let observation_failure_target =
+        crate::qualification_session::capture_device_observation_failure_target(
+            state,
+            device_handle,
+            session_epoch,
+        );
     let catalog = catalog(&state)?;
     let exact_serial = facts
         .get("serial")
@@ -1170,19 +1196,49 @@ fn match_device_result(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
-    if let Some(device_plan) = crate::qualification_session::active_device_plan(state) {
-        let mut observation =
-            crate::device_observation::SelectedDeviceObservation::new(device_handle)
-                .with_session_epoch(session_epoch);
-        if let Some(profile_id) =
-            crate::device_observation::matched_profile_id(&projection, &device_plan)
-        {
-            observation = observation.with_profile_id(profile_id);
-        }
-        crate::device_observation::commit_selected_observation_in_transition(state, observation)?;
-    }
+    let matched_profile_id = qualification_device_plan.as_ref().and_then(|device_plan| {
+        crate::device_observation::matched_profile_id(&projection, device_plan)
+    });
+    commit_match_device_observation_in_transition(
+        state,
+        device_handle,
+        session_epoch,
+        qualification_device_plan.as_deref(),
+        matched_profile_id.as_deref(),
+        observation_failure_target,
+    )?;
     transition.release_and_retry_best_effort();
     Ok((public, projection))
+}
+
+/// Publish the catalog profile projection for the exact current device session.
+/// If an active attempt's plan no longer resolves to a catalog profile, fail
+/// that captured attempt closed without changing the product match response.
+pub(crate) fn commit_match_device_observation_in_transition(
+    state: &AppState,
+    device_handle: &str,
+    session_epoch: u64,
+    device_plan: Option<&str>,
+    profile_id: Option<&str>,
+    failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+) -> Result<(), String> {
+    if device_plan.is_none() {
+        return Ok(());
+    }
+    if let Some(profile_id) = profile_id {
+        crate::device_observation::commit_selected_observation_in_transition(
+            state,
+            crate::device_observation::SelectedDeviceObservation::new(device_handle)
+                .with_profile_id(profile_id)
+                .with_session_epoch(session_epoch),
+        )
+    } else {
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -2381,6 +2437,40 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn reset_test_state(root: &std::path::Path) -> AppState {
+        AppState {
+            sidecar: SidecarState::new(root.join("sidecar-cache")),
+            catalog: Err("catalog is not used by session reset".to_string()),
+            qualification_repository:
+                crate::qualification_repository::QualificationRepositoryProvider::default(),
+            qualification_transition_gate: Mutex::new(()),
+            adb: Mutex::new(crate::adb::AdbManager::new(root.join("platform-tools"))),
+            platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
+            input_contracts: Mutex::new(InputContractSnapshot::default()),
+            handles: Mutex::new(SessionHandles::default()),
+            qualification_sessions: Mutex::new(
+                crate::qualification_session::QualificationSessionStore::default(),
+            ),
+            root_qualification: Mutex::new(RootQualificationStore::default()),
+            executions: Mutex::new(ExecutionHandleStore::default()),
+            saved_configurations: Mutex::new(
+                crate::saved_configurations::SavedConfigurationStore::load(
+                    root.join("recent-configurations.json"),
+                ),
+            ),
+            recovery: Mutex::new(crate::recovery::RecoveryStore::load(
+                root.join("recovery-draft.json"),
+                root.join("session-active.marker"),
+            )),
+            support: Mutex::new(crate::support::SupportStore::new(
+                root.join("support-cache"),
+            )),
+            updates: crate::updates::UpdateService::from_production_document()
+                .expect("production update document should be valid in tests"),
+            update_activity: crate::updates::ActivityGate::default(),
+        }
+    }
+
     fn review_snapshot(device_handle: &str) -> ReviewedPlanSnapshot {
         ReviewedPlanSnapshot {
             response: json!({ "plan": { "id": "plan" } }),
@@ -2394,6 +2484,60 @@ mod tests {
             created: Instant::now(),
             last_access: Instant::now(),
         }
+    }
+
+    #[test]
+    fn session_reset_holds_execution_before_gate_and_commits_reset_after_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "reset-order-device",
+                        "state": "available",
+                        "transportId": "reset-order-transport"
+                    }]
+                }))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        let transition = qualification_transition_lock(&state);
+        let (reset_locked_execution_tx, reset_locked_execution_rx) =
+            std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let state = &state;
+            let reset = scope.spawn(move || {
+                reset_app_session_with_hook(state, false, move || {
+                    reset_locked_execution_tx
+                        .send(())
+                        .expect("reset should reach the gate after locking execution state");
+                })
+            });
+            reset_locked_execution_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("reset should lock execution state before waiting on the gate");
+            assert!(matches!(
+                state.executions.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            assert!(state.handles.lock().unwrap().device(&device_handle).is_ok());
+
+            drop(transition);
+            reset
+                .join()
+                .expect("reset thread should not panic")
+                .expect("reset should complete after the transition gate is released");
+        });
+
+        assert!(!state.executions.lock().unwrap().has_in_flight());
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .device(&device_handle)
+            .is_err());
     }
 
     #[test]

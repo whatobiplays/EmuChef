@@ -1425,15 +1425,16 @@ validity, or process-local handle authority. There are no
 `bind_qualification_execution`, or `finalize_qualification_candidate` IPC
 commands.
 
-The persisted session's device handle is capture-time metadata, not durable
-runtime authority. Process-local association lives only in Rust memory and is
-never restored from `session.json`. RecoveryStore captures the previous
-process's clean-handoff proof when it loads the native marker. A restored
-session has no device association, so product device selection remains unlocked
-until a trusted observation proves the registered target, including its
-authored profile identity and all material target facts. Once associated, the
-backend reports selection locked; a restored session awaiting reassociation or
-a closed session reports it unlocked. No UI query establishes reassociation.
+Persisted sessions contain no device handle or process-local device association.
+Rust keeps that association only in memory and recreates it after recovery from
+fresh trusted device observations; React never carries, infers, or restores the
+association. RecoveryStore captures the previous process's clean-handoff proof
+when it loads the native marker. A restored session has no device association,
+so product device selection remains unlocked until a trusted observation proves
+the registered target, including its authored profile identity and all material
+target facts. Once associated, the backend reports selection locked; a restored
+session awaiting reassociation or a closed session reports it unlocked. No UI
+query establishes reassociation.
 RecoveryStore captures the prior-process clean-handoff proof at native load and
 tracks which qualification candidate began in the current process separately
 from resettable frontend session state. This prevents a frontend reset from
