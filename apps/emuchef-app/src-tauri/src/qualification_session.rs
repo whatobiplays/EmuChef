@@ -2026,6 +2026,13 @@ fn recover_candidate(
             }
         }
         session.invalidate(QualificationInvalidation::IncompatibleSessionVersion);
+        if provider
+            .mark_candidate_audit_only(candidate_handle)
+            .is_err()
+        {
+            poison_attempt(state, provider, store, candidate_handle);
+            return Err(persistence_error());
+        }
         match finalize_candidate(provider, &session) {
             Ok(()) => {
                 let _ = provider.remove_session_report(candidate_handle);
@@ -2115,6 +2122,13 @@ fn finalize_recovered_invalid(
     session: QualificationSession,
 ) -> Result<bool, String> {
     let candidate_handle = session.candidate_handle().to_string();
+    if provider
+        .mark_candidate_audit_only(&candidate_handle)
+        .is_err()
+    {
+        poison_attempt(state, provider, store, &candidate_handle);
+        return Err(persistence_error());
+    }
     match finalize_candidate(provider, &session) {
         Ok(()) => {
             let _ = provider.remove_session_report(&candidate_handle);
@@ -2611,7 +2625,7 @@ fn begin_with_candidate_summary(
         )?
         .with_device_plan(request.device_plan);
         let authored_recipe_digests = provider
-            .capture_authored_recipe_digests(session.required_recipes())
+            .capture_recordable_authored_recipe_digests(session.required_recipes())
             .map_err(|_| {
                 session_error(
                     "qualification_source_changed",
@@ -6473,6 +6487,10 @@ mod tests {
         let finalized = repository.load_candidate(&candidate).unwrap();
         assert_eq!(finalized.payload["runValidity"], "invalid");
         assert!(!finalized.promotable);
+        assert_eq!(
+            finalized.non_promotable_reason.as_deref(),
+            Some("recovered invalid qualification attempts cannot be promoted")
+        );
     }
 
     #[test]
@@ -7451,6 +7469,25 @@ mod tests {
                 "The previous application session did not end cleanly, so this attempt cannot be trusted."
             )
         );
+        assert!(!stored.promotable);
+        assert_eq!(
+            stored.non_promotable_reason.as_deref(),
+            Some("recovered invalid qualification attempts cannot be promoted")
+        );
+
+        let clean_build_restart = test_repository(&temp);
+        let stored_again = clean_build_restart
+            .load_candidate(&candidate)
+            .expect("recovered candidate should survive a clean restart on its captured build");
+        assert!(!stored_again.promotable);
+        assert_eq!(
+            clean_build_restart.record_run(&candidate).unwrap_err(),
+            "recovered invalid qualification attempts cannot be promoted"
+        );
+        clean_build_restart
+            .discard_candidate(&candidate)
+            .expect("recovery audit candidates must remain discardable");
+        assert!(clean_build_restart.load_candidate(&candidate).is_err());
     }
 
     #[test]
@@ -7515,6 +7552,96 @@ mod tests {
             Some(
                 "The saved qualification attempt was created by an incompatible application version."
             )
+        );
+        assert!(!stored.promotable);
+        assert_eq!(
+            stored.non_promotable_reason.as_deref(),
+            Some("recovered invalid qualification attempts cannot be promoted")
+        );
+    }
+
+    #[test]
+    fn recovery_audit_marker_failure_poisons_without_finalizing_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        let provider = state.qualification_repository.get().unwrap();
+        let mut store = state.qualification_sessions.lock().unwrap();
+        let mut session = load_active_session(provider, &store, &candidate).unwrap();
+        session.invalidate(QualificationInvalidation::ObservationFailed);
+        persist(provider, &session).unwrap();
+        provider.fail_next_audit_only_marker_for_test();
+
+        assert!(finalize_recovered_invalid(&state, provider, &mut store, session).is_err());
+
+        assert!(store.is_poisoned(&candidate));
+        let stored = provider.load_candidate(&candidate).unwrap();
+        assert!(!stored.promotable);
+        assert_eq!(
+            stored.non_promotable_reason.as_deref(),
+            Some("qualification session persistence failed and cannot be promoted")
+        );
+        assert!(stored.payload.get("runValidity").is_none());
+        assert!(temp
+            .path()
+            .join(".emuchef_runtime/qualification-candidates")
+            .join(&candidate)
+            .join("session-poison.json")
+            .is_file());
+    }
+
+    #[test]
+    fn admitted_execution_without_retained_terminal_is_audit_only_after_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(
+                &app.state::<AppState>(),
+                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+            )
+            .unwrap();
+        }
+
+        let repository = test_repository(&temp);
+        let mut persisted = repository.load_session_json(&candidate).unwrap();
+        persisted["executionAdmitted"] = json!(true);
+        std::fs::write(
+            repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session.json"),
+            serde_json::to_vec_pretty(&persisted).unwrap(),
+        )
+        .unwrap();
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+
+        crate::qualification_mode::recover_sessions_at_process_start(&app.state::<AppState>());
+
+        assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+        let stored = app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert!(!stored.promotable);
+        assert_eq!(
+            stored.non_promotable_reason.as_deref(),
+            Some("recovered invalid qualification attempts cannot be promoted")
         );
     }
 

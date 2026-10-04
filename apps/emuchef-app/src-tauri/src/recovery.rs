@@ -334,6 +334,11 @@ impl RecoveryStore {
         }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_current_process_qualification_provenance(&self) -> bool {
+        !self.current_process_qualification_candidates.is_empty()
+    }
+
     fn defer(&mut self, request: RecoveryRecordRequest) -> Result<(), String> {
         self.require_session(request.session_generation)?;
         self.require_record_generation(request.record_generation)?;

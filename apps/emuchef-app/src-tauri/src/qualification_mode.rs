@@ -571,6 +571,21 @@ pub fn begin_qualification_session(
     request: BeginQualificationSessionRequest,
     state: State<'_, AppState>,
 ) -> Result<crate::qualification_session::QualificationSessionSnapshot, String> {
+    let app_state = state.inner();
+    let mut source = QualificationObservationSource { state: app_state };
+    begin_qualification_session_with_source(request, app_state, &mut source)
+}
+
+/// Run session-start orchestration against one trusted observation source.
+/// Keeping the source injectable lets tests exercise the same provisional
+/// candidate cleanup path without starting native device operations.
+fn begin_qualification_session_with_source<
+    S: crate::device_observation::SelectedDeviceObservationSource,
+>(
+    request: BeginQualificationSessionRequest,
+    state: &AppState,
+    source: &mut S,
+) -> Result<crate::qualification_session::QualificationSessionSnapshot, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
     let build = require_recordable_mode(&mode)?.clone();
     let repository = state
@@ -595,10 +610,8 @@ pub fn begin_qualification_session(
             .into_iter()
             .find(|target| target.id == request.target_id)
             .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-        let capture = {
-            let mut source = QualificationObservationSource { state: &state };
-            source.capture_selected_device(&request.device_handle, &request.device_plan)?
-        };
+        let capture =
+            source.capture_selected_device(&request.device_handle, &request.device_plan)?;
         if workflow.required_capabilities.iter().any(|required| {
             !capture
                 .capabilities
@@ -1012,6 +1025,7 @@ mod tests {
         capture: Option<SelectedDeviceCapture>,
         error: Option<String>,
         calls: usize,
+        after_capture: Option<Box<dyn FnOnce() + Send>>,
     }
 
     impl FakeDeviceSource {
@@ -1020,6 +1034,7 @@ mod tests {
                 capture: Some(capture),
                 error: None,
                 calls: 0,
+                after_capture: None,
             }
         }
 
@@ -1028,7 +1043,13 @@ mod tests {
                 capture: None,
                 error: Some(message.to_string()),
                 calls: 0,
+                after_capture: None,
             }
+        }
+
+        fn with_after_capture(mut self, hook: impl FnOnce() + Send + 'static) -> Self {
+            self.after_capture = Some(Box::new(hook));
+            self
         }
     }
 
@@ -1042,10 +1063,14 @@ mod tests {
             if let Some(error) = self.error.take() {
                 return Err(error);
             }
-            Ok(self
+            let capture = self
                 .capture
                 .take()
-                .expect("the fake observation source must be consulted once"))
+                .expect("the fake observation source must be consulted once");
+            if let Some(hook) = self.after_capture.take() {
+                hook();
+            }
+            Ok(capture)
         }
     }
 
@@ -1101,6 +1126,45 @@ mod tests {
             "qualificationContract": 1
         }))
         .expect("test build should decode")
+    }
+
+    fn begin_test_description(build: &QualificationBuildIdentity) -> Value {
+        json!({
+            "schemaVersion": 1,
+            "runtimeContract": "real-execution-v1",
+            "qualificationContract": 1,
+            "build": build,
+            "workflowCatalog": {
+                "schemaVersion": 1,
+                "workflows": [{
+                    "id": "test-workflow",
+                    "version": 1,
+                    "purpose": "test",
+                    "productionRecipes": ["test.recipe"],
+                    "requiredCapabilities": ["apk_install"],
+                    "prerequisites": [],
+                    "humanCheckpoints": [],
+                    "automatedObservations": []
+                }]
+            },
+            "deviceTargets": {
+                "schemaVersion": 2,
+                "targets": [{
+                    "id": "target-test",
+                    "profileId": { "value": "ayaneo.pocket_s2", "source": "production_observation" },
+                    "manufacturer": { "value": "AYANEO", "source": "production_observation" },
+                    "model": { "value": "Pocket S2", "source": "production_observation" },
+                    "androidVersion": { "value": "15", "source": "production_observation" },
+                    "androidApi": { "value": 35, "source": "production_observation" },
+                    "abiSocClass": { "value": "arm64", "source": "production_observation" },
+                    "rootState": { "value": "non_root", "source": "explicit_root_check" },
+                    "connectionType": { "value": "usb3", "source": "operator_attestation" },
+                    "firmwareBuild": { "value": "vendor/build", "source": "production_observation" },
+                    "capabilities": ["apk_install"],
+                    "deferredWorkflows": []
+                }]
+            }
+        })
     }
 
     fn test_app(
@@ -1326,6 +1390,96 @@ mod tests {
     }
 
     #[test]
+    fn session_start_rechecks_source_after_device_capture_and_discards_provisional_candidate() {
+        let temp = tempfile::tempdir().expect("test repository directory should be created");
+        std::fs::create_dir_all(temp.path().join("authored/recipes"))
+            .expect("recipe directory should be created");
+        std::fs::write(
+            temp.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .expect("recipe fixture should be written");
+        let build = test_build();
+        let clean_source = crate::qualification_repository::QualificationSourceState {
+            head: build.git_commit.clone(),
+            tracked_worktree_clean: true,
+        };
+        let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(BeginDescriptionRunner {
+                description: begin_test_description(&build),
+            }),
+            build,
+            clean_source.clone(),
+        );
+        let source_state = repository
+            .source_state_handle_for_test()
+            .expect("test repository should expose its source-state fixture");
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider);
+        let state = app.state::<AppState>();
+        let changed_source = crate::qualification_repository::QualificationSourceState {
+            head: "2".repeat(40),
+            tracked_worktree_clean: false,
+        };
+        let source_state_after_capture = std::sync::Arc::clone(&source_state);
+        let mut capture = trusted_capture();
+        capture.observation.session_epoch = Some(1);
+        let mut source = FakeDeviceSource::returning(capture).with_after_capture(move || {
+            *source_state_after_capture
+                .lock()
+                .expect("source state should not be poisoned") = changed_source;
+        });
+        let request = BeginQualificationSessionRequest {
+            device_handle: "device-opaque".to_string(),
+            device_plan: "test-plan".to_string(),
+            target_id: "target-test".to_string(),
+            workflow_id: "test-workflow".to_string(),
+        };
+
+        let error = begin_qualification_session_with_source(request.clone(), &state, &mut source)
+            .expect_err("source changed after device capture must reject session start");
+        let error: Value = serde_json::from_str(&error).expect("command error should be JSON");
+        assert_eq!(error["code"], "qualification_source_changed");
+        let repository = state.qualification_repository.get().unwrap();
+        assert!(
+            repository.list_candidates().unwrap().is_empty(),
+            "the command boundary must discard the provisional candidate"
+        );
+        assert!(crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_none());
+        let sessions = state.qualification_sessions.lock().unwrap();
+        assert!(sessions.active_candidate().is_none());
+        assert!(sessions.associated_device_handle().is_none());
+        drop(sessions);
+        assert!(!state
+            .recovery
+            .lock()
+            .unwrap()
+            .has_current_process_qualification_provenance());
+
+        *source_state
+            .lock()
+            .expect("source state should not be poisoned") = clean_source;
+        let mut capture = trusted_capture();
+        capture.observation.session_epoch = Some(1);
+        let mut source = FakeDeviceSource::returning(capture);
+        begin_qualification_session_with_source(request, &state, &mut source)
+            .expect("a fresh start should succeed after the exact clean source is restored");
+        assert!(crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_some());
+        let sessions = state.qualification_sessions.lock().unwrap();
+        assert_eq!(sessions.associated_device_handle(), Some("device-opaque"));
+        assert!(state
+            .recovery
+            .lock()
+            .unwrap()
+            .has_current_process_qualification_provenance());
+    }
+
+    #[test]
     fn target_capture_projects_the_exact_trusted_observation_into_the_candidate() {
         let mut source = FakeDeviceSource::returning(trusted_capture());
         let payload =
@@ -1418,6 +1572,20 @@ mod tests {
                 payload["target"]["rootState"]["source"],
                 "explicit_root_check"
             );
+        }
+    }
+
+    struct BeginDescriptionRunner {
+        description: Value,
+    }
+
+    impl crate::qualification_repository::QualificationToolRunner for BeginDescriptionRunner {
+        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            if args.first().map(String::as_str) != Some("--describe") {
+                return Err("unexpected test operation".to_string());
+            }
+            serde_json::to_vec(&self.description)
+                .map_err(|_| "test description should serialize".to_string())
         }
     }
 

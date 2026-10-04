@@ -40,6 +40,8 @@ const CANDIDATE_PUBLICATION_STAGING_PREFIX: &str = ".qualification-candidate-pub
 const CANDIDATE_PUBLICATION_SCHEMA_VERSION: u64 = 1;
 const SESSION_FILE: &str = "session.json";
 const SESSION_POISON_FILE: &str = "session-poison.json";
+const SESSION_AUDIT_ONLY_FILE: &str = "session-audit-only";
+const SESSION_AUDIT_ONLY_STAGING_PREFIX: &str = ".qualification-session-audit-only-tmp-";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
 const SESSION_REPORT_FILE: &str = "session-terminal-report.json";
 const CANDIDATE_STAGING_PREFIX: &str = ".qualification-candidate-tmp-";
@@ -201,7 +203,11 @@ pub struct QualificationRepository {
     #[cfg(test)]
     source_state_read_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
+    authored_recipe_digest_capture_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
     fail_next_finalize: AtomicBool,
+    #[cfg(test)]
+    fail_next_audit_only_marker: AtomicBool,
     #[cfg(test)]
     fail_after_candidate_envelope_publication: AtomicBool,
     #[cfg(test)]
@@ -346,7 +352,11 @@ impl QualificationRepository {
             #[cfg(test)]
             source_state_read_hook: Mutex::new(None),
             #[cfg(test)]
+            authored_recipe_digest_capture_hook: Mutex::new(None),
+            #[cfg(test)]
             fail_next_finalize: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_audit_only_marker: AtomicBool::new(false),
             #[cfg(test)]
             fail_after_candidate_envelope_publication: AtomicBool::new(false),
             #[cfg(test)]
@@ -386,12 +396,35 @@ impl QualificationRepository {
                 .join(format!("{id}.yaml"));
             let bytes = fs::read(path)
                 .map_err(|_| "qualification authored source could not be read".to_string())?;
+            #[cfg(test)]
+            if let Some(hook) = self
+                .authored_recipe_digest_capture_hook
+                .lock()
+                .map_err(|_| "qualification authored source is unavailable".to_string())?
+                .clone()
+            {
+                hook();
+            }
             digests.push(AuthoredRecipeDigest {
                 id: id.clone(),
                 sha256: hex::encode(Sha256::digest(bytes)),
             });
         }
         Ok(digests)
+    }
+
+    /// Capture session-start recipe identities only while the checkout remains
+    /// the clean source for this embedded qualification build. The second
+    /// source check catches filesystem changes that occur during the reads.
+    pub(crate) fn capture_recordable_authored_recipe_digests(
+        &self,
+        recipe_ids: &[String],
+    ) -> Result<Vec<AuthoredRecipeDigest>, String> {
+        let _operation = self.lock_operation()?;
+        self.ensure_recordable_unlocked()?;
+        let digests = self.capture_authored_recipe_digests(recipe_ids);
+        self.ensure_recordable_unlocked()?;
+        digests
     }
 
     /// Revalidate the canonical source bound to a session before valid evidence
@@ -443,6 +476,13 @@ impl QualificationRepository {
     }
 
     #[cfg(test)]
+    pub(crate) fn source_state_handle_for_test(
+        &self,
+    ) -> Option<std::sync::Arc<Mutex<QualificationSourceState>>> {
+        self.source_state_override.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_source_state_read_hook_for_test(
         &self,
         hook: std::sync::Arc<dyn Fn() + Send + Sync>,
@@ -454,8 +494,25 @@ impl QualificationRepository {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_authored_recipe_digest_capture_hook_for_test(
+        &self,
+        hook: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) {
+        *self
+            .authored_recipe_digest_capture_hook
+            .lock()
+            .expect("authored recipe digest hook should not be poisoned") = Some(hook);
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_next_finalize_for_test(&self) {
         self.fail_next_finalize.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_audit_only_marker_for_test(&self) {
+        self.fail_next_audit_only_marker
+            .store(true, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -704,6 +761,28 @@ impl QualificationRepository {
         sync_directory(&directory)
     }
 
+    /// Durably prevent a recovery-invalid attempt from being promoted. This
+    /// candidate-local marker remains after resumable session files are removed.
+    pub(crate) fn mark_candidate_audit_only(&self, candidate_handle: &str) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        #[cfg(test)]
+        if self
+            .fail_next_audit_only_marker
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err("qualification audit-only marker could not be retained".to_string());
+        }
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        write_synced_replaced_file(
+            &directory,
+            SESSION_AUDIT_ONLY_FILE,
+            SESSION_AUDIT_ONLY_STAGING_PREFIX,
+            b"Recovered invalid qualification attempts cannot be promoted.\n",
+        )?;
+        sync_directory(&directory)
+    }
+
     /// Report whether durable fail-closed state exists for one session.
     pub(crate) fn session_is_poisoned(&self, candidate_handle: &str) -> Result<bool, String> {
         let _operation = self.lock_operation()?;
@@ -859,16 +938,27 @@ impl QualificationRepository {
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
             Err(_) => return Err("qualification poison marker could not be inspected".to_string()),
         };
+        let audit_only = match fs::symlink_metadata(directory.join(SESSION_AUDIT_ONLY_FILE)) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
+            Ok(_) => {
+                return Err("qualification audit-only marker is not a regular file".to_string())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => {
+                return Err("qualification audit-only marker could not be inspected".to_string())
+            }
+        };
         let (promotable, non_promotable_reason) = if poisoned {
             (
                 false,
                 Some("qualification session persistence failed and cannot be promoted".to_string()),
             )
-        } else {
-            self.candidate_promotion_status(envelope.build.as_ref())
-        };
-        let (promotable, non_promotable_reason) = if envelope.kind
-            == CandidateKind::QualificationRun
+        } else if audit_only {
+            (
+                false,
+                Some("recovered invalid qualification attempts cannot be promoted".to_string()),
+            )
+        } else if envelope.kind == CandidateKind::QualificationRun
             && !is_terminal_run_candidate(&envelope.payload)
         {
             (
@@ -878,7 +968,7 @@ impl QualificationRepository {
                 ),
             )
         } else {
-            (promotable, non_promotable_reason)
+            self.candidate_promotion_status(envelope.build.as_ref())
         };
 
         Ok(StoredQualificationCandidate {
@@ -1438,6 +1528,11 @@ fn validate_candidate_files(directory: &Path) -> Result<(), String> {
         &directory.join(EXECUTION_REPORT_FILE),
         false,
         "qualification execution report",
+    )?;
+    validate_regular_file_path(
+        &directory.join(SESSION_AUDIT_ONLY_FILE),
+        false,
+        "qualification audit-only marker",
     )?;
     Ok(())
 }
@@ -2339,6 +2434,123 @@ mod tests {
             .record_run(&handle)
             .expect("terminal invalid candidates remain recordable");
         assert_eq!(calls.calls()[0].1, vec!["--record-run".to_string(), handle]);
+    }
+
+    #[test]
+    fn recovery_audit_only_marker_survives_session_cleanup_and_blocks_recording() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": build_identity_json(),
+                    "runValidity": "invalid",
+                    "qualificationOutcome": "not_observed",
+                }),
+                None,
+            )
+            .expect("provisional run candidate should be stored");
+
+        repository
+            .mark_candidate_audit_only(&handle)
+            .expect("recovery audit-only status should be retained durably");
+        repository
+            .remove_session(&handle)
+            .expect("session state should be removable");
+        repository
+            .remove_session_report(&handle)
+            .expect("session report should be removable");
+
+        let restarted = repository_with_embedded_build(&temp, calls.clone());
+        let stored = restarted
+            .load_candidate(&handle)
+            .expect("audit-only candidate should remain readable after restart");
+        assert!(!stored.promotable);
+        assert_eq!(
+            stored.non_promotable_reason.as_deref(),
+            Some("recovered invalid qualification attempts cannot be promoted")
+        );
+        assert_eq!(
+            restarted.record_run(&handle).unwrap_err(),
+            "recovered invalid qualification attempts cannot be promoted"
+        );
+        assert!(
+            calls.calls().is_empty(),
+            "Node must not be invoked for audit-only evidence"
+        );
+        restarted
+            .discard_candidate(&handle)
+            .expect("audit-only candidates must remain discardable");
+        assert!(restarted.load_candidate(&handle).is_err());
+    }
+
+    #[test]
+    fn recordable_recipe_digest_capture_accepts_clean_source_and_rejects_dirty_source() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        fs::create_dir_all(temp.path().join("authored/recipes"))
+            .expect("recipe directory should be created");
+        fs::write(
+            temp.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .expect("recipe should be written");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let recipe_ids = vec!["test.recipe".to_string()];
+
+        let digests = repository
+            .capture_recordable_authored_recipe_digests(&recipe_ids)
+            .expect("clean embedded source should produce a trusted digest");
+        assert_eq!(digests.len(), 1);
+        assert_eq!(digests[0].id, "test.recipe");
+
+        repository.set_source_state_for_test(QualificationSourceState {
+            head: "2".repeat(40),
+            tracked_worktree_clean: true,
+        });
+        assert!(repository
+            .capture_recordable_authored_recipe_digests(&recipe_ids)
+            .is_err());
+    }
+
+    #[test]
+    fn recordable_recipe_digest_capture_rechecks_source_after_recipe_read() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        fs::create_dir_all(temp.path().join("authored/recipes"))
+            .expect("recipe directory should be created");
+        let recipe_path = temp.path().join("authored/recipes/test.recipe.yaml");
+        fs::write(&recipe_path, b"id: test.recipe\n").expect("recipe should be written");
+        let repository = std::sync::Arc::new(repository_with_embedded_build(
+            &temp,
+            FakeQualificationToolRunner::default(),
+        ));
+        let repository_for_hook = std::sync::Arc::downgrade(&repository);
+        let path_for_hook = recipe_path.clone();
+        repository.set_authored_recipe_digest_capture_hook_for_test(std::sync::Arc::new(
+            move || {
+                fs::write(
+                    &path_for_hook,
+                    b"id: test.recipe\n# changed during capture\n",
+                )
+                .expect("recipe mutation should be injected during digest capture");
+                repository_for_hook
+                    .upgrade()
+                    .expect("repository should remain alive during capture")
+                    .set_source_state_for_test(QualificationSourceState {
+                        head: "2".repeat(40),
+                        tracked_worktree_clean: false,
+                    });
+            },
+        ));
+
+        let error = repository
+            .capture_recordable_authored_recipe_digests(&["test.recipe".to_string()])
+            .expect_err("the second source check must reject a mutation during digest capture");
+        assert!(error.contains("source state changed"));
     }
 
     #[test]
