@@ -1,0 +1,39 @@
+apps/emuchef-app/src-tauri/src/execution.rs
+  s_09b05cf592369e::t_f8cd8b7ed37218 664,674,687-692,5112,8168
+  s_09b05cf592369e::t_39a3ca62a2bd74 698-701,731-733,736-739
+  s_09b05cf592369e::t_dba104773e923a 682,684,693-697,8170-8171
+  s_09b05cf592369e::t_cde55709f173d7 3961,5089-5111,5113-5114
+  s_09b05cf592369e::t_f77197c64f847f 8101
+  s_09b05cf592369e::t_10986b66d6e982 659-663,665-673,675,702-703,2480-2488,2491
+  s_09b05cf592369e::t_bfb1d313696dd2 8116,8128-8136
+  s_09b05cf592369e::t_652294dda5672d 8127
+  s_09b05cf592369e::t_88358355318e0c 8140-8150,8152-8154,8156-8167,8169,8172-8183
+  s_09b05cf592369e::t_f7a1da10a8ee25 658
+  s_09b05cf592369e::t_803070149d5809 5115-5116
+  s_09b05cf592369e::t_a3c82076d32480 8137-8139
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_c18e42346b8745 4559-4561,4563-4602
+docs/testing/phase-6d6/ui-binding-index.json
+  s_09b05cf592369e::t_2415291b441231 6,203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9df2f8f124bd473e03cd5660d4d968fd6b3918cb",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
