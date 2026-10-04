@@ -649,8 +649,8 @@ impl QualificationSession {
         &self,
         root_state: Option<RootQualificationState>,
     ) -> Option<QualificationInvalidation> {
-        // An unavailable or failed root check does not establish a root fact,
-        // so it can never prove that the target contract was violated.
+        // Missing superuser support is a trusted non-root result. A failed
+        // check is indeterminate and therefore contributes no root fact.
         let observed = project_root_state(&root_state?)?;
         if observed == self.target.root_state {
             None
@@ -1110,12 +1110,15 @@ impl QualificationSession {
 }
 
 /// Project one committed explicit root-check result into the target contract.
-/// Unavailable or failed checks cannot establish a root fact.
+/// A missing `su` binary is trusted non-root evidence; failed checks establish
+/// no root-state fact.
 pub(crate) fn project_root_state(root: &RootQualificationState) -> Option<QualificationRootState> {
     match root {
         RootQualificationState::Granted => Some(QualificationRootState::Rooted),
-        RootQualificationState::Denied => Some(QualificationRootState::NonRoot),
-        RootQualificationState::Unavailable | RootQualificationState::CheckFailed { .. } => None,
+        RootQualificationState::Denied | RootQualificationState::Unavailable => {
+            Some(QualificationRootState::NonRoot)
+        }
+        RootQualificationState::CheckFailed { .. } => None,
     }
 }
 
@@ -2138,8 +2141,13 @@ pub(crate) fn observe(state: &AppState, observation: QualificationLifecycleObser
             session_epoch,
             root_state,
         } => {
-            if project_root_state(root_state).is_none() {
-                // An unavailable or failed check establishes no root fact.
+            if matches!(root_state, RootQualificationState::CheckFailed { .. }) {
+                if store.associated_device_handle().is_some_and(|associated| {
+                    associated == device_handle
+                        && store.associated_device_session_epoch() == Some(*session_epoch)
+                }) {
+                    session.invalidate(QualificationInvalidation::ObservationFailed);
+                }
             } else if store.associated_device_handle().is_some_and(|associated| {
                 associated == device_handle
                     && store.associated_device_session_epoch() == Some(*session_epoch)
@@ -2219,6 +2227,19 @@ pub(crate) fn capture_device_observation_failure_target(
 }
 
 pub(crate) fn observe_device_observation_failure(
+    state: &AppState,
+    target: Option<DeviceObservationFailureTarget>,
+) {
+    let Some(target) = target else {
+        return;
+    };
+    let _transition = crate::commands::qualification_transition_lock(state);
+    observe_device_observation_failure_in_transition(state, Some(target));
+}
+
+/// Apply a failed observation while the caller already owns the shared
+/// product-transition gate.
+pub(crate) fn observe_device_observation_failure_in_transition(
     state: &AppState,
     target: Option<DeviceObservationFailureTarget>,
 ) {
@@ -2389,6 +2410,17 @@ pub(crate) fn begin(
     state: &AppState,
     request: BeginSessionRequest,
 ) -> Result<QualificationSessionSnapshot, String> {
+    begin_with_candidate_summary(state, request, candidate_summary)
+}
+
+fn begin_with_candidate_summary(
+    state: &AppState,
+    request: BeginSessionRequest,
+    summarize_candidate: impl FnOnce(
+        &QualificationRepository,
+        &str,
+    ) -> Result<QualificationCandidateSummaryDto, String>,
+) -> Result<QualificationSessionSnapshot, String> {
     let provider = state
         .qualification_repository
         .get()
@@ -2403,67 +2435,79 @@ pub(crate) fn begin(
             "A qualification attempt is already active. Finish or abandon it before starting another.",
         ));
     }
+    let candidate_handle = request.candidate_handle.clone();
     // The candidate was created for this attempt moments ago, so it must never
     // be recovered as an interrupted attempt from a previous process.
-    store.mark_pending(&request.candidate_handle);
-    ensure_recovered(state, provider, &mut store)?;
-    if store.active_candidate.is_some() {
-        store.forget(&request.candidate_handle);
-        return Err(session_error(
-            "qualification_session_active",
-            "A qualification attempt is already active. Finish or abandon it before starting another.",
-        ));
+    store.mark_pending(&candidate_handle);
+    let result = (|| {
+        ensure_recovered(state, provider, &mut store)?;
+        if store.active_candidate.is_some() {
+            return Err(session_error(
+                "qualification_session_active",
+                "A qualification attempt is already active. Finish or abandon it before starting another.",
+            ));
+        }
+        let mut session = QualificationSession::new(
+            request.session_handle,
+            request.candidate_handle.clone(),
+            request.captured_at,
+            request.target,
+            request.workflow,
+            request.build,
+            request.runtime_contract,
+        )?
+        .with_device_plan(request.device_plan);
+        let authored_recipe_digests = provider
+            .capture_authored_recipe_digests(session.required_recipes())
+            .map_err(|_| {
+                session_error(
+                    "qualification_source_changed",
+                    "Qualification source changed before the attempt could be retained.",
+                )
+            })?;
+        session.set_authored_recipe_digests(authored_recipe_digests);
+        if !request.observation.proves_target_compatibility()
+            || request
+                .observation
+                .root_state
+                .as_ref()
+                .and_then(project_root_state)
+                != Some(session.target.root_state.clone())
+        {
+            return Err(session_error(
+                "qualification_target_unverified",
+                "A fresh root check could not verify the registered target state.",
+            ));
+        }
+        session.observe_matching_target(&request.observation);
+        if session.run_validity() == RunValidity::Invalid {
+            return Err(session_error(
+                "qualification_target_unverified",
+                "The selected device does not match the registered qualification target.",
+            ));
+        }
+
+        // Build every fallible response projection before durable or
+        // process-local activation. A malformed/missing provisional candidate
+        // must leave no active pointer or current-process provenance behind.
+        let candidate = summarize_candidate(provider, session.candidate_handle())
+            .map_err(|_| persistence_error())?;
+        let snapshot = session.snapshot(Some(candidate));
+        let mut recovery = state.recovery.lock().map_err(|_| persistence_error())?;
+        persist(provider, &session)?;
+        recovery.note_qualification_session_started(&candidate_handle);
+        drop(recovery);
+        store.set_active(candidate_handle.clone());
+        store.associate(
+            request.observation.device_handle.clone(),
+            request.observation.session_epoch,
+        );
+        Ok(snapshot)
+    })();
+    if result.is_err() {
+        store.forget(&candidate_handle);
     }
-    let mut session = QualificationSession::new(
-        request.session_handle,
-        request.candidate_handle.clone(),
-        request.captured_at,
-        request.target,
-        request.workflow,
-        request.build,
-        request.runtime_contract,
-    )?
-    .with_device_plan(request.device_plan);
-    let authored_recipe_digests = provider
-        .capture_authored_recipe_digests(session.required_recipes())
-        .map_err(|_| {
-            session_error(
-                "qualification_source_changed",
-                "Qualification source changed before the attempt could be retained.",
-            )
-        })?;
-    session.set_authored_recipe_digests(authored_recipe_digests);
-    if !request.observation.proves_target_compatibility()
-        || request
-            .observation
-            .root_state
-            .as_ref()
-            .and_then(project_root_state)
-            != Some(session.target.root_state.clone())
-    {
-        return Err(session_error(
-            "qualification_target_unverified",
-            "A fresh root check could not verify the registered target state.",
-        ));
-    }
-    session.observe_matching_target(&request.observation);
-    if session.run_validity() == RunValidity::Invalid {
-        return Err(session_error(
-            "qualification_target_unverified",
-            "The selected device does not match the registered qualification target.",
-        ));
-    }
-    let mut recovery = state.recovery.lock().map_err(|_| persistence_error())?;
-    persist(provider, &session)?;
-    recovery.note_qualification_session_started(&request.candidate_handle);
-    drop(recovery);
-    store.set_active(request.candidate_handle.clone());
-    store.associate(
-        request.observation.device_handle.clone(),
-        request.observation.session_epoch,
-    );
-    let candidate = candidate_summary(provider, session.candidate_handle())?;
-    Ok(session.snapshot(Some(candidate)))
+    result
 }
 
 /// Record one explicit operator checkpoint. When the terminal execution is
@@ -2583,6 +2627,7 @@ pub(crate) fn observe_device_inventory(
     if handles.device_generation() != generation || current_devices != available_devices {
         return;
     }
+    drop(handles);
     let mut store = match state.qualification_sessions.lock() {
         Ok(store) => store,
         Err(poisoned) => {
@@ -2966,6 +3011,7 @@ mod tests {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
             catalog: Err("test catalog is not needed by qualification commands".to_string()),
             qualification_repository: provider,
+            qualification_transition_gate: Mutex::new(()),
             adb: Mutex::new(AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
             input_contracts: Mutex::new(InputContractSnapshot::default()),
@@ -5229,13 +5275,15 @@ mod tests {
                 root_state: RootQualificationState::Unavailable,
             },
         );
-        assert!(app
-            .state::<AppState>()
-            .qualification_sessions
-            .lock()
-            .unwrap()
-            .associated_device_handle()
-            .is_none());
+        assert_eq!(
+            app.state::<AppState>()
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .associated_device_handle(),
+            Some("device-two"),
+            "a current unavailable-su result proves the target's non-root state"
+        );
         observe(
             &app.state::<AppState>(),
             QualificationLifecycleObservation::RootChecked {
@@ -5272,6 +5320,211 @@ mod tests {
         assert!(document.get("deviceHandle").is_none());
         assert!(document.get("boundReviewHandle").is_none());
         assert!(document.get("boundExecutionHandle").is_none());
+    }
+
+    #[test]
+    fn associated_non_root_attempt_accepts_unavailable_root_recheck() {
+        assert_eq!(
+            project_root_state(&RootQualificationState::Unavailable),
+            Some(QualificationRootState::NonRoot),
+            "an unavailable su binary is an authoritative non-root result"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+
+        observe(
+            &state,
+            QualificationLifecycleObservation::RootChecked {
+                device_handle: "device-one".to_string(),
+                session_epoch: 1,
+                root_state: RootQualificationState::Unavailable,
+            },
+        );
+
+        let active = session_status(&state).unwrap().unwrap();
+        assert_eq!(active.run_validity, RunValidity::Valid);
+        assert_eq!(active.phase, QualificationSessionPhase::ExecutionPending);
+    }
+
+    #[test]
+    fn check_failed_root_rechecks_invalidate_only_the_matching_association() {
+        for reason in [
+            crate::device_qualification::RootQualificationFailureReason::TimedOut,
+            crate::device_qualification::RootQualificationFailureReason::Transport,
+            crate::device_qualification::RootQualificationFailureReason::UnexpectedResponse,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repository = test_repository(&temp);
+            let candidate = create_run_candidate(&repository, CAPTURED_AT);
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            begin(
+                &state,
+                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+            )
+            .unwrap();
+
+            observe(
+                &state,
+                QualificationLifecycleObservation::RootChecked {
+                    device_handle: "device-one".to_string(),
+                    session_epoch: 1,
+                    root_state: RootQualificationState::CheckFailed {
+                        reason,
+                        message: "untrusted test detail".to_string(),
+                    },
+                },
+            );
+
+            assert!(session_status(&state).unwrap().is_none());
+            let stored = state
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&candidate)
+                .unwrap();
+            assert_eq!(stored.payload["runValidity"], "invalid");
+        }
+    }
+
+    #[test]
+    fn check_failed_root_recheck_does_not_associate_a_restored_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let captured = begin_request(&candidate, CAPTURED_AT, observation("device-one"));
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(&app.state::<AppState>(), captured).unwrap();
+        }
+        let (_app_temp, app) = clean_restart(&temp);
+        let state = app.state::<AppState>();
+
+        observe(
+            &state,
+            QualificationLifecycleObservation::RootChecked {
+                device_handle: "device-two".to_string(),
+                session_epoch: 9,
+                root_state: RootQualificationState::CheckFailed {
+                    reason: crate::device_qualification::RootQualificationFailureReason::TimedOut,
+                    message: "untrusted test detail".to_string(),
+                },
+            },
+        );
+
+        let active = session_status(&state).unwrap().unwrap();
+        assert_eq!(active.run_validity, RunValidity::Valid);
+        assert!(state
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .associated_device_handle()
+            .is_none());
+    }
+
+    #[test]
+    fn stale_check_failed_root_recheck_cannot_invalidate_a_newer_device_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let mut current = observation("device-one");
+        current.session_epoch = Some(2);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, current)).unwrap();
+
+        observe(
+            &state,
+            QualificationLifecycleObservation::RootChecked {
+                device_handle: "device-one".to_string(),
+                session_epoch: 1,
+                root_state: RootQualificationState::CheckFailed {
+                    reason: crate::device_qualification::RootQualificationFailureReason::TimedOut,
+                    message: "stale result".to_string(),
+                },
+            },
+        );
+
+        let active = session_status(&state).unwrap().unwrap();
+        assert_eq!(active.run_validity, RunValidity::Valid);
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .associated_device_session_epoch(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn failed_candidate_summary_leaves_begin_uncommitted_and_allows_a_later_begin() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let failed_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, false);
+        let state = app.state::<AppState>();
+
+        let error = begin_with_candidate_summary(
+            &state,
+            begin_request(&failed_candidate, CAPTURED_AT, observation("device-one")),
+            |_, _| Err("injected candidate projection failure".to_string()),
+        )
+        .expect_err("a failed candidate projection cannot produce a success snapshot");
+        let public_error: Value = serde_json::from_str(&error)
+            .expect("the begin failure must remain a sanitized IPC error");
+        assert_eq!(public_error["code"], "qualification_session_unavailable");
+        {
+            let store = state.qualification_sessions.lock().unwrap();
+            assert!(store.active_candidate().is_none());
+            assert!(store.associated_device_handle().is_none());
+            assert!(!store.is_pending(&failed_candidate));
+        }
+        assert!(!state
+            .recovery
+            .lock()
+            .unwrap()
+            .qualification_handoff_proven_for_candidate(&failed_candidate));
+
+        let repository = state.qualification_repository.get().unwrap();
+        repository
+            .discard_candidate(&failed_candidate)
+            .expect("the command wrapper must still be able to discard the provisional candidate");
+        let next_candidate = create_run_candidate(repository, CAPTURED_AT);
+        let started = begin(
+            &state,
+            begin_request(&next_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .expect("a later valid begin must succeed without resetting process state");
+        assert_eq!(
+            started
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.candidate_handle.as_str()),
+            Some(next_candidate.as_str())
+        );
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .active_candidate(),
+            Some(next_candidate.as_str())
+        );
     }
 
     #[test]

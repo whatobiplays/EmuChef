@@ -26,8 +26,7 @@ use uuid::Uuid;
 
 use crate::adb::{AdbRevalidationError, PlatformToolsReadiness};
 use crate::commands::{
-    catalog, current_adb_path, list_and_reconcile_inventory_with_authority, redact_absolute_paths,
-    redact_exact_serial, safe_error, AppState,
+    catalog, current_adb_path, redact_absolute_paths, redact_exact_serial, safe_error, AppState,
 };
 use crate::device_observation::{
     qualify_reconciled_current_with_runtime, CurrentQualification, DeviceQualificationState,
@@ -1051,7 +1050,7 @@ fn start_real_execution_inner(
         runtime_generation,
         platform_tools_revision,
     };
-    let public = start_real_execution_inner_with_runtime(
+    start_real_execution_inner_with_runtime(
         review_handle,
         Some(state),
         &state.handles,
@@ -1059,18 +1058,7 @@ fn start_real_execution_inner(
         executions,
         &state.sidecar,
         &platform_tools,
-    )?;
-    // Publish the product admission to an active qualification attempt only
-    // after the execution mapping exists.
-    if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
-        let mapping = executions.mapping(
-            ExecutionKind::Real,
-            execution_handle,
-            REAL_EXECUTION_UNAVAILABLE,
-        )?;
-        observe_real_admission(state, &mapping, &mapping.review);
-    }
-    Ok(public)
+    )
 }
 
 /// Immutable snapshot of the revalidated Platform-Tools state consumed by the
@@ -1102,19 +1090,31 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         .clone();
     validate_review_executable(&review)?;
 
-    let mut inventory_request =
+    let inventory_request =
         |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
-    list_and_reconcile_inventory_with_authority(
-        handles,
-        root_qualification,
-        platform_tools.adb_path,
-        platform_tools.runtime_generation,
-        platform_tools.platform_tools_revision,
-        &mut inventory_request,
+    let inventory = inventory_request(
+        "listAdbDevices",
+        json!({ "adbPath": platform_tools.adb_path }),
     )
     .map_err(|_| device_disconnected())?;
     if let Some(state) = qualification_state {
-        crate::commands::report_device_inventory_to_qualification(state);
+        crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+            state,
+            &inventory,
+            platform_tools.runtime_generation,
+            platform_tools.platform_tools_revision,
+            || {},
+        )
+        .map_err(|_| device_disconnected())?;
+    } else {
+        crate::device_qualification::reconcile_inventory_with_context(
+            handles,
+            root_qualification,
+            &inventory,
+            platform_tools.runtime_generation,
+            platform_tools.platform_tools_revision,
+        )
+        .map_err(|_| device_disconnected())?;
     }
 
     // Resolve the retained handle only after fresh reconciliation. A changed
@@ -1151,17 +1151,46 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         Ok(facts) => facts,
         Err(_) => {
             if let Some(state) = qualification_state {
-                crate::qualification_session::observe_device_observation_failure(
-                    state,
-                    observation_failure_target.clone(),
-                );
+                let _transition = crate::commands::qualification_transition_lock(state);
+                let current = state
+                    .handles
+                    .lock()
+                    .map_err(|_| session_error())?
+                    .device(&refreshed_review.device_handle)
+                    .is_ok_and(|device| {
+                        device.state == "available"
+                            && device.serial == serial
+                            && device.session_epoch == session_epoch
+                    });
+                if current {
+                    crate::qualification_session::observe_device_observation_failure_in_transition(
+                        state,
+                        observation_failure_target.clone(),
+                    );
+                }
             }
             return Err(device_disconnected());
         }
     };
     let typed_probe_facts = crate::device_observation::DeviceProbeFacts::decode(&facts);
+    let mut final_probe_observation = typed_probe_facts.as_ref().map(|probe_facts| {
+        crate::device_observation::SelectedDeviceObservation::new(&refreshed_review.device_handle)
+            .with_probe_facts(probe_facts)
+            .with_session_epoch(session_epoch)
+    });
     {
+        let _transition = qualification_state.map(crate::commands::qualification_transition_lock);
         let mut handles = handles.lock().map_err(|_| session_error())?;
+        let current = handles
+            .device(&refreshed_review.device_handle)
+            .is_ok_and(|device| {
+                device.state == "available"
+                    && device.serial == serial
+                    && device.session_epoch == session_epoch
+            });
+        if !current {
+            return Err(device_disconnected());
+        }
         handles
             .set_facts_for_epoch(
                 &refreshed_review.device_handle,
@@ -1169,21 +1198,22 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                 facts.clone(),
             )
             .map_err(|_| device_disconnected())?;
-    }
-    let mut final_probe_observation = typed_probe_facts.as_ref().map(|probe_facts| {
-        crate::device_observation::SelectedDeviceObservation::new(&refreshed_review.device_handle)
-            .with_probe_facts(&probe_facts)
-            .with_session_epoch(session_epoch)
-    });
-    if let Some(state) = qualification_state {
-        match final_probe_observation.as_ref() {
-            Some(observation) => {
-                crate::device_observation::commit_selected_observation(state, observation.clone())?
+        drop(handles);
+        if let Some(state) = qualification_state {
+            match final_probe_observation.as_ref() {
+                Some(observation) => {
+                    crate::device_observation::commit_selected_observation_in_transition(
+                        state,
+                        observation.clone(),
+                    )?
+                }
+                None => {
+                    crate::qualification_session::observe_device_observation_failure_in_transition(
+                        state,
+                        observation_failure_target.clone(),
+                    )
+                }
             }
-            None => crate::qualification_session::observe_device_observation_failure(
-                state,
-                observation_failure_target.clone(),
-            ),
         }
     }
     validate_target(&refreshed_review.target, &serial, &facts)?;
@@ -1246,41 +1276,69 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     });
 
     {
+        let _transition = qualification_state.map(crate::commands::qualification_transition_lock);
         let handles = handles.lock().map_err(|_| session_error())?;
         let device = handles
             .device(&refreshed_review.device_handle)
             .map_err(|_| device_disconnected())?;
         if device.state != "available"
+            || device.serial != serial
             || device.session_epoch != session_epoch
             || device.facts_session_epoch != Some(session_epoch)
         {
             return Err(device_disconnected());
         }
-    }
+        drop(handles);
 
-    if let (Some(state), Some(observation)) = (qualification_state, final_probe_observation.take())
-    {
-        let mut observation = observation.with_snapshot(&current.snapshot);
-        if qualification_device_plan.is_some() {
-            if let Some(profile_id) = current_profile_id {
-                observation = observation.with_profile_id(profile_id);
-                crate::device_observation::commit_selected_observation(state, observation)?;
+        if let (Some(state), Some(observation)) =
+            (qualification_state, final_probe_observation.take())
+        {
+            let mut observation = observation.with_snapshot(&current.snapshot);
+            if qualification_device_plan.is_some() {
+                if let Some(profile_id) = current_profile_id {
+                    observation = observation.with_profile_id(profile_id);
+                    crate::device_observation::commit_selected_observation_in_transition(
+                        state,
+                        observation,
+                    )?;
+                } else {
+                    // Catalog matching is qualification-only at this point. Its
+                    // failure invalidates the attempt but never changes the
+                    // already validated product execution decision.
+                    crate::qualification_session::observe_device_observation_failure_in_transition(
+                        state,
+                        observation_failure_target,
+                    );
+                }
             } else {
-                // Catalog matching is qualification-only at this point. Its
-                // failure invalidates the attempt but never changes the
-                // already validated product execution decision.
-                crate::qualification_session::observe_device_observation_failure(
+                crate::device_observation::commit_selected_observation_in_transition(
                     state,
-                    observation_failure_target,
-                );
+                    observation,
+                )?;
             }
-        } else {
-            crate::device_observation::commit_selected_observation(state, observation)?;
         }
     }
 
     let start_result = request_real_start(runtime, &refreshed_review)?;
-    bind_real_start_result(executions, review_handle, refreshed_review, &start_result)
+    if let Some(state) = qualification_state {
+        // The sidecar start request is complete. Retain product admission and
+        // notify qualification as one ordered transition so inventory or a
+        // terminal report cannot cross the commit-to-observation boundary.
+        let _transition = crate::commands::qualification_transition_lock(state);
+        let public =
+            bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
+        if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
+            let mapping = executions.mapping(
+                ExecutionKind::Real,
+                execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )?;
+            observe_real_admission(state, &mapping, &mapping.review);
+        }
+        Ok(public)
+    } else {
+        bind_real_start_result(executions, review_handle, refreshed_review, &start_result)
+    }
 }
 
 fn request_real_start(
@@ -1568,40 +1626,42 @@ fn retain_terminal_real_execution(
         production_execution_report_bytes_for(mapping, report, report_runtime.clone())?;
     let identity_failed = report_has_identity_failure(report);
     let root_failed = !identity_failed && report_has_root_authority_failure(report);
+    // Execution state precedes the transition gate everywhere it is needed.
+    // The status/report sidecar work above is complete, so the gate covers
+    // only product retention and the matching qualification notification.
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Real-device execution state is unavailable.",
+        )
+    })?;
+    let _transition = crate::commands::qualification_transition_lock(state);
+    if executions.terminal_retained(ExecutionKind::Real, &mapping.public_handle) {
+        return Ok(None);
+    }
     if identity_failed {
         invalidate_identity_terminal_authority(&state.handles, &state.root_qualification, mapping)?;
     } else if root_failed {
         invalidate_root_terminal_authority(&state.handles, &state.root_qualification, mapping)?;
     }
-    {
-        let mut executions = state.executions.lock().map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Real-device execution state is unavailable.",
-            )
-        })?;
-        if executions.terminal_retained(ExecutionKind::Real, &mapping.public_handle) {
-            return Ok(None);
-        }
-        let launch_expected = eligible_launch_label(mapping, report).is_some();
-        let launch_action = executions.launch_action(mapping, report);
-        if launch_expected && launch_action.is_none() {
-            return Err(safe_error(
-                "launch_action_retention_failed",
-                "The completed execution action could not be retained.",
-            ));
-        }
-        if !executions.mark_terminal_with_report(
-            ExecutionKind::Real,
-            &mapping.public_handle,
-            report.clone(),
-            report_runtime,
-        ) {
-            return Err(safe_error(
-                "execution_state_unavailable",
-                "Real-device execution state is unavailable.",
-            ));
-        }
+    let launch_expected = eligible_launch_label(mapping, report).is_some();
+    let launch_action = executions.launch_action(mapping, report);
+    if launch_expected && launch_action.is_none() {
+        return Err(safe_error(
+            "launch_action_retention_failed",
+            "The completed execution action could not be retained.",
+        ));
+    }
+    if !executions.mark_terminal_with_report(
+        ExecutionKind::Real,
+        &mapping.public_handle,
+        report.clone(),
+        report_runtime,
+    ) {
+        return Err(safe_error(
+            "execution_state_unavailable",
+            "Real-device execution state is unavailable.",
+        ));
     }
     let observation = crate::qualification_session::TerminalExecutionObservation {
         execution_handle: mapping.public_handle.clone(),
@@ -2259,22 +2319,17 @@ fn platform_tools_unavailable() -> String {
     )
 }
 
-fn forget_lost_real_mapping(state: &AppState, public_handle: &str) -> Result<(), String> {
-    let removed =
-        recover_poisoned_lock(&state.executions).forget_mapping(ExecutionKind::Real, public_handle);
-    if let Some(mapping) = removed {
-        recover_poisoned_lock(&state.handles)
-            .invalidate_review(&mapping.review_handle, "review_stale");
-    }
-    Ok(())
-}
-
 fn recover_from_real_execution_loss(
     state: &AppState,
     public_handle: &str,
     error: &str,
 ) -> Result<(), String> {
-    let mapping = recover_poisoned_lock(&state.executions)
+    let Some(loss) = execution_session_loss(error) else {
+        return Ok(());
+    };
+    let mut executions = recover_poisoned_lock(&state.executions);
+    let _transition = crate::commands::qualification_transition_lock(state);
+    let mapping = executions
         .mapping(
             ExecutionKind::Real,
             public_handle,
@@ -2282,14 +2337,23 @@ fn recover_from_real_execution_loss(
         )
         .ok();
     let retained_mapping = mapping.clone();
-    match execution_session_loss(error) {
-        Some(ExecutionSessionLoss::RuntimeSessionLost) => invalidate_lost_runtime_authority(state),
-        Some(ExecutionSessionLoss::UnknownExecution) => {
-            forget_lost_real_mapping(state, public_handle)
+    match loss {
+        ExecutionSessionLoss::RuntimeSessionLost => {
+            executions.reset();
+            recover_poisoned_lock(&state.handles)
+                .invalidate_runtime_authority_preserving_identities();
+            recover_poisoned_lock(&state.root_qualification).invalidate();
         }
-        None => return Ok(()),
-    }?;
-    recover_poisoned_lock(&state.executions).mark_lost(public_handle, retained_mapping);
+        ExecutionSessionLoss::UnknownExecution => {
+            let removed = executions.forget_mapping(ExecutionKind::Real, public_handle);
+            if let Some(mapping) = removed {
+                recover_poisoned_lock(&state.handles)
+                    .invalidate_review(&mapping.review_handle, "review_stale");
+            }
+        }
+    }
+    executions.mark_lost(public_handle, retained_mapping);
+    drop(executions);
     // The product no longer holds any authority for this execution, so an
     // active attempt fails closed instead of waiting for evidence that can
     // never arrive.
@@ -2302,10 +2366,9 @@ fn recover_from_real_execution_loss(
     Ok(())
 }
 
-/// Discard all native authority derived from a sidecar process generation that
-/// can no longer answer requests. Portable user intent is owned elsewhere and
-/// remains intact; executions, launch actions, reviews, device facts, and root
-/// qualification evidence cannot survive the lost in-memory runtime session.
+/// Discard native authority after the shared runtime session is lost. Real
+/// execution loss uses the ordered qualification-aware path above; simulated
+/// execution callers use this product-only cleanup.
 fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
     recover_poisoned_lock(&state.executions).reset();
     recover_poisoned_lock(&state.handles).invalidate_runtime_authority_preserving_identities();
@@ -2313,6 +2376,10 @@ fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Discard all native authority derived from a sidecar process generation that
+/// can no longer answer requests. Portable user intent is owned elsewhere and
+/// remains intact; executions, launch actions, reviews, device facts, and root
+/// qualification evidence cannot survive the lost in-memory runtime session.
 fn recover_poisoned_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -4972,6 +5039,7 @@ mod tests {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
             catalog: Ok(catalog),
             qualification_repository,
+            qualification_transition_gate: Mutex::new(()),
             adb: Mutex::new(crate::adb::AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(
                 crate::commands::PlatformToolsSelectionStore::default(),
@@ -6126,8 +6194,14 @@ mod tests {
     }
 
     fn qualification_session_observation() -> crate::device_observation::SelectedDeviceObservation {
+        qualification_session_observation_for("device-one")
+    }
+
+    fn qualification_session_observation_for(
+        device_handle: &str,
+    ) -> crate::device_observation::SelectedDeviceObservation {
         crate::device_observation::SelectedDeviceObservation {
-            device_handle: "device-one".to_string(),
+            device_handle: device_handle.to_string(),
             session_epoch: Some(1),
             profile_id: Some("profile.test".to_string()),
             manufacturer: Some("Test".to_string()),
@@ -6141,9 +6215,15 @@ mod tests {
     }
 
     fn qualification_admission_review() -> crate::qualification_session::ReviewObservation {
+        qualification_admission_review_for("device-one")
+    }
+
+    fn qualification_admission_review_for(
+        device_handle: &str,
+    ) -> crate::qualification_session::ReviewObservation {
         crate::qualification_session::ReviewObservation {
             review_handle: "review-one".to_string(),
-            device_handle: "device-one".to_string(),
+            device_handle: device_handle.to_string(),
             device_plan: "test-plan".to_string(),
             selected_recipes: vec!["test.recipe".to_string()],
             target_id: Some("target-test".to_string()),
@@ -6388,6 +6468,155 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inventory_commit_cannot_be_overtaken_by_terminal_materialization() {
+        let (_repository_root, _app_root, app, execution_handle, candidate, _device_handle) =
+            begin_monitor_qualification_attempt_with_live_device();
+        let state = app.state::<AppState>();
+        let state = &*state;
+        let mapping = state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .unwrap();
+        let report = json!({
+            "executionId": "sidecar-qualification",
+            "status": "succeeded",
+            "errors": [],
+            "recipes": []
+        });
+        let (inventory_committed_tx, inventory_committed_rx) = std::sync::mpsc::channel();
+        let (continue_inventory_tx, continue_inventory_rx) = std::sync::mpsc::channel();
+        let (terminal_started_tx, terminal_started_rx) = std::sync::mpsc::channel();
+        let (terminal_done_tx, terminal_done_rx) = std::sync::mpsc::channel();
+
+        let terminal_completed_early = std::thread::scope(|scope| {
+            let inventory = scope.spawn(move || {
+                crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+                    state,
+                    &json!({ "devices": [] }),
+                    0,
+                    0,
+                    || {
+                        inventory_committed_tx
+                            .send(())
+                            .expect("the inventory test must reach its commit barrier");
+                        continue_inventory_rx
+                            .recv()
+                            .expect("the test must release the inventory notification");
+                    },
+                )
+            });
+            inventory_committed_rx
+                .recv()
+                .expect("product inventory authority should commit before notification");
+
+            let terminal = scope.spawn(move || {
+                terminal_started_tx
+                    .send(())
+                    .expect("the terminal attempt should start");
+                let result = retain_terminal_real_execution(
+                    state,
+                    &mapping,
+                    &report,
+                    "2026-10-03T12:00:00Z",
+                );
+                terminal_done_tx
+                    .send(result)
+                    .expect("the terminal result should be delivered");
+            });
+            terminal_started_rx
+                .recv()
+                .expect("terminal retention should be attempted while inventory is paused");
+            let completed_before_inventory_notification = terminal_done_rx.try_recv().is_ok();
+
+            continue_inventory_tx
+                .send(())
+                .expect("the inventory notification should be released");
+            inventory
+                .join()
+                .expect("inventory reconciliation should complete")
+                .expect("the inventory transition should remain a successful product result");
+            terminal
+                .join()
+                .expect("terminal retention should complete after inventory notification");
+            completed_before_inventory_notification
+        });
+        assert!(
+            !terminal_completed_early,
+            "terminal retention must wait behind the committed inventory notification"
+        );
+        let terminal = terminal_done_rx
+            .recv()
+            .expect("the ordered terminal result should be returned")
+            .expect("terminal retention should succeed")
+            .expect("terminal retention should be the first terminal commit");
+        assert!(matches!(
+            terminal,
+            RealExecutionMonitorEvent::Terminal { .. }
+        ));
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload["runValidity"], "invalid",
+            "the committed disconnect must be observed before terminal evidence is materialized"
+        );
+    }
+
+    #[test]
+    fn terminal_commit_before_later_inventory_removal_keeps_the_completed_candidate_valid() {
+        let (_repository_root, _app_root, app, execution_handle, candidate, _device_handle) =
+            begin_monitor_qualification_attempt_with_live_device();
+        let state = app.state::<AppState>();
+        let state = &*state;
+        let mapping = state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .unwrap();
+        let report = json!({
+            "executionId": "sidecar-qualification",
+            "status": "succeeded",
+            "errors": [],
+            "recipes": []
+        });
+
+        retain_terminal_real_execution(state, &mapping, &report, "2026-10-03T12:00:00Z")
+            .expect("the terminal product transition should be retained")
+            .expect("the terminal product transition should be new");
+        crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+            state,
+            &json!({ "devices": [] }),
+            0,
+            0,
+            || {},
+        )
+        .expect("a later inventory change must retain its ordinary product result");
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "valid");
+    }
+
     /// Prepare one active qualification attempt bound to one real execution so
     /// a test can drive the product terminal monitor through the same seams
     /// production uses.
@@ -6395,6 +6624,53 @@ mod tests {
     /// The first returned directory holds the authored corpus and qualification
     /// repository root, the second holds the application state directories.
     fn begin_monitor_qualification_attempt() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tauri::App<tauri::test::MockRuntime>,
+        String,
+        String,
+    ) {
+        begin_monitor_qualification_attempt_with_handles(SessionHandles::default(), "device-one")
+    }
+
+    fn begin_monitor_qualification_attempt_with_live_device() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tauri::App<tauri::test::MockRuntime>,
+        String,
+        String,
+        String,
+    ) {
+        let mut handles = SessionHandles::default();
+        handles
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "monitor-test-serial",
+                    "state": "available",
+                    "model": "Device",
+                    "transportId": "monitor-test-transport"
+                }]
+            }))
+            .unwrap();
+        let device_handle = handles
+            .single_available_device_handle()
+            .expect("the fixture should retain one available native device");
+        let (repository_root, app_root, app, execution_handle, candidate) =
+            begin_monitor_qualification_attempt_with_handles(handles, &device_handle);
+        (
+            repository_root,
+            app_root,
+            app,
+            execution_handle,
+            candidate,
+            device_handle,
+        )
+    }
+
+    fn begin_monitor_qualification_attempt_with_handles(
+        native_handles: SessionHandles,
+        device_handle: &str,
+    ) -> (
         tempfile::TempDir,
         tempfile::TempDir,
         tauri::App<tauri::test::MockRuntime>,
@@ -6431,7 +6707,7 @@ mod tests {
             )
             .unwrap();
         let executions = Mutex::new(ExecutionHandleStore::default());
-        let handles = Mutex::new(SessionHandles::default());
+        let handles = Mutex::new(native_handles);
         let root = Mutex::new(RootQualificationStore::default());
         let execution_handle = bind_monitor_execution(&executions, "sidecar-qualification");
         let provider =
@@ -6451,7 +6727,7 @@ mod tests {
                 workflow: qualification_session_workflow(),
                 build: serde_json::from_value(qualification_build_json()).unwrap(),
                 runtime_contract: "real-execution-v1".to_string(),
-                observation: qualification_session_observation(),
+                observation: qualification_session_observation_for(device_handle),
             },
         )
         .expect("the attempt should begin against the prepared candidate");
@@ -6468,8 +6744,8 @@ mod tests {
                 Box::new(
                     crate::qualification_session::ExecutionAdmissionObservation {
                         execution_handle: execution_handle.clone(),
-                        review: qualification_admission_review(),
-                        device_handle: "device-one".to_string(),
+                        review: qualification_admission_review_for(device_handle),
+                        device_handle: device_handle.to_string(),
                     },
                 ),
             ),

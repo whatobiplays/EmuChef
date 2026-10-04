@@ -403,6 +403,27 @@ pub(crate) fn check_device_root_observation(
         },
     };
     let changed = previous.as_ref() != Some(&qualification);
+    let _transition = crate::commands::qualification_transition_lock(&state);
+    {
+        let handles = state.handles.lock().map_err(|_| {
+            safe_error("session_state_unavailable", "Session state is unavailable.")
+        })?;
+        let current_device = handles.device(device_handle).map_err(|_| {
+            safe_error(
+                "root_check_stale",
+                "The device changed while root access was being checked. Try again.",
+            )
+        })?;
+        if current_device.state != "available"
+            || current_device.session_epoch != context.session_epoch
+            || current_device.serial != target.serial
+        {
+            return Err(safe_error(
+                "root_check_stale",
+                "The device changed while root access was being checked. Try again.",
+            ));
+        }
+    }
     let committed = attempt_guard.complete(qualification.clone())?;
     if !committed {
         return Err(safe_error(
@@ -432,6 +453,7 @@ pub(crate) fn check_device_root_observation(
     if changed {
         handles.invalidate_reviews_for_device(device_handle, "root_qualification_changed");
     }
+    drop(handles);
     // Feed the committed explicit root-check result to the active attempt. The
     // root check stays the only root authority; qualification only observes the
     // result it committed.
@@ -443,7 +465,6 @@ pub(crate) fn check_device_root_observation(
             root_state: qualification.clone(),
         },
     );
-    drop(handles);
     Ok(RootQualificationCheckDto {
         qualification,
         runtime_generation,

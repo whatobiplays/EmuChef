@@ -568,6 +568,17 @@ pub(crate) fn commit_selected_observation(
     state: &AppState,
     observation: SelectedDeviceObservation,
 ) -> Result<(), String> {
+    let _transition = crate::commands::qualification_transition_lock(state);
+    commit_selected_observation_in_transition(state, observation)
+}
+
+/// Commit an observation while the caller already owns the shared transition
+/// gate. This keeps multi-part product commits and their qualification hook
+/// atomic without re-entering the non-recursive mutex.
+pub(crate) fn commit_selected_observation_in_transition(
+    state: &AppState,
+    observation: SelectedDeviceObservation,
+) -> Result<(), String> {
     let session_epoch = observation
         .session_epoch
         .ok_or_else(unverified_device_error)?;
@@ -591,13 +602,13 @@ pub(crate) fn commit_selected_observation(
             "The selected device changed. Refresh device discovery and try again.",
         ));
     }
+    drop(handles);
     crate::qualification_session::observe(
         state,
         crate::qualification_session::QualificationLifecycleObservation::DeviceObserved(Box::new(
             observation,
         )),
     );
-    drop(handles);
     Ok(())
 }
 
@@ -1176,24 +1187,38 @@ pub(crate) fn commit_snapshot_observation(
     current: &CurrentQualification,
     failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
 ) -> Result<(), String> {
+    let _transition = crate::commands::qualification_transition_lock(state);
     let Some(identity) = current.snapshot.device_identity.as_deref() else {
-        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
         return Ok(());
     };
     let Some(context) = current.context.as_ref() else {
-        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
         return Ok(());
     };
-    if let Err(error) = commit_selected_observation(
+    if let Err(error) = commit_selected_observation_in_transition(
         state,
         SelectedDeviceObservation::new(identity)
             .with_snapshot(&current.snapshot)
             .with_session_epoch(context.session_epoch),
     ) {
-        return fail_qualification_refresh(state, failure_target, error);
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
+        return Err(error);
     }
     if current.snapshot.state != DeviceQualificationState::Supported {
-        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
     }
     Ok(())
 }

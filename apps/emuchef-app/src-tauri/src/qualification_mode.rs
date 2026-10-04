@@ -1094,6 +1094,7 @@ mod tests {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
             catalog: Err("test catalog is not needed by qualification commands".to_string()),
             qualification_repository: provider,
+            qualification_transition_gate: Mutex::new(()),
             adb: Mutex::new(AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
             input_contracts: Mutex::new(InputContractSnapshot::default()),
@@ -1355,7 +1356,6 @@ mod tests {
     fn target_capture_rejects_root_checks_that_never_established_a_fact() {
         for root_state in [
             None,
-            Some(RootQualificationState::Unavailable),
             Some(RootQualificationState::CheckFailed {
                 reason: RootQualificationFailureReason::TimedOut,
                 message: "timed out".to_string(),
@@ -1387,6 +1387,7 @@ mod tests {
         for (root, expected) in [
             (RootQualificationState::Granted, "rooted"),
             (RootQualificationState::Denied, "non_root"),
+            (RootQualificationState::Unavailable, "non_root"),
         ] {
             let mut capture = trusted_capture();
             capture.observation.root_state = Some(root);

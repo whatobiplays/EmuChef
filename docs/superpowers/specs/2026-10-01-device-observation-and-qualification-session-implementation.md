@@ -57,6 +57,13 @@ Required observation points:
 - real-execution admission/start; and
 - real-execution terminal retention/classification.
 
+An authoritative selected-device probe that fails, or whose product response
+cannot be decoded into the required typed facts, invalidates qualification only
+when the result still belongs to the attempt's currently associated device
+handle and native session epoch. A delayed completion from an older epoch must
+not invalidate a newer association. Qualification failure remains evidence-only
+and never changes the ordinary product probe result or error.
+
 Do not observe terminal state from polling/export/UI reads.
 
 If qualification handling fails after product commit:
@@ -98,6 +105,21 @@ No operator candidate-finalization action remains.
 7. After clean restart, automatically reassociate on the first trusted device observation; never reuse the prior process-local handle.
 8. Compatible observation continues the session; conflicting observation invalidates it.
 9. If invalid-candidate persistence fails, keep the session poisoned/non-recordable in memory and never claim the candidate exists.
+
+A current-version session is resumable only when its retained
+`authoredRecipeDigests` are present and contain exactly one digest for every
+required recipe, with no missing, duplicate, or extra recipe IDs. Every recipe
+ID must use the canonical recipe-ID format, and each digest must be exactly 64
+lowercase hexadecimal characters. Missing, malformed, or inconsistent digest
+sets follow corrupt-session recovery and never resume as recordable evidence.
+
+Inventory and device observations carry native continuity provenance. Only a
+snapshot from the current native inventory generation may affect current
+qualification authority, and device continuity is scoped to the exact current
+session epoch. A delayed older inventory snapshot is ignored and cannot
+invalidate or reassociate a newer device session. A compatible observation
+continues or reassociates a session only when its continuity provenance is
+current; a conflicting current observation invalidates monotonically.
 
 Do not add a qualification event journal.
 

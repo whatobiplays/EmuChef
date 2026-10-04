@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -38,6 +38,11 @@ pub struct AppState {
     pub sidecar: SidecarState,
     pub catalog: Result<CatalogDescriptor, String>,
     pub qualification_repository: QualificationRepositoryProvider,
+    /// Serializes trusted product commits with their qualification observation.
+    /// Acquire it only after sidecar/ADB work is complete. When an execution
+    /// store must also be locked, execution state precedes this gate; all other
+    /// callers acquire the gate before product authority stores.
+    pub qualification_transition_gate: Mutex<()>,
     pub adb: Mutex<AdbManager>,
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
@@ -78,24 +83,72 @@ where
             )
         })?
         .revision();
-    list_and_reconcile_inventory_with_authority(
-        &state.handles,
-        &state.root_qualification,
+    list_and_reconcile_inventory_for_state(
+        state,
         &adb_path,
         runtime_generation,
         platform_tools_revision,
         request,
     )
-    .map(|devices| {
-        report_device_inventory_to_qualification(state);
-        devices
-    })
 }
 
-/// Report one reconciled inventory to the active qualification attempt. A
-/// device that is gone can no longer prove attempt continuity, so the session
-/// fails closed instead of staying active on an absent device.
-pub(crate) fn report_device_inventory_to_qualification(state: &AppState) {
+/// Serialize inventory authority retention with its qualification observation.
+/// The request is completed before this function acquires the transition gate.
+pub(crate) fn list_and_reconcile_inventory_for_state<F>(
+    state: &AppState,
+    adb_path: &str,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    request: &mut F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    let inventory = request("listAdbDevices", json!({ "adbPath": adb_path })).map_err(|_| {
+        safe_error(
+            "adb_inventory_failed",
+            "Connected Android devices could not be listed.",
+        )
+    })?;
+    reconcile_inventory_snapshot_with_state_and_hook(
+        state,
+        &inventory,
+        runtime_generation,
+        platform_tools_revision,
+        || {},
+    )
+}
+
+/// Retain one reconciled inventory and notify qualification while holding the
+/// shared transition gate. The hook exists for a deterministic ordering test;
+/// production callers use the same path with an empty hook.
+pub(crate) fn reconcile_inventory_snapshot_with_state_and_hook<F>(
+    state: &AppState,
+    inventory: &Value,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    after_product_commit: F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnOnce(),
+{
+    let _transition = qualification_transition_lock(state);
+    let result = reconcile_inventory_with_context(
+        &state.handles,
+        &state.root_qualification,
+        inventory,
+        runtime_generation,
+        platform_tools_revision,
+    );
+    let (generation, available_devices) = current_qualification_inventory_snapshot(state);
+    after_product_commit();
+    report_device_inventory_to_qualification(state, generation, &available_devices);
+    result
+}
+
+/// Capture one immutable, generation-tagged inventory projection from the
+/// native product store.
+fn current_qualification_inventory_snapshot(state: &AppState) -> (u64, Vec<(String, u64)>) {
     let (generation, available_devices) = match state.handles.lock() {
         Ok(handles) => (
             handles.device_generation(),
@@ -120,7 +173,31 @@ pub(crate) fn report_device_inventory_to_qualification(state: &AppState) {
             )
         }
     };
-    crate::qualification_session::observe_device_inventory(state, generation, &available_devices);
+    (generation, available_devices)
+}
+
+/// Report one committed inventory generation to the active qualification
+/// attempt. A missing associated device invalidates the attempt.
+fn report_device_inventory_to_qualification(
+    state: &AppState,
+    generation: u64,
+    available_devices: &[(String, u64)],
+) {
+    crate::qualification_session::observe_device_inventory(state, generation, available_devices);
+}
+
+/// Serialize a product observation commit and its qualification notification.
+/// A poisoned mutex is recovered because losing this ordering boundary must
+/// never silently drop a committed product transition.
+pub(crate) fn qualification_transition_lock(state: &AppState) -> MutexGuard<'_, ()> {
+    match state.qualification_transition_gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let guard = poisoned.into_inner();
+            state.qualification_transition_gate.clear_poison();
+            guard
+        }
+    }
 }
 
 /// Request and reconcile one inventory using explicit native authority inputs.
@@ -882,6 +959,7 @@ where
     let facts = match probe(&serial) {
         Ok(facts) => facts,
         Err(error) => {
+            let _transition = qualification_transition_lock(state);
             let current = state
                 .handles
                 .lock()
@@ -903,7 +981,7 @@ where
                     "The selected device changed. Refresh device discovery and try again.",
                 ));
             }
-            crate::qualification_session::observe_device_observation_failure(
+            crate::qualification_session::observe_device_observation_failure_in_transition(
                 state,
                 failure_target.clone(),
             );
@@ -911,25 +989,38 @@ where
         }
     };
     let typed = crate::device_observation::DeviceProbeFacts::decode(&facts);
-    state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "Device session state is unavailable.",
-            )
-        })?
-        .set_facts_for_epoch(&device_handle, session_epoch, facts.clone())?;
+    let _transition = qualification_transition_lock(state);
+    let mut handles = state.handles.lock().map_err(|_| {
+        safe_error(
+            "session_state_unavailable",
+            "Device session state is unavailable.",
+        )
+    })?;
+    let current = handles.device(device_handle).is_ok_and(|device| {
+        device.state == "available"
+            && device.serial == serial
+            && device.session_epoch == session_epoch
+    });
+    if !current {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
+    handles.set_facts_for_epoch(&device_handle, session_epoch, facts.clone())?;
+    drop(handles);
     if let Some(typed_facts) = typed.as_ref() {
-        crate::device_observation::commit_selected_observation(
+        crate::device_observation::commit_selected_observation_in_transition(
             &state,
             crate::device_observation::SelectedDeviceObservation::new(device_handle)
                 .with_probe_facts(typed_facts)
                 .with_session_epoch(session_epoch),
         )?;
     } else {
-        crate::qualification_session::observe_device_observation_failure(state, failure_target);
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
     }
     Ok(DeviceProbeResult {
         facts,
@@ -1003,6 +1094,7 @@ fn match_device_result(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
+    let _transition = qualification_transition_lock(state);
     {
         let handles = state.handles.lock().map_err(|_| {
             safe_error(
@@ -1043,7 +1135,7 @@ fn match_device_result(
         {
             observation = observation.with_profile_id(profile_id);
         }
-        crate::device_observation::commit_selected_observation(state, observation)?;
+        crate::device_observation::commit_selected_observation_in_transition(state, observation)?;
     }
     Ok((public, projection))
 }
@@ -1231,12 +1323,27 @@ pub fn create_review(
         created: Instant::now(),
         last_access: Instant::now(),
     };
+    let _transition = qualification_transition_lock(&state);
     let mut handles = state.handles.lock().map_err(|_| {
         safe_error(
             "session_state_unavailable",
             "Review session state is unavailable.",
         )
     })?;
+    let current_device = handles.device(&device_handle).map_err(|_| {
+        safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        )
+    })?;
+    if current_device.state != "available"
+        || handles.qualification_context(&device_handle) != snapshot.qualification_context
+    {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
     handles.invalidate_catalog(catalog(&state)?.digest());
     let review_handle = handles.insert_review(snapshot.clone());
     drop(handles);
