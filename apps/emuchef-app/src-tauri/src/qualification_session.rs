@@ -4556,16 +4556,51 @@ mod tests {
             available_test_device(&state, "simulated-runtime-loss");
         let session_handle =
             terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+        let (reset_tx, reset_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_gate_tx, checkpoint_gate_rx) = std::sync::mpsc::sync_channel(1);
 
-        crate::execution::invalidate_lost_runtime_authority_for_test(&state).unwrap();
+        std::thread::scope(|scope| {
+            let state_ref = &*state;
+            let reset = scope.spawn(move || {
+                crate::execution::tests::poll_simulated_runtime_loss_for_test(
+                    state_ref,
+                    move || {
+                        assert!(state_ref.qualification_transition_gate.try_lock().is_err());
+                        reset_tx.send(()).unwrap();
+                        continue_rx.recv().unwrap();
+                    },
+                )
+            });
+            reset_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("the event poll should reach its post-reset transition boundary");
 
-        assert!(record_checkpoint(
-            &state,
-            &session_handle,
-            "device_state_verified",
-            CheckpointOutcome::Pass,
-        )
-        .is_err());
+            let state_ref = &*state;
+            let checkpoint_session = session_handle.clone();
+            let checkpoint = scope.spawn(move || {
+                let blocked = state_ref.qualification_transition_gate.try_lock().is_err();
+                checkpoint_gate_tx.send(blocked).unwrap();
+                record_checkpoint(
+                    state_ref,
+                    &checkpoint_session,
+                    "device_state_verified",
+                    CheckpointOutcome::Pass,
+                )
+            });
+            assert!(checkpoint_gate_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("checkpoint should inspect the shared transition gate"));
+
+            continue_tx.send(()).unwrap();
+            assert!(reset
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .contains("execution_unavailable"));
+            assert!(checkpoint.join().unwrap().is_err());
+        });
+
         let stored = state
             .qualification_repository
             .get()

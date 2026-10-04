@@ -656,19 +656,51 @@ pub fn get_simulated_execution_events(
     after_sequence: u64,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    get_simulated_execution_events_with_runtime(
+        &state,
+        &state.sidecar,
+        &execution_handle,
+        after_sequence,
+        || state.sidecar.runtime_session_was_lost(),
+        || {},
+    )
+}
+
+fn get_simulated_execution_events_with_runtime(
+    state: &AppState,
+    runtime: &impl RuntimeRequester,
+    execution_handle: &str,
+    after_sequence: u64,
+    runtime_session_was_lost: impl FnOnce() -> bool,
+    after_store_reset: impl FnOnce(),
+) -> Result<Value, String> {
     let mut executions = state
         .executions
         .lock()
         .map_err(|_| execution_state_error())?;
     let result = request_simulated_execution_events(
-        &state.sidecar,
+        runtime,
         &mut executions,
-        &execution_handle,
+        execution_handle,
         after_sequence,
     );
-    drop(executions);
-    if result.is_err() && state.sidecar.runtime_session_was_lost() {
-        invalidate_lost_runtime_authority(&state)?;
+    if result.is_err()
+        && (runtime_session_was_lost()
+            || result.as_ref().err().is_some_and(|error| {
+                execution_session_loss(error) == Some(ExecutionSessionLoss::RuntimeSessionLost)
+            }))
+    {
+        invalidate_lost_runtime_authority_with_execution_guard(
+            state,
+            executions,
+            after_store_reset,
+        )?;
+        return Err(safe_error(
+            "execution_unavailable",
+            "The in-memory simulated run was lost. Return to Review or generate a new review.",
+        ));
+    } else {
+        drop(executions);
     }
     result
 }
@@ -696,16 +728,18 @@ fn request_simulated_execution_events(
         Ok(response) => response,
         Err(error) if execution_session_loss(&error).is_some() => {
             match execution_session_loss(&error) {
-                Some(ExecutionSessionLoss::RuntimeSessionLost) => executions.reset(),
+                Some(ExecutionSessionLoss::RuntimeSessionLost) => {
+                    return Err(runtime_session_lost_error());
+                }
                 Some(ExecutionSessionLoss::UnknownExecution) => {
                     executions.forget_active(ExecutionKind::Simulated, execution_handle);
+                    return Err(safe_error(
+                        "execution_unavailable",
+                        "The in-memory simulated run was lost. Return to Review or generate a new review.",
+                    ));
                 }
                 None => unreachable!("guard requires a recognized execution session loss"),
             }
-            return Err(safe_error(
-                "execution_unavailable",
-                "The in-memory simulated run was lost. Return to Review or generate a new review.",
-            ));
         }
         Err(_) => {
             return Err(safe_error(
@@ -2443,20 +2477,24 @@ fn recover_from_real_execution_loss(
 /// the execution store before the transition gate, matching admission and real
 /// execution loss, then publish the qualification consequence before release.
 fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
-    let mut executions = recover_poisoned_lock(&state.executions);
+    let executions = recover_poisoned_lock(&state.executions);
+    invalidate_lost_runtime_authority_with_execution_guard(state, executions, || {})
+}
+
+fn invalidate_lost_runtime_authority_with_execution_guard(
+    state: &AppState,
+    mut executions: std::sync::MutexGuard<'_, ExecutionHandleStore>,
+    after_store_reset: impl FnOnce(),
+) -> Result<(), String> {
     let transition = crate::commands::qualification_transition_lock(state);
     executions.reset();
+    after_store_reset();
     recover_poisoned_lock(&state.handles).invalidate_runtime_authority_preserving_identities();
     recover_poisoned_lock(&state.root_qualification).invalidate();
     crate::qualification_session::observe_product_runtime_session_lost_in_transition(state);
     drop(executions);
     transition.release_and_retry_best_effort();
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn invalidate_lost_runtime_authority_for_test(state: &AppState) -> Result<(), String> {
-    invalidate_lost_runtime_authority(state)
 }
 
 /// Discard all native authority derived from a sidecar process generation that
@@ -3920,7 +3958,7 @@ fn execution_state_error() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -5046,6 +5084,34 @@ mod tests {
                 .push((request_type.into(), payload));
             self.result.clone()
         }
+    }
+
+    pub(crate) fn poll_simulated_runtime_loss_for_test(
+        state: &AppState,
+        after_store_reset: impl FnOnce(),
+    ) -> Result<Value, String> {
+        let mapping = {
+            let mut executions = state.executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Simulated).unwrap();
+            executions.bind_started(
+                ExecutionKind::Simulated,
+                "sidecar-simulated-loss".into(),
+                "review-simulated-loss".into(),
+                review(),
+            )
+        };
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err(json!({ "code": "runtime_session_lost" }).to_string()),
+        };
+        get_simulated_execution_events_with_runtime(
+            state,
+            &runtime,
+            &mapping.public_handle,
+            0,
+            || true,
+            after_store_reset,
+        )
     }
 
     struct ScriptedRuntime {
@@ -8032,7 +8098,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_runtime_session_resets_all_execution_mappings() {
+    fn event_request_defers_runtime_loss_reset_to_transition_resolution() {
         let runtime = FakeRuntime {
             requests: Mutex::new(Vec::new()),
             result: Err(json!({ "code": "runtime_session_lost" }).to_string()),
@@ -8047,7 +8113,7 @@ mod tests {
         );
         store.mark_terminal(ExecutionKind::Simulated, &terminal.public_handle);
         store.reserve_start(ExecutionKind::Real).unwrap();
-        store.bind_started(
+        let active = store.bind_started(
             ExecutionKind::Real,
             "sidecar-active".into(),
             "active-review".into(),
@@ -8058,17 +8124,63 @@ mod tests {
             request_simulated_execution_events(&runtime, &mut store, &terminal.public_handle, 0)
                 .unwrap_err();
 
-        assert!(error.contains("execution_unavailable"));
-        assert!(store
-            .mapping(
+        assert!(error.contains("runtime_session_lost"));
+        assert_eq!(
+            store
+                .mapping(ExecutionKind::Real, &active.public_handle, "unavailable")
+                .unwrap()
+                .sidecar_id,
+            "sidecar-active",
+            "event polling must not reset product authority before the transition gate is held"
+        );
+        assert!(store.reserve_start(ExecutionKind::Simulated).is_err());
+    }
+
+    #[test]
+    fn simulated_event_runtime_loss_resets_authority_inside_transition_gate() {
+        let (_temp, app) = test_app(
+            Mutex::new(ExecutionHandleStore::default()),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let mapping = {
+            let mut executions = state.executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Simulated).unwrap();
+            executions.bind_started(
                 ExecutionKind::Simulated,
-                &terminal.public_handle,
-                "unavailable"
+                "sidecar-simulated".into(),
+                "review-simulated".into(),
+                review(),
             )
-            .is_err());
-        store
-            .reserve_start(ExecutionKind::Real)
-            .expect("an irrecoverably lost runtime session must release its active slot");
+        };
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err(json!({ "code": "runtime_session_lost" }).to_string()),
+        };
+        let mut reset_was_inside_transition = false;
+
+        let error = get_simulated_execution_events_with_runtime(
+            &state,
+            &runtime,
+            &mapping.public_handle,
+            0,
+            || true,
+            || {
+                reset_was_inside_transition =
+                    state.qualification_transition_gate.try_lock().is_err();
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("execution_unavailable"));
+        assert!(reset_was_inside_transition);
+        assert!(state
+            .executions
+            .lock()
+            .unwrap()
+            .reserve_start(ExecutionKind::Simulated)
+            .is_ok());
     }
 
     #[test]
