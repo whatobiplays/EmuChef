@@ -1,0 +1,33 @@
+CONTEXT.md
+  s_09b05cf592369e::t_2b171539256c7b 1433-1439
+  s_09b05cf592369e::t_edc4cdf9e32d8a 1428-1432
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_c2c9493907bbd8 6753-6812,6814-6815,6817-6822,6827-6840,6843-6851,6856-6866
+  s_09b05cf592369e::t_a30860f3f5e3ef 2284,2297-2303,2312,2314-2315,2337-2345,2349-2360
+  s_09b05cf592369e::t_8fa13bbc8bc4fe 6841-6842,6852-6855
+  s_09b05cf592369e::t_e6dee6a0c70509 2285-2292,2311
+  s_09b05cf592369e::t_047213617e3461 6813,6816,6823-6826
+  s_09b05cf592369e::t_75e6df3d688639 2346,2367,2370,2380,2419,2453
+  s_09b05cf592369e::t_c414ddacaed33e 6752
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "faf0c255b8e825ea89948d883a54fe75d665aa40",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
