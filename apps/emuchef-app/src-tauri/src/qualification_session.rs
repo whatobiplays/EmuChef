@@ -2282,20 +2282,37 @@ pub(crate) fn observe_reserved_real_execution_admission_in_transition(
     fence: Option<&QualificationAdmissionFence>,
     admission: ExecutionAdmissionObservation,
 ) {
+    observe_reserved_real_execution_admission_with_hook(state, fence, admission, || {});
+}
+
+fn observe_reserved_real_execution_admission_with_hook(
+    state: &AppState,
+    fence: Option<&QualificationAdmissionFence>,
+    admission: ExecutionAdmissionObservation,
+    after_reservation_check: impl FnOnce(),
+) {
     let Some(fence) = fence else {
         return;
     };
-    let store = lock_session_store(state);
+    let Some(provider) = state.qualification_repository.get() else {
+        return;
+    };
+    let mut store = lock_session_store(state);
+    if ensure_recovered(state, provider, &mut store).is_err() {
+        return;
+    }
     let matches_reservation = store.active_candidate() == Some(fence.candidate_handle.as_str())
         && store.bound_review_handle() == Some(fence.review_handle.as_str())
         && admission.review.review_handle == fence.review_handle
         && !store.is_poisoned(&fence.candidate_handle);
-    drop(store);
     if !matches_reservation {
         return;
     }
-    observe_in_transition(
+    after_reservation_check();
+    observe_recovered_in_transition(
         state,
+        provider,
+        &mut store,
         QualificationLifecycleObservation::RealExecutionAdmitted(Box::new(admission)),
     );
 }
@@ -2317,19 +2334,40 @@ pub(crate) fn observe_in_transition(
             store
         }
     };
-    if ensure_recovered(state, provider, &mut store).is_err() {
+    observe_in_transition_with_store(state, provider, &mut store, observation);
+}
+
+fn observe_in_transition_with_store(
+    state: &AppState,
+    provider: &QualificationRepository,
+    store: &mut QualificationSessionStore,
+    observation: QualificationLifecycleObservation,
+) {
+    if ensure_recovered(state, provider, store).is_err() {
         return;
     }
+    observe_recovered_in_transition(state, provider, store, observation);
+}
+
+/// Apply an observation after recovery has run while keeping the session-store
+/// lock held. Admission fencing uses this boundary so no attempt replacement
+/// can occur between reservation validation and applying the transition.
+fn observe_recovered_in_transition(
+    state: &AppState,
+    provider: &QualificationRepository,
+    store: &mut QualificationSessionStore,
+    observation: QualificationLifecycleObservation,
+) {
     let Some(candidate_handle) = store.active_candidate.clone() else {
         return;
     };
     if store.is_poisoned(&candidate_handle) {
         return;
     }
-    let mut session = match load_active_session(provider, &store, &candidate_handle) {
+    let mut session = match load_active_session(provider, store, &candidate_handle) {
         Ok(session) => session,
         Err(_) => {
-            poison_attempt(state, provider, &mut store, &candidate_handle);
+            poison_attempt(state, provider, store, &candidate_handle);
             return;
         }
     };
@@ -2339,7 +2377,7 @@ pub(crate) fn observe_in_transition(
     }
     match &observation {
         QualificationLifecycleObservation::DeviceObserved(observation) => {
-            apply_device_observation(&mut session, &mut store, observation);
+            apply_device_observation(&mut session, store, observation);
         }
         QualificationLifecycleObservation::DeviceObservationFailed(target) => {
             if candidate_handle == target.candidate_handle
@@ -2378,7 +2416,7 @@ pub(crate) fn observe_in_transition(
                     .cloned()
                     .map(|observed| observed.with_root_state(root_state.clone()));
                 if let Some(accumulated) = accumulated {
-                    apply_device_observation(&mut session, &mut store, &accumulated);
+                    apply_device_observation(&mut session, store, &accumulated);
                 }
             }
         }
@@ -2412,7 +2450,7 @@ pub(crate) fn observe_in_transition(
     let _ = finish_transition(
         state,
         provider,
-        &mut store,
+        store,
         session,
         AuthoredSourceVerification::NotVerified,
     );
@@ -6709,6 +6747,121 @@ mod tests {
         let store = state.qualification_sessions.lock().unwrap();
         assert_eq!(store.bound_execution_handle(), None);
         assert_eq!(store.bound_review_handle(), Some("review-second"));
+    }
+
+    #[test]
+    fn reserved_admission_keeps_fence_and_transition_atomic_with_attempt_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let first_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let first_session = session_handle_for_candidate(&first_candidate).unwrap();
+        begin(
+            &state,
+            begin_request(&first_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        record_checkpoint(
+            &state,
+            &first_session,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-first",
+                "device-one",
+            ))),
+        );
+        let fence = capture_execution_admission_fence(&state, "review-first")
+            .expect("the start reservation should capture attempt A and its review");
+
+        let (checked_tx, checked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let state = &state;
+            let admission = ExecutionAdmissionObservation {
+                execution_handle: "execution-first".to_string(),
+                review: review("review-first", "device-one"),
+                device_handle: "device-one".to_string(),
+            };
+            let admission_thread = scope.spawn(move || {
+                let transition = crate::commands::qualification_transition_lock(state);
+                observe_reserved_real_execution_admission_with_hook(
+                    state,
+                    Some(&fence),
+                    admission,
+                    || {
+                        checked_tx
+                            .send(())
+                            .expect("the test should observe the reservation check");
+                        release_rx
+                            .recv()
+                            .expect("the test should release the admission transition");
+                    },
+                );
+                transition.release_and_retry_best_effort();
+            });
+
+            checked_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("the admission should reach the fenced transition");
+            let session_store_remained_locked = matches!(
+                state.qualification_sessions.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            release_tx
+                .send(())
+                .expect("the admission should continue while retaining the session lock");
+            admission_thread
+                .join()
+                .expect("the admission thread should not panic");
+            assert!(
+                session_store_remained_locked,
+                "the reservation check and admission transition must retain one session-store lock"
+            );
+        });
+
+        let admitted = session_status(&state).unwrap().unwrap();
+        assert_eq!(admitted.phase, QualificationSessionPhase::ExecutionActive);
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .bound_execution_handle(),
+            Some("execution-first")
+        );
+
+        abandon(&state, &first_session).unwrap();
+        let second_candidate =
+            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+        begin(
+            &state,
+            begin_request(&second_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        let replacement = session_status(&state).unwrap().unwrap();
+        assert_eq!(
+            replacement.session_handle,
+            session_handle_for_candidate(&second_candidate).unwrap()
+        );
+        assert_eq!(
+            replacement.phase,
+            QualificationSessionPhase::ExecutionPending
+        );
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .bound_execution_handle(),
+            None
+        );
     }
 
     #[test]
