@@ -83,7 +83,7 @@ function executionRefreshSignal(execution: WorkflowState["execution"] | undefine
       return `starting:${execution.generation}:${execution.mode}`;
     case "active":
     case "terminal":
-      return `${execution.kind}:${execution.generation}:${execution.mode}:${execution.snapshot.executionHandle}:${execution.snapshot.reviewHandle}:${execution.snapshot.status}`;
+      return `${execution.kind}:${execution.generation}:${execution.mode}:${execution.snapshot.executionHandle}:${execution.snapshot.reviewHandle}`;
     case "unavailable":
       return `unavailable:${execution.generation}:${execution.executionHandle}`;
   }

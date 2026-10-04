@@ -1326,6 +1326,9 @@ pub(crate) enum QualificationLifecycleObservation {
     /// Platform-Tools replacement or removal invalidated all process-local
     /// device authority. Only a currently associated attempt depends on it.
     ProductDeviceAuthorityReset,
+    /// The product runtime session was lost and all process-local device
+    /// authority derived from it was cleared.
+    ProductRuntimeSessionLost,
     RootChecked {
         device_handle: String,
         session_epoch: u64,
@@ -2414,6 +2417,9 @@ fn observe_recovered_in_transition(
                 session.invalidate(QualificationInvalidation::DeviceUnavailable);
             }
         }
+        QualificationLifecycleObservation::ProductRuntimeSessionLost => {
+            session.invalidate(QualificationInvalidation::DeviceUnavailable);
+        }
         QualificationLifecycleObservation::RootChecked {
             device_handle,
             session_epoch,
@@ -2559,6 +2565,15 @@ pub(crate) fn observe_platform_tools_authority_reset_in_transition(state: &AppSt
     observe_in_transition(
         state,
         QualificationLifecycleObservation::ProductDeviceAuthorityReset,
+    );
+}
+
+/// Apply a committed loss of the shared product runtime while the caller owns
+/// the product-transition gate.
+pub(crate) fn observe_product_runtime_session_lost_in_transition(state: &AppState) {
+    observe_in_transition(
+        state,
+        QualificationLifecycleObservation::ProductRuntimeSessionLost,
     );
 }
 
@@ -4530,6 +4545,38 @@ mod tests {
     }
 
     #[test]
+    fn simulated_runtime_loss_invalidates_terminal_pending_attempt_before_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) =
+            available_test_device(&state, "simulated-runtime-loss");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        crate::execution::invalidate_lost_runtime_authority_for_test(&state).unwrap();
+
+        assert!(record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .is_err());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
     fn platform_tools_replacement_serializes_authority_reset_with_finalization() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -4639,15 +4686,26 @@ mod tests {
         let (removal_visible_tx, removal_visible_rx) = std::sync::mpsc::sync_channel(1);
         let (continue_removal_tx, continue_removal_rx) = std::sync::mpsc::sync_channel(1);
         let (removal_result_tx, removal_result_rx) = std::sync::mpsc::sync_channel(1);
+        let (gate_was_free_tx, gate_was_free_rx) = std::sync::mpsc::sync_channel(1);
         let (checkpoint_started_tx, checkpoint_started_rx) = std::sync::mpsc::sync_channel(1);
         let (checkpoint_result_tx, checkpoint_result_rx) = std::sync::mpsc::sync_channel(1);
 
         std::thread::scope(|scope| {
             let state_for_removal = &state;
             let removal = scope.spawn(move || {
-                let result = crate::commands::remove_platform_tools_with_hook(
+                let result = crate::commands::remove_platform_tools_with_lock_hooks(
                     state_for_removal,
                     None,
+                    || {
+                        gate_was_free_tx
+                            .send(
+                                state_for_removal
+                                    .qualification_transition_gate
+                                    .try_lock()
+                                    .is_ok(),
+                            )
+                            .unwrap();
+                    },
                     || {
                         assert!(!state_for_removal.adb.lock().unwrap().is_app_managed());
                         removal_visible_tx.send(()).unwrap();
@@ -4686,6 +4744,9 @@ mod tests {
             checkpoint.join().unwrap();
         });
 
+        assert!(gate_was_free_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("removal should observe execution lock before taking the transition gate"));
         removal_result_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("successful Platform-Tools removal should return its status")

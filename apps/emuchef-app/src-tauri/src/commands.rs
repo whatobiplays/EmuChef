@@ -877,41 +877,47 @@ pub fn remove_platform_tools(
     expected_revision: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    remove_platform_tools_after_mutation(&state, expected_revision, || {})
+    remove_platform_tools_after_mutation(&state, expected_revision, || {}, || {})
 }
 
 #[cfg(test)]
-pub(crate) fn remove_platform_tools_with_hook<F>(
+pub(crate) fn remove_platform_tools_with_lock_hooks<F, G>(
     state: &AppState,
     expected_revision: Option<u64>,
-    after_product_removal: F,
+    after_execution_lock: F,
+    after_product_removal: G,
 ) -> Result<Value, String>
 where
     F: FnOnce(),
+    G: FnOnce(),
 {
-    remove_platform_tools_after_mutation(state, expected_revision, after_product_removal)
+    remove_platform_tools_after_mutation(
+        state,
+        expected_revision,
+        after_execution_lock,
+        after_product_removal,
+    )
 }
 
-fn remove_platform_tools_after_mutation<F>(
+fn remove_platform_tools_after_mutation<F, G>(
     state: &AppState,
     expected_revision: Option<u64>,
-    after_product_removal: F,
+    after_execution_lock: F,
+    after_product_removal: G,
 ) -> Result<Value, String>
 where
     F: FnOnce(),
+    G: FnOnce(),
 {
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    after_execution_lock();
     let transition = qualification_transition_lock(state);
-    if state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .has_in_flight()
-    {
+    if executions.has_in_flight() {
         return Err(safe_error(
             "execution_active",
             "Platform-Tools cannot be removed while an execution is starting or active.",
@@ -974,19 +980,11 @@ where
         handles.invalidate_all();
         drop(handles);
 
-        let mut executions = match state.executions.lock() {
-            Ok(executions) => executions,
-            Err(poisoned) => {
-                let executions = poisoned.into_inner();
-                state.executions.clear_poison();
-                executions
-            }
-        };
         executions.reset();
-        drop(executions);
 
         crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
     }
+    drop(executions);
     transition.release_and_retry_best_effort();
     let result = result?;
     Ok(public_adb_status(&result))

@@ -144,9 +144,10 @@ function activeExecutionWorkflow(
   snapshot = realExecutionSnapshot(),
   events: ExecutionEvent[] = [],
   eventCursor = 0,
+  baseWorkflow: WorkflowState = reviewWorkflow(),
 ): WorkflowState {
   return {
-    ...reviewWorkflow(),
+    ...baseWorkflow,
     step: "execution",
     executionGeneration: 1,
     execution: {
@@ -378,7 +379,12 @@ test("device, facts, review, and execution lifecycle transitions refresh status"
   rerender(<Harness workflow={starting} />);
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(5));
 
-  const active = activeExecutionWorkflow();
+  const active = activeExecutionWorkflow(
+    realExecutionSnapshot({ reviewHandle: "review-one" }),
+    [],
+    0,
+    reviewed,
+  );
   rerender(<Harness workflow={active} />);
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(6));
 
@@ -395,12 +401,13 @@ test("device, facts, review, and execution lifecycle transitions refresh status"
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(7));
 
   const terminal: WorkflowState = {
-    ...active,
+    ...replacedExecutionReview,
     execution: {
       kind: "terminal",
       generation: active.executionGeneration,
       mode: "real",
       snapshot: realExecutionSnapshot({
+        reviewHandle: "review-replaced",
         status: "succeeded",
         terminal: true,
         finishedAt: "2026-10-01T12:01:00Z",

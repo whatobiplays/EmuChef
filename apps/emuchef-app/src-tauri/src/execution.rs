@@ -2439,14 +2439,24 @@ fn recover_from_real_execution_loss(
     Ok(())
 }
 
-/// Discard native authority after the shared runtime session is lost. Real
-/// execution loss uses the ordered qualification-aware path above; simulated
-/// execution callers use this product-only cleanup.
+/// Discard native authority after the shared runtime session is lost. Acquire
+/// the execution store before the transition gate, matching admission and real
+/// execution loss, then publish the qualification consequence before release.
 fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
-    recover_poisoned_lock(&state.executions).reset();
+    let mut executions = recover_poisoned_lock(&state.executions);
+    let transition = crate::commands::qualification_transition_lock(state);
+    executions.reset();
     recover_poisoned_lock(&state.handles).invalidate_runtime_authority_preserving_identities();
     recover_poisoned_lock(&state.root_qualification).invalidate();
+    crate::qualification_session::observe_product_runtime_session_lost_in_transition(state);
+    drop(executions);
+    transition.release_and_retry_best_effort();
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn invalidate_lost_runtime_authority_for_test(state: &AppState) -> Result<(), String> {
+    invalidate_lost_runtime_authority(state)
 }
 
 /// Discard all native authority derived from a sidecar process generation that

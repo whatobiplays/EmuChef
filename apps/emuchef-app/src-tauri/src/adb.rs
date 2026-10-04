@@ -1723,16 +1723,21 @@ fn checked_install_path(root: &Path, relative: &str) -> Result<PathBuf, String> 
         .canonicalize()
         .map_err(|_| "managed root is unavailable".to_string())?;
     let candidate = root.join(relative_path);
-    if candidate.exists() {
-        let canonical = candidate
-            .canonicalize()
-            .map_err(|_| "managed install is unavailable".to_string())?;
-        if !canonical.starts_with(&root) {
-            return Err("managed install escaped its root".to_string());
+    match fs::symlink_metadata(&candidate) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("managed install is unavailable".to_string());
+            }
+            let canonical = candidate
+                .canonicalize()
+                .map_err(|_| "managed install is unavailable".to_string())?;
+            if !canonical.starts_with(&root) {
+                return Err("managed install escaped its root".to_string());
+            }
+            Ok(canonical)
         }
-        Ok(canonical)
-    } else {
-        Ok(candidate)
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(candidate),
+        Err(_) => Err("managed install is unavailable".to_string()),
     }
 }
 
@@ -2495,6 +2500,44 @@ mod tests {
         assert!(
             !stale_install.exists(),
             "rejected preparation should be cleaned up"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_stale_preparation_does_not_follow_a_symlink_to_another_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("platform-tools.zip");
+        write_platform_tools_zip(&zip, &[]);
+        let root = temp.path().join("managed");
+        let retained = root.join("installs/retained");
+        fs::create_dir_all(root.join("installs")).unwrap();
+        fs::create_dir_all(root.join("staging")).unwrap();
+        fs::create_dir_all(&retained).unwrap();
+        fs::write(retained.join("adb"), b"retained installation").unwrap();
+        let prepared = AdbManager::prepare_zip_at_revision_with_executor(
+            &root,
+            1,
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+        let stale = root.join(&prepared.settings.install_relative_path);
+        fs::remove_dir_all(&stale).unwrap();
+        std::os::unix::fs::symlink("retained", &stale).unwrap();
+
+        drop(prepared);
+
+        assert!(
+            retained.join("adb").is_file(),
+            "cleanup must not delete the symlink target"
+        );
+        assert!(
+            fs::symlink_metadata(stale)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "cleanup must leave an unexpected symlink untouched"
         );
     }
 
