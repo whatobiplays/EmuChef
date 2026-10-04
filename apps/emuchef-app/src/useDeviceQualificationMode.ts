@@ -73,6 +73,22 @@ function candidatePreviewFromSummary(
   };
 }
 
+/** Refresh only when the execution phase or stable execution identity changes. */
+function executionRefreshSignal(execution: WorkflowState["execution"] | undefined): string {
+  if (!execution) return "none";
+  switch (execution.kind) {
+    case "idle":
+      return "idle";
+    case "starting":
+      return `starting:${execution.generation}:${execution.mode}`;
+    case "active":
+    case "terminal":
+      return `${execution.kind}:${execution.generation}:${execution.mode}:${execution.snapshot.executionHandle}:${execution.snapshot.reviewHandle}:${execution.snapshot.status}`;
+    case "unavailable":
+      return `unavailable:${execution.generation}:${execution.executionHandle}`;
+  }
+}
+
 /**
  * Presentation and operator-intent adapter for device qualification mode.
  *
@@ -89,6 +105,10 @@ export function useDeviceQualificationMode({
   workflow,
   workflowRef,
 }: UseDeviceQualificationModeOptions): DeviceQualificationModeController {
+  const deviceHandle = workflow?.deviceHandle ?? null;
+  const deviceFacts = workflow?.facts ?? null;
+  const reviewHandle = workflow?.review?.reviewHandle ?? null;
+  const executionSignal = executionRefreshSignal(workflow?.execution);
   const [status, setStatus] = useState<QualificationModeStatus | null>(null);
   const [session, setSession] = useState<QualificationSessionSnapshot | null>(null);
   const [targetCandidate, setTargetCandidate] = useState<QualificationTargetCandidatePreview | null>(null);
@@ -194,9 +214,10 @@ export function useDeviceQualificationMode({
     return () => {
       refreshGenerationRef.current += 1;
     };
-  // Product lifecycle is owned by Rust. Workflow changes are a presentation
-  // signal only: reread its sanitized projection after ordinary product work.
-  }, [enabled, refresh, workflow]);
+  // Product lifecycle is owned by Rust. Only stable device, review, and
+  // execution lifecycle signals trigger a presentation refresh; event batches,
+  // progress snapshots, and editable workflow intent do not.
+  }, [deviceFacts, deviceHandle, enabled, executionSignal, refresh, reviewHandle]);
 
   const beginSession = useCallback(async (request: {
     deviceHandle: string;

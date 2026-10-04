@@ -339,7 +339,6 @@ export function DeviceQualificationOverlay({
                             disabled={
                               recorded !== undefined
                                 || controller.busy
-                                || !status.recordable
                                 || !sessionRecordable
                             }
                             onChange={() => void controller.recordCheckpoint(checkpoint.id, outcome)}

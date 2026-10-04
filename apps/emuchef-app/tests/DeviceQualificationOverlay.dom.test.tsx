@@ -163,10 +163,12 @@ test("closed non-recordable attempts disable checkpoint controls", async () => {
   expect(current.recordCheckpoint).not.toHaveBeenCalled();
 });
 
-test("inspection-only repository status disables checkpoint controls", async () => {
+test("dirty repository status does not block an active session checkpoint", async () => {
+  const recordCheckpoint = vi.fn().mockResolvedValue(undefined);
   const current = controller({
     status: { ...status(), recordable: false },
     session: session({
+      recordable: true,
       humanCheckpoints: [{
         id: "clean-reset",
         instruction: "Reset the device before the first reviewed run.",
@@ -175,14 +177,15 @@ test("inspection-only repository status disables checkpoint controls", async () 
         required: true,
       }],
     }),
+    recordCheckpoint,
   });
 
   render(<DeviceQualificationOverlay controller={current} />);
 
   const pass = screen.getByRole("radio", { name: "Pass" }) as HTMLInputElement;
-  expect(pass.disabled).toBe(true);
+  expect(pass.disabled).toBe(false);
   await userEvent.click(pass);
-  expect(current.recordCheckpoint).not.toHaveBeenCalled();
+  expect(recordCheckpoint).toHaveBeenCalledWith("clean-reset", "pass");
 });
 
 test("recording a run and abandoning an attempt always require an explicit click", () => {

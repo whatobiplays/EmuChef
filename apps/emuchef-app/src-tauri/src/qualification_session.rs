@@ -1323,8 +1323,8 @@ pub(crate) enum QualificationLifecycleObservation {
         device_handle: String,
         session_epoch: u64,
     },
-    /// Platform-Tools replacement invalidated all process-local device
-    /// authority. Only a currently associated attempt depends on that state.
+    /// Platform-Tools replacement or removal invalidated all process-local
+    /// device authority. Only a currently associated attempt depends on it.
     ProductDeviceAuthorityReset,
     RootChecked {
         device_handle: String,
@@ -4541,17 +4541,10 @@ mod tests {
         let session_handle =
             terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
 
-        let imported_status = crate::adb::AdbSetupStatusDto {
-            status: "ready",
-            version: Some("35.0.2".to_string()),
-            warning: None,
-            error: None,
-            can_import: true,
-            can_replace: true,
-            can_remove: true,
-        };
-        let (product_reset_tx, product_reset_rx) = std::sync::mpsc::sync_channel(1);
-        let (continue_reset_tx, continue_reset_rx) = std::sync::mpsc::sync_channel(1);
+        let prepared =
+            crate::adb::test_support::prepare_platform_tools_install(&state.adb.lock().unwrap());
+        let (activation_visible_tx, activation_visible_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_activation_tx, continue_activation_rx) = std::sync::mpsc::sync_channel(1);
         let (product_result_tx, product_result_rx) = std::sync::mpsc::sync_channel(1);
         let (checkpoint_started_tx, checkpoint_started_rx) = std::sync::mpsc::sync_channel(1);
         let (checkpoint_result_tx, checkpoint_result_rx) = std::sync::mpsc::sync_channel(1);
@@ -4561,18 +4554,22 @@ mod tests {
             let reset = scope.spawn(move || {
                 let result = crate::commands::finish_platform_tools_import_with_hook(
                     state_for_reset,
-                    &imported_status,
+                    prepared,
                     || {
-                        product_reset_tx.send(()).unwrap();
-                        continue_reset_rx.recv().unwrap();
+                        let adb = state_for_reset.adb.lock().unwrap();
+                        assert_eq!(adb.revision(), 1);
+                        assert_eq!(adb.status().status, "ready");
+                        drop(adb);
+                        activation_visible_tx.send(()).unwrap();
+                        continue_activation_rx.recv().unwrap();
                     },
                 );
                 product_result_tx.send(result).unwrap();
             });
 
-            product_reset_rx
+            activation_visible_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
-                .expect("product authority should be reset before qualification invalidation");
+                .expect("the installation should activate while the transition gate is held");
             assert!(state.qualification_transition_gate.try_lock().is_err());
 
             let state_for_checkpoint = &state;
@@ -4588,13 +4585,13 @@ mod tests {
             });
             checkpoint_started_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
-                .expect("checkpoint transition should start while authority reset is paused");
+                .expect("checkpoint transition should start while activation commit is paused");
             assert!(matches!(
                 checkpoint_result_rx.try_recv(),
                 Err(std::sync::mpsc::TryRecvError::Empty)
             ));
 
-            continue_reset_tx.send(()).unwrap();
+            continue_activation_tx.send(()).unwrap();
             reset.join().unwrap();
             checkpoint.join().unwrap();
         });
@@ -4604,6 +4601,95 @@ mod tests {
             .expect("successful Platform-Tools import should return its status")
             .expect("qualification persistence failure must not fail Platform-Tools setup");
         assert_eq!(product_result["status"], "ready");
+        assert!(checkpoint_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("checkpoint should resume after the reset commits")
+            .is_err());
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
+    fn platform_tools_removal_serializes_authority_reset_with_finalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) =
+            available_test_device(&state, "platform-tools-remove-race");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+        {
+            let mut adb = state.adb.lock().unwrap();
+            let prepared = crate::adb::test_support::prepare_platform_tools_install(&adb);
+            adb.activate_prepared(prepared)
+                .unwrap()
+                .cleanup_retired_install();
+        }
+
+        let (removal_visible_tx, removal_visible_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_removal_tx, continue_removal_rx) = std::sync::mpsc::sync_channel(1);
+        let (removal_result_tx, removal_result_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_started_tx, checkpoint_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (checkpoint_result_tx, checkpoint_result_rx) = std::sync::mpsc::sync_channel(1);
+
+        std::thread::scope(|scope| {
+            let state_for_removal = &state;
+            let removal = scope.spawn(move || {
+                let result = crate::commands::remove_platform_tools_with_hook(
+                    state_for_removal,
+                    None,
+                    || {
+                        assert!(!state_for_removal.adb.lock().unwrap().is_app_managed());
+                        removal_visible_tx.send(()).unwrap();
+                        continue_removal_rx.recv().unwrap();
+                    },
+                );
+                removal_result_tx.send(result).unwrap();
+            });
+
+            removal_visible_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("Platform-Tools removal should commit under the transition gate");
+            assert!(state.qualification_transition_gate.try_lock().is_err());
+
+            let state_for_checkpoint = &state;
+            let checkpoint = scope.spawn(move || {
+                checkpoint_started_tx.send(()).unwrap();
+                let result = record_checkpoint(
+                    state_for_checkpoint,
+                    &session_handle,
+                    "device_state_verified",
+                    CheckpointOutcome::Pass,
+                );
+                checkpoint_result_tx.send(result).unwrap();
+            });
+            checkpoint_started_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("checkpoint transition should start while removal is paused");
+            assert!(matches!(
+                checkpoint_result_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+
+            continue_removal_tx.send(()).unwrap();
+            removal.join().unwrap();
+            checkpoint.join().unwrap();
+        });
+
+        removal_result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("successful Platform-Tools removal should return its status")
+            .expect("qualification failure must not fail Platform-Tools removal");
         assert!(checkpoint_result_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("checkpoint should resume after the reset commits")
@@ -4635,21 +4721,11 @@ mod tests {
             panic!("inject a poisoned native handle store");
         }));
 
-        let imported_status = crate::adb::AdbSetupStatusDto {
-            status: "ready",
-            version: Some("35.0.2".to_string()),
-            warning: None,
-            error: None,
-            can_import: true,
-            can_replace: true,
-            can_remove: true,
-        };
-        let result = crate::commands::finish_platform_tools_import_with_hook(
-            &state,
-            &imported_status,
-            || {},
-        )
-        .expect("a poisoned authority lock must be recovered after import succeeds");
+        let prepared =
+            crate::adb::test_support::prepare_platform_tools_install(&state.adb.lock().unwrap());
+        let result =
+            crate::commands::finish_platform_tools_import_with_hook(&state, prepared, || {})
+                .expect("a poisoned authority lock must be recovered after import succeeds");
 
         assert_eq!(result["status"], "ready");
         assert!(!state.handles.is_poisoned());
@@ -6072,6 +6148,74 @@ mod tests {
             hex::encode(Sha256::digest(b"id: test.recipe\n"))
         );
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+    }
+
+    #[test]
+    fn source_change_after_final_recipe_capture_keeps_candidate_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let repository = state.qualification_repository.get().unwrap();
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        begin_with_prerequisite_and_admission(&app, &candidate);
+        observe(
+            &state,
+            QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+                TerminalExecutionObservation {
+                    execution_handle: "execution-one".to_string(),
+                    status: Some("succeeded".to_string()),
+                    observed_at: "2026-09-30T19:27:12Z".to_string(),
+                    report_available: true,
+                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    authority_invalidated: false,
+                },
+            )),
+        );
+
+        let source_state = repository
+            .source_state_handle_for_test()
+            .expect("test repository should expose controlled source state");
+        let source_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let checks_for_hook = source_checks.clone();
+        repository.set_source_state_read_hook_for_test(std::sync::Arc::new(move || {
+            if checks_for_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                *source_state
+                    .lock()
+                    .expect("test source state should not be poisoned") =
+                    QualificationSourceState {
+                        head: "2".repeat(40),
+                        tracked_worktree_clean: false,
+                    };
+            }
+        }));
+
+        let pending = record_checkpoint(
+            &state,
+            &session_handle_for_candidate(&candidate).unwrap(),
+            "device_state_verified",
+            QualificationCheckpointOutcome::Pass,
+        )
+        .unwrap();
+
+        assert_eq!(
+            pending.phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+        assert!(repository
+            .load_candidate(&candidate)
+            .unwrap()
+            .payload
+            .get("runValidity")
+            .is_none());
+        assert!(session_status(&state).unwrap().is_some());
+        assert_eq!(source_checks.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

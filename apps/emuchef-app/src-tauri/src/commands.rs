@@ -739,9 +739,9 @@ pub async fn install_platform_tools_selection(
         .take(&selection_handle)?;
 
     let import_app = app.clone();
-    let result = run_import_task(move || {
+    let preparation = {
         let state = import_app.state::<AppState>();
-        let mut adb = state.adb.lock().map_err(|_| {
+        let adb = state.adb.lock().map_err(|_| {
             safe_error(
                 "adb_state_unavailable",
                 "Platform-Tools setup state is unavailable.",
@@ -753,48 +753,57 @@ pub async fn install_platform_tools_selection(
                 "Platform-Tools status changed. Review troubleshooting status before retrying.",
             ));
         }
-        let result = adb.import_zip(&path);
-        drop(adb);
-        result
-    })
-    .await?;
+        adb.import_preparation_context()
+    };
+    let prepared = run_import_task(move || preparation.prepare_zip(&path)).await?;
 
     let state = app.state::<AppState>();
-    finish_platform_tools_import(&state, &result)
+    finish_platform_tools_import(&state, prepared)
 }
 
-/// Commit Platform-Tools replacement effects after the import has completed.
-/// The expensive archive work stays outside the qualification transition gate;
-/// the product authority reset and its qualification invalidation are one
-/// serialized commit before the imported status is returned.
+/// Activate a prepared installation and commit its authority reset together.
+/// Archive inspection, extraction, and validation finish before this gate is
+/// acquired; the settings/current/revision update and qualification reset share
+/// one serialized product-transition boundary.
 fn finish_platform_tools_import(
     state: &AppState,
-    imported_status: &AdbSetupStatusDto,
+    prepared: crate::adb::PreparedAdbInstall,
 ) -> Result<Value, String> {
-    finish_platform_tools_import_after_clear(state, imported_status, || {})
+    finish_platform_tools_import_after_activation(state, prepared, || {})
 }
 
 #[cfg(test)]
 pub(crate) fn finish_platform_tools_import_with_hook<F>(
     state: &AppState,
-    imported_status: &AdbSetupStatusDto,
-    after_product_authority_clear: F,
+    prepared: crate::adb::PreparedAdbInstall,
+    after_product_activation: F,
 ) -> Result<Value, String>
 where
     F: FnOnce(),
 {
-    finish_platform_tools_import_after_clear(state, imported_status, after_product_authority_clear)
+    finish_platform_tools_import_after_activation(state, prepared, after_product_activation)
 }
 
-fn finish_platform_tools_import_after_clear<F>(
+fn finish_platform_tools_import_after_activation<F>(
     state: &AppState,
-    imported_status: &AdbSetupStatusDto,
-    after_product_authority_clear: F,
+    prepared: crate::adb::PreparedAdbInstall,
+    after_product_activation: F,
 ) -> Result<Value, String>
 where
     F: FnOnce(),
 {
     let transition = qualification_transition_lock(state);
+    let activated = {
+        let mut adb = state.adb.lock().map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?;
+        adb.activate_prepared(prepared)?
+    };
+    after_product_activation();
+
     let mut root_authority = match state.root_qualification.lock() {
         Ok(root_authority) => root_authority,
         Err(poisoned) => {
@@ -816,10 +825,10 @@ where
     };
     handles.invalidate_runtime_authority_preserving_identities();
     drop(handles);
-    after_product_authority_clear();
     crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
     transition.release_and_retry_best_effort();
-    Ok(public_adb_status(imported_status))
+    let imported_status = activated.cleanup_retired_install();
+    Ok(public_adb_status(&imported_status))
 }
 
 pub(crate) type PickerCompletion<T> = Box<dyn FnOnce(Option<T>) + Send>;
@@ -868,6 +877,30 @@ pub fn remove_platform_tools(
     expected_revision: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    remove_platform_tools_after_mutation(&state, expected_revision, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn remove_platform_tools_with_hook<F>(
+    state: &AppState,
+    expected_revision: Option<u64>,
+    after_product_removal: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+{
+    remove_platform_tools_after_mutation(state, expected_revision, after_product_removal)
+}
+
+fn remove_platform_tools_after_mutation<F>(
+    state: &AppState,
+    expected_revision: Option<u64>,
+    after_product_removal: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+{
+    let transition = qualification_transition_lock(state);
     if state
         .executions
         .lock()
@@ -912,38 +945,50 @@ pub fn remove_platform_tools(
             "Only an app-managed Platform-Tools installation can be removed here.",
         ));
     }
-    let result = adb.remove()?;
+    let revision_before_removal = adb.revision();
+    let result = adb.remove();
+    let authority_was_cleared = adb.revision() != revision_before_removal || !adb.is_app_managed();
     drop(adb);
-    state
-        .root_qualification
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
-            )
-        })?
-        .invalidate();
-    state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "The device session could not be reset.",
-            )
-        })?
-        .invalidate_all();
-    state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .reset();
+    if authority_was_cleared {
+        after_product_removal();
+
+        let mut root_authority = match state.root_qualification.lock() {
+            Ok(root_authority) => root_authority,
+            Err(poisoned) => {
+                let root_authority = poisoned.into_inner();
+                state.root_qualification.clear_poison();
+                root_authority
+            }
+        };
+        root_authority.invalidate();
+        drop(root_authority);
+
+        let mut handles = match state.handles.lock() {
+            Ok(handles) => handles,
+            Err(poisoned) => {
+                let handles = poisoned.into_inner();
+                state.handles.clear_poison();
+                handles
+            }
+        };
+        handles.invalidate_all();
+        drop(handles);
+
+        let mut executions = match state.executions.lock() {
+            Ok(executions) => executions,
+            Err(poisoned) => {
+                let executions = poisoned.into_inner();
+                state.executions.clear_poison();
+                executions
+            }
+        };
+        executions.reset();
+        drop(executions);
+
+        crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
+    }
+    transition.release_and_retry_best_effort();
+    let result = result?;
     Ok(public_adb_status(&result))
 }
 

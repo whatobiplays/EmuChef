@@ -17,11 +17,13 @@ vi.mock("../src/api", () => ({ api: mockApi }));
 
 import { useDeviceQualificationMode } from "../src/useDeviceQualificationMode";
 import type {
+  ExecutionEvent,
   QualificationModeStatus,
   QualificationSessionSnapshot,
   QualificationTargetCandidatePreview,
+  RealExecutionSnapshot,
 } from "../src/types";
-import { initialWorkflowState, type WorkflowState } from "../src/workflow";
+import { initialWorkflowState, workflowReducer, type WorkflowState } from "../src/workflow";
 
 function disabledStatus(): QualificationModeStatus {
   return {
@@ -97,6 +99,65 @@ function reviewWorkflow(): WorkflowState {
     deviceHandle: "device-opaque",
     devicePlan: "plan.bound",
     selectedRecipes: ["recipe.one", "recipe.dependency"],
+  };
+}
+
+function realExecutionSnapshot(
+  overrides: Partial<RealExecutionSnapshot> = {},
+): RealExecutionSnapshot {
+  return {
+    executionHandle: "execution-opaque",
+    reviewHandle: "review-opaque",
+    simulated: false,
+    verificationScope: "real_device",
+    target: { label: "Connected Android device" },
+    status: "running",
+    startedAt: "2026-10-01T12:00:00Z",
+    finishedAt: null,
+    latestSequence: 1,
+    terminal: false,
+    recipes: [],
+    warnings: [],
+    errors: [],
+    completion: {
+      classification: "in_progress",
+      counts: {
+        total: 1,
+        completed: 0,
+        skipped: 0,
+        blocked: 0,
+        failed: 0,
+        cancelled: 0,
+        pending: 1,
+      },
+      warningCount: 0,
+      partialChangesPossible: false,
+      features: [],
+    },
+    progress: { currentFeature: null, currentAction: null },
+    launchAction: null,
+    ...overrides,
+  };
+}
+
+function activeExecutionWorkflow(
+  snapshot = realExecutionSnapshot(),
+  events: ExecutionEvent[] = [],
+  eventCursor = 0,
+): WorkflowState {
+  return {
+    ...reviewWorkflow(),
+    step: "execution",
+    executionGeneration: 1,
+    execution: {
+      kind: "active",
+      generation: 1,
+      mode: "real",
+      snapshot,
+      events,
+      eventCursor,
+      cancellationRequested: false,
+    },
   };
 }
 
@@ -233,6 +294,141 @@ test("disabled qualification mode leaves the normal workflow unconstrained", asy
   expect(mockApi.abandonQualificationSession).not.toHaveBeenCalled();
 });
 
+test("execution event batches and same-phase snapshots do not poll qualification status", async () => {
+  let workflow = activeExecutionWorkflow();
+  const { rerender } = render(<Harness workflow={workflow} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(1));
+
+  const event = (sequence: number): ExecutionEvent => ({
+    sequence,
+    timestamp: `2026-10-01T12:00:0${sequence}Z`,
+    label: `Action ${sequence}`,
+    status: "running",
+    issue: null,
+  });
+  for (const sequence of [2, 3, 4]) {
+    workflow = workflowReducer(workflow, {
+      type: "execution-events",
+      generation: 1,
+      batch: {
+        executionHandle: "execution-opaque",
+        events: [event(sequence)],
+        latestSequence: sequence,
+        terminal: false,
+      },
+    });
+    await act(async () => {
+      rerender(<Harness workflow={workflow} />);
+      await Promise.resolve();
+    });
+    workflow = workflowReducer(workflow, {
+      type: "execution-snapshot",
+      generation: 1,
+      snapshot: realExecutionSnapshot({
+        latestSequence: sequence,
+        progress: { currentFeature: "feature.one", currentAction: `Action ${sequence}` },
+      }),
+    });
+    await act(async () => {
+      rerender(<Harness workflow={workflow} />);
+      await Promise.resolve();
+    });
+  }
+
+  expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(1);
+});
+
+test("device, facts, review, and execution lifecycle transitions refresh status", async () => {
+  const { rerender } = render(<Harness workflow={initialWorkflowState} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(1));
+
+  const selected = { ...initialWorkflowState, deviceHandle: "device-one" };
+  rerender(<Harness workflow={selected} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+
+  const probed = {
+    ...selected,
+    facts: {
+      deviceHandle: "device-one",
+      manufacturer: "Ayaneo",
+      brand: null,
+      model: "Pocket Fit",
+      androidVersion: 14,
+      androidApiLevel: 34,
+      firmwareBuild: "build-one",
+    },
+  };
+  rerender(<Harness workflow={probed} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(3));
+
+  const reviewed: WorkflowState = {
+    ...probed,
+    review: {
+      reviewHandle: "review-one",
+    } as NonNullable<WorkflowState["review"]>,
+  };
+  rerender(<Harness workflow={reviewed} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(4));
+
+  const starting: WorkflowState = {
+    ...reviewed,
+    executionGeneration: 1,
+    execution: { kind: "starting", generation: 1, mode: "real" },
+  };
+  rerender(<Harness workflow={starting} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(5));
+
+  const active = activeExecutionWorkflow();
+  rerender(<Harness workflow={active} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(6));
+
+  const activeExecution = active.execution;
+  if (activeExecution.kind !== "active") throw new Error("active execution fixture must be active");
+  const replacedExecutionReview: WorkflowState = {
+    ...active,
+    execution: {
+      ...activeExecution,
+      snapshot: realExecutionSnapshot({ reviewHandle: "review-replaced" }),
+    },
+  };
+  rerender(<Harness workflow={replacedExecutionReview} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(7));
+
+  const terminal: WorkflowState = {
+    ...active,
+    execution: {
+      kind: "terminal",
+      generation: active.executionGeneration,
+      mode: "real",
+      snapshot: realExecutionSnapshot({
+        status: "succeeded",
+        terminal: true,
+        finishedAt: "2026-10-01T12:01:00Z",
+        completion: {
+          classification: "success",
+          counts: {
+            total: 1,
+            completed: 1,
+            skipped: 0,
+            blocked: 0,
+            failed: 0,
+            cancelled: 0,
+            pending: 0,
+          },
+          warningCount: 0,
+          partialChangesPossible: false,
+          features: [],
+        },
+      }),
+      events: [],
+      eventCursor: 0,
+      cancellationRequested: false,
+    },
+  };
+  rerender(<Harness workflow={terminal} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(8));
+});
+
 test("refresh restores the stored target candidate without recapturing it", async () => {
   mockApi.deviceQualificationModeStatus.mockResolvedValue(activeStatus({
     resumableCandidates: [{
@@ -279,7 +475,12 @@ test("status refresh preserves the currently selected target candidate", async (
     expect(screen.getByTestId("qualification-candidate-handle").textContent).toBe("zzz-latest");
   });
 
-  rerender(<Harness workflow={{ ...workflow, step: "execution" }} />);
+  rerender(<Harness workflow={{
+    ...workflow,
+    step: "execution",
+    executionGeneration: 1,
+    execution: { kind: "starting", generation: 1, mode: "real" },
+  }} />);
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
   await act(async () => {
     resolveRefresh(activeStatus({
@@ -630,12 +831,17 @@ test("run candidates are projected independently of the resumable session", asyn
   expect(screen.getByTestId("qualification-active").textContent).toBe("false");
 });
 
-test("workflow transitions trigger a presentation-only status refresh", async () => {
+test("meaningful execution lifecycle transitions trigger a presentation-only status refresh", async () => {
   const initial = reviewWorkflow();
   const { rerender } = render(<Harness workflow={initial} />);
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(1));
 
-  rerender(<Harness workflow={{ ...initial, step: "execution" }} />);
+  rerender(<Harness workflow={{
+    ...initial,
+    step: "execution",
+    executionGeneration: 1,
+    execution: { kind: "starting", generation: 1, mode: "real" },
+  }} />);
 
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
   expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();

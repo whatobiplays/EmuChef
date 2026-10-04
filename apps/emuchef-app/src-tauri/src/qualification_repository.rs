@@ -442,8 +442,9 @@ impl QualificationRepository {
             .iter()
             .map(|digest| digest.id.clone())
             .collect::<Vec<_>>();
-        self.capture_authored_recipe_digests(&recipe_ids)
-            .is_ok_and(|current| current == expected)
+        let current = self.capture_authored_recipe_digests(&recipe_ids);
+        let source_remains_recordable = self.ensure_recordable_unlocked().is_ok();
+        source_remains_recordable && current.is_ok_and(|current| current == expected)
     }
 
     fn current_source_state(&self) -> Result<QualificationSourceState, String> {
@@ -2551,6 +2552,70 @@ mod tests {
             .capture_recordable_authored_recipe_digests(&["test.recipe".to_string()])
             .expect_err("the second source check must reject a mutation during digest capture");
         assert!(error.contains("source state changed"));
+    }
+
+    #[test]
+    fn authored_recipe_digest_match_requires_clean_source_and_exact_recipe_bytes() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        fs::create_dir_all(temp.path().join("authored/recipes"))
+            .expect("recipe directory should be created");
+        let recipe_path = temp.path().join("authored/recipes/test.recipe.yaml");
+        fs::write(&recipe_path, b"id: test.recipe\n").expect("recipe should be written");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let recipe_ids = vec!["test.recipe".to_string()];
+        let expected = repository
+            .capture_authored_recipe_digests(&recipe_ids)
+            .expect("expected recipe digest should be captured");
+
+        assert!(repository.authored_recipe_digests_match(&expected));
+
+        fs::write(&recipe_path, b"id: test.recipe\n# changed\n")
+            .expect("changed recipe should be written");
+        assert!(!repository.authored_recipe_digests_match(&expected));
+
+        fs::write(&recipe_path, b"id: test.recipe\n").expect("recipe should be restored");
+        repository.set_source_state_for_test(QualificationSourceState {
+            head: "2".repeat(40),
+            tracked_worktree_clean: false,
+        });
+        assert!(!repository.authored_recipe_digests_match(&expected));
+    }
+
+    #[test]
+    fn authored_recipe_digest_match_rechecks_source_after_recipe_capture() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        fs::create_dir_all(temp.path().join("authored/recipes"))
+            .expect("recipe directory should be created");
+        fs::write(
+            temp.path().join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .expect("recipe should be written");
+        let repository = std::sync::Arc::new(repository_with_embedded_build(
+            &temp,
+            FakeQualificationToolRunner::default(),
+        ));
+        let expected = repository
+            .capture_authored_recipe_digests(&["test.recipe".to_string()])
+            .expect("expected recipe digest should be captured");
+        let repository_for_hook = std::sync::Arc::downgrade(&repository);
+        let source_checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let checks_for_hook = source_checks.clone();
+        repository.set_source_state_read_hook_for_test(std::sync::Arc::new(move || {
+            if checks_for_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                repository_for_hook
+                    .upgrade()
+                    .expect("repository should remain alive during digest matching")
+                    .set_source_state_for_test(QualificationSourceState {
+                        head: "2".repeat(40),
+                        tracked_worktree_clean: false,
+                    });
+            }
+        }));
+
+        assert!(!repository.authored_recipe_digests_match(&expected));
+        assert_eq!(source_checks.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

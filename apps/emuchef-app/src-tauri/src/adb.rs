@@ -135,6 +135,47 @@ pub struct AdbManager {
     revision: u64,
 }
 
+#[derive(Clone)]
+pub(crate) struct AdbImportPreparationContext {
+    root: PathBuf,
+    expected_revision: u64,
+}
+
+/// A validated installation that is not active until `AdbManager` commits it.
+#[derive(Debug)]
+pub(crate) struct PreparedAdbInstall {
+    root: PathBuf,
+    expected_revision: u64,
+    settings: ManagedSettings,
+    resolved: ResolvedAdb,
+    activated: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActivatedAdbInstall {
+    status: AdbSetupStatusDto,
+    retired_install: Option<(PathBuf, String)>,
+}
+
+impl ActivatedAdbInstall {
+    /// Remove the superseded managed installation after the activation commit
+    /// no longer holds the qualification transition gate.
+    pub(crate) fn cleanup_retired_install(self) -> AdbSetupStatusDto {
+        if let Some((root, relative)) = self.retired_install {
+            remove_managed_install_if_present(&root, &relative);
+        }
+        self.status
+    }
+}
+
+impl Drop for PreparedAdbInstall {
+    fn drop(&mut self) {
+        if !self.activated {
+            remove_managed_install_if_present(&self.root, &self.settings.install_relative_path);
+        }
+    }
+}
+
 impl AdbManager {
     pub fn new(root: PathBuf) -> Self {
         let mut manager = Self {
@@ -151,6 +192,48 @@ impl AdbManager {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn import_preparation_context(&self) -> AdbImportPreparationContext {
+        AdbImportPreparationContext {
+            root: self.root.clone(),
+            expected_revision: self.revision,
+        }
+    }
+
+    pub(crate) fn activate_prepared(
+        &mut self,
+        mut prepared: PreparedAdbInstall,
+    ) -> Result<ActivatedAdbInstall, String> {
+        if self.root != prepared.root || self.revision != prepared.expected_revision {
+            return Err(actionable_json(
+                "platform_tools_revision_stale",
+                "Platform-Tools changed while the replacement was being validated. Review troubleshooting status before retrying.",
+            ));
+        }
+
+        let old_install = read_settings(&self.settings_path())
+            .ok()
+            .map(|settings| settings.install_relative_path)
+            .filter(|relative| relative != &prepared.settings.install_relative_path);
+        if let Err(error) = write_settings_atomic(&self.settings_path(), &prepared.settings) {
+            return Err(serde_json::to_string(&setup_error(
+                "failed_replacement_recovery",
+                &format!("The validated replacement could not be activated. The existing installation was preserved. {error}"),
+                vec!["retry"],
+            ))
+            .unwrap_or_else(|_| "{}".to_string()));
+        }
+
+        self.current = Some(prepared.resolved.clone());
+        self.last_error = None;
+        self.revision = self.revision.saturating_add(1).max(1);
+        prepared.activated = true;
+
+        Ok(ActivatedAdbInstall {
+            status: self.status(),
+            retired_install: old_install.map(|relative| (self.root.clone(), relative)),
+        })
     }
 
     pub fn is_app_managed(&self) -> bool {
@@ -255,22 +338,6 @@ impl AdbManager {
         })
     }
 
-    pub fn import_zip(&mut self, source: &Path) -> Result<AdbSetupStatusDto, String> {
-        let previous = self.current.clone();
-        match self.import_zip_inner(source) {
-            Ok(current) => {
-                self.current = Some(current);
-                self.last_error = None;
-                self.revision = self.revision.saturating_add(1).max(1);
-                Ok(self.status())
-            }
-            Err(error) => {
-                self.current = previous;
-                Err(serde_json::to_string(&error).unwrap_or_else(|_| error.message.clone()))
-            }
-        }
-    }
-
     pub fn remove(&mut self) -> Result<AdbSetupStatusDto, String> {
         let managed_relative = self
             .current
@@ -355,19 +422,14 @@ impl AdbManager {
         Ok(())
     }
 
-    fn import_zip_inner(&self, source: &Path) -> Result<ResolvedAdb, ActionableErrorDto> {
-        self.import_zip_inner_with_executor(source, &RealProcessExecutor)
-    }
-
-    fn import_zip_inner_with_executor(
-        &self,
+    fn prepare_zip_inner_with_executor(
+        root: &Path,
         source: &Path,
         executor: &impl ProcessExecutor,
-    ) -> Result<ResolvedAdb, ActionableErrorDto> {
+    ) -> Result<(ManagedSettings, ResolvedAdb), ActionableErrorDto> {
         let mut source = secure_open_zip(source)?;
         let members = inspect_archive(&mut source)?;
-        let staging = self
-            .root
+        let staging = root
             .join("staging")
             .join(Uuid::new_v4().simple().to_string());
         fs::create_dir(&staging).map_err(|_| {
@@ -408,7 +470,7 @@ impl AdbManager {
         let validation = validate_candidate(&staging, &hashes, true, executor)?;
         let install_id = Uuid::new_v4().simple().to_string();
         let relative = format!("installs/{install_id}");
-        let destination = self.root.join(&relative);
+        let destination = root.join(&relative);
         fs::rename(&staging, &destination).map_err(|_| {
             setup_error(
                 "adb_install_failed",
@@ -425,28 +487,15 @@ impl AdbManager {
             signer_team_identifier: GOOGLE_TEAM_IDENTIFIER.to_string(),
             files: hashes,
         };
-        let old_settings = read_settings(&self.settings_path()).ok();
-        if let Err(error) = write_settings_atomic(&self.settings_path(), &settings) {
-            let _ = fs::remove_dir_all(&destination);
-            return Err(setup_error(
-                "failed_replacement_recovery",
-                &format!("The validated replacement could not be activated. The existing installation was preserved. {error}"),
-                vec!["retry"],
-            ));
-        }
-        if let Some(old) = old_settings {
-            if old.install_relative_path != relative {
-                if let Ok(old_path) = checked_install_path(&self.root, &old.install_relative_path) {
-                    let _ = fs::remove_dir_all(old_path);
-                }
-            }
-        }
-        Ok(ResolvedAdb {
-            path: destination.join("adb"),
-            version: validation.version.clone(),
-            warning: version_warning(&validation.version),
-            managed_relative_path: Some(relative),
-        })
+        Ok((
+            settings,
+            ResolvedAdb {
+                path: destination.join("adb"),
+                version: validation.version.clone(),
+                warning: version_warning(&validation.version),
+                managed_relative_path: Some(relative),
+            },
+        ))
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -483,6 +532,42 @@ impl AdbManager {
                 }
             }
         }
+    }
+}
+
+impl AdbImportPreparationContext {
+    pub(crate) fn prepare_zip(&self, source: &Path) -> Result<PreparedAdbInstall, String> {
+        let (settings, resolved) =
+            AdbManager::prepare_zip_inner_with_executor(&self.root, source, &RealProcessExecutor)
+                .map_err(|error| {
+                serde_json::to_string(&error).unwrap_or_else(|_| error.message.clone())
+            })?;
+        Ok(PreparedAdbInstall {
+            root: self.root.clone(),
+            expected_revision: self.expected_revision,
+            settings,
+            resolved,
+            activated: false,
+        })
+    }
+}
+
+#[cfg(test)]
+impl AdbManager {
+    fn prepare_zip_at_revision_with_executor(
+        root: &Path,
+        expected_revision: u64,
+        source: &Path,
+        executor: &impl ProcessExecutor,
+    ) -> Result<PreparedAdbInstall, ActionableErrorDto> {
+        let (settings, resolved) = Self::prepare_zip_inner_with_executor(root, source, executor)?;
+        Ok(PreparedAdbInstall {
+            root: root.to_path_buf(),
+            expected_revision,
+            settings,
+            resolved,
+            activated: false,
+        })
     }
 }
 
@@ -1651,6 +1736,18 @@ fn checked_install_path(root: &Path, relative: &str) -> Result<PathBuf, String> 
     }
 }
 
+fn remove_managed_install_if_present(root: &Path, relative: &str) {
+    let Ok(path) = checked_install_path(root, relative) else {
+        return;
+    };
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return;
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
 fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
@@ -2236,15 +2333,24 @@ mod tests {
         let root = temp.path().join("managed");
         fs::create_dir_all(root.join("installs")).unwrap();
         fs::create_dir_all(root.join("staging")).unwrap();
-        let manager = AdbManager {
+        let mut manager = AdbManager {
             root: root.clone(),
             current: None,
             last_error: None,
             revision: 0,
         };
-        let installed = manager
-            .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
-            .unwrap();
+        let prepared = AdbManager::prepare_zip_at_revision_with_executor(
+            &root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+        manager
+            .activate_prepared(prepared)
+            .unwrap()
+            .cleanup_retired_install();
+        let installed = manager.current.as_ref().unwrap();
         let install = installed.path.parent().unwrap();
         let mut names = fs::read_dir(install)
             .unwrap()
@@ -2264,10 +2370,14 @@ mod tests {
             ..FakeExecutor::default()
         };
         assert_eq!(
-            manager
-                .import_zip_inner_with_executor(&zip, &failed)
-                .unwrap_err()
-                .code,
+            AdbManager::prepare_zip_at_revision_with_executor(
+                &root,
+                manager.revision(),
+                &zip,
+                &failed,
+            )
+            .unwrap_err()
+            .code,
             "adb_version_failed"
         );
         assert_eq!(
@@ -2275,6 +2385,161 @@ mod tests {
             settings_before
         );
         assert_eq!(fs::read_dir(root.join("staging")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn import_preparation_does_not_publish_or_remove_the_active_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("platform-tools.zip");
+        write_platform_tools_zip(&zip, &[]);
+        let root = temp.path().join("managed");
+        let previous_relative = "installs/current".to_string();
+        let previous_path = root.join(&previous_relative);
+        fs::create_dir_all(&previous_path).unwrap();
+        fs::create_dir_all(root.join("staging")).unwrap();
+        fs::write(previous_path.join("adb"), b"existing trusted adb").unwrap();
+        let previous_settings = ManagedSettings {
+            schema_version: 1,
+            install_relative_path: previous_relative.clone(),
+            version: "36.0.0".to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            signer_team_identifier: GOOGLE_TEAM_IDENTIFIER.to_string(),
+            files: HashMap::new(),
+        };
+        write_settings_atomic(&root.join("settings.json"), &previous_settings).unwrap();
+        let settings_before = fs::read(root.join("settings.json")).unwrap();
+        let manager = AdbManager {
+            root: root.clone(),
+            current: Some(ResolvedAdb {
+                path: previous_path.join("adb"),
+                version: "36.0.0".to_string(),
+                warning: None,
+                managed_relative_path: Some(previous_relative),
+            }),
+            last_error: None,
+            revision: 7,
+        };
+
+        let _prepared = AdbManager::prepare_zip_at_revision_with_executor(
+            &root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .expect("valid import should prepare an installation");
+
+        assert_eq!(
+            fs::read(root.join("settings.json")).unwrap(),
+            settings_before
+        );
+        assert!(
+            previous_path.is_dir(),
+            "preparation must retain the active install"
+        );
+        assert_eq!(manager.revision(), 7);
+        assert_eq!(
+            manager.current.as_ref().unwrap().path,
+            previous_path.join("adb")
+        );
+    }
+
+    #[test]
+    fn stale_prepared_activation_cannot_replace_a_newer_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("platform-tools.zip");
+        write_platform_tools_zip(&zip, &[]);
+        let root = temp.path().join("managed");
+        fs::create_dir_all(root.join("installs")).unwrap();
+        fs::create_dir_all(root.join("staging")).unwrap();
+        let mut manager = AdbManager {
+            root: root.clone(),
+            current: None,
+            last_error: None,
+            revision: 0,
+        };
+
+        let stale = AdbManager::prepare_zip_at_revision_with_executor(
+            &root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+        let stale_install = stale.resolved.path.parent().unwrap().to_path_buf();
+        let newer = AdbManager::prepare_zip_at_revision_with_executor(
+            &root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+
+        manager
+            .activate_prepared(newer)
+            .expect("the first prepared activation should commit");
+        let settings_after_newer = fs::read(root.join("settings.json")).unwrap();
+        let current_after_newer = manager.current.as_ref().unwrap().path.clone();
+        let revision_after_newer = manager.revision();
+
+        let error = manager
+            .activate_prepared(stale)
+            .expect_err("a preparation based on an older revision must be rejected");
+
+        assert!(error.contains("platform_tools_revision_stale"));
+        assert_eq!(
+            fs::read(root.join("settings.json")).unwrap(),
+            settings_after_newer
+        );
+        assert_eq!(manager.current.as_ref().unwrap().path, current_after_newer);
+        assert_eq!(manager.revision(), revision_after_newer);
+        assert!(
+            !stale_install.exists(),
+            "rejected preparation should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn failed_settings_activation_preserves_the_previous_install_and_cleans_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("platform-tools.zip");
+        write_platform_tools_zip(&zip, &[]);
+        let root = temp.path().join("managed");
+        let previous_path = root.join("installs/previous/adb");
+        fs::create_dir_all(previous_path.parent().unwrap()).unwrap();
+        fs::write(&previous_path, b"previous trusted adb").unwrap();
+        fs::create_dir_all(root.join("settings.json")).unwrap();
+        fs::create_dir_all(root.join("staging")).unwrap();
+        fs::create_dir_all(root.join("installs")).unwrap();
+        let mut manager = AdbManager {
+            root: root.clone(),
+            current: Some(ResolvedAdb {
+                path: previous_path.clone(),
+                version: "36.0.0".to_string(),
+                warning: None,
+                managed_relative_path: Some("installs/previous".to_string()),
+            }),
+            last_error: None,
+            revision: 9,
+        };
+        let prepared = AdbManager::prepare_zip_at_revision_with_executor(
+            &root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+        let prepared_install = prepared.resolved.path.parent().unwrap().to_path_buf();
+
+        let error = manager
+            .activate_prepared(prepared)
+            .expect_err("settings replacement failure must reject activation");
+
+        assert!(error.contains("failed_replacement_recovery"));
+        assert_eq!(manager.revision(), 9);
+        assert_eq!(manager.current.as_ref().unwrap().path, previous_path);
+        assert_eq!(fs::read(previous_path).unwrap(), b"previous trusted adb");
+        assert!(root.join("settings.json").is_dir());
+        assert!(!prepared_install.exists());
     }
 
     #[test]
@@ -2291,11 +2556,18 @@ mod tests {
             last_error: None,
             revision: 0,
         };
-        let installed = manager
-            .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
-            .unwrap();
-        let identity = installed.identity();
-        manager.current = Some(installed);
+        let prepared = AdbManager::prepare_zip_at_revision_with_executor(
+            &manager.root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+        manager
+            .activate_prepared(prepared)
+            .unwrap()
+            .cleanup_retired_install();
+        let identity = manager.current.as_ref().unwrap().identity();
         assert_eq!(
             manager
                 .readiness_snapshot()
@@ -2355,13 +2627,26 @@ mod tests {
         );
         assert!(missing_executor.calls.lock().unwrap().is_empty());
 
-        let installed = manager
-            .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
+        let prepared = AdbManager::prepare_zip_at_revision_with_executor(
+            &manager.root,
+            manager.revision(),
+            &zip,
+            &FakeExecutor::default(),
+        )
+        .unwrap();
+        manager
+            .activate_prepared(prepared)
+            .unwrap()
+            .cleanup_retired_install();
+        let adb_path = manager
+            .current
+            .as_ref()
+            .unwrap()
+            .path
+            .canonicalize()
             .unwrap();
-        let adb_path = installed.path.canonicalize().unwrap();
-        manager.current = Some(installed);
         let snapshot = manager.readiness_snapshot();
-        assert_eq!(snapshot.adb_revision(), 7);
+        assert_eq!(snapshot.adb_revision(), 8);
         let executor = FakeExecutor::default();
         assert_eq!(
             snapshot.evaluate_with_executor(&executor),
@@ -2661,5 +2946,39 @@ mod tests {
         let status = serde_json::to_string(&manager.status()).unwrap();
         assert!(!status.contains("private"));
         assert!(!status.contains("secret"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn prepare_platform_tools_install(manager: &AdbManager) -> PreparedAdbInstall {
+        fs::create_dir_all(manager.root.join("installs")).unwrap();
+        let relative = format!("installs/{}", Uuid::new_v4().simple());
+        let install = manager.root.join(&relative);
+        fs::create_dir(&install).unwrap();
+        fs::write(install.join("adb"), b"prepared test adb").unwrap();
+
+        let settings = ManagedSettings {
+            schema_version: 1,
+            install_relative_path: relative.clone(),
+            version: "37.0.0".to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            signer_team_identifier: GOOGLE_TEAM_IDENTIFIER.to_string(),
+            files: HashMap::new(),
+        };
+        PreparedAdbInstall {
+            root: manager.root.clone(),
+            expected_revision: manager.revision,
+            settings,
+            resolved: ResolvedAdb {
+                path: install.join("adb"),
+                version: "37.0.0".to_string(),
+                warning: None,
+                managed_relative_path: Some(relative),
+            },
+            activated: false,
+        }
     }
 }
