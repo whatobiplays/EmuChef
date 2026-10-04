@@ -222,9 +222,9 @@ pub(crate) struct QualificationTargetRegistrationResult {
 
 /// Runtime inputs used to decide whether qualification commands may be used.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct QualificationModeState {
-    enabled: bool,
-    build: Option<QualificationBuildIdentity>,
+pub(crate) struct QualificationModeState {
+    pub(crate) enabled: bool,
+    pub(crate) build: Option<QualificationBuildIdentity>,
 }
 
 impl QualificationModeState {
@@ -485,6 +485,18 @@ pub fn register_qualification_target(
     state: State<'_, AppState>,
 ) -> Result<QualificationTargetRegistrationResult, String> {
     let mode = QualificationModeState::current(&state.qualification_repository);
+    register_qualification_target_with_mode(&candidate_handle, &mode, &state)
+}
+
+pub(crate) fn register_qualification_target_with_mode(
+    candidate_handle: &str,
+    mode: &QualificationModeState,
+    state: &AppState,
+) -> Result<QualificationTargetRegistrationResult, String> {
+    // Reject disabled/unavailable qualification before recovery can inspect or
+    // reconcile a persisted session. A disabled command must have no session
+    // or candidate side effects.
+    let _ = require_recordable_mode(mode)?;
     let repository = state
         .qualification_repository
         .get()
@@ -492,7 +504,7 @@ pub fn register_qualification_target(
     with_inactive_qualification_session(&state, repository, || {
         register_qualification_target_with_repository(
             &candidate_handle,
-            &mode,
+            mode,
             &state.qualification_repository,
         )
     })

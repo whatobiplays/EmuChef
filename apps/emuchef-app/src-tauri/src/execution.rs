@@ -1151,7 +1151,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         Ok(facts) => facts,
         Err(_) => {
             if let Some(state) = qualification_state {
-                let _transition = crate::commands::qualification_transition_lock(state);
+                let transition = crate::commands::qualification_transition_lock(state);
                 let current = state
                     .handles
                     .lock()
@@ -1168,6 +1168,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                         observation_failure_target.clone(),
                     );
                 }
+                transition.release_and_retry_best_effort();
             }
             return Err(device_disconnected());
         }
@@ -1179,7 +1180,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
             .with_session_epoch(session_epoch)
     });
     {
-        let _transition = qualification_state.map(crate::commands::qualification_transition_lock);
+        let transition = qualification_state.map(crate::commands::qualification_transition_lock);
         let mut handles = handles.lock().map_err(|_| session_error())?;
         let current = handles
             .device(&refreshed_review.device_handle)
@@ -1199,13 +1200,15 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
             )
             .map_err(|_| device_disconnected())?;
         drop(handles);
+        let mut qualification_result = Ok(());
         if let Some(state) = qualification_state {
             match final_probe_observation.as_ref() {
                 Some(observation) => {
-                    crate::device_observation::commit_selected_observation_in_transition(
-                        state,
-                        observation.clone(),
-                    )?
+                    qualification_result =
+                        crate::device_observation::commit_selected_observation_in_transition(
+                            state,
+                            observation.clone(),
+                        );
                 }
                 None => {
                     crate::qualification_session::observe_device_observation_failure_in_transition(
@@ -1215,6 +1218,10 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                 }
             }
         }
+        if let Some(transition) = transition {
+            transition.release_and_retry_best_effort();
+        }
+        qualification_result?;
     }
     validate_target(&refreshed_review.target, &serial, &facts)?;
     validate_plan_digest(&refreshed_review)?;
@@ -1287,7 +1294,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     });
 
     {
-        let _transition = qualification_state.map(crate::commands::qualification_transition_lock);
+        let transition = qualification_state.map(crate::commands::qualification_transition_lock);
         let handles = handles.lock().map_err(|_| session_error())?;
         let device = handles
             .device(&refreshed_review.device_handle)
@@ -1301,6 +1308,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         }
         drop(handles);
 
+        let mut qualification_result = Ok(());
         if let (Some(state), Some(observation)) =
             (qualification_state, final_probe_observation.take())
         {
@@ -1308,10 +1316,11 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
             if qualification_device_plan.is_some() {
                 if let Some(profile_id) = current_profile_id {
                     observation = observation.with_profile_id(profile_id);
-                    crate::device_observation::commit_selected_observation_in_transition(
-                        state,
-                        observation,
-                    )?;
+                    qualification_result =
+                        crate::device_observation::commit_selected_observation_in_transition(
+                            state,
+                            observation,
+                        );
                 } else {
                     // Catalog matching is qualification-only at this point. Its
                     // failure invalidates the attempt but never changes the
@@ -1322,12 +1331,17 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
                     );
                 }
             } else {
-                crate::device_observation::commit_selected_observation_in_transition(
-                    state,
-                    observation,
-                )?;
+                qualification_result =
+                    crate::device_observation::commit_selected_observation_in_transition(
+                        state,
+                        observation,
+                    );
             }
         }
+        if let Some(transition) = transition {
+            transition.release_and_retry_best_effort();
+        }
+        qualification_result?;
     }
 
     let start_result = request_real_start(runtime, &refreshed_review)?;
@@ -1335,18 +1349,22 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         // The sidecar start request is complete. Retain product admission and
         // notify qualification as one ordered transition so inventory or a
         // terminal report cannot cross the commit-to-observation boundary.
-        let _transition = crate::commands::qualification_transition_lock(state);
-        let public =
-            bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
-        if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
-            let mapping = executions.mapping(
-                ExecutionKind::Real,
-                execution_handle,
-                REAL_EXECUTION_UNAVAILABLE,
-            )?;
-            observe_real_admission(state, &mapping, &mapping.review);
-        }
-        Ok(public)
+        let transition = crate::commands::qualification_transition_lock(state);
+        let result = (|| {
+            let public =
+                bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
+            if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
+                let mapping = executions.mapping(
+                    ExecutionKind::Real,
+                    execution_handle,
+                    REAL_EXECUTION_UNAVAILABLE,
+                )?;
+                observe_real_admission(state, &mapping, &mapping.review);
+            }
+            Ok(public)
+        })();
+        transition.release_and_retry_best_effort();
+        result
     } else {
         bind_real_start_result(executions, review_handle, refreshed_review, &start_result)
     }
@@ -2345,7 +2363,7 @@ fn recover_from_real_execution_loss(
         return Ok(());
     };
     let mut executions = recover_poisoned_lock(&state.executions);
-    let _transition = crate::commands::qualification_transition_lock(state);
+    let transition = crate::commands::qualification_transition_lock(state);
     let mapping = executions
         .mapping(
             ExecutionKind::Real,
@@ -2380,6 +2398,7 @@ fn recover_from_real_execution_loss(
             execution_handle: public_handle.to_string(),
         },
     );
+    transition.release_and_retry_best_effort();
     Ok(())
 }
 
@@ -6632,6 +6651,58 @@ mod tests {
             .load_candidate(&candidate)
             .unwrap();
         assert_eq!(stored.payload["runValidity"], "valid");
+    }
+
+    #[test]
+    fn authoritative_runtime_loss_retries_deferred_qualification_materialization() {
+        let (repository_root, _app_root, app, execution_handle, candidate) =
+            begin_monitor_qualification_attempt();
+        let state = app.state::<AppState>();
+        let recipe_path = repository_root
+            .path()
+            .join("authored/recipes/test.recipe.yaml");
+        std::fs::write(
+            &recipe_path,
+            b"id: test.recipe\nsteps: [temporary change]\n",
+        )
+        .unwrap();
+        let mapping = state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .unwrap();
+        let report = json!({
+            "executionId": "sidecar-qualification",
+            "status": "succeeded",
+            "errors": [],
+            "recipes": []
+        });
+        retain_terminal_real_execution(&state, &mapping, &report, "2026-10-03T12:00:00Z")
+            .expect("the product terminal result should be retained")
+            .expect("the terminal transition should be new");
+
+        std::fs::write(&recipe_path, b"id: test.recipe\n").unwrap();
+        let error = safe_error("runtime_session_lost", "the runtime session is gone");
+        recover_from_real_execution_loss(&state, &execution_handle, &error)
+            .expect("authoritative runtime loss should remain a successful product transition");
+
+        assert!(state.executions.lock().unwrap().is_lost(&execution_handle));
+        assert!(crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_none());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "valid");
+        assert!(stored.promotable);
     }
 
     /// Prepare one active qualification attempt bound to one real execution so

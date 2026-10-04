@@ -568,8 +568,10 @@ pub(crate) fn commit_selected_observation(
     state: &AppState,
     observation: SelectedDeviceObservation,
 ) -> Result<(), String> {
-    let _transition = crate::commands::qualification_transition_lock(state);
-    commit_selected_observation_in_transition(state, observation)
+    let transition = crate::commands::qualification_transition_lock(state);
+    let result = commit_selected_observation_in_transition(state, observation);
+    transition.release_and_retry_best_effort();
+    result
 }
 
 /// Commit an observation while the caller already owns the shared transition
@@ -1187,40 +1189,44 @@ pub(crate) fn commit_snapshot_observation(
     current: &CurrentQualification,
     failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
 ) -> Result<(), String> {
-    let _transition = crate::commands::qualification_transition_lock(state);
-    let Some(identity) = current.snapshot.device_identity.as_deref() else {
-        crate::qualification_session::observe_device_observation_failure_in_transition(
+    let transition = crate::commands::qualification_transition_lock(state);
+    let result = (|| {
+        let Some(identity) = current.snapshot.device_identity.as_deref() else {
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target,
+            );
+            return Ok(());
+        };
+        let Some(context) = current.context.as_ref() else {
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target,
+            );
+            return Ok(());
+        };
+        if let Err(error) = commit_selected_observation_in_transition(
             state,
-            failure_target,
-        );
-        return Ok(());
-    };
-    let Some(context) = current.context.as_ref() else {
-        crate::qualification_session::observe_device_observation_failure_in_transition(
-            state,
-            failure_target,
-        );
-        return Ok(());
-    };
-    if let Err(error) = commit_selected_observation_in_transition(
-        state,
-        SelectedDeviceObservation::new(identity)
-            .with_snapshot(&current.snapshot)
-            .with_session_epoch(context.session_epoch),
-    ) {
-        crate::qualification_session::observe_device_observation_failure_in_transition(
-            state,
-            failure_target,
-        );
-        return Err(error);
-    }
-    if current.snapshot.state != DeviceQualificationState::Supported {
-        crate::qualification_session::observe_device_observation_failure_in_transition(
-            state,
-            failure_target,
-        );
-    }
-    Ok(())
+            SelectedDeviceObservation::new(identity)
+                .with_snapshot(&current.snapshot)
+                .with_session_epoch(context.session_epoch),
+        ) {
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target,
+            );
+            return Err(error);
+        }
+        if current.snapshot.state != DeviceQualificationState::Supported {
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target,
+            );
+        }
+        Ok(())
+    })();
+    transition.release_and_retry_best_effort();
+    result
 }
 
 /// Qualify the single target from an already reconciled native inventory.
@@ -1592,7 +1598,7 @@ fn clear_unverified_device_authority_and_observe_failure_with<F>(
 where
     F: FnOnce(),
 {
-    let _transition = crate::commands::qualification_transition_lock(state);
+    let transition = crate::commands::qualification_transition_lock(state);
     clear_unverified_device_authority(
         &state.handles,
         &state.root_qualification,
@@ -1604,6 +1610,7 @@ where
         state,
         failure_target,
     );
+    transition.release_and_retry_best_effort();
     Ok(())
 }
 

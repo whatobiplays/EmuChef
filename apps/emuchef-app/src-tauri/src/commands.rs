@@ -132,7 +132,7 @@ pub(crate) fn reconcile_inventory_snapshot_with_state_and_hook<F>(
 where
     F: FnOnce(),
 {
-    let _transition = qualification_transition_lock(state);
+    let transition = qualification_transition_lock(state);
     let result = reconcile_inventory_with_context(
         &state.handles,
         &state.root_qualification,
@@ -143,6 +143,7 @@ where
     let (generation, available_devices) = current_qualification_inventory_snapshot(state);
     after_product_commit();
     report_device_inventory_to_qualification(state, generation, &available_devices);
+    transition.release_and_retry_best_effort();
     result
 }
 
@@ -207,6 +208,16 @@ impl QualificationTransitionGuard<'_> {
     ) -> Result<Option<crate::qualification_session::QualificationSessionSnapshot>, String> {
         drop(self.guard.take());
         crate::qualification_session::retry_deferred_finalization(self.state)
+    }
+
+    /// Release the product-transition gate and retry deferred qualification
+    /// materialization without changing the already-committed product result.
+    pub(crate) fn release_and_retry_best_effort(self) {
+        if self.release_and_retry().is_err() {
+            eprintln!(
+                "Qualification state was retained, but deferred candidate materialization remains pending."
+            );
+        }
     }
 }
 
@@ -990,7 +1001,7 @@ where
     let facts = match probe(&serial) {
         Ok(facts) => facts,
         Err(error) => {
-            let _transition = qualification_transition_lock(state);
+            let transition = qualification_transition_lock(state);
             let current = state
                 .handles
                 .lock()
@@ -1016,11 +1027,12 @@ where
                 state,
                 failure_target.clone(),
             );
+            transition.release_and_retry_best_effort();
             return Err(error);
         }
     };
     let typed = crate::device_observation::DeviceProbeFacts::decode(&facts);
-    let _transition = qualification_transition_lock(state);
+    let transition = qualification_transition_lock(state);
     let mut handles = state.handles.lock().map_err(|_| {
         safe_error(
             "session_state_unavailable",
@@ -1053,6 +1065,7 @@ where
             failure_target,
         );
     }
+    transition.release_and_retry_best_effort();
     Ok(DeviceProbeResult {
         facts,
         typed,
@@ -1125,7 +1138,7 @@ fn match_device_result(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
-    let _transition = qualification_transition_lock(state);
+    let transition = qualification_transition_lock(state);
     {
         let handles = state.handles.lock().map_err(|_| {
             safe_error(
@@ -1168,6 +1181,7 @@ fn match_device_result(
         }
         crate::device_observation::commit_selected_observation_in_transition(state, observation)?;
     }
+    transition.release_and_retry_best_effort();
     Ok((public, projection))
 }
 
@@ -1354,7 +1368,7 @@ pub fn create_review(
         created: Instant::now(),
         last_access: Instant::now(),
     };
-    let _transition = qualification_transition_lock(&state);
+    let transition = qualification_transition_lock(&state);
     let mut handles = state.handles.lock().map_err(|_| {
         safe_error(
             "session_state_unavailable",
@@ -1384,6 +1398,7 @@ pub fn create_review(
             crate::qualification_session::review_observation(&review_handle, &snapshot),
         )),
     );
+    transition.release_and_retry_best_effort();
     let exact_serial = plan
         .pointer("/target_device/serial")
         .and_then(Value::as_str);

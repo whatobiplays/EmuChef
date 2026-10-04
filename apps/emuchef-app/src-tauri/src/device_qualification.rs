@@ -403,7 +403,7 @@ pub(crate) fn check_device_root_observation(
         },
     };
     let changed = previous.as_ref() != Some(&qualification);
-    let _transition = crate::commands::qualification_transition_lock(&state);
+    let transition = crate::commands::qualification_transition_lock(&state);
     {
         let handles = state.handles.lock().map_err(|_| {
             safe_error("session_state_unavailable", "Session state is unavailable.")
@@ -457,21 +457,45 @@ pub(crate) fn check_device_root_observation(
     // Feed the committed explicit root-check result to the active attempt. The
     // root check stays the only root authority; qualification only observes the
     // result it committed.
-    crate::qualification_session::observe_in_transition(
-        state,
-        crate::qualification_session::QualificationLifecycleObservation::RootChecked {
-            device_handle: device_handle.to_string(),
-            session_epoch: context.session_epoch,
-            root_state: qualification.clone(),
-        },
-    );
-    Ok(RootQualificationCheckDto {
+    let result = RootQualificationCheckDto {
         qualification,
         runtime_generation,
         qualification_revision: context.qualification_revision,
         device_identity: device_handle.to_string(),
         session_epoch: context.session_epoch,
-    })
+    };
+    Ok(publish_committed_root_observation(
+        state,
+        transition,
+        device_handle,
+        result.session_epoch,
+        result.qualification.clone(),
+        result,
+    ))
+}
+
+/// Publish root authority only after the product root result has been retained.
+/// Deferred candidate checks may inspect authored source, so they run after the
+/// product-transition gate has been released. Qualification failures never
+/// change the root result returned to the product caller.
+pub(crate) fn publish_committed_root_observation(
+    state: &AppState,
+    transition: crate::commands::QualificationTransitionGuard<'_>,
+    device_handle: &str,
+    session_epoch: u64,
+    root_state: RootQualificationState,
+    result: RootQualificationCheckDto,
+) -> RootQualificationCheckDto {
+    crate::qualification_session::observe_in_transition(
+        state,
+        crate::qualification_session::QualificationLifecycleObservation::RootChecked {
+            device_handle: device_handle.to_string(),
+            session_epoch,
+            root_state,
+        },
+    );
+    transition.release_and_retry_best_effort();
+    result
 }
 
 #[cfg(test)]

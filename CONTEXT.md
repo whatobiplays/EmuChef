@@ -1440,11 +1440,15 @@ from resettable frontend session state. This prevents a frontend reset from
 reclassifying a same-process attempt using the stale startup marker. Recovery
 checks prior-process handoff proof before comparing build identity. An
 otherwise-valid persisted attempt with an unproven handoff is durably
-invalidated and retained as invalid/not_observed under the current build. Only
-a cleanly handed-off valid attempt is subject to build matching: the captured
-build resumes it, while another build defers it unchanged. An incompatible or
-already-invalid persisted attempt may be closed under another build only as
-invalid/not_observed evidence that cannot be promoted.
+invalidated and retained as invalid/not_observed under the current build. After
+a clean handoff, an otherwise-valid attempt captured by another build remains
+deferred and unchanged. Under a matching build, a session resumes when execution
+was never admitted or when an admitted execution has a retained terminal
+observation. If execution was admitted but no terminal observation was
+retained, recovery records a lifecycle-transition-missed failure as
+invalid/not_observed audit evidence; a matching build cannot repair that gap.
+An incompatible or already-invalid persisted attempt may be closed under
+another build only as invalid/not_observed evidence that cannot be promoted.
 
 Qualification sessions use opaque handles and strict Rust-owned persistence
 beside the canonical candidate envelope. Source digests are captured when the
