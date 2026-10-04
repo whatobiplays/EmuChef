@@ -1,0 +1,64 @@
+apps/emuchef-app/src-tauri/src/execution.rs
+  s_09b05cf592369e::t_052394b8fb953e 6918-6922
+  s_09b05cf592369e::t_2551a134511224 1899-1900,1937
+  s_09b05cf592369e::t_c897f8ba587f12 6923-6927
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_4700d11daeff09 3473,3725,4418-4421,4423,4533-4622
+  s_09b05cf592369e::t_8f74cc5c66e4f1 4445-4446,4508-4509
+  s_09b05cf592369e::t_d0745e3bbc29ef 3737-3738,3745-3752,4439-4441,4502-4504
+  s_09b05cf592369e::t_045b298e531ece 3171
+  s_09b05cf592369e::t_9c0dd8390bfcf6 1319-1328,2402-2416,2540-2562
+  s_09b05cf592369e::t_bd36d4042d4df1 3472,4623-4661
+  s_09b05cf592369e::t_7f6fd8615dc005 3268-3281,3428-3466,3471
+  s_09b05cf592369e::t_289d13c532c044 3726-3736,3739-3744,3753-3793
+  s_09b05cf592369e::t_a391daf0d243cb 4442,4505
+  s_09b05cf592369e::t_c98eef2fc9caf1 2563,3116-3144
+  s_09b05cf592369e::t_5ea8d9d514806c 4424-4438,4443-4444,4447-4501,4506-4507,4510-4532
+  s_09b05cf592369e::t_7c522cb01c270d 2564
+  s_09b05cf592369e::t_4e8ed05b112852 3467-3470
+  s_09b05cf592369e::t_1d60f59cec5caa 3474
+  s_09b05cf592369e::t_d5dc3fe7754d5a 4422
+apps/emuchef-app/src/workflow.ts
+  s_09b05cf592369e::t_ee16223bdf159b 351-352
+  s_09b05cf592369e::t_6bb7912f8f5419 353-358
+apps/emuchef-app/tests/workflow.test.ts
+  s_09b05cf592369e::t_f0dbb591147a72 17,112-130,975-1038
+  s_09b05cf592369e::t_f6fd9eb51916d7 1039-1040
+apps/emuchef-app/src-tauri/src/commands.rs
+  s_09b05cf592369e::t_a87e30e161c0ab 798-818
+  s_09b05cf592369e::t_4c1370d4de470c 763-797,819-822
+apps/emuchef-app/src-tauri/src/device_observation.rs
+  s_09b05cf592369e::t_d0745e3bbc29ef 1646-1653
+  s_09b05cf592369e::t_58911122dbed9e 1336,1357-1358,1361
+  s_09b05cf592369e::t_c08b2441c4bd8c 1674,1676-1677
+apps/emuchef-app/src/types.ts
+  s_09b05cf592369e::t_97f5840270a37b 288-289
+apps/emuchef-app/src-tauri/src/qualification_mode.rs
+  s_09b05cf592369e::t_beae6401abf264 348-368,372,376,380,385,387-398
+  s_09b05cf592369e::t_5dc8a0110b80f3 386
+CONTEXT.md
+  s_09b05cf592369e::t_23814409049a93 1395-1399
+docs/testing/phase-6d6/ui-binding-index.json
+  s_09b05cf592369e::t_a3e0283133574d 6,203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "72847ad1edf372c00d7861ff188de4bd2ba2d489",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
