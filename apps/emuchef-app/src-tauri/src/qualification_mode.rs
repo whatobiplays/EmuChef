@@ -317,7 +317,7 @@ pub(crate) fn with_inactive_qualification_session<T>(
         .lock_begin()
         .map_err(|_| safe_qualification_error("qualification_session_active"))?;
     crate::qualification_session::recover_persisted_sessions(state, repository)?;
-    if crate::qualification_session::session_status(state)?.is_some() {
+    if crate::qualification_session::has_open_attempt(state) {
         return Err(safe_qualification_error("qualification_session_active"));
     }
     operation()

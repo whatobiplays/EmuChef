@@ -246,6 +246,26 @@ impl SessionHandles {
             .map(|device| device.session_epoch)
     }
 
+    #[cfg(test)]
+    pub(crate) fn retain_available_device_for_test(&mut self, handle: &str, session_epoch: u64) {
+        self.device_generation = self.device_generation.saturating_add(1);
+        self.session_epoch_by_handle
+            .insert(handle.to_string(), session_epoch);
+        self.devices_by_handle.insert(
+            handle.to_string(),
+            DeviceRecord {
+                handle: handle.to_string(),
+                serial: format!("test-{handle}"),
+                state: "available".to_string(),
+                model: None,
+                transport_id: None,
+                session_epoch,
+                facts: None,
+                facts_session_epoch: None,
+            },
+        );
+    }
+
     pub fn single_available_device_handle(&self) -> Option<String> {
         if self.devices_by_handle.len() != 1 {
             return None;

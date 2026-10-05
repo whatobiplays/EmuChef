@@ -34,7 +34,7 @@ use crate::device_observation::{
 use crate::device_qualification::{
     RootQualificationKey, RootQualificationState, RootQualificationStore,
 };
-use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
+use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::sidecar::SidecarState;
 
 const ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER: &str =
@@ -91,6 +91,7 @@ pub struct ExecutionHandleStore {
     latest_terminal_report: Option<StoredExecutionReport>,
     latest_lost: Option<(String, Option<ExecutionMapping>)>,
     launch_actions: HashMap<String, LaunchActionRecord>,
+    launch_attempts_in_flight: HashSet<String>,
     successful_launches: HashSet<String>,
 }
 
@@ -305,7 +306,11 @@ impl ExecutionHandleStore {
     }
 
     fn launch_action(&mut self, mapping: &ExecutionMapping, report: &Value) -> Option<Value> {
-        if self.successful_launches.contains(&mapping.public_handle) {
+        if self.successful_launches.contains(&mapping.public_handle)
+            || self
+                .launch_attempts_in_flight
+                .contains(&mapping.public_handle)
+        {
             return None;
         }
         if let Some(existing) = self
@@ -331,7 +336,9 @@ impl ExecutionHandleStore {
     /// Read the retained launch action for one execution without minting a new
     /// one. UI reads are pure projections and never create product state.
     fn retained_launch_action(&self, public_handle: &str) -> Option<Value> {
-        if self.successful_launches.contains(public_handle) {
+        if self.successful_launches.contains(public_handle)
+            || self.launch_attempts_in_flight.contains(public_handle)
+        {
             return None;
         }
         self.launch_actions
@@ -370,15 +377,65 @@ impl ExecutionHandleStore {
 
     /// Atomically remove one opaque action before any external revalidation or ADB work.
     fn consume_launch_action(&mut self, action_handle: &str) -> Result<LaunchActionRecord, String> {
-        self.launch_actions.remove(action_handle).ok_or_else(|| {
+        let action = self.launch_actions.remove(action_handle).ok_or_else(|| {
             safe_error(
                 "launch_unavailable",
                 "This launch action is unavailable. Refresh the completed execution before trying again.",
             )
-        })
+        })?;
+        if self
+            .launch_attempts_in_flight
+            .contains(&action.mapping.public_handle)
+        {
+            self.launch_actions
+                .insert(action.action_handle.clone(), action);
+            return Err(launch_unavailable());
+        }
+        self.launch_attempts_in_flight
+            .insert(action.mapping.public_handle.clone());
+        Ok(action)
+    }
+
+    /// Complete a consumed launch action after validation or launch failed.
+    /// Reissue exactly one fresh opaque action only while the retained terminal
+    /// execution and its product report still authorize the same launch.
+    fn complete_failed_launch(&mut self, consumed: &LaunchActionRecord) -> Option<Value> {
+        let public_handle = &consumed.mapping.public_handle;
+        self.launch_attempts_in_flight.remove(public_handle);
+        if self.successful_launches.contains(public_handle)
+            || self.is_lost(public_handle)
+            || !self.latest_terminal.as_ref().is_some_and(|mapping| {
+                mapping.kind == consumed.mapping.kind && mapping.public_handle == *public_handle
+            })
+        {
+            return None;
+        }
+        let report = self.latest_terminal_report.as_ref()?;
+        if eligible_launch_label(&consumed.mapping, &report.report).as_deref()
+            != Some(consumed.label.as_str())
+        {
+            return None;
+        }
+        if let Some(existing) = self
+            .launch_actions
+            .values()
+            .find(|action| action.mapping.public_handle == *public_handle)
+        {
+            return Some(retained_launch_action_value(existing));
+        }
+        let action_handle = format!("launch_{}", Uuid::new_v4().simple());
+        let replacement = LaunchActionRecord {
+            action_handle: action_handle.clone(),
+            label: consumed.label.clone(),
+            mapping: consumed.mapping.clone(),
+        };
+        self.launch_actions
+            .insert(action_handle.clone(), replacement);
+        Some(json!({ "handle": action_handle, "label": consumed.label }))
     }
 
     fn mark_launch_succeeded(&mut self, public_handle: &str) {
+        self.launch_attempts_in_flight.remove(public_handle);
         self.successful_launches.insert(public_handle.to_string());
         self.discard_launch_actions_for_execution(public_handle);
     }
@@ -386,6 +443,7 @@ impl ExecutionHandleStore {
     fn discard_launch_actions_for_execution(&mut self, public_handle: &str) {
         self.launch_actions
             .retain(|_, action| action.mapping.public_handle != public_handle);
+        self.launch_attempts_in_flight.remove(public_handle);
     }
 
     fn forget_mapping(
@@ -446,6 +504,64 @@ fn runtime_request(
     runtime.request(request_type, payload)
 }
 
+#[derive(Debug)]
+enum PreflightInventoryFailure {
+    ProductUnavailable,
+    Runtime(String),
+}
+
+struct PreflightInventorySnapshot {
+    inventory: Value,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+}
+
+fn request_preflight_inventory<R: RuntimeRequester>(
+    state: &AppState,
+    runtime: &R,
+    adb_path: &str,
+) -> Result<PreflightInventorySnapshot, PreflightInventoryFailure> {
+    let runtime_generation = state
+        .sidecar
+        .try_generation()
+        .map_err(|_| PreflightInventoryFailure::ProductUnavailable)?;
+    let platform_tools_revision = state
+        .adb
+        .lock()
+        .map_err(|_| PreflightInventoryFailure::ProductUnavailable)?
+        .revision();
+    let inventory = runtime_request(runtime, "listAdbDevices", json!({ "adbPath": adb_path }))
+        .map_err(PreflightInventoryFailure::Runtime)?;
+    Ok(PreflightInventorySnapshot {
+        inventory,
+        runtime_generation,
+        platform_tools_revision,
+    })
+}
+
+/// List devices outside the qualification transition gate, then retain the
+/// resulting inventory through the product and qualification authority seam.
+/// Callers that already hold the execution store preserve the documented
+/// execution-store-before-transition-gate lock order.
+fn list_and_reconcile_preflight_inventory<R>(
+    state: &AppState,
+    runtime: &R,
+    adb_path: &str,
+) -> Result<Vec<DeviceDto>, PreflightInventoryFailure>
+where
+    R: RuntimeRequester,
+{
+    let snapshot = request_preflight_inventory(state, runtime, adb_path)?;
+    crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+        state,
+        &snapshot.inventory,
+        snapshot.runtime_generation,
+        snapshot.platform_tools_revision,
+        || {},
+    )
+    .map_err(|_| PreflightInventoryFailure::ProductUnavailable)
+}
+
 #[tauri::command]
 pub fn start_simulated_execution(
     review_handle: String,
@@ -491,18 +607,18 @@ fn start_simulated_execution_inner(
     validate_review_executable(&review)?;
     validate_catalog(&review, state)?;
     let adb_path = current_adb_path(state)?;
-    let inventory = runtime_request(
-        &state.sidecar,
-        "listAdbDevices",
-        json!({ "adbPath": &adb_path }),
-    )
-    .map_err(|_| stale_review("The reviewed device could not be found."))?;
+    let _devices = list_and_reconcile_preflight_inventory(state, &state.sidecar, &adb_path)
+        .map_err(|failure| match failure {
+            PreflightInventoryFailure::ProductUnavailable => {
+                stale_review("The reviewed device inventory changed.")
+            }
+            PreflightInventoryFailure::Runtime(_) => {
+                stale_review("The reviewed device could not be found.")
+            }
+        })?;
 
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
-        handles
-            .update_devices(&inventory)
-            .map_err(|_| stale_review("The reviewed device inventory changed."))?;
         let refreshed = handles.review(review_handle)?.clone();
         let device = handles
             .device(&refreshed.device_handle)
@@ -981,10 +1097,16 @@ pub fn start_real_execution(
                 "Another execution is already starting or active.",
             )
         })?;
-    let admission_fence = crate::qualification_session::capture_execution_admission_fence(
+    let admission_fence = match crate::qualification_session::capture_execution_admission_fence(
         &state,
         &request.review_handle,
-    );
+    ) {
+        Ok(fence) => fence,
+        Err(error) => {
+            executions.release_start();
+            return Err(error);
+        }
+    };
     match start_real_execution_inner(
         &request.review_handle,
         &state,
@@ -1128,9 +1250,12 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     runtime: &R,
     platform_tools: &PlatformToolsSnapshot<'_>,
 ) -> Result<Value, String> {
-    let admission_fence = qualification_state.and_then(|state| {
-        crate::qualification_session::capture_execution_admission_fence(state, review_handle)
-    });
+    let admission_fence = match qualification_state {
+        Some(state) => {
+            crate::qualification_session::capture_execution_admission_fence(state, review_handle)?
+        }
+        None => None,
+    };
     start_real_execution_inner_with_admission_fence(
         review_handle,
         qualification_state,
@@ -2156,10 +2281,8 @@ pub fn cancel_real_execution(
 }
 
 /// Consume one opaque launch action before revalidating any external state.
-///
-/// A failed invocation leaves the retained execution eligible, so a subsequent
-/// authoritative snapshot refresh may mint a new action handle. The consumed
-/// handle itself is never reusable.
+/// A retryable failure retains a replacement before the command returns; the
+/// consumed handle itself is never restored or reusable.
 #[tauri::command]
 pub fn launch_configured_app(
     launch_action_handle: String,
@@ -2168,12 +2291,91 @@ pub fn launch_configured_app(
     if !cfg!(feature = "real-execution") {
         return Err(launch_unavailable());
     }
-    let action = state
-        .executions
-        .lock()
-        .map_err(|_| real_execution_state_error())?
-        .consume_launch_action(&launch_action_handle)?;
-    let mapping = action.mapping;
+    let app_state = state.inner();
+    run_launch_action_attempt(app_state, &launch_action_handle, |action| {
+        launch_configured_app_after_consumption(app_state, action)
+    })
+}
+
+/// Keep launch-action consumption one-shot while ensuring every retryable
+/// failure retains one fresh action before the command returns.
+fn run_launch_action_attempt<T>(
+    state: &AppState,
+    launch_action_handle: &str,
+    operation: impl FnOnce(&LaunchActionRecord) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut attempt = LaunchActionAttemptGuard::consume(state, launch_action_handle)?;
+    match operation(attempt.action()) {
+        Ok(value) => {
+            attempt.finish_success();
+            Ok(value)
+        }
+        Err(error) => {
+            if attempt.finish_failure() {
+                Err(error)
+            } else {
+                Err(launch_unavailable())
+            }
+        }
+    }
+}
+
+/// Owns a consumed launch action until the command either records success or
+/// restores one fresh action after failure. Dropping during unwinding also
+/// clears the in-flight state and attempts the same bounded reissue.
+struct LaunchActionAttemptGuard<'a> {
+    state: &'a AppState,
+    action: LaunchActionRecord,
+    armed: bool,
+}
+
+impl<'a> LaunchActionAttemptGuard<'a> {
+    fn consume(state: &'a AppState, action_handle: &str) -> Result<Self, String> {
+        let action =
+            recover_poisoned_lock(&state.executions).consume_launch_action(action_handle)?;
+        Ok(Self {
+            state,
+            action,
+            armed: true,
+        })
+    }
+
+    fn action(&self) -> &LaunchActionRecord {
+        &self.action
+    }
+
+    fn finish_success(&mut self) {
+        recover_poisoned_lock(&self.state.executions)
+            .mark_launch_succeeded(&self.action.mapping.public_handle);
+        self.armed = false;
+    }
+
+    fn finish_failure(&mut self) -> bool {
+        if !self.armed {
+            return false;
+        }
+        let replacement =
+            recover_poisoned_lock(&self.state.executions).complete_failed_launch(&self.action);
+        self.armed = false;
+        replacement.is_some()
+    }
+}
+
+impl Drop for LaunchActionAttemptGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ =
+                recover_poisoned_lock(&self.state.executions).complete_failed_launch(&self.action);
+            self.armed = false;
+        }
+    }
+}
+
+fn launch_configured_app_after_consumption(
+    state: &AppState,
+    action: &LaunchActionRecord,
+) -> Result<Value, String> {
+    let mapping = &action.mapping;
 
     let review = state
         .handles
@@ -2199,17 +2401,18 @@ pub fn launch_configured_app(
         .to_string_lossy()
         .into_owned();
 
-    let inventory = runtime_request(
-        &state.sidecar,
-        "listAdbDevices",
-        json!({ "adbPath": &adb_path }),
-    )
-    .map_err(|_| device_disconnected())?;
+    let _devices = match list_and_reconcile_preflight_inventory(&state, &state.sidecar, &adb_path) {
+        Ok(devices) => devices,
+        Err(PreflightInventoryFailure::ProductUnavailable) => {
+            return Err(device_disconnected());
+        }
+        Err(PreflightInventoryFailure::Runtime(error)) => {
+            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            return Err(device_disconnected());
+        }
+    };
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
-        handles
-            .update_devices(&inventory)
-            .map_err(|_| device_disconnected())?;
         let refreshed = handles
             .review(&mapping.review_handle)
             .map_err(|_| launch_stale_target())?
@@ -2222,43 +2425,51 @@ pub fn launch_configured_app(
         }
         (device.serial.clone(), refreshed)
     };
-    let facts = runtime_request(
+    let facts = match runtime_request(
         &state.sidecar,
         "probeDevice",
         json!({ "adbPath": adb_path, "serial": &serial }),
-    )
-    .map_err(|_| device_disconnected())?;
+    ) {
+        Ok(facts) => facts,
+        Err(error) => {
+            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            return Err(device_disconnected());
+        }
+    };
     validate_target(&refreshed_review.target, &serial, &facts)
         .map_err(|_| launch_stale_target())?;
     validate_plan_digest(&refreshed_review).map_err(|_| launch_stale_target())?;
 
-    let report_response = runtime_request(
+    let report_response = match runtime_request(
         &state.sidecar,
         "getExecution",
         json!({ "executionId": mapping.sidecar_id }),
-    )
-    .map_err(|_| launch_unavailable())?;
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            return Err(launch_unavailable());
+        }
+    };
     let report = report_response
         .get("execution")
         .ok_or_else(launch_unavailable)?;
     eligible_launch_label(&mapping, report).ok_or_else(launch_unavailable)?;
 
-    runtime_request(
+    match runtime_request(
         &state.sidecar,
         "launchExecutionApp",
         json!({ "executionId": mapping.sidecar_id }),
-    )
-    .map_err(|_| {
-        safe_error(
+    ) {
+        Ok(_) => {}
+        Err(error) => {
+            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            return Err(safe_error(
             "launch_failed",
             "The configured app could not be launched. Refresh the completed execution to create a new launch action.",
-        )
-    })?;
-    state
-        .executions
-        .lock()
-        .map_err(|_| real_execution_state_error())?
-        .mark_launch_succeeded(&mapping.public_handle);
+            ));
+        }
+    }
     Ok(json!({
         "launched": true,
         "message": "The configured app was launched.",
@@ -4297,17 +4508,201 @@ pub(crate) mod tests {
             launch_review(),
         );
         let report = eligible_launch_report("succeeded_with_warnings");
-        store.mark_terminal(ExecutionKind::Real, &mapping.public_handle);
+        store.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            json!({ "status": "ready" }),
+        );
         let first = store.launch_action(&mapping, &report).unwrap();
         let first_handle = first.get("handle").and_then(Value::as_str).unwrap();
         let consumed = store.consume_launch_action(first_handle).unwrap();
         assert_eq!(consumed.mapping.public_handle, mapping.public_handle);
         assert!(store.consume_launch_action(first_handle).is_err());
+        assert!(store.launch_action(&mapping, &report).is_none());
 
-        let replacement = store.launch_action(&mapping, &report).unwrap();
+        let replacement = store.complete_failed_launch(&consumed).unwrap();
         assert_ne!(replacement.get("handle"), first.get("handle"));
+        assert!(store.consume_launch_action(first_handle).is_err());
+        assert_eq!(store.launch_actions.len(), 1);
         store.mark_launch_succeeded(&mapping.public_handle);
         assert!(store.launch_action(&mapping, &report).is_none());
+        assert!(store.launch_actions.is_empty());
+    }
+
+    #[test]
+    fn failed_launch_attempt_reissues_one_action_and_retry_success_disarms_it() {
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = executions.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            json!({ "status": "ready" }),
+        );
+        let first = executions.launch_action(&mapping, &report).unwrap();
+        let first_handle = first["handle"].as_str().unwrap().to_string();
+        let (_temp, app) = test_app(
+            Mutex::new(executions),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+
+        let failed = run_launch_action_attempt(&state, &first_handle, |_| {
+            Err::<(), _>(safe_error(
+                "launch_failed",
+                "The configured app could not be launched. Refresh the completed execution to create a new launch action.",
+            ))
+        })
+        .unwrap_err();
+        assert!(failed.contains("launch_failed"));
+        let refresh_runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err("retained terminal state should not require the sidecar".to_string()),
+        };
+        let refreshed = get_real_execution_inner_with_runtime(
+            &mapping.public_handle,
+            &state.executions,
+            &refresh_runtime,
+        )
+        .unwrap();
+        let replacement = refreshed["launchAction"].clone();
+        let replacement_handle = replacement["handle"].as_str().unwrap().to_string();
+        assert_ne!(replacement_handle, first_handle);
+        assert!(refresh_runtime.requests.lock().unwrap().is_empty());
+        assert!(state
+            .executions
+            .lock()
+            .unwrap()
+            .consume_launch_action(&first_handle)
+            .is_err());
+
+        for _ in 0..3 {
+            let current = state
+                .executions
+                .lock()
+                .unwrap()
+                .retained_launch_action(&mapping.public_handle)
+                .unwrap();
+            let handle = current["handle"].as_str().unwrap().to_string();
+            let transient_validation =
+                run_launch_action_attempt(&state, &handle, |_| Err::<(), _>(device_disconnected()));
+            assert!(transient_validation.is_err());
+            let executions = state.executions.lock().unwrap();
+            assert_eq!(executions.launch_actions.len(), 1);
+            assert!(executions
+                .retained_launch_action(&mapping.public_handle)
+                .is_some());
+        }
+
+        let retry = state
+            .executions
+            .lock()
+            .unwrap()
+            .retained_launch_action(&mapping.public_handle)
+            .unwrap();
+        let retry_handle = retry["handle"].as_str().unwrap().to_string();
+        assert_eq!(
+            run_launch_action_attempt(&state, &retry_handle, |_| Ok("launched")),
+            Ok("launched")
+        );
+        let executions = state.executions.lock().unwrap();
+        assert!(executions
+            .retained_launch_action(&mapping.public_handle)
+            .is_none());
+        assert!(executions.launch_actions.is_empty());
+    }
+
+    #[test]
+    fn panicking_launch_attempt_releases_the_fence_and_reissues_one_action() {
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = executions.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            json!({ "status": "ready" }),
+        );
+        let first = executions.launch_action(&mapping, &report).unwrap();
+        let first_handle = first["handle"].as_str().unwrap().to_string();
+        let (_temp, app) = test_app(
+            Mutex::new(executions),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = run_launch_action_attempt(&state, &first_handle, |_| -> Result<(), String> {
+                panic!("injected panic during launch validation")
+            });
+        }));
+        assert!(panic_result.is_err());
+
+        let mut executions = state.executions.lock().unwrap();
+        assert!(executions.launch_attempts_in_flight.is_empty());
+        assert_eq!(executions.launch_actions.len(), 1);
+        let replacement = executions
+            .retained_launch_action(&mapping.public_handle)
+            .expect("a retryable panic must leave one fresh launch action");
+        assert_ne!(replacement["handle"], first_handle);
+        assert!(executions.consume_launch_action(&first_handle).is_err());
+    }
+
+    #[test]
+    fn failed_launch_does_not_reissue_for_lost_or_ineligible_execution() {
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = executions.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            json!({ "status": "ready" }),
+        );
+        let first = executions.launch_action(&mapping, &report).unwrap();
+        let first_handle = first["handle"].as_str().unwrap().to_string();
+        let (_temp, app) = test_app(
+            Mutex::new(executions),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+
+        let error = run_launch_action_attempt(&state, &first_handle, |_| {
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .mark_lost(&mapping.public_handle, Some(mapping.clone()));
+            Err::<(), _>(device_disconnected())
+        })
+        .unwrap_err();
+        assert!(error.contains("launch_unavailable"));
+        let executions = state.executions.lock().unwrap();
+        assert!(executions.launch_actions.is_empty());
+        assert!(executions.is_lost(&mapping.public_handle));
     }
 
     #[test]
@@ -5084,6 +5479,28 @@ pub(crate) mod tests {
                 .push((request_type.into(), payload));
             self.result.clone()
         }
+    }
+
+    pub(crate) fn preflight_inventory_commit_for_test(
+        state: &AppState,
+        inventory: Value,
+        after_product_commit: impl FnOnce(),
+    ) -> Result<(), String> {
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Ok(inventory),
+        };
+        let snapshot = request_preflight_inventory(state, &runtime, "test-adb")
+            .map_err(|_| device_disconnected())?;
+        crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+            state,
+            &snapshot.inventory,
+            snapshot.runtime_generation,
+            snapshot.platform_tools_revision,
+            after_product_commit,
+        )
+        .map_err(|_| device_disconnected())
+        .map(|_| ())
     }
 
     pub(crate) fn poll_simulated_runtime_loss_for_test(
@@ -6869,7 +7286,7 @@ pub(crate) mod tests {
     }
 
     fn begin_monitor_qualification_attempt_with_handles(
-        native_handles: SessionHandles,
+        mut native_handles: SessionHandles,
         device_handle: &str,
     ) -> (
         tempfile::TempDir,
@@ -6878,6 +7295,12 @@ pub(crate) mod tests {
         String,
         String,
     ) {
+        if !native_handles
+            .device(device_handle)
+            .is_ok_and(|device| device.state == "available" && device.session_epoch == 1)
+        {
+            native_handles.retain_available_device_for_test(device_handle, 1);
+        }
         let repository_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
         std::fs::write(

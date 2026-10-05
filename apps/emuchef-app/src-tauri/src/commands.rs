@@ -149,7 +149,9 @@ where
 
 /// Capture one immutable, generation-tagged inventory projection from the
 /// native product store.
-fn current_qualification_inventory_snapshot(state: &AppState) -> (u64, Vec<(String, u64)>) {
+pub(crate) fn current_qualification_inventory_snapshot(
+    state: &AppState,
+) -> (u64, Vec<(String, u64)>) {
     let (generation, available_devices) = match state.handles.lock() {
         Ok(handles) => (
             handles.device_generation(),

@@ -1035,6 +1035,12 @@ the production report and runtime metadata needed for report capture. The
 `production_execution_report_bytes` helper owns the sanitized projection,
 redaction, deterministic pretty-JSON serialization, and trailing newline used
 by both the native export dialog and qualification evidence capture.
+An eligible configured-app launch action is consumed before external
+revalidation and is never reusable. A failed attempt retains one fresh opaque
+action immediately when the retained terminal report still authorizes that
+launch; successful launches, lost executions, and executions that are no
+longer eligible expose no replacement. Execution reads only project whichever
+action is already retained.
 
 `getExecution` snapshots are authoritative for feature-grouped progress,
 current user-facing action, completion counts, and terminal state. Incremental
@@ -1450,11 +1456,18 @@ checks prior-process handoff proof before comparing build identity. An
 otherwise-valid persisted attempt with an unproven handoff is durably
 invalidated and retained as invalid/not_observed under the current build. After
 a clean handoff, an otherwise-valid attempt captured by another build remains
-deferred and unchanged. Under a matching build, a session resumes when execution
-was never admitted or when an admitted execution has a retained terminal
-observation. If execution was admitted but no terminal observation was
-retained, recovery records a lifecycle-transition-missed failure as
-invalid/not_observed audit evidence; a matching build cannot repair that gap.
+deferred and unchanged, while reserving the one-attempt qualification harness
+globally. It has no process-local device, review, or execution association in
+the other build, and new sessions, target registration, other inactive-only
+mutations, and real execution admission remain blocked until the deferred
+candidate is discarded or the captured build resumes it. If
+multiple otherwise-valid open attempts are found, recovery selects none and
+keeps the harness reserved until the ambiguous candidates are resolved. Under
+a matching build, a session resumes when execution was never admitted or when
+an admitted execution has a retained terminal observation. If execution was
+admitted but no terminal observation was retained, recovery records a
+lifecycle-transition-missed failure as invalid/not_observed audit evidence; a
+matching build cannot repair that gap.
 An incompatible or already-invalid persisted attempt may be closed under
 another build only as invalid/not_observed evidence that cannot be promoted.
 
