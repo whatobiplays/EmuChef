@@ -463,8 +463,10 @@ test("real execution is default-disabled with compile-time-only enablement", () 
     "fn start_real_execution_inner",
     "\nfn request_real_start",
   );
-  assert.match(realStart, /\.revalidate_for_execution\(expected_adb\)/);
-  assert.ok(realStart.indexOf("revalidate_for_execution") < realStart.indexOf('"listAdbDevices"'));
+  assert.match(realStart, /revalidated_adb_runtime_snapshot\(state, expected_adb\)/);
+  assert.ok(
+    realStart.indexOf("revalidated_adb_runtime_snapshot") < realStart.indexOf('"listAdbDevices"'),
+  );
   assert.doesNotMatch(realStart, /ExecutionCapabilities|platform_tools_status|executor_readiness/);
 });
 

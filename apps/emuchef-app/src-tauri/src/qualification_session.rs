@@ -7477,6 +7477,29 @@ mod tests {
         assert!(begin_error.contains("qualification_session_active"));
         repository.discard_candidate(&competing_candidate).unwrap();
 
+        let candidate_count_before_target_registration =
+            std::fs::read_dir(repository.candidate_root())
+                .unwrap()
+                .count();
+        let target_registration_error =
+            crate::qualification_mode::create_qualification_target_candidate(
+                crate::qualification_mode::CreateQualificationTargetCandidateRequest {
+                    device_handle: "device-from-build-b".to_string(),
+                    device_plan: "test-plan".to_string(),
+                    connection_type: crate::qualification_mode::QualificationConnectionType::Usb3,
+                },
+                app.state(),
+            )
+            .expect_err("a deferred attempt must block target-registration capture");
+        assert!(target_registration_error.contains("qualification_session_active"));
+        assert_eq!(
+            std::fs::read_dir(repository.candidate_root())
+                .unwrap()
+                .count(),
+            candidate_count_before_target_registration,
+            "a rejected registration must not create a candidate"
+        );
+
         let called = std::cell::Cell::new(false);
         let rejected = crate::qualification_mode::with_inactive_qualification_session(
             &state,

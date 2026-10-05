@@ -513,29 +513,28 @@ enum PreflightInventoryFailure {
 struct PreflightInventorySnapshot {
     inventory: Value,
     runtime_generation: u64,
-    platform_tools_revision: u64,
+    platform_tools: crate::commands::AdbRuntimeSnapshot,
 }
 
 fn request_preflight_inventory<R: RuntimeRequester>(
     state: &AppState,
     runtime: &R,
-    adb_path: &str,
+    platform_tools: &crate::commands::AdbRuntimeSnapshot,
 ) -> Result<PreflightInventorySnapshot, PreflightInventoryFailure> {
     let runtime_generation = state
         .sidecar
         .try_generation()
         .map_err(|_| PreflightInventoryFailure::ProductUnavailable)?;
-    let platform_tools_revision = state
-        .adb
-        .lock()
-        .map_err(|_| PreflightInventoryFailure::ProductUnavailable)?
-        .revision();
-    let inventory = runtime_request(runtime, "listAdbDevices", json!({ "adbPath": adb_path }))
-        .map_err(PreflightInventoryFailure::Runtime)?;
+    let inventory = runtime_request(
+        runtime,
+        "listAdbDevices",
+        json!({ "adbPath": platform_tools.adb_path }),
+    )
+    .map_err(PreflightInventoryFailure::Runtime)?;
     Ok(PreflightInventorySnapshot {
         inventory,
         runtime_generation,
-        platform_tools_revision,
+        platform_tools: platform_tools.clone(),
     })
 }
 
@@ -546,17 +545,17 @@ fn request_preflight_inventory<R: RuntimeRequester>(
 fn list_and_reconcile_preflight_inventory<R>(
     state: &AppState,
     runtime: &R,
-    adb_path: &str,
+    platform_tools: &crate::commands::AdbRuntimeSnapshot,
 ) -> Result<Vec<DeviceDto>, PreflightInventoryFailure>
 where
     R: RuntimeRequester,
 {
-    let snapshot = request_preflight_inventory(state, runtime, adb_path)?;
+    let snapshot = request_preflight_inventory(state, runtime, platform_tools)?;
     crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
         state,
         &snapshot.inventory,
         snapshot.runtime_generation,
-        snapshot.platform_tools_revision,
+        snapshot.platform_tools.revision,
         || {},
     )
     .map_err(|_| PreflightInventoryFailure::ProductUnavailable)
@@ -606,16 +605,16 @@ fn start_simulated_execution_inner(
 
     validate_review_executable(&review)?;
     validate_catalog(&review, state)?;
-    let adb_path = current_adb_path(state)?;
-    let _devices = list_and_reconcile_preflight_inventory(state, &state.sidecar, &adb_path)
+    let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
+    let _devices = list_and_reconcile_preflight_inventory(state, &state.sidecar, &platform_tools)
         .map_err(|failure| match failure {
-            PreflightInventoryFailure::ProductUnavailable => {
-                stale_review("The reviewed device inventory changed.")
-            }
-            PreflightInventoryFailure::Runtime(_) => {
-                stale_review("The reviewed device could not be found.")
-            }
-        })?;
+        PreflightInventoryFailure::ProductUnavailable => {
+            stale_review("The reviewed device inventory changed.")
+        }
+        PreflightInventoryFailure::Runtime(_) => {
+            stale_review("The reviewed device could not be found.")
+        }
+    })?;
 
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
@@ -634,7 +633,7 @@ fn start_simulated_execution_inner(
     let facts = runtime_request(
         &state.sidecar,
         "probeDevice",
-        json!({ "adbPath": adb_path, "serial": &serial }),
+        json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     )
     .map_err(|_| stale_review("The reviewed device facts could not be refreshed."))?;
     validate_target(&refreshed_review.target, &serial, &facts)?;
@@ -1172,16 +1171,7 @@ fn start_real_execution_inner(
             "The reviewed Platform-Tools installation is no longer associated with this review.",
         )
     })?;
-    let adb_path = state
-        .adb
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "platform_tools_unavailable",
-                "The reviewed Platform-Tools installation is unavailable. Repair it and generate a new review.",
-            )
-        })?
-        .revalidate_for_execution(expected_adb)
+    let platform_tools = crate::commands::revalidated_adb_runtime_snapshot(state, expected_adb)
         .map_err(|error| match error {
             AdbRevalidationError::Unavailable => safe_error(
                 "platform_tools_unavailable",
@@ -1191,7 +1181,6 @@ fn start_real_execution_inner(
                 stale_review("The Platform-Tools installation changed after review.")
             }
     })?;
-    let adb_path = adb_path.to_string_lossy().into_owned();
 
     // The shared final helper requests "listAdbDevices" only after this
     // reviewed Platform-Tools identity has been revalidated.
@@ -1201,20 +1190,10 @@ fn start_real_execution_inner(
             "Device qualification state is temporarily unavailable.",
         )
     })?;
-    let platform_tools_revision = state
-        .adb
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "adb_state_unavailable",
-                "Platform-Tools setup state is unavailable.",
-            )
-        })?
-        .revision();
     let platform_tools = PlatformToolsSnapshot {
-        adb_path: &adb_path,
+        adb_path: &platform_tools.adb_path,
         runtime_generation,
-        platform_tools_revision,
+        platform_tools_revision: platform_tools.revision,
     };
     start_real_execution_inner_with_admission_fence(
         review_handle,
@@ -2389,28 +2368,23 @@ fn launch_configured_app_after_consumption(
         .platform_tools_identity
         .as_ref()
         .ok_or_else(platform_tools_unavailable)?;
-    let adb_path = state
-        .adb
-        .lock()
-        .map_err(|_| platform_tools_unavailable())?
-        .revalidate_for_execution(expected_adb)
+    let platform_tools = crate::commands::revalidated_adb_runtime_snapshot(state, expected_adb)
         .map_err(|error| match error {
             AdbRevalidationError::Unavailable => platform_tools_unavailable(),
             AdbRevalidationError::Changed => launch_stale_target(),
-        })?
-        .to_string_lossy()
-        .into_owned();
+        })?;
 
-    let _devices = match list_and_reconcile_preflight_inventory(&state, &state.sidecar, &adb_path) {
-        Ok(devices) => devices,
-        Err(PreflightInventoryFailure::ProductUnavailable) => {
-            return Err(device_disconnected());
-        }
-        Err(PreflightInventoryFailure::Runtime(error)) => {
-            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
-            return Err(device_disconnected());
-        }
-    };
+    let _devices =
+        match list_and_reconcile_preflight_inventory(&state, &state.sidecar, &platform_tools) {
+            Ok(devices) => devices,
+            Err(PreflightInventoryFailure::ProductUnavailable) => {
+                return Err(device_disconnected());
+            }
+            Err(PreflightInventoryFailure::Runtime(error)) => {
+                recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+                return Err(device_disconnected());
+            }
+        };
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
         let refreshed = handles
@@ -2428,7 +2402,7 @@ fn launch_configured_app_after_consumption(
     let facts = match runtime_request(
         &state.sidecar,
         "probeDevice",
-        json!({ "adbPath": adb_path, "serial": &serial }),
+        json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     ) {
         Ok(facts) => facts,
         Err(error) => {
@@ -5481,6 +5455,67 @@ pub(crate) mod tests {
         }
     }
 
+    struct ReplacingPlatformToolsRuntime<'a> {
+        state: &'a AppState,
+        inventory: Value,
+        requests: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl RuntimeRequester for ReplacingPlatformToolsRuntime<'_> {
+        fn request(&self, request_type: &str, payload: Value) -> Result<Value, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request_type.to_string(), payload));
+            assert_eq!(request_type, "listAdbDevices");
+            self.state.adb.lock().unwrap().remove().unwrap();
+            Ok(self.inventory.clone())
+        }
+    }
+
+    #[test]
+    fn preflight_inventory_keeps_its_captured_adb_revision_when_tools_change_during_request() {
+        let (_temp, app) = test_app(
+            Mutex::new(ExecutionHandleStore::default()),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let platform_tools = crate::commands::AdbRuntimeSnapshot {
+            adb_path: "captured-adb-path".to_string(),
+            revision: state.adb.lock().unwrap().revision(),
+        };
+        let runtime = ReplacingPlatformToolsRuntime {
+            state: &state,
+            inventory: supported_inventory("old-platform-tools-transport"),
+            requests: Mutex::new(Vec::new()),
+        };
+
+        let snapshot = request_preflight_inventory(&state, &runtime, &platform_tools)
+            .expect("the runtime inventory request should complete");
+
+        assert_eq!(
+            runtime.requests.lock().unwrap()[0].1["adbPath"],
+            platform_tools.adb_path
+        );
+        assert_eq!(snapshot.platform_tools, platform_tools);
+        let error = crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+            &state,
+            &snapshot.inventory,
+            snapshot.runtime_generation,
+            snapshot.platform_tools.revision,
+            || {},
+        )
+        .expect_err("the old path's inventory must not commit under the new revision");
+        assert!(error.contains("platform_tools_revision_stale"));
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .qualification_devices()
+            .is_empty());
+    }
+
     pub(crate) fn preflight_inventory_commit_for_test(
         state: &AppState,
         inventory: Value,
@@ -5490,13 +5525,17 @@ pub(crate) mod tests {
             requests: Mutex::new(Vec::new()),
             result: Ok(inventory),
         };
-        let snapshot = request_preflight_inventory(state, &runtime, "test-adb")
+        let platform_tools = crate::commands::AdbRuntimeSnapshot {
+            adb_path: "test-adb".to_string(),
+            revision: state.adb.lock().unwrap().revision(),
+        };
+        let snapshot = request_preflight_inventory(state, &runtime, &platform_tools)
             .map_err(|_| device_disconnected())?;
         crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
             state,
             &snapshot.inventory,
             snapshot.runtime_generation,
-            snapshot.platform_tools_revision,
+            snapshot.platform_tools.revision,
             after_product_commit,
         )
         .map_err(|_| device_disconnected())
@@ -5635,6 +5674,15 @@ pub(crate) mod tests {
         };
         assert!(app.manage(app_state));
         (temp, app)
+    }
+
+    fn align_test_adb_revision(state: &AppState, expected_revision: u64) {
+        let mut adb = state.adb.lock().unwrap();
+        while adb.revision() < expected_revision {
+            adb.remove()
+                .expect("the test ADB manager should advance its revision");
+        }
+        assert_eq!(adb.revision(), expected_revision);
     }
 
     fn supported_inventory(transport_id: &str) -> Value {
@@ -8015,6 +8063,7 @@ pub(crate) mod tests {
             provider,
         );
         let state = app.state::<AppState>();
+        align_test_adb_revision(&state, 2);
         let session_handle =
             crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
         let mut target = qualification_session_target();
@@ -8191,6 +8240,7 @@ pub(crate) mod tests {
             provider,
         );
         let state = app.state::<AppState>();
+        align_test_adb_revision(&state, 2);
         let session_handle =
             crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
         let mut observation = qualification_session_observation();
@@ -8330,6 +8380,7 @@ pub(crate) mod tests {
             provider,
         );
         let state = app.state::<AppState>();
+        align_test_adb_revision(&state, 2);
         let session_handle =
             crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
         let mut target = qualification_session_target();

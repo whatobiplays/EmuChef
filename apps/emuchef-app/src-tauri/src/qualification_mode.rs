@@ -490,26 +490,22 @@ pub fn create_qualification_target_candidate(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    let _begin_guard = repository
-        .lock_begin()
-        .map_err(|_| safe_qualification_error("qualification_session_active"))?;
-    if crate::qualification_session::session_status(&state)?.is_some() {
-        return Err(safe_qualification_error("qualification_session_active"));
-    }
-    repository
-        .require_recordable()
-        .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
-    let payload = {
-        let mut source = QualificationObservationSource { state: &state };
-        capture_target_registration_payload(&mut source, &request, &build)?
-    };
-    let handle = repository
-        .create_candidate(CandidateKind::TargetRegistration, &payload, None)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let candidate = repository
-        .load_candidate(&handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    target_candidate_preview(&candidate)
+    with_inactive_qualification_session(&state, repository, || {
+        repository
+            .require_recordable()
+            .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
+        let payload = {
+            let mut source = QualificationObservationSource { state: &state };
+            capture_target_registration_payload(&mut source, &request, &build)?
+        };
+        let handle = repository
+            .create_candidate(CandidateKind::TargetRegistration, &payload, None)
+            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        let candidate = repository
+            .load_candidate(&handle)
+            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        target_candidate_preview(&candidate)
+    })
 }
 
 #[tauri::command]

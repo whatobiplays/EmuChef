@@ -18,7 +18,7 @@ use tauri_plugin_dialog::FilePath;
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
-use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
+use crate::adb::{AdbManager, AdbRevalidationError, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
 #[cfg(test)]
 use crate::device_qualification::RootQualificationInvalidation;
@@ -57,6 +57,15 @@ pub struct AppState {
     pub update_activity: ActivityGate,
 }
 
+/// One immutable Platform-Tools identity used to request and retain inventory.
+/// The path and revision are captured while holding the same manager lock so a
+/// delayed response cannot be attributed to a replacement installation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AdbRuntimeSnapshot {
+    pub(crate) adb_path: String,
+    pub(crate) revision: u64,
+}
+
 /// Request one fresh ADB inventory and pass it through the shared native
 /// continuity reconciliation before any caller resolves a device target.
 pub(crate) fn list_and_reconcile_inventory<F>(
@@ -66,45 +75,32 @@ pub(crate) fn list_and_reconcile_inventory<F>(
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
-    let adb_path = current_adb_path(state)?;
+    let platform_tools = current_adb_runtime_snapshot(state)?;
     let runtime_generation = state.sidecar.try_generation().map_err(|_| {
         safe_error(
             "runtime_generation_unavailable",
             "Device qualification state is temporarily unavailable.",
         )
     })?;
-    let platform_tools_revision = state
-        .adb
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "adb_state_unavailable",
-                "Platform-Tools setup state is unavailable.",
-            )
-        })?
-        .revision();
-    list_and_reconcile_inventory_for_state(
-        state,
-        &adb_path,
-        runtime_generation,
-        platform_tools_revision,
-        request,
-    )
+    list_and_reconcile_inventory_for_state(state, &platform_tools, runtime_generation, request)
 }
 
 /// Serialize inventory authority retention with its qualification observation.
 /// The request is completed before this function acquires the transition gate.
 pub(crate) fn list_and_reconcile_inventory_for_state<F>(
     state: &AppState,
-    adb_path: &str,
+    platform_tools: &AdbRuntimeSnapshot,
     runtime_generation: u64,
-    platform_tools_revision: u64,
     request: &mut F,
 ) -> Result<Vec<DeviceDto>, String>
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
-    let inventory = request("listAdbDevices", json!({ "adbPath": adb_path })).map_err(|_| {
+    let inventory = request(
+        "listAdbDevices",
+        json!({ "adbPath": platform_tools.adb_path }),
+    )
+    .map_err(|_| {
         safe_error(
             "adb_inventory_failed",
             "Connected Android devices could not be listed.",
@@ -114,7 +110,7 @@ where
         state,
         &inventory,
         runtime_generation,
-        platform_tools_revision,
+        platform_tools.revision,
         || {},
     )
 }
@@ -133,6 +129,22 @@ where
     F: FnOnce(),
 {
     let transition = qualification_transition_lock(state);
+    let current_platform_tools_revision = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .revision();
+    if current_platform_tools_revision != platform_tools_revision {
+        return Err(safe_error(
+            "platform_tools_revision_stale",
+            "Device status changed. Refresh device discovery before continuing.",
+        ));
+    }
     let result = reconcile_inventory_with_context(
         &state.handles,
         &state.root_qualification,
@@ -1842,6 +1854,34 @@ pub(crate) fn current_adb_path(state: &AppState) -> Result<String, String> {
         .into_owned())
 }
 
+pub(crate) fn current_adb_runtime_snapshot(state: &AppState) -> Result<AdbRuntimeSnapshot, String> {
+    let adb = state.adb.lock().map_err(|_| {
+        safe_error(
+            "adb_state_unavailable",
+            "Platform-Tools setup state is unavailable.",
+        )
+    })?;
+    Ok(AdbRuntimeSnapshot {
+        adb_path: adb.adb_path()?.to_string_lossy().into_owned(),
+        revision: adb.revision(),
+    })
+}
+
+pub(crate) fn revalidated_adb_runtime_snapshot(
+    state: &AppState,
+    expected: &crate::adb::AdbInstallationIdentity,
+) -> Result<AdbRuntimeSnapshot, AdbRevalidationError> {
+    let adb = state
+        .adb
+        .lock()
+        .map_err(|_| AdbRevalidationError::Unavailable)?;
+    let adb_path = adb.revalidate_for_execution(expected)?;
+    Ok(AdbRuntimeSnapshot {
+        adb_path: adb_path.to_string_lossy().into_owned(),
+        revision: adb.revision(),
+    })
+}
+
 fn configuration_payload(
     state: &AppState,
     device_handle: &str,
@@ -2553,6 +2593,40 @@ mod tests {
                 .expect("production update document should be valid in tests"),
             update_activity: crate::updates::ActivityGate::default(),
         }
+    }
+
+    #[test]
+    fn inventory_from_a_replaced_platform_tools_revision_is_not_committed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let captured_revision = state.adb.lock().unwrap().revision();
+        state.adb.lock().unwrap().remove().unwrap();
+        assert_ne!(state.adb.lock().unwrap().revision(), captured_revision);
+
+        let mut committed = false;
+        let error = reconcile_inventory_snapshot_with_state_and_hook(
+            &state,
+            &json!({
+                "devices": [{
+                    "serial": "stale-platform-tools-device",
+                    "state": "available",
+                    "transportId": "stale-platform-tools-transport"
+                }]
+            }),
+            1,
+            captured_revision,
+            || committed = true,
+        )
+        .expect_err("a snapshot captured under the old ADB revision must be rejected");
+
+        assert!(error.contains("platform_tools_revision_stale"));
+        assert!(!committed, "qualification must not observe stale inventory");
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .qualification_devices()
+            .is_empty());
     }
 
     fn review_snapshot(device_handle: &str) -> ReviewedPlanSnapshot {
