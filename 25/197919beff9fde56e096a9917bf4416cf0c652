@@ -1,0 +1,45 @@
+apps/emuchef-app/tests/security-policy.test.mjs
+  s_09b05cf592369e::t_9593b860f2741c 466-469
+apps/emuchef-app/src-tauri/src/qualification_mode.rs
+  s_09b05cf592369e::t_58d1e17b626059 493-508
+apps/emuchef-app/src-tauri/src/commands.rs
+  s_09b05cf592369e::t_1f77fe742a265f 60-68,78,92,99-103,113,132-147,1858-1865,1881-1882
+  s_09b05cf592369e::t_c33012ce3b6b1e 85,1857
+  s_09b05cf592369e::t_3453890d4cad13 21,1866-1880,1883
+  s_09b05cf592369e::t_c54bb68a93d5fb 2598-2631
+  s_09b05cf592369e::t_fe1518a6cdaf90 1884
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_07160a04012d15 7480-7483
+  s_09b05cf592369e::t_dbb6eeca9a821b 7495-7501
+  s_09b05cf592369e::t_267cc8caec665a 7484-7494,7502
+docs/testing/phase-6d6/ui-binding-index.json
+  s_09b05cf592369e::t_43909255f4fda2 6,203
+apps/emuchef-app/src-tauri/src/execution.rs
+  s_09b05cf592369e::t_a12111bf0a3833 8066,8243,8383
+  s_09b05cf592369e::t_fb302049e0f20b 516,522,528-533,537,548,553,558,608-609,636,1174,1194
+  s_09b05cf592369e::t_43a9e3724e8525 1196,2371,2375,2405,5528-5532,5538
+  s_09b05cf592369e::t_c33012ce3b6b1e 611-617,2377-2387
+  s_09b05cf592369e::t_7dca45bcdb247e 5458-5518
+  s_09b05cf592369e::t_0ddd88f61f80f4 5679-5687
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25197919beff9fde56e096a9917bf4416cf0c652",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
