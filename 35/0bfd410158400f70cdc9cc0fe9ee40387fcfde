@@ -1,0 +1,41 @@
+apps/emuchef-app/src-tauri/src/device_observation.rs
+  s_09b05cf592369e::t_e99292c2f19814 1382-1386,1407-1411
+  s_09b05cf592369e::t_8091e251a0aca1 1608-1659,1661-1665
+  s_09b05cf592369e::t_45941e4e823fc8 1660
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_517f877add6d42 9562,9564-9568,9588-9598,9600-9601,9603,9607-9608,9610-9621,9648-9649,9675-9680,9691-9700
+  s_09b05cf592369e::t_5500954a7ce256 5794,5814-5828
+  s_09b05cf592369e::t_45941e4e823fc8 9267-9268,9609
+  s_09b05cf592369e::t_00515540458414 3283-3290,3292-3297,3299-3302,3306-3312
+  s_09b05cf592369e::t_9a1d99f156485a 9650,9670-9674,9681-9686,9689-9690
+  s_09b05cf592369e::t_0141c160697dcb 2423-2431
+  s_09b05cf592369e::t_c83d9484bf546e 2236-2239,2243-2246,2281-2298
+  s_09b05cf592369e::t_c4313f724893f7 9192-9247
+  s_09b05cf592369e::t_502dbdc1c3e8db 2032-2038,2059-2061
+  s_09b05cf592369e::t_c0032baa5c27c3 10066-10128
+  s_09b05cf592369e::t_3d31f149794ed0 467-474
+  s_09b05cf592369e::t_fc8e48bfdc8fd0 9093-9191,9248-9266,9269-9287
+  s_09b05cf592369e::t_15a395241aef85 9092,9554-9561,9563,9569-9587,9599,9602,9604-9606,9622-9647,9651-9669,9687-9688,9701-9710,10065
+  s_09b05cf592369e::t_5cc1260ef9c12d 2062,2299-2300,5829
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "350bfd410158400f70cdc9cc0fe9ee40387fcfde",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
