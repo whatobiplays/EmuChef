@@ -60,6 +60,17 @@ struct ReviewTombstone {
     code: &'static str,
 }
 
+/// One decoded ADB inventory entry. The complete inventory is decoded before
+/// any retained native state changes, so a malformed entry cannot leave
+/// partial epoch bumps, cleared qualification contexts, or invalidated reviews
+/// behind while the reconciliation that owns them reports failure.
+struct ParsedInventoryDevice {
+    serial: String,
+    state: String,
+    model: Option<String>,
+    transport_id: Option<String>,
+}
+
 #[derive(Default)]
 pub struct SessionHandles {
     devices_by_handle: HashMap<String, DeviceRecord>,
@@ -80,7 +91,35 @@ impl SessionHandles {
             .get("devices")
             .and_then(Value::as_array)
             .ok_or_else(|| "ADB inventory response was invalid.".to_string())?;
-        let inventory_count = raw.len();
+        // Decode everything first. Callers treat a failed reconciliation as
+        // "no inventory was committed", so retained authority must be
+        // untouched whenever any entry is rejected.
+        let parsed = raw
+            .iter()
+            .map(|device| {
+                Ok(ParsedInventoryDevice {
+                    serial: device
+                        .get("serial")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "ADB inventory device omitted its serial.".to_string())?
+                        .to_string(),
+                    state: device
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "ADB inventory device omitted its state.".to_string())?
+                        .to_string(),
+                    model: device
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    transport_id: device
+                        .get("transportId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let inventory_count = parsed.len();
         let cardinality_transition = self
             .last_inventory_count
             .is_some_and(|previous| previous > 1 || inventory_count > 1);
@@ -99,31 +138,15 @@ impl SessionHandles {
             }
         }
         let mut present = HashMap::new();
-        for device in raw {
-            let serial = device
-                .get("serial")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "ADB inventory device omitted its serial.".to_string())?;
-            let state = device
-                .get("state")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "ADB inventory device omitted its state.".to_string())?;
-            let model = device
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let transport_id = device
-                .get("transportId")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let handle = self.handle_for_serial(serial);
+        for device in parsed {
+            let handle = self.handle_for_serial(&device.serial);
             let previous = self.devices_by_handle.get(&handle);
             let continuity_lost = previous.is_some_and(|previous| {
                 !(previous.state == "available"
-                    && state == "available"
-                    && previous.model == model
+                    && device.state == "available"
+                    && previous.model == device.model
                     && previous.transport_id.is_some()
-                    && previous.transport_id == transport_id)
+                    && previous.transport_id == device.transport_id)
             });
             let epoch = {
                 let entry = self
@@ -147,10 +170,10 @@ impl SessionHandles {
                 handle.clone(),
                 DeviceRecord {
                     handle: handle.clone(),
-                    serial: serial.to_string(),
-                    state: state.to_string(),
-                    model,
-                    transport_id,
+                    serial: device.serial,
+                    state: device.state,
+                    model: device.model,
+                    transport_id: device.transport_id,
                     session_epoch: epoch,
                     facts: previous_facts,
                     facts_session_epoch: previous_facts_epoch,
@@ -755,6 +778,53 @@ mod tests {
             .review(&review)
             .unwrap_err()
             .contains("device_qualification_changed"));
+    }
+
+    #[test]
+    fn malformed_inventory_entry_leaves_retained_authority_untouched() {
+        let malformed_inventories = [
+            json!([
+                { "serial": "two" },
+                { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" }
+            ]),
+            json!([
+                { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" },
+                { "serial": "two" }
+            ]),
+            json!([
+                { "state": "available" },
+                { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" }
+            ]),
+        ];
+        for malformed in malformed_inventories {
+            let mut store = SessionHandles::default();
+            let first = store
+                .update_devices(&json!({
+                    "devices": [{ "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" }]
+                }))
+                .unwrap()[0]
+                .device_handle
+                .clone();
+            let epoch = store.device(&first).unwrap().session_epoch;
+            let generation = store.device_generation();
+            store.set_qualification_context(qualification_context_for(&first, epoch));
+            let review = store.insert_review(review_snapshot(&first));
+
+            let error = store
+                .update_devices(&json!({ "devices": malformed }))
+                .unwrap_err();
+
+            assert!(
+                error.contains("ADB inventory device omitted"),
+                "unexpected error: {error}"
+            );
+            assert_eq!(store.device_generation(), generation);
+            assert_eq!(store.last_inventory_count, Some(1));
+            assert_eq!(store.device(&first).unwrap().session_epoch, epoch);
+            assert_eq!(store.device(&first).unwrap().state, "available");
+            assert!(store.qualification_context(&first).is_some());
+            assert!(store.review(&review).is_ok());
+        }
     }
 
     #[test]

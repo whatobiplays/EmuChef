@@ -5890,6 +5890,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn malformed_inventory_commit_leaves_the_active_attempt_authoritative() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, epoch) = available_test_device(&state, "malformed-inventory");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+        let (generation, context) = {
+            let handles = state.handles.lock().unwrap();
+            (
+                handles.device_generation(),
+                handles.qualification_context(&device_handle),
+            )
+        };
+
+        let error = crate::execution::tests::preflight_inventory_commit_for_test(
+            &state,
+            json!({
+                "devices": [
+                    {
+                        "serial": "malformed-inventory",
+                        "state": "available",
+                        "model": "Device",
+                        "transportId": "transport-malformed-inventory"
+                    },
+                    { "serial": "malformed-second-device" }
+                ]
+            }),
+            || {},
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("device_disconnected"),
+            "unexpected error: {error}"
+        );
+
+        let handles = state.handles.lock().unwrap();
+        assert_eq!(handles.device_generation(), generation);
+        assert_eq!(handles.device_session_epoch(&device_handle), Some(epoch));
+        assert_eq!(handles.device(&device_handle).unwrap().state, "available");
+        assert_eq!(handles.qualification_context(&device_handle), context);
+        drop(handles);
+        let qualification = state.qualification_sessions.lock().unwrap();
+        assert_eq!(
+            qualification.associated_device_handle(),
+            Some(device_handle.as_str())
+        );
+        assert_eq!(qualification.associated_device_session_epoch(), Some(epoch));
+        drop(qualification);
+
+        let snapshot = session_status(&state).unwrap().unwrap();
+        assert_eq!(snapshot.session_handle, session_handle);
+        assert_eq!(
+            snapshot.phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+
+        // The failed reconciliation committed no product transition, so the
+        // retained device authority still admits the final checkpoint exactly
+        // like an unchanged inventory does.
+        record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            QualificationCheckpointOutcome::Pass,
+        )
+        .unwrap();
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "valid");
+    }
+
     fn block_next_source_state_read(
         repository: &QualificationRepository,
     ) -> (
