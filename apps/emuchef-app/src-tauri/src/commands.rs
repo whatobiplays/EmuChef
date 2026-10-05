@@ -806,7 +806,24 @@ fn finish_platform_tools_import_after_activation<F>(
 where
     F: FnOnce(),
 {
+    // Activation publishes a new managed ADB identity that an in-flight
+    // execution's reviewed device steps still depend on, so it shares the
+    // execution-store-before-transition-gate boundary with removal and
+    // real-execution start. An execution that is starting or active rejects the
+    // replacement before anything becomes authoritative.
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
     let transition = qualification_transition_lock(state);
+    if executions.has_in_flight() {
+        return Err(safe_error(
+            "execution_active",
+            "Platform-Tools cannot be replaced while an execution is starting or active.",
+        ));
+    }
     let activated = {
         let mut adb = state.adb.lock().map_err(|_| {
             safe_error(
@@ -840,6 +857,7 @@ where
     handles.invalidate_runtime_authority_preserving_identities();
     drop(handles);
     crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
+    drop(executions);
     transition.release_and_retry_best_effort();
     let imported_status = activated.cleanup_retired_install();
     Ok(public_adb_status(&imported_status))

@@ -78,6 +78,36 @@ fn retained_launch_action_value(action: &LaunchActionRecord) -> Value {
     })
 }
 
+/// Minimal reviewed plan used only by tests that need an in-flight execution
+/// store without running a real sidecar execution.
+#[cfg(test)]
+fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
+    let plan = json!({
+        "kind": "execution_plan",
+        "id": "plan.test-in-flight",
+        "recipes": [],
+        "steps": [],
+        "target_device": { "serial": "serial-test" },
+    });
+    ReviewedPlanSnapshot {
+        response: json!({ "plan": plan.clone(), "review": { "canExecute": true } }),
+        target: json!({ "serial": "serial-test" }),
+        catalog_identity: json!({
+            "sourceKind": "bundled",
+            "sourceId": "catalog",
+            "version": "1",
+            "contentDigest": { "algorithm": "sha256", "value": "catalog" }
+        }),
+        catalog_digest: "catalog".to_string(),
+        plan_digest: canonical_json_digest(&plan).unwrap_or_default(),
+        device_handle: "device-test".to_string(),
+        qualification_context: None,
+        platform_tools_identity: None,
+        created: std::time::Instant::now(),
+        last_access: std::time::Instant::now(),
+    }
+}
+
 /// Bounded, restart-volatile execution handle state.
 ///
 /// A start reservation prevents concurrent preflight races. At most one active
@@ -161,6 +191,27 @@ impl ExecutionHandleStore {
 
     fn release_start(&mut self) {
         self.start_reserved = None;
+    }
+
+    /// Place the store directly into one of the two in-flight states so
+    /// regression tests can prove that authoritative product mutations reject
+    /// new work while a real execution is starting or active. Reproducing the
+    /// states directly keeps the tests deterministic: a live start performs
+    /// device work between its reservation and its terminal state.
+    #[cfg(test)]
+    pub(crate) fn force_in_flight_for_test(&mut self, active: bool) {
+        let kind = ExecutionKind::Real;
+        self.start_reserved = Some(kind);
+        if active {
+            self.start_reserved = None;
+            self.active = Some(ExecutionMapping {
+                kind,
+                public_handle: "execution_test_active".to_string(),
+                sidecar_id: "sidecar-test".to_string(),
+                review_handle: "review-test".to_string(),
+                review: synthetic_in_flight_review(),
+            });
+        }
     }
 
     fn bind_started(

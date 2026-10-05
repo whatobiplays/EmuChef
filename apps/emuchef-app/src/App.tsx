@@ -1648,6 +1648,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setRootCheckPhase("checking");
     try {
       const result = await api.checkDeviceRoot(candidate);
+      // Rust owns qualification lifecycle and this command can synchronously
+      // invalidate or close the active attempt. Refresh the sanitized status
+      // before the local staleness guards below, which only decide whether the
+      // returned root result updates the local deviceQualification projection;
+      // they never decide whether the backend lifecycle changed.
+      void qualification.refresh();
       if (
         rootCheckGenerationRef.current !== checkGeneration
         || devicePollGenerationRef.current !== pollGeneration
@@ -1666,7 +1672,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     } finally {
       if (rootCheckGenerationRef.current === checkGeneration) setRootCheckPhase("idle");
     }
-  }, [deviceQualification?.state, devices]);
+  }, [deviceQualification?.state, devices, qualification.refresh]);
 
   useEffect(() => {
     void pollDevices();

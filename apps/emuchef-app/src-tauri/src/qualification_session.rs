@@ -3363,6 +3363,13 @@ pub(crate) fn has_open_attempt(state: &AppState) -> bool {
     lock_session_store(state).has_open_attempt()
 }
 
+/// Whether this process currently owns the given candidate as its active
+/// attempt. Candidates deferred because they belong to another build are not
+/// active here, so an operator may still discard them.
+pub(crate) fn candidate_is_active(state: &AppState, candidate_handle: &str) -> bool {
+    lock_session_store(state).active_candidate() == Some(candidate_handle)
+}
+
 /// One lifecycle-consistent view used by qualification status. Callers hold
 /// the shared transition gate while this function projects repository
 /// candidates and the session/device association from one session-store lock.
@@ -4931,6 +4938,129 @@ mod tests {
             .unwrap();
         assert_eq!(stored.payload["runValidity"], "invalid");
         assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+    }
+
+    #[test]
+    fn platform_tools_replacement_rejects_an_in_flight_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) =
+            available_test_device(&state, "platform-tools-in-flight");
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+
+        // Root authority, qualification context, and a retained review all
+        // describe authority a replacement is allowed to clear only when no
+        // execution depends on the installation it replaces.
+        let context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch,
+            1,
+            0,
+            1,
+            "supported-context",
+        );
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .set_qualification_context(context.clone());
+        let root_key = crate::device_qualification::RootQualificationKey::from_context(&context);
+        let root_attempt = state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .begin(root_key.clone())
+            .unwrap();
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .complete(root_attempt, RootQualificationState::Denied));
+
+        let adb_before = {
+            let adb = state.adb.lock().unwrap();
+            (
+                adb.revision(),
+                adb.is_app_managed(),
+                adb.status().status.clone(),
+            )
+        };
+
+        for active in [false, true] {
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .force_in_flight_for_test(active);
+            let prepared = crate::adb::test_support::prepare_platform_tools_install(
+                &state.adb.lock().unwrap(),
+            );
+            let error =
+                crate::commands::finish_platform_tools_import_with_hook(&state, prepared, || {})
+                    .expect_err("an in-flight execution must reject a prepared replacement");
+            let error: Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(error["code"], "execution_active");
+
+            let adb_after = {
+                let adb = state.adb.lock().unwrap();
+                (
+                    adb.revision(),
+                    adb.is_app_managed(),
+                    adb.status().status.clone(),
+                )
+            };
+            assert_eq!(
+                adb_after, adb_before,
+                "a rejected replacement must not change Platform-Tools identity or revision"
+            );
+            let handles = state.handles.lock().unwrap();
+            assert!(handles.device(&device_handle).is_ok());
+            assert_eq!(
+                handles.qualification_context(&device_handle),
+                Some(context.clone())
+            );
+            drop(handles);
+            assert!(state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .get(&root_key)
+                .is_some());
+            assert_eq!(
+                session_status(&state).unwrap().unwrap().phase,
+                QualificationSessionPhase::ExecutionPending,
+                "a rejected replacement must leave the attempt valid"
+            );
+        }
+
+        // With the execution idle the same prepared activation commits its
+        // ordinary atomic transition, including the authority reset.
+        state.executions.lock().unwrap().reset();
+        let prepared =
+            crate::adb::test_support::prepare_platform_tools_install(&state.adb.lock().unwrap());
+        let status =
+            crate::commands::finish_platform_tools_import_with_hook(&state, prepared, || {})
+                .expect("an idle execution store must allow the replacement");
+        assert_eq!(status["status"], "ready");
+        assert_eq!(state.adb.lock().unwrap().revision(), adb_before.0 + 1);
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .get(&root_key)
+            .is_none());
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .qualification_context(&device_handle)
+            .is_none());
     }
 
     #[test]
@@ -7683,8 +7813,11 @@ mod tests {
             "the other build must leave the deferred attempt unchanged"
         );
 
-        repository.discard_candidate(&deferred_candidate).unwrap();
-        forget_candidate(&state, &deferred_candidate);
+        crate::qualification_mode::discard_qualification_candidate(
+            deferred_candidate.clone(),
+            app.state(),
+        )
+        .expect("the operator-facing discard must release a cross-build deferred attempt");
         assert!(capture_execution_admission_fence(&state, "review-build-b")
             .expect("discard releases the execution reservation")
             .is_none());
@@ -7718,6 +7851,96 @@ mod tests {
             session_status(&state).unwrap().unwrap().session_handle,
             started.session_handle
         );
+    }
+
+    #[test]
+    fn discard_qualification_candidate_rejects_an_execution_pending_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "discard-pending");
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().phase,
+            QualificationSessionPhase::ExecutionPending
+        );
+
+        let error = crate::qualification_mode::discard_qualification_candidate(
+            candidate.clone(),
+            app.state(),
+        )
+        .expect_err("an active attempt must not be deleted as a plain candidate");
+        assert!(
+            error.contains("qualification_candidate_active"),
+            "discarding an active attempt must direct the operator to abandonment: {error}"
+        );
+
+        let repository = state.qualification_repository.get().unwrap();
+        let retained = repository.load_session_json(&candidate).unwrap();
+        assert_eq!(retained["candidateHandle"], json!(candidate));
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().phase,
+            QualificationSessionPhase::ExecutionPending,
+            "a rejected discard must leave the attempt active"
+        );
+        assert!(repository.load_candidate(&candidate).is_ok());
+    }
+
+    #[test]
+    fn discard_qualification_candidate_rejects_terminal_awaiting_evidence_until_abandoned() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) =
+            available_test_device(&state, "discard-terminal-awaiting");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        let repository = state.qualification_repository.get().unwrap();
+        let retained_session = repository.load_session_json(&candidate).unwrap();
+        let retained_report = repository.load_session_report(&candidate).unwrap();
+        let error = crate::qualification_mode::discard_qualification_candidate(
+            candidate.clone(),
+            app.state(),
+        )
+        .expect_err("an attempt awaiting checkpoint evidence must not be deleted");
+        assert!(error.contains("qualification_candidate_active"));
+        assert_eq!(
+            repository.load_session_json(&candidate).unwrap(),
+            retained_session,
+            "a rejected discard must leave the persisted attempt byte-identical"
+        );
+        assert_eq!(
+            repository.load_session_report(&candidate).unwrap(),
+            retained_report,
+            "a rejected discard must leave the retained terminal report untouched"
+        );
+        assert_eq!(
+            session_status(&state).unwrap().unwrap().phase,
+            QualificationSessionPhase::TerminalAwaitingEvidence
+        );
+
+        // Abandonment is the supported close path, and the invalid/not-observed
+        // candidate it materializes is no longer the active attempt, so the
+        // ordinary discard then removes it.
+        abandon(&state, &session_handle).unwrap();
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], json!("invalid"));
+        assert_eq!(
+            stored.payload["qualificationOutcome"],
+            json!("not_observed")
+        );
+        crate::qualification_mode::discard_qualification_candidate(candidate.clone(), app.state())
+            .expect("an abandoned attempt leaves an inactive candidate that discards normally");
+        assert!(repository.load_candidate(&candidate).is_err());
     }
 
     #[test]

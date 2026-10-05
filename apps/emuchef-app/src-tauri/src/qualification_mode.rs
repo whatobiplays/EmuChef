@@ -282,8 +282,14 @@ fn safe_qualification_error(code: &str) -> String {
         "qualification_candidate_invalid" => {
             "The qualification target, session, or candidate is invalid or no longer available."
         }
+        "qualification_candidate_active" => {
+            "This candidate belongs to an active qualification attempt. Abandon the attempt before discarding its candidate."
+        }
         "qualification_target_unverified" => {
             "The connected device target could not be verified from trusted observations."
+        }
+        "qualification_execution_active" => {
+            "A real-device execution is starting or active. Wait for it to finish before starting a qualification attempt."
         }
         "qualification_review_mismatch" => {
             "The reviewed production plan does not match this qualification session."
@@ -588,10 +594,21 @@ pub fn discard_qualification_candidate(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    // Recover and inspect ownership while the product-transition gate is held
+    // so the candidate can neither become the active attempt between the check
+    // and the deletion nor be deleted while an active attempt still owns it. A
+    // live attempt may only close through abandonment, which materializes its
+    // invalid/not-observed audit evidence.
+    let transition = crate::commands::qualification_transition_lock(&state);
+    crate::qualification_session::recover_persisted_sessions(&state, repository)?;
+    if crate::qualification_session::candidate_is_active(&state, &candidate_handle) {
+        return Err(safe_qualification_error("qualification_candidate_active"));
+    }
     repository
         .discard_candidate(&candidate_handle)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
     crate::qualification_session::forget_candidate(&state, &candidate_handle);
+    drop(transition);
     Ok(())
 }
 
@@ -621,6 +638,22 @@ fn begin_qualification_session_with_source<
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    // Real execution start owns this store while it reserves its start and
+    // commits admission, so qualification begin acquires it first and holds it
+    // until the attempt is active or the start has failed and cleaned up. A
+    // start therefore cannot reserve against the device this attempt is about
+    // to own, and this attempt cannot cross its authority boundary in the
+    // middle of an admission that captured no qualification fence. This is the
+    // required execution-store-before-session-authority order.
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    if executions.has_in_flight() {
+        return Err(safe_qualification_error("qualification_execution_active"));
+    }
     with_inactive_qualification_session(&state, repository, || {
         repository
             .require_recordable()
@@ -1834,5 +1867,205 @@ mod tests {
         );
         candidate.payload["target"]["model"]["value"] = json!("changed only in test");
         assert_eq!(preview.target.model.value, "Pocket");
+    }
+
+    /// Repository fixture shared by the session-start serialization tests: one
+    /// workflow that requires the recipe fixture, one registered target, and a
+    /// clean committed source.
+    fn session_start_test_repository(
+        root: &Path,
+        build: &QualificationBuildIdentity,
+    ) -> crate::qualification_repository::QualificationRepository {
+        std::fs::create_dir_all(root.join("authored/recipes"))
+            .expect("recipe directory should be created");
+        std::fs::write(
+            root.join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .expect("recipe fixture should be written");
+        crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+            root.to_path_buf(),
+            Box::new(BeginDescriptionRunner {
+                description: begin_test_description(build),
+            }),
+            build.clone(),
+            crate::qualification_repository::QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        )
+    }
+
+    fn session_start_test_request() -> BeginQualificationSessionRequest {
+        BeginQualificationSessionRequest {
+            device_handle: "device-opaque".to_string(),
+            device_plan: "test-plan".to_string(),
+            target_id: "target-test".to_string(),
+            workflow_id: "test-workflow".to_string(),
+        }
+    }
+
+    fn session_start_test_capture() -> SelectedDeviceCapture {
+        let mut capture = trusted_capture();
+        capture.observation.session_epoch = Some(1);
+        capture
+    }
+
+    fn error_code(error: &str) -> String {
+        let error: Value = serde_json::from_str(error).expect("command error should be JSON");
+        error["code"]
+            .as_str()
+            .expect("command error should carry a code")
+            .to_string()
+    }
+
+    #[test]
+    fn session_start_rejects_while_a_real_execution_is_reserved_or_active() {
+        let build = test_build();
+        let temp = tempfile::tempdir().expect("test repository directory should be created");
+        let repository = session_start_test_repository(temp.path(), &build);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider);
+        let state = app.state::<AppState>();
+        let request = session_start_test_request();
+
+        // A start reservation and an active execution are the two in-flight
+        // states a real execution holds between its reservation and its
+        // terminal retention. Qualification begin must reject both before it
+        // observes the device or creates anything durable.
+        for active in [false, true] {
+            state
+                .executions
+                .lock()
+                .expect("execution state should not be poisoned")
+                .force_in_flight_for_test(active);
+            let mut source = FakeDeviceSource::returning(session_start_test_capture());
+            let error =
+                begin_qualification_session_with_source(request.clone(), &state, &mut source)
+                    .expect_err("an in-flight real execution must reject qualification begin");
+            assert_eq!(error_code(&error), "qualification_execution_active");
+            assert_eq!(
+                source.calls, 0,
+                "the guard must reject before any device observation side effect"
+            );
+            let repository = state
+                .qualification_repository
+                .get()
+                .expect("test repository should be available");
+            assert!(
+                repository.list_candidates().unwrap().is_empty(),
+                "a rejected begin must not create a provisional candidate"
+            );
+            assert!(crate::qualification_session::session_status(&state)
+                .expect("session status should load")
+                .is_none());
+            let sessions = state
+                .qualification_sessions
+                .lock()
+                .expect("qualification session state should not be poisoned");
+            assert!(sessions.active_candidate().is_none());
+            assert!(sessions.associated_device_handle().is_none());
+        }
+
+        // The guard only rejects live executions: an idle execution store
+        // keeps the ordinary session-start behavior.
+        state
+            .executions
+            .lock()
+            .expect("execution state should not be poisoned")
+            .reset();
+        let mut source = FakeDeviceSource::returning(session_start_test_capture());
+        begin_qualification_session_with_source(request, &state, &mut source)
+            .expect("an idle execution store must allow the ordinary session start");
+        assert!(crate::qualification_session::session_status(&state)
+            .expect("session status should load")
+            .is_some());
+    }
+
+    #[test]
+    fn session_start_holds_the_execution_store_across_its_authority_boundary() {
+        let build = test_build();
+        let temp = tempfile::tempdir().expect("test repository directory should be created");
+        let repository = session_start_test_repository(temp.path(), &build);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider);
+        let state = app.state::<AppState>();
+        let request = session_start_test_request();
+        let (captured_tx, captured_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(1);
+        let mut source = FakeDeviceSource::returning(session_start_test_capture())
+            .with_after_capture(move || {
+                captured_tx
+                    .send(())
+                    .expect("the test thread should await the paused capture");
+                continue_rx
+                    .recv()
+                    .expect("the paused capture should be released");
+            });
+
+        std::thread::scope(|scope| {
+            let state = &state;
+            let begin_thread = scope.spawn(move || {
+                begin_qualification_session_with_source(request, state, &mut source)
+            });
+            captured_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("session start should reach the device capture");
+            assert!(
+                matches!(
+                    state.executions.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "a competing real execution must not cross its reservation boundary while the attempt is being created"
+            );
+            continue_tx
+                .send(())
+                .expect("the paused capture should be released");
+            begin_thread
+                .join()
+                .expect("the begin thread should not panic")
+                .expect("session start should succeed once the capture completes");
+        });
+
+        let snapshot = crate::qualification_session::session_status(&state)
+            .expect("session status should load")
+            .expect("the attempt should be active");
+        assert_eq!(snapshot.device_plan, "test-plan");
+        assert!(!state
+            .executions
+            .lock()
+            .expect("execution state should not be poisoned")
+            .has_in_flight());
+
+        // Once the attempt is active, the competing start's fence decision
+        // observes it instead of racing ahead of the session that now owns the
+        // device, so the matching review is admitted against this attempt.
+        crate::qualification_session::observe(
+            &state,
+            crate::qualification_session::QualificationLifecycleObservation::ReviewCreated(
+                Box::new(crate::qualification_session::ReviewObservation {
+                    review_handle: "review-opaque".to_string(),
+                    device_handle: "device-opaque".to_string(),
+                    device_plan: "test-plan".to_string(),
+                    selected_recipes: vec!["test.recipe".to_string()],
+                    target_id: Some("target-test".to_string()),
+                    manufacturer: Some("AYANEO".to_string()),
+                    model: Some("Pocket S2".to_string()),
+                    android_api: Some(35),
+                }),
+            ),
+        );
+        let executions = state
+            .executions
+            .lock()
+            .expect("execution state should not be poisoned");
+        let fence = crate::qualification_session::capture_execution_admission_fence(
+            &state,
+            "review-opaque",
+        )
+        .expect("the active attempt should permit its matching review")
+        .expect("the active attempt must fence the competing real execution start");
+        drop(executions);
+        drop(fence);
     }
 }

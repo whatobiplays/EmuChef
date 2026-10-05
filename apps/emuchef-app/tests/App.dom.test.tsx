@@ -1273,6 +1273,202 @@ describe("device qualification controller integration", () => {
     expect(mockApi.abandonQualificationSession).not.toHaveBeenCalled();
   });
 
+
+  test("an explicit root check reloads qualification status and releases its locks", async () => {
+    const user = userEvent.setup();
+    const qualificationStatus = {
+      enabled: true,
+      recordable: true,
+      message: null,
+      build: {
+        appVersion: "0.1.0",
+        gitCommit: "commit-opaque",
+        materialBuildDigest: "digest-opaque",
+        realExecutionEnabled: true,
+        qualificationContract: 2,
+      },
+      runtimeContract: "runtime-contract-2",
+      workflows: [{
+        id: "workflow.one",
+        version: 1,
+        purpose: "Workflow one",
+        productionRecipes: ["recipe.one"],
+        requiredCapabilities: [],
+        prerequisites: [],
+        humanCheckpoints: [],
+      }],
+      targets: [{
+        id: "target.one",
+        profileId: "profile.one",
+        manufacturer: "Example",
+        model: "Handheld",
+        androidVersion: "14",
+        androidApi: 34,
+        abiSocClass: "arm64",
+        rootState: "non_root",
+        connectionType: "usb3",
+        firmwareBuild: "firmware-opaque",
+      }],
+      deviceSelectionLocked: false,
+      resumableCandidates: [],
+    };
+    const sessionSnapshot = {
+      sessionHandle: "session-root-refresh",
+      targetId: "target.one",
+      workflowId: "workflow.one",
+      workflowVersion: 1,
+      devicePlan: "plan.supported",
+      requiredRecipes: ["recipe.one"],
+      humanCheckpoints: [],
+      recordedCheckpoints: [],
+      phase: "executionPending",
+      runValidity: "valid",
+      qualificationOutcome: "not_observed",
+      recordable: true,
+      invalidReason: null,
+      candidate: {
+        candidateHandle: "candidate-root-refresh",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    };
+    // The root command commits product qualification authority, so the
+    // backend it talks to closes the attempt before the sanitized status is
+    // reread.
+    mockApi.deviceQualification.mockResolvedValue({
+      state: "supported",
+      summary: "This device meets the current qualification requirements.",
+      limitations: ["Root access was not checked."],
+      androidMajor: 14,
+      androidApiLevel: 34,
+      abiClass: "arm64",
+      storage: "available",
+      packageManager: "available",
+      activityManager: "available",
+      root: null,
+      runtimeGeneration: 0,
+      qualificationRevision: 2,
+      deviceIdentity: "device-opaque",
+    });
+    let activeSession: typeof sessionSnapshot | null = null;
+    mockApi.deviceQualificationModeStatus.mockImplementation(async () => ({
+      ...qualificationStatus,
+      deviceSelectionLocked: activeSession !== null,
+      resumableSession: activeSession,
+    }));
+    mockApi.beginQualificationSession.mockImplementation(async () => {
+      activeSession = sessionSnapshot;
+      return sessionSnapshot;
+    });
+    mockApi.checkDeviceRoot.mockImplementation(async () => {
+      activeSession = null;
+      return {
+        qualification: { status: "granted" },
+        runtimeGeneration: 0,
+        qualificationRevision: 0,
+        deviceIdentity: "device-opaque",
+      };
+    });
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/option",
+      inputId: "option",
+      label: "Optional setting",
+      required: false,
+      sensitive: false,
+    }));
+
+    await advanceToInputs(user);
+    const beginSession = screen.getByRole("button", { name: "Begin qualification session" });
+    await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
+    await user.click(beginSession);
+    await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    expect(
+      (screen.getByRole("checkbox", { name: /Recipe One/ }) as HTMLInputElement).disabled,
+    ).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Example Handheld" });
+    const statusCallsBeforeCheck = mockApi.deviceQualificationModeStatus.mock.calls.length;
+    const pollsBeforeCheck = mockApi.pollDevices.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Check root access" }));
+    await waitFor(() => expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"));
+    await waitFor(() => expect(
+      mockApi.deviceQualificationModeStatus.mock.calls.length,
+    ).toBeGreaterThan(statusCallsBeforeCheck));
+    // The lifecycle reload needed no device poll: the explicit root command
+    // is the only signal that changed.
+    expect(mockApi.pollDevices.mock.calls.length).toBe(pollsBeforeCheck);
+
+    // Rust closed the attempt, so the refreshed projection releases the
+    // device-selection lock even though this workflow still holds the device.
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    const connectedDevice = await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    });
+    await waitFor(() => expect((connectedDevice as HTMLButtonElement).disabled).toBe(false));
+
+    // Walking forward proves the recipe intent lock is released as well.
+    await user.click(connectedDevice);
+    await screen.findByRole("heading", { name: "Example Handheld" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    await waitFor(() => expect(
+      (screen.getByRole("checkbox", { name: /Recipe One/ }) as HTMLInputElement).disabled,
+    ).toBe(false));
+
+    // Only the explicit root command caused the reload: no review replacement
+    // or execution progress signal was involved.
+    expect(mockApi.createReview).not.toHaveBeenCalled();
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+  });
+
+  test("a stale root result still reloads qualification status", async () => {
+    const user = userEvent.setup();
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.deviceQualification.mockResolvedValue({
+      state: "supported",
+      summary: "This device meets the current qualification requirements.",
+      limitations: ["Root access was not checked."],
+      androidMajor: 14,
+      androidApiLevel: 34,
+      abiClass: "arm64",
+      storage: "available",
+      packageManager: "available",
+      activityManager: "available",
+      root: null,
+      runtimeGeneration: 0,
+      qualificationRevision: 2,
+      deviceIdentity: "device-opaque",
+    });
+    // A result for a different device is a stale local response. The
+    // projection guard must reject it while the lifecycle reread still runs.
+    mockApi.checkDeviceRoot.mockResolvedValue({
+      qualification: { status: "granted" },
+      runtimeGeneration: 0,
+      qualificationRevision: 2,
+      deviceIdentity: "different-device",
+    });
+
+    await renderReadyApp();
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    const section = (await screen.findByRole("heading", { name: "Device qualification" })).closest("section");
+    expect(section?.textContent).toContain("Root accessNot checked");
+    const statusCallsBeforeCheck = mockApi.deviceQualificationModeStatus.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Check root access" }));
+    await waitFor(() => expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"));
+    await waitFor(() => expect(
+      mockApi.deviceQualificationModeStatus.mock.calls.length,
+    ).toBeGreaterThan(statusCallsBeforeCheck));
+    expect(section?.textContent).toContain("Root accessNot checked");
+  });
+
   test("active same-process qualification session observes normal workflow and locks its connected device row", async () => {
     const user = userEvent.setup();
     const qualificationStatus = {
