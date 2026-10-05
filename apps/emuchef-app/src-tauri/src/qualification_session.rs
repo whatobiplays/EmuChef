@@ -464,6 +464,14 @@ impl QualificationSession {
         self.terminal_report = report;
     }
 
+    /// Record that a version-1 document retained a terminal execution status.
+    /// Legacy recovery never trusts the status as run validity; it only proves
+    /// that the separately retained terminal report must be preserved before
+    /// the attempt materializes as an audit candidate.
+    fn adopt_legacy_terminal_status(&mut self, status: &str) {
+        self.terminal_execution_status = Some(status.to_string());
+    }
+
     pub(crate) fn set_authored_recipe_digests(&mut self, digests: Vec<AuthoredRecipeDigest>) {
         self.authored_recipe_digests = Some(digests);
     }
@@ -2021,6 +2029,13 @@ fn recover_prepared_qualification_candidate(
             PreparedQualificationSession::Current(session)
             | PreparedQualificationSession::Legacy(session) => session,
         };
+        // Preserve any retained product evidence before the audit candidate is
+        // materialized. When durable state proves a terminal transition but the
+        // report cannot be read, the durable poison marker keeps the attempt
+        // non-resumable and the candidate visible for the operator.
+        if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
+            return Ok(false);
+        }
         session.invalidate(QualificationInvalidation::ObservationFailed);
         if session.authored_recipe_digests().is_none() {
             if let Ok(digests) =
@@ -2040,6 +2055,10 @@ fn recover_prepared_qualification_candidate(
                     poison_attempt(state, provider, store, candidate_handle);
                     return Ok(false);
                 }
+            }
+            if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
+                poison_attempt(state, provider, store, candidate_handle);
+                return Err(persistence_error());
             }
             session.invalidate(QualificationInvalidation::IncompatibleSessionVersion);
             if provider
@@ -2214,9 +2233,17 @@ fn recover_current_candidate(
 ) -> Result<bool, String> {
     let candidate_handle = &candidate.candidate_handle;
     if session.run_validity() == RunValidity::Invalid {
+        if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
+            poison_attempt(state, provider, store, candidate_handle);
+            return Err(persistence_error());
+        }
         return finalize_recovered_invalid(state, provider, store, session);
     }
     if !handoff_proven {
+        if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
+            poison_attempt(state, provider, store, candidate_handle);
+            return Err(persistence_error());
+        }
         session.invalidate(QualificationInvalidation::UnprovenShutdown);
         if persist(provider, &session).is_err() {
             poison_attempt(state, provider, store, candidate_handle);
@@ -2249,6 +2276,26 @@ fn recover_current_candidate(
     }
     store.set_active(candidate_handle.clone());
     Ok(true)
+}
+
+/// Attach the separately retained terminal execution report to an attempt whose
+/// durable session state proves a tool-observed terminal execution was
+/// retained. Recovery must preserve that product evidence even when the
+/// attempt is about to materialize as an invalid audit candidate. A missing or
+/// unreadable report fails closed instead of silently publishing an audit
+/// artifact that discards known product evidence.
+fn attach_retained_terminal_report_for_recovery(
+    provider: &QualificationRepository,
+    session: &mut QualificationSession,
+) -> Result<(), String> {
+    if session.terminal_execution_status().is_none() {
+        return Ok(());
+    }
+    let report = provider
+        .load_session_report(session.candidate_handle())?
+        .ok_or_else(persistence_error)?;
+    session.set_terminal_report(Some(report));
+    Ok(())
 }
 
 /// Materialize one recovered attempt that can never produce valid evidence and
@@ -2373,7 +2420,15 @@ fn legacy_session_for_recovery(value: &Value) -> Result<QualificationSession, St
         build,
         runtime_contract,
     )?;
-    Ok(session.with_device_plan(device_plan.to_string()))
+    let mut session = session.with_device_plan(device_plan.to_string());
+    // A version-1 document that recorded a terminal execution status proves
+    // the previous process retained that product transition. The status is
+    // never trusted as run validity, but the separately retained report must
+    // be preserved before this attempt materializes as an audit candidate.
+    if let Some(status) = value.get("terminalExecutionStatus").and_then(Value::as_str) {
+        session.adopt_legacy_terminal_status(status);
+    }
+    Ok(session)
 }
 
 /// Apply one closed lifecycle observation to the active session.
@@ -3225,22 +3280,36 @@ pub(crate) fn observe_device_inventory_in_transition(
     if store.is_poisoned(&candidate_handle) {
         return;
     }
+    // Qualification's product contract requires exactly one available device.
+    // Any other committed inventory (no device, a replacement, an advanced
+    // epoch, or an additional device) revokes the authority the attempt was
+    // admitted under, so only one exact handle/epoch pair can retain it.
+    let sole_available_device = match available_devices {
+        [device] => Some(device),
+        _ => None,
+    };
     let Some(associated) = store.associated_device_handle().map(str::to_string) else {
-        if let Some(observed) = store.observed_device() {
-            if !available_devices.iter().any(|(handle, epoch)| {
-                handle == &observed.device_handle && observed.session_epoch == Some(*epoch)
-            }) {
-                store.clear_observed_device();
+        // Without an association, an accumulated observation is only
+        // trustworthy while one unambiguous device still matches it. Multiple
+        // devices never establish reassociation authority.
+        let accumulated_is_authoritative = match (store.observed_device(), sole_available_device) {
+            (Some(observed), Some((handle, epoch))) => {
+                observed.device_handle == *handle && observed.session_epoch == Some(*epoch)
             }
+            _ => false,
+        };
+        if !accumulated_is_authoritative {
+            store.clear_observed_device();
         }
         return;
     };
-    if available_devices.iter().any(|(handle, epoch)| {
-        handle == &associated
-            && store
-                .associated_device_session_epoch()
-                .is_none_or(|expected| expected == *epoch)
-    }) {
+    let associated_is_sole_available_device = matches!(
+        sole_available_device,
+        Some((handle, epoch))
+            if *handle == associated
+                && store.associated_device_session_epoch() == Some(*epoch)
+    );
+    if associated_is_sole_available_device {
         return;
     }
     let mut session = match load_active_session(provider, &store, &candidate_handle) {
@@ -5722,7 +5791,7 @@ mod tests {
     fn execution_preflight_inventory_transition_wins_over_final_checkpoint() {
         use std::sync::mpsc::sync_channel;
 
-        for transition in ["disappeared", "reconnected", "unchanged"] {
+        for transition in ["disappeared", "reconnected", "second_device", "unchanged"] {
             let temp = tempfile::tempdir().unwrap();
             let repository = test_repository(&temp);
             let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -5741,6 +5810,22 @@ mod tests {
                         "model": "Device",
                         "transportId": "new-preflight-transport"
                     }]
+                }),
+                "second_device" => json!({
+                    "devices": [
+                        {
+                            "serial": "preflight-race",
+                            "state": "available",
+                            "model": "Device",
+                            "transportId": "transport-preflight-race"
+                        },
+                        {
+                            "serial": "preflight-second-device",
+                            "state": "available",
+                            "model": "Device",
+                            "transportId": "transport-preflight-second-device"
+                        }
+                    ]
                 }),
                 "unchanged" => json!({
                     "devices": [{
@@ -9005,6 +9090,202 @@ mod tests {
     }
 
     #[test]
+    fn invalid_recovery_preserves_the_retained_terminal_report() {
+        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            let (device_handle, epoch) = available_test_device(&state, "invalid-recovery");
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+        }
+
+        // The previous process durably recorded the attempt as invalid after
+        // it had already retained the terminal transition and its report.
+        let repository = test_repository(&temp);
+        let mut persisted = repository.load_session_json(&candidate).unwrap();
+        persisted["runValidity"] = json!("invalid");
+        persisted["invalidation"] = json!("device_unavailable");
+        persisted["terminalOutcome"] = json!("not_observed");
+        std::fs::write(
+            repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session.json"),
+            serde_json::to_vec_pretty(&persisted).unwrap(),
+        )
+        .unwrap();
+
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        crate::qualification_mode::recover_sessions_at_process_start(&state);
+
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert!(!stored.promotable);
+        assert_eq!(
+            std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&candidate)
+                    .join("execution-report.json")
+            )
+            .expect("the retained product report must survive invalid recovery"),
+            REPORT
+        );
+        let artifacts = stored.payload["artifacts"].as_array().cloned().unwrap();
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact["id"] == "execution-report")
+            .expect("the invalid audit candidate must declare the retained report");
+        assert_eq!(
+            artifact["sha256"].as_str(),
+            Some(hex::encode(Sha256::digest(REPORT)).as_str())
+        );
+    }
+
+    #[test]
+    fn unproven_shutdown_recovery_preserves_the_retained_terminal_report() {
+        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            let (device_handle, epoch) = available_test_device(&state, "unproven-recovery");
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+        }
+
+        // The next launch finds an interrupted marker, so the previous process
+        // never proved which product transitions it observed.
+        let provider = QualificationRepositoryProvider::for_test(test_repository(&temp));
+        let (_app_temp, app) = test_app(provider, false);
+        let state = app.state::<AppState>();
+        crate::qualification_mode::recover_sessions_at_process_start(&state);
+
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert!(!stored.promotable);
+        assert_eq!(
+            std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&candidate)
+                    .join("execution-report.json")
+            )
+            .expect("unproven-shutdown recovery must preserve the retained report"),
+            REPORT
+        );
+    }
+
+    #[test]
+    fn invalid_recovery_without_the_retained_report_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            let (device_handle, epoch) = available_test_device(&state, "lost-report");
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+        }
+
+        let repository = test_repository(&temp);
+        let mut persisted = repository.load_session_json(&candidate).unwrap();
+        persisted["runValidity"] = json!("invalid");
+        persisted["invalidation"] = json!("device_unavailable");
+        persisted["terminalOutcome"] = json!("not_observed");
+        std::fs::write(
+            repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session.json"),
+            serde_json::to_vec_pretty(&persisted).unwrap(),
+        )
+        .unwrap();
+        // The retained product report is gone before recovery can preserve it.
+        std::fs::remove_file(
+            repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session-terminal-report.json"),
+        )
+        .unwrap();
+
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        crate::qualification_mode::recover_sessions_at_process_start(&state);
+
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        assert!(
+            repository.session_is_poisoned(&candidate).unwrap(),
+            "losing a proven terminal report must fail closed durably"
+        );
+        assert!(
+            !repository
+                .candidate_root()
+                .join(&candidate)
+                .join("execution-report.json")
+                .exists(),
+            "no audit candidate may be published without the retained product evidence"
+        );
+    }
+
+    #[test]
+    fn cross_build_deferral_keeps_the_retained_terminal_report_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let captured_build = test_build();
+        let repository = test_repository_with_build(&temp, captured_build.clone());
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            let (device_handle, epoch) = available_test_device(&state, "cross-build-report");
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+        }
+        let retained_before = test_repository(&temp)
+            .load_session_json(&candidate)
+            .unwrap();
+
+        let mut build_b = captured_build;
+        build_b.git_commit = "2".repeat(40);
+        build_b.material_build_digest = format!("sha256:{}", "b".repeat(64));
+        let provider =
+            QualificationRepositoryProvider::for_test(test_repository_with_build(&temp, build_b));
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let repository = state.qualification_repository.get().unwrap();
+        recover_persisted_sessions(&state, repository).unwrap();
+
+        assert!(session_status(&state).unwrap().is_none());
+        assert!(has_open_attempt(&state));
+        assert_eq!(
+            repository.load_session_json(&candidate).unwrap(),
+            retained_before,
+            "a cross-build deferral must leave the valid session bytes unchanged"
+        );
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert!(
+            stored.payload.get("runValidity").is_none(),
+            "deferring must not materialize an audit candidate"
+        );
+    }
+
+    #[test]
     fn clean_restart_recovers_terminal_awaiting_evidence_from_retained_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -9268,6 +9549,163 @@ mod tests {
             .load_candidate(&candidate)
             .unwrap();
         assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn additional_available_device_invalidates_the_associated_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        available_test_device(&state, "inventory-device");
+
+        // A second device arrives while the operator has not started the
+        // attempt yet, so the native store bumps every known handle to a new
+        // epoch. The attempt then begins against the current epoch of the
+        // originally selected device while both devices are available.
+        let (device_handle, epoch, generation, available) = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [
+                        {
+                            "serial": "inventory-device",
+                            "state": "available",
+                            "model": "Device",
+                            "transportId": "transport-inventory-device"
+                        },
+                        {
+                            "serial": "inventory-second-device",
+                            "state": "available",
+                            "model": "Device",
+                            "transportId": "transport-inventory-second-device"
+                        }
+                    ]
+                }))
+                .unwrap();
+            let device = handles
+                .qualification_devices()
+                .into_iter()
+                .find(|device| device.serial == "inventory-device")
+                .expect("the selected device must still be available");
+            let available = handles
+                .qualification_devices()
+                .into_iter()
+                .filter(|device| device.state == "available")
+                .map(|device| (device.handle, device.session_epoch))
+                .collect::<Vec<_>>();
+            (
+                device.handle,
+                device.session_epoch,
+                handles.device_generation(),
+                available,
+            )
+        };
+        assert_eq!(available.len(), 2);
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(epoch);
+        begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .associated_device_session_epoch(),
+            Some(epoch),
+            "the start must associate the current device epoch"
+        );
+
+        // The associated device keeps its exact epoch, so only qualification's
+        // exactly-one-device contract can fail the attempt here.
+        observe_device_inventory(&state, generation, &available);
+
+        assert!(session_status(&state).unwrap().is_none());
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+    }
+
+    #[test]
+    fn multiple_devices_do_not_reestablish_reassociation_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let captured = begin_request(&candidate, CAPTURED_AT, observation("device-one"));
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(&app.state::<AppState>(), captured).unwrap();
+        }
+        let (_app_temp, app) = clean_restart(&temp);
+        let state = app.state::<AppState>();
+
+        // Both devices are already connected when the restored attempt
+        // accumulates its first trusted observation.
+        let (device_two_handle, device_two_epoch, generation, available) = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [
+                        {
+                            "serial": "device-two",
+                            "state": "available",
+                            "model": "Device",
+                            "transportId": "transport-device-two"
+                        },
+                        {
+                            "serial": "device-three",
+                            "state": "available",
+                            "model": "Device",
+                            "transportId": "transport-device-three"
+                        }
+                    ]
+                }))
+                .unwrap();
+            let device = handles
+                .qualification_devices()
+                .into_iter()
+                .find(|device| device.serial == "device-two")
+                .expect("the two-device fixture must retain device-two");
+            let available = handles
+                .qualification_devices()
+                .into_iter()
+                .filter(|device| device.state == "available")
+                .map(|device| (device.handle, device.session_epoch))
+                .collect::<Vec<_>>();
+            (
+                device.handle,
+                device.session_epoch,
+                handles.device_generation(),
+                available,
+            )
+        };
+        assert_eq!(available.len(), 2);
+        let mut partial = partial_observation(&device_two_handle);
+        partial.session_epoch = Some(device_two_epoch);
+        observe(
+            &state,
+            QualificationLifecycleObservation::DeviceObserved(Box::new(partial)),
+        );
+        assert!(state
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .observed_device()
+            .is_some());
+        observe_device_inventory(&state, generation, &available);
+
+        let store = state.qualification_sessions.lock().unwrap();
+        assert!(
+            store.observed_device().is_none(),
+            "multiple available devices must not establish reassociation authority"
+        );
+        assert!(store.associated_device_handle().is_none());
     }
 
     #[test]
@@ -9621,6 +10059,70 @@ mod tests {
         assert_eq!(
             stored.non_promotable_reason.as_deref(),
             Some("recovered invalid qualification attempts cannot be promoted")
+        );
+    }
+
+    #[test]
+    fn version_one_recovery_preserves_the_retained_terminal_report() {
+        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        repository
+            .save_session_report(&candidate, REPORT)
+            .expect("the interrupted process retained a terminal report");
+        let legacy = json!({
+            "sessionSchemaVersion": 1,
+            "sessionHandle": session_handle_for_candidate(&candidate).unwrap(),
+            "candidateHandle": candidate,
+            "capturedAt": CAPTURED_AT,
+            "deviceHandle": "device-one",
+            "targetId": "target-test",
+            "target": serde_json::to_value(target()).unwrap(),
+            "workflowId": "test-workflow",
+            "workflowVersion": 1,
+            "devicePlan": "test-plan",
+            "requiredRecipes": ["test.recipe"],
+            "prerequisites": [],
+            "humanCheckpoints": [],
+            "automatedObservations": [],
+            "recordedCheckpoints": [],
+            "build": build_json(),
+            "runtimeContract": "real-execution-v1",
+            "runValidity": "valid",
+            "invalidation": null,
+            "boundReviewHandle": null,
+            "boundExecutionHandle": null,
+            "terminalExecutionStatus": "succeeded",
+            "terminalOutcome": "not_observed",
+        });
+        std::fs::write(
+            repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        crate::qualification_mode::recover_sessions_at_process_start(&state);
+
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert!(!stored.promotable);
+        assert_eq!(
+            std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&candidate)
+                    .join("execution-report.json")
+            )
+            .expect("the legacy attempt's retained report must be preserved"),
+            REPORT
         );
     }
 

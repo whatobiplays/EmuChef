@@ -1379,23 +1379,11 @@ where
         .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
         .qualification_devices();
     if devices.is_empty() {
-        let invalidation = root_qualification
-            .lock()
-            .map_err(|_| {
-                safe_error(
-                    "qualification_state_unavailable",
-                    "Device qualification state is unavailable.",
-                )
-            })?
-            .invalidate_if_not_key(None);
-        if let Some(device_handle) = invalidation.device_handle.as_deref() {
-            handles
-                .lock()
-                .map_err(|_| {
-                    safe_error("session_state_unavailable", "Session state is unavailable.")
-                })?
-                .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
-        }
+        clear_context_less_device_authority_for_observation(
+            handles,
+            root_qualification,
+            &failure_context,
+        )?;
         return Ok(CurrentQualification {
             snapshot: classify_complete(true, runtime_generation, qualification_revision, &[]),
             context: None,
@@ -1416,23 +1404,11 @@ where
             opaque_identity: "qualification-device-2",
             ..first.clone()
         };
-        let invalidation = root_qualification
-            .lock()
-            .map_err(|_| {
-                safe_error(
-                    "qualification_state_unavailable",
-                    "Device qualification state is unavailable.",
-                )
-            })?
-            .invalidate_if_not_key(None);
-        if let Some(device_handle) = invalidation.device_handle.as_deref() {
-            handles
-                .lock()
-                .map_err(|_| {
-                    safe_error("session_state_unavailable", "Session state is unavailable.")
-                })?
-                .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
-        }
+        clear_context_less_device_authority_for_observation(
+            handles,
+            root_qualification,
+            &failure_context,
+        )?;
         return Ok(CurrentQualification {
             snapshot: classify_complete(
                 true,
@@ -1625,6 +1601,64 @@ fn ensure_target_session_current(
             "device_changed",
             "The selected device changed. Refresh device discovery and try again.",
         ));
+    }
+    Ok(())
+}
+
+/// Clear stale product qualification authority for a context-less native
+/// inventory. An inventory with zero or multiple available devices can no
+/// longer prove which device any completed root evidence belongs to, so root
+/// qualification and its dependent reviews are dropped. Product-only callers
+/// never own a qualification attempt and clear directly; qualification-aware
+/// callers clear while owning the shared product-transition gate so no
+/// checkpoint or finalization can interleave with the authority change.
+fn clear_context_less_device_authority_for_observation(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    failure_context: &ObservationFailureContext<'_>,
+) -> Result<(), String> {
+    match failure_context {
+        ObservationFailureContext::ProductOnly => {
+            clear_context_less_device_authority(handles, root_qualification)
+        }
+        ObservationFailureContext::Qualification { state, .. } => {
+            let transition = crate::commands::qualification_transition_lock(state);
+            let result = clear_context_less_device_authority_in_transition(state);
+            if result.is_ok() {
+                transition.release_and_retry_best_effort();
+            }
+            result
+        }
+    }
+}
+
+/// Clear context-less product qualification authority while the caller owns
+/// the shared qualification transition gate.
+fn clear_context_less_device_authority_in_transition(state: &AppState) -> Result<(), String> {
+    clear_context_less_device_authority(&state.handles, &state.root_qualification)
+}
+
+/// Drop completed root evidence and dependent reviews that no single available
+/// device can justify. Callers that belong to the qualification-aware path must
+/// already own the shared transition gate.
+fn clear_context_less_device_authority(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+) -> Result<(), String> {
+    let invalidation = root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate_if_not_key(None);
+    if let Some(device_handle) = invalidation.device_handle.as_deref() {
+        handles
+            .lock()
+            .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+            .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
     }
     Ok(())
 }
