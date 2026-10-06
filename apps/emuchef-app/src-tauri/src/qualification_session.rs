@@ -1944,6 +1944,13 @@ fn ensure_recovered(
     provider: &QualificationRepository,
     store: &mut QualificationSessionStore,
 ) -> Result<(), String> {
+    // Every recovery entry point funnels through here, so the process-marker
+    // gate is enforced before an already-active attempt can be advanced and
+    // before a persisted attempt can be adopted, poisoned, or closed. A
+    // process that could not establish its durable marker cannot make an
+    // abrupt termination detectable, so it must not mutate qualification
+    // lifecycle state that a later launch would otherwise trust.
+    qualification_process_handoff_gate(state)?;
     if store.active_candidate.is_some() {
         return Ok(());
     }
@@ -2133,6 +2140,29 @@ pub(crate) fn recover_persisted_sessions(
         }
     };
     ensure_recovered(state, provider, &mut store)
+}
+
+/// Fail closed when this application session could not establish its durable
+/// active-process marker. Without that marker an abrupt termination cannot be
+/// detected on the next launch, so the process must not begin, resume, or
+/// mutate qualification lifecycle state that a later launch would otherwise
+/// trust as part of a clean handoff. The check runs at the shared recovery
+/// entry where every begin, checkpoint, abandonment, deferred-finalization,
+/// and lifecycle-observation path enters, so no mutation can reach the session
+/// store without it.
+fn qualification_process_handoff_gate(state: &AppState) -> Result<(), String> {
+    let available = state
+        .recovery
+        .lock()
+        .map(|recovery| recovery.qualification_lifecycle_available())
+        .unwrap_or(false);
+    if available {
+        return Ok(());
+    }
+    Err(session_error(
+        "qualification_session_recovery_unavailable",
+        "Qualification is unavailable because this application session could not establish its durable process marker. Restart EmuChef and try again.",
+    ))
 }
 
 /// Retry the already-recovered active attempt when exact authored source was
@@ -2930,6 +2960,23 @@ pub(crate) struct BeginSessionRequest {
     pub(crate) observation: SelectedDeviceObservation,
 }
 
+/// Publish one qualification-run candidate and immediately mark it pending.
+/// Publication makes the candidate visible to concurrent recovery paths, so the
+/// process-local store is held across both steps: a status refresh or product
+/// observation can never mistake the not-yet-written session document for
+/// corruption and durably poison an otherwise valid attempt.
+pub(crate) fn publish_pending_candidate(
+    state: &AppState,
+    provider: &QualificationRepository,
+    payload: &Value,
+) -> Result<String, String> {
+    let mut store = lock_session_store(state);
+    let candidate_handle =
+        provider.create_candidate(CandidateKind::QualificationRun, payload, None)?;
+    store.mark_pending(&candidate_handle);
+    Ok(candidate_handle)
+}
+
 pub(crate) fn begin(
     state: &AppState,
     request: BeginSessionRequest,
@@ -3048,6 +3095,24 @@ pub(crate) fn record_checkpoint(
         .get()
         .ok_or_else(unavailable_error)?;
     let candidate_handle = candidate_handle_for_session(session_handle)?;
+    // Keep every checkpoint ordered with real execution admission. The
+    // execution store is always acquired before the qualification transition
+    // gate, so a prerequisite pass can never be committed between a real start
+    // request and its admission commit, and no checkpoint can be recorded while
+    // a real run is starting or active. Terminal retention releases the active
+    // slot, so post-terminal checkpoints remain available.
+    let executions = state.executions.lock().map_err(|_| {
+        session_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    if executions.real_in_flight() {
+        return Err(session_error(
+            "qualification_execution_active",
+            "A real device execution is starting or active. Record checkpoints before confirming the run, or after it finishes.",
+        ));
+    }
     let transition = crate::commands::qualification_transition_lock(state);
     let (generation, available_devices) =
         crate::commands::current_qualification_inventory_snapshot(state);
@@ -3090,6 +3155,7 @@ pub(crate) fn record_checkpoint(
             AuthoredSourceVerification::NotVerified,
         );
         drop(store);
+        drop(executions);
         transition.release_and_retry_best_effort();
         if retained.is_none() {
             return Err(persistence_error());
@@ -3117,6 +3183,7 @@ pub(crate) fn record_checkpoint(
     )
     .ok_or_else(persistence_error)?;
     drop(store);
+    drop(executions);
     drop(transition);
     #[cfg(test)]
     run_after_checkpoint_gate_release_hook(state);
@@ -3733,33 +3800,52 @@ mod tests {
         provider: QualificationRepositoryProvider,
         proven_clean_handoff: bool,
     ) -> (TempDir, tauri::App<tauri::test::MockRuntime>) {
-        test_app_with_frontend_session(provider, proven_clean_handoff, true)
+        test_app_with_frontend_session(provider, proven_clean_handoff, true, false)
     }
 
     fn test_app_before_frontend_session(
         provider: QualificationRepositoryProvider,
         proven_clean_handoff: bool,
     ) -> (TempDir, tauri::App<tauri::test::MockRuntime>) {
-        test_app_with_frontend_session(provider, proven_clean_handoff, false)
+        test_app_with_frontend_session(provider, proven_clean_handoff, false, false)
+    }
+
+    /// Launch over a process marker path that cannot accept a write, so the
+    /// frontend session begins without establishing crash detection.
+    fn test_app_with_unavailable_process_marker(
+        provider: QualificationRepositoryProvider,
+    ) -> (TempDir, tauri::App<tauri::test::MockRuntime>) {
+        test_app_with_frontend_session(provider, true, true, true)
     }
 
     fn test_app_with_frontend_session(
         provider: QualificationRepositoryProvider,
         proven_clean_handoff: bool,
         begin_frontend_session: bool,
+        block_process_marker: bool,
     ) -> (TempDir, tauri::App<tauri::test::MockRuntime>) {
         let temp = tempfile::tempdir().expect("test app directory should be created");
         let app_root = temp.path();
         let marker = app_root.join("session-active.marker");
-        if !proven_clean_handoff {
+        if block_process_marker {
+            // A directory at the marker path makes every atomic marker write
+            // fail, which is the only way a process loses crash detection.
+            std::fs::create_dir_all(&marker).expect("blocked marker directory should be created");
+        } else if !proven_clean_handoff {
             std::fs::write(&marker, b"1").expect("interrupted marker should be written");
         }
         let recovery = RecoveryStore::load(app_root.join("recovery-draft.json"), marker);
         let mut recovery = recovery;
         if begin_frontend_session {
-            recovery
-                .begin_session()
-                .expect("recovery session should begin");
+            if block_process_marker {
+                recovery
+                    .begin_session()
+                    .expect_err("a blocked marker path must fail the frontend session marker");
+            } else {
+                recovery
+                    .begin_session()
+                    .expect("recovery session should begin");
+            }
         }
         let app_state = AppState {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
@@ -4371,6 +4457,234 @@ mod tests {
                 .unwrap()
                 .payload["runValidity"],
             "invalid"
+        );
+    }
+
+    #[test]
+    fn checkpoint_recording_is_serialized_with_real_execution_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "checkpoint-admission-race",
+                        "state": "available",
+                        "model": "Device",
+                        "transportId": "checkpoint-race-transport"
+                    }]
+                }))
+                .unwrap();
+            let device = handles.qualification_devices().remove(0);
+            (device.handle, device.session_epoch)
+        };
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        let active = begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+
+        // A reserved real start is the window in which the sidecar worker may
+        // already be mutating the device, so the prerequisite pass can no longer
+        // be recorded truthfully.
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .force_in_flight_for_test(false);
+        let error = record_checkpoint(
+            &state,
+            &active.session_handle,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap_err();
+        assert!(error.contains("qualification_execution_active"), "{error}");
+        assert!(
+            session_status(&state)
+                .unwrap()
+                .unwrap()
+                .recorded_checkpoints
+                .is_empty(),
+            "a checkpoint rejected by the execution ordering gate must not be retained"
+        );
+
+        // An admitted active execution holds the same ordering guarantee.
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .force_in_flight_for_test(true);
+        assert!(record_checkpoint(
+            &state,
+            &active.session_handle,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap_err()
+        .contains("qualification_execution_active"));
+
+        // Terminal retention releases the slot, so post-terminal evidence stays
+        // available to the operator.
+        state.executions.lock().unwrap().reset();
+        let recorded = record_checkpoint(
+            &state,
+            &active.session_handle,
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        assert_eq!(recorded.phase, QualificationSessionPhase::ExecutionPending);
+        assert_eq!(recorded.recorded_checkpoints.len(), 1);
+    }
+
+    #[test]
+    fn published_provisional_candidate_survives_concurrent_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let provider = state.qualification_repository.get().unwrap();
+
+        let candidate = publish_pending_candidate(
+            &state,
+            provider,
+            &json!({
+                "capturedAt": CAPTURED_AT,
+                "build": build_json(),
+            }),
+        )
+        .unwrap();
+
+        // A concurrent status refresh runs recovery inside the publication
+        // window. The pending mark must already be visible, so the candidate is
+        // neither poisoned nor dropped from the resumable set.
+        recover_persisted_sessions(&state, provider).unwrap();
+
+        assert!(!provider.session_is_poisoned(&candidate).unwrap());
+        assert!(state
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .is_pending(&candidate));
+        assert!(resumable_candidates(provider)
+            .unwrap()
+            .iter()
+            .any(|listed| listed.candidate_handle == candidate));
+    }
+
+    #[test]
+    fn qualification_lifecycle_is_disabled_when_the_process_marker_cannot_be_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app_with_unavailable_process_marker(provider);
+        let state = app.state::<AppState>();
+        let provider = state.qualification_repository.get().unwrap();
+
+        let error = recover_persisted_sessions(&state, provider).unwrap_err();
+        assert!(
+            error.contains("qualification_session_recovery_unavailable"),
+            "{error}"
+        );
+        assert!(
+            session_status(&state).unwrap().is_none(),
+            "no attempt may become active while crash detection is unavailable"
+        );
+    }
+
+    #[test]
+    fn lifecycle_mutations_fail_closed_when_the_process_marker_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        // The frontend session has not begun yet, so the attempt below can
+        // still start before crash detection is established.
+        let (app_temp, app) = test_app_before_frontend_session(provider, true);
+        let state = app.state::<AppState>();
+        let provider = state.qualification_repository.get().unwrap();
+        let (device_handle, session_epoch) = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "marker-unavailable-race",
+                        "state": "available",
+                        "model": "Device",
+                        "transportId": "marker-transport"
+                    }]
+                }))
+                .unwrap();
+            let device = handles.qualification_devices().remove(0);
+            (device.handle, device.session_epoch)
+        };
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        let active = begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        // Establish the frontend session over a marker path that cannot accept
+        // a write, so the process loses crash detection while the attempt is
+        // still active in memory.
+        std::fs::create_dir_all(app_temp.path().join("session-active.marker")).unwrap();
+        state
+            .recovery
+            .lock()
+            .unwrap()
+            .begin_session()
+            .expect_err("a blocked marker path must fail the frontend session marker");
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .active_candidate(),
+            Some(candidate.as_str()),
+            "the attempt must still be active before the guarded mutations"
+        );
+
+        let checkpoint_error = record_checkpoint(
+            &state,
+            &active.session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .expect_err("a checkpoint must not be recorded without crash detection");
+        assert!(
+            checkpoint_error.contains("qualification_session_recovery_unavailable"),
+            "{checkpoint_error}"
+        );
+        let abandon_error = abandon(&state, &active.session_handle)
+            .expect_err("an attempt must not close without crash detection");
+        assert!(
+            abandon_error.contains("qualification_session_recovery_unavailable"),
+            "{abandon_error}"
+        );
+        let retry_error = retry_deferred_finalization(&state)
+            .expect_err("deferred finalization must not run without crash detection");
+        assert!(
+            retry_error.contains("qualification_session_recovery_unavailable"),
+            "{retry_error}"
+        );
+
+        // Nothing was recovered, advanced, poisoned, or closed.
+        assert!(!provider.session_is_poisoned(&candidate).unwrap());
+        let snapshot = session_status(&state).unwrap().expect("active session");
+        assert_eq!(snapshot.session_handle, active.session_handle);
+        assert!(
+            snapshot.recorded_checkpoints.is_empty(),
+            "the rejected checkpoint must not be retained"
+        );
+        assert_eq!(
+            state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .active_candidate(),
+            Some(candidate.as_str())
         );
     }
 

@@ -195,10 +195,5 @@ fn finish_recovery_process_session(app_handle: &tauri::AppHandle) -> bool {
     let Some(state) = app_handle.try_state::<commands::AppState>() else {
         return true;
     };
-    state
-        .recovery
-        .lock()
-        .map_err(|_| ())
-        .and_then(|mut recovery| recovery.finish_process_termination().map_err(|_| ()))
-        .is_ok()
+    commands::finish_recovery_process_session(&state)
 }

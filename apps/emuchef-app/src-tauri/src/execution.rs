@@ -130,6 +130,18 @@ impl ExecutionHandleStore {
         self.start_reserved.is_some() || self.active.is_some()
     }
 
+    /// Whether the shared execution slot is currently owned by a real start
+    /// reservation or an admitted real execution. Qualification checkpoints use
+    /// this to keep prerequisite observations ordered before real execution
+    /// admission. Simulated runs never mutate the device and do not block them.
+    pub(crate) fn real_in_flight(&self) -> bool {
+        self.start_reserved == Some(ExecutionKind::Real)
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|mapping| mapping.kind == ExecutionKind::Real)
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -1569,7 +1581,16 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         qualification_result?;
     }
 
-    let start_result = request_real_start(runtime, &refreshed_review)?;
+    let start_result = match request_real_start(runtime, &refreshed_review) {
+        Ok(public) => public,
+        Err(error) => {
+            return Err(resolve_real_start_failure(
+                qualification_state,
+                executions,
+                &error,
+            ));
+        }
+    };
     if let Some(state) = qualification_state {
         // The sidecar start request is complete. Retain product admission and
         // notify qualification as one ordered transition so inventory or a
@@ -1595,10 +1616,38 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     }
 }
 
+/// Resolve one failed real-execution start request. A lost runtime session
+/// means the sidecar may already have accepted the request and begun device
+/// mutations before the response was lost, so the product clears every piece of
+/// authority derived from that process generation and publishes the loss to
+/// qualification through the ordered runtime-loss transition. The caller still
+/// receives a sanitized failure, and ordinary start rejections keep their
+/// product error.
+fn resolve_real_start_failure(
+    qualification_state: Option<&AppState>,
+    executions: &mut ExecutionHandleStore,
+    error: &str,
+) -> String {
+    let Some(state) = qualification_state else {
+        return real_start_error(error);
+    };
+    let runtime_session_lost = execution_session_loss(error)
+        == Some(ExecutionSessionLoss::RuntimeSessionLost)
+        || state.sidecar.runtime_session_was_lost();
+    if !runtime_session_lost {
+        return real_start_error(error);
+    }
+    invalidate_lost_runtime_authority_with_store(state, executions);
+    runtime_session_lost_error()
+}
+
 fn request_real_start(
     runtime: &impl RuntimeRequester,
     review: &ReviewedPlanSnapshot,
 ) -> Result<Value, String> {
+    // The raw runtime error is preserved so the start seam can distinguish a
+    // lost runtime session from an ordinary start rejection before the error is
+    // sanitized for the frontend.
     runtime_request(
         runtime,
         "startExecution",
@@ -1609,7 +1658,6 @@ fn request_real_start(
             "targetDevice": review.target,
         }),
     )
-    .map_err(|error| real_start_error(&error))
 }
 
 fn bind_real_start_result(
@@ -2725,12 +2773,33 @@ fn invalidate_lost_runtime_authority_with_execution_guard(
     let transition = crate::commands::qualification_transition_lock(state);
     executions.reset();
     after_store_reset();
-    recover_poisoned_lock(&state.handles).invalidate_runtime_authority_preserving_identities();
-    recover_poisoned_lock(&state.root_qualification).invalidate();
-    crate::qualification_session::observe_product_runtime_session_lost_in_transition(state);
+    invalidate_lost_runtime_authority_in_transition(state);
     drop(executions);
     transition.release_and_retry_best_effort();
     Ok(())
+}
+
+/// Discard the authority derived from a runtime session that can no longer
+/// answer requests while the caller already owns the execution store. The
+/// store reset, the native authority invalidation, and the qualification loss
+/// observation commit inside one transition, preserving the documented
+/// execution-store-before-transition-gate order.
+fn invalidate_lost_runtime_authority_with_store(
+    state: &AppState,
+    executions: &mut ExecutionHandleStore,
+) {
+    let transition = crate::commands::qualification_transition_lock(state);
+    executions.reset();
+    invalidate_lost_runtime_authority_in_transition(state);
+    transition.release_and_retry_best_effort();
+}
+
+/// Native authority that cannot survive a lost runtime session. The caller owns
+/// the transition gate and has already reset the execution store.
+fn invalidate_lost_runtime_authority_in_transition(state: &AppState) {
+    recover_poisoned_lock(&state.handles).invalidate_runtime_authority_preserving_identities();
+    recover_poisoned_lock(&state.root_qualification).invalidate();
+    crate::qualification_session::observe_product_runtime_session_lost_in_transition(state);
 }
 
 /// Discard all native authority derived from a sidecar process generation that
@@ -7432,7 +7501,6 @@ pub(crate) mod tests {
         let executions = Mutex::new(ExecutionHandleStore::default());
         let handles = Mutex::new(native_handles);
         let root = Mutex::new(RootQualificationStore::default());
-        let execution_handle = bind_monitor_execution(&executions, "sidecar-qualification");
         let provider =
             crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
         let (app_root, app) = test_app_with_qualification(executions, handles, root, provider);
@@ -7461,6 +7529,10 @@ pub(crate) mod tests {
             crate::qualification_mode::QualificationCheckpointOutcome::Pass,
         )
         .expect("the required checkpoint should be recorded");
+        // Operator evidence is retained before the product binds its real
+        // execution, matching the production "record checkpoints before
+        // confirming the run" ordering.
+        let execution_handle = bind_monitor_execution(&state.executions, "sidecar-qualification");
         crate::qualification_session::observe(
             &state,
             crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
@@ -8235,6 +8307,188 @@ pub(crate) mod tests {
             stored.payload.get("runValidity").and_then(Value::as_str),
             Some("invalid"),
             "the exact final probe observation must invalidate the drifted target"
+        );
+    }
+
+    #[test]
+    fn lost_runtime_during_real_start_clears_authority_and_invalidates_qualification() {
+        let repository_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            repository_root
+                .path()
+                .join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let repository =
+            crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                repository_root.path().to_path_buf(),
+                Box::new(NoQualificationToolRunner),
+                serde_json::from_value(qualification_build_json()).unwrap(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: "1".repeat(40),
+                    tracked_worktree_clean: true,
+                },
+            );
+        let candidate = repository
+            .create_candidate(
+                crate::qualification_repository::CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": qualification_build_json(),
+                }),
+                None,
+            )
+            .unwrap();
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let device_handle = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .device_handle
+            .clone();
+        let device_session_epoch = handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .expect("prepared review must retain the device epoch");
+        let provider =
+            crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
+        let (_app_root, app) = test_app_with_qualification(
+            Mutex::new(ExecutionHandleStore::default()),
+            handles,
+            root,
+            provider,
+        );
+        let state = app.state::<AppState>();
+        align_test_adb_revision(&state, 2);
+        // Retain granted root evidence so the runtime-loss transition can be
+        // proven to clear authority that only the lost session produced.
+        let lost_root_key =
+            crate::device_qualification::RootQualificationKey::new("lost-runtime-device", 3, 4);
+        {
+            let mut root_qualification = state.root_qualification.lock().unwrap();
+            let attempt = root_qualification.begin(lost_root_key.clone()).unwrap();
+            assert!(root_qualification.complete(attempt, RootQualificationState::Granted));
+        }
+        let session_handle =
+            crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
+        let mut target = qualification_session_target();
+        target.manufacturer = "AYANEO".to_string();
+        target.model = "Pocket S".to_string();
+        target.android_version = "15".to_string();
+        target.android_api = 33;
+        target.abi_soc_class = "arm64-v8a".to_string();
+        target.firmware_build = "original/build".to_string();
+        let mut observation = qualification_session_observation();
+        observation.device_handle = device_handle.clone();
+        observation.session_epoch = Some(device_session_epoch);
+        observation.manufacturer = Some(target.manufacturer.clone());
+        observation.model = Some(target.model.clone());
+        observation.android_version = Some(target.android_version.clone());
+        observation.android_api = Some(target.android_api);
+        observation.abi_soc_class = Some(target.abi_soc_class.clone());
+        observation.firmware_build = Some(target.firmware_build.clone());
+        crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle: session_handle.clone(),
+                candidate_handle: candidate.clone(),
+                captured_at: "2026-08-23T12:00:00Z".to_string(),
+                device_plan: "test-plan".to_string(),
+                target,
+                workflow: qualification_session_workflow(),
+                build: serde_json::from_value(qualification_build_json()).unwrap(),
+                runtime_contract: "real-execution-v1".to_string(),
+                observation,
+            },
+        )
+        .unwrap();
+        crate::qualification_session::record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            crate::qualification_mode::QualificationCheckpointOutcome::Pass,
+        )
+        .unwrap();
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
+                Err(safe_error(
+                    "runtime_session_lost",
+                    "the runtime session is gone",
+                )),
+            ]),
+        };
+        let platform_tools = PlatformToolsSnapshot {
+            adb_path: "/trusted/adb",
+            runtime_generation: 1,
+            platform_tools_revision: 2,
+        };
+
+        let result = start_real_execution_inner_with_runtime(
+            &review_handle,
+            Some(&state),
+            &state.handles,
+            &state.root_qualification,
+            &mut executions,
+            &runtime,
+            &platform_tools,
+        );
+
+        let error = result.expect_err("a lost start runtime session must fail the start");
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert_eq!(
+            runtime
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(request_type, _)| request_type == "startExecution")
+                .count(),
+            1,
+            "the loss must be observed on the one authoritative start request"
+        );
+        assert!(
+            !executions.has_in_flight(),
+            "a lost runtime session must clear the reserved execution authority"
+        );
+        assert!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .review(&review_handle)
+                .is_err(),
+            "review authority derived from the lost runtime must be invalidated"
+        );
+        assert!(
+            state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .get(&lost_root_key)
+                .is_none(),
+            "root evidence derived from the lost runtime must be invalidated"
+        );
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid"),
+            "the active attempt must fail closed when the runtime session is lost"
         );
     }
 

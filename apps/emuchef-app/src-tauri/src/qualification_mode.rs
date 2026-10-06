@@ -690,14 +690,18 @@ fn begin_qualification_session_with_source<
             "workflowVersion": workflow.version,
             "deviceTargetId": request.target_id,
         });
-        let candidate_handle = repository
-            .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
-            .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+        let candidate_handle = crate::qualification_session::publish_pending_candidate(
+            &state,
+            repository,
+            &provisional_payload,
+        )
+        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
         let session_handle =
             match crate::qualification_session::session_handle_for_candidate(&candidate_handle) {
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = repository.discard_candidate(&candidate_handle);
+                    crate::qualification_session::forget_candidate(&state, &candidate_handle);
                     return Err(error);
                 }
             };

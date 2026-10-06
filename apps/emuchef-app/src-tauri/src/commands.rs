@@ -444,6 +444,24 @@ pub fn begin_app_session(state: State<'_, AppState>) -> Result<Value, String> {
         .begin_session()
 }
 
+/// Finalize the process-lifetime recovery marker for an accepted application
+/// termination. Marker removal is the durable statement that this process ended
+/// through the clean-shutdown contract, so it is serialized with the
+/// qualification transition gate: an invalidation, checkpoint, or abandonment
+/// that is still being persisted completes before the next launch is told the
+/// handoff was clean. Returns false when the marker could not be finalized.
+pub(crate) fn finish_recovery_process_session(state: &AppState) -> bool {
+    let transition = qualification_transition_lock(state);
+    let finalized = state
+        .recovery
+        .lock()
+        .map_err(|_| ())
+        .and_then(|mut recovery| recovery.finish_process_termination().map_err(|_| ()))
+        .is_ok();
+    drop(transition);
+    finalized
+}
+
 /// Restart the Rust sidecar after proving no execution is in flight.
 #[tauri::command]
 pub fn restart_runtime(
@@ -2645,6 +2663,42 @@ mod tests {
             .unwrap()
             .qualification_devices()
             .is_empty());
+    }
+
+    #[test]
+    fn accepted_termination_marker_removal_waits_for_qualification_transitions() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let marker = temp.path().join("session-active.marker");
+        state.recovery.lock().unwrap().begin_session().unwrap();
+        assert!(marker.is_file());
+
+        // Model a qualification transition that is still being persisted when
+        // the operator accepts termination.
+        let transition = qualification_transition_lock(&state);
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                finished_tx
+                    .send(finish_recovery_process_session(&state))
+                    .unwrap();
+            });
+            assert!(
+                finished_rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_err(),
+                "marker removal must wait for an in-flight qualification transition"
+            );
+            assert!(
+                marker.is_file(),
+                "the clean-handoff marker must survive until the transition finishes"
+            );
+            drop(transition);
+            assert!(finished_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("marker removal must finish after the transition releases"));
+        });
+        assert!(!marker.exists());
     }
 
     fn review_snapshot(device_handle: &str) -> ReviewedPlanSnapshot {

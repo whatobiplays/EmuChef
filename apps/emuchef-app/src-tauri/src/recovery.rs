@@ -74,6 +74,11 @@ pub struct RecoveryStore {
     /// Keep the active-process marker when a durable qualification poison
     /// marker could not be written. The next process must then fail closed.
     preserve_marker_on_exit: bool,
+    /// Set when the active-process marker could not be written for this process.
+    /// Without that marker an abrupt termination is undetectable on the next
+    /// launch, so qualification lifecycle work stays disabled until a later
+    /// launch establishes its own marker.
+    process_marker_unavailable: bool,
     /// Qualification candidates begun in this process. Unlike the presentation
     /// session store, this provenance survives frontend session resets.
     current_process_qualification_candidates: HashSet<String>,
@@ -101,6 +106,7 @@ impl RecoveryStore {
             required_reentry: HashSet::new(),
             clean_handoff_proven,
             preserve_marker_on_exit: false,
+            process_marker_unavailable: false,
             current_process_qualification_candidates: HashSet::new(),
         }
     }
@@ -112,7 +118,15 @@ impl RecoveryStore {
         let first_process_session = self.session_generation == 0;
         let interrupted_session = first_process_session && !self.session_handoff_proven();
         if first_process_session {
-            atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")?;
+            if let Err(error) =
+                atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")
+            {
+                // This process cannot be detected as crashed on the next launch, so
+                // it must not begin, resume, or mutate qualification lifecycle
+                // state that a later launch would otherwise trust.
+                self.process_marker_unavailable = true;
+                return Err(error);
+            }
         }
 
         self.session_generation = self.session_generation.saturating_add(1).max(1);
@@ -186,6 +200,15 @@ impl RecoveryStore {
     /// proof when it writes the current process marker.
     pub fn session_handoff_proven(&self) -> bool {
         self.clean_handoff_proven.unwrap_or(false)
+    }
+
+    /// Whether qualification lifecycle work may proceed in this process. A
+    /// process that could not establish its active-process marker cannot make
+    /// an abrupt termination detectable, so it must not create or continue
+    /// resumable attempts. Returns false while the recovery state is
+    /// unavailable.
+    pub(crate) fn qualification_lifecycle_available(&self) -> bool {
+        !self.process_marker_unavailable
     }
 
     /// Record that native code began this qualification candidate in the
@@ -1072,6 +1095,24 @@ mod tests {
         assert!(marker.is_file());
         let restarted = RecoveryStore::load(temp.path().join("recovery.json"), marker);
         assert!(!restarted.session_handoff_proven());
+    }
+
+    #[test]
+    fn failed_process_marker_write_disables_qualification_lifecycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("active");
+        // A directory at the marker path makes the atomic marker write fail.
+        std::fs::create_dir_all(&marker).unwrap();
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker.clone());
+        assert!(store.qualification_lifecycle_available());
+
+        let error = store.begin_session().unwrap_err();
+        assert!(error.contains("recovery_session_marker_failed"), "{error}");
+        assert!(
+            !store.qualification_lifecycle_available(),
+            "a process that cannot write its marker must not run qualification lifecycle work"
+        );
+        assert!(marker.is_dir(), "the blocked marker path is left untouched");
     }
 
     #[test]
