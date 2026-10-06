@@ -2488,7 +2488,16 @@ pub(crate) fn observe(state: &AppState, observation: QualificationLifecycleObser
     transition.release_and_retry_best_effort();
 }
 
-/// Capture the matching active attempt and bound review at real-execution start.
+/// Capture the active qualification attempt at real-execution start.
+///
+/// The fence records which attempt owned device authority when the execution
+/// start was reserved together with the product review handle the execution
+/// will use. The attempt does not have to have bound that review yet: a review
+/// created before the attempt began still names real device mutation, so the
+/// committed admission must reach the captured attempt and let
+/// [`QualificationSession::admit_execution`] bind it or fail closed. Only a
+/// poisoned attempt, which can never accept evidence, captures nothing.
+///
 /// A deferred cross-build attempt has no process-local authority but still
 /// reserves the harness, so it rejects an unbound start. The fence is
 /// process-local and never crosses IPC.
@@ -2511,7 +2520,7 @@ pub(crate) fn capture_execution_admission_fence(
             Ok(None)
         };
     };
-    if store.is_poisoned(&candidate_handle) || store.bound_review_handle() != Some(review_handle) {
+    if store.is_poisoned(&candidate_handle) {
         return Ok(None);
     }
     Ok(Some(QualificationAdmissionFence {
@@ -2546,8 +2555,13 @@ fn observe_reserved_real_execution_admission_with_hook(
     if ensure_recovered(state, provider, &mut store).is_err() {
         return;
     }
+    // Route to the exact attempt captured at reservation time. The attempt's
+    // current review binding is deliberately not part of this check: a review
+    // created before the attempt began, or replaced after the fence was
+    // captured, still proves the product mutated the device this attempt
+    // owns. `admit_execution` classifies that drift and fails closed instead
+    // of leaving the attempt valid with no knowledge of the real run.
     let matches_reservation = store.active_candidate() == Some(fence.candidate_handle.as_str())
-        && store.bound_review_handle() == Some(fence.review_handle.as_str())
         && admission.review.review_handle == fence.review_handle
         && !store.is_poisoned(&fence.candidate_handle);
     if !matches_reservation {
@@ -5317,7 +5331,7 @@ mod tests {
                 .join()
                 .unwrap()
                 .unwrap_err()
-                .contains("execution_unavailable"));
+                .contains("runtime_session_lost"));
             assert!(checkpoint.join().unwrap().is_err());
         });
 
@@ -8949,7 +8963,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_admission_is_ignored_after_review_replacement_but_binds_when_unchanged() {
+    fn reserved_admission_after_review_replacement_fails_closed_for_the_captured_attempt() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let replaced_candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -8990,25 +9004,38 @@ mod tests {
             },
         );
         drop(transition);
-        let current = session_status(&state).unwrap().unwrap();
-        assert_eq!(current.run_validity, RunValidity::Valid);
-        assert_eq!(current.phase, QualificationSessionPhase::ExecutionPending);
+        // The execution started with the still-valid first review, so it
+        // mutated the device this attempt owns. Replacing the review before
+        // the admission commits fails that attempt closed instead of leaving
+        // it valid with no knowledge of the real run.
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&replaced_candidate)
+            .unwrap();
         assert_eq!(
-            state
-                .qualification_sessions
-                .lock()
-                .unwrap()
-                .bound_execution_handle(),
-            None
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
         );
+        assert_eq!(
+            stored
+                .payload
+                .get("qualificationOutcome")
+                .and_then(Value::as_str),
+            Some("not_observed")
+        );
+        assert!(session_status(&state).unwrap().is_none());
+    }
 
-        abandon(
-            &state,
-            &session_handle_for_candidate(&replaced_candidate).unwrap(),
-        )
-        .unwrap();
-        let normal_candidate =
-            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+    #[test]
+    fn reserved_admission_binds_when_review_is_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let normal_candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
 
         begin(
             &state,
@@ -9055,6 +9082,136 @@ mod tests {
                 .bound_execution_handle(),
             Some("execution-normal")
         );
+    }
+
+    #[test]
+    fn reserved_admission_reaches_the_attempt_that_began_after_the_review() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        // Publish exactly like the production begin path so candidate recovery
+        // cannot mistake this provisional candidate for an interrupted
+        // attempt while the review observation below runs.
+        let candidate = publish_run_candidate(&state, CAPTURED_AT);
+
+        // The product review is created first. No qualification attempt exists
+        // yet, so this observation is a qualification no-op.
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                "review-pre-existing",
+                "device-one",
+            ))),
+        );
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        retain_available_device_for_checkpoint(&state, "device-one", 1);
+        record_checkpoint(
+            &state,
+            &session_handle_for_candidate(&candidate).unwrap(),
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+
+        let fence = capture_execution_admission_fence(&state, "review-pre-existing")
+            .expect("the active attempt should permit the pre-existing review")
+            .expect("a review created before the attempt must still fence the execution");
+        let transition = crate::commands::qualification_transition_lock(&state);
+        observe_reserved_real_execution_admission_in_transition(
+            &state,
+            Some(&fence),
+            ExecutionAdmissionObservation {
+                execution_handle: "execution-pre-existing".to_string(),
+                review: review("review-pre-existing", "device-one"),
+                device_handle: "device-one".to_string(),
+            },
+        );
+        drop(transition);
+
+        let current = session_status(&state).unwrap().unwrap();
+        assert_eq!(current.run_validity, RunValidity::Valid);
+        assert_eq!(current.phase, QualificationSessionPhase::ExecutionActive);
+        let store = state.qualification_sessions.lock().unwrap();
+        assert_eq!(
+            store.bound_execution_handle(),
+            Some("execution-pre-existing")
+        );
+        assert_eq!(store.bound_review_handle(), Some("review-pre-existing"));
+    }
+
+    #[test]
+    fn reserved_admission_with_a_mismatched_review_invalidates_the_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        // Publish exactly like the production begin path so candidate recovery
+        // cannot mistake this provisional candidate for an interrupted
+        // attempt while the review observation below runs.
+        let candidate = publish_run_candidate(&state, CAPTURED_AT);
+
+        // The product review predates the attempt and does not match the
+        // intent locked at session start, so it never binds during begin.
+        let mut mismatched = review("review-mismatched", "device-one");
+        mismatched.selected_recipes = vec!["other.recipe".to_string()];
+        observe(
+            &state,
+            QualificationLifecycleObservation::ReviewCreated(Box::new(mismatched.clone())),
+        );
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        retain_available_device_for_checkpoint(&state, "device-one", 1);
+        record_checkpoint(
+            &state,
+            &session_handle_for_candidate(&candidate).unwrap(),
+            "clean_or_deliberately_reset_device",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+
+        let fence = capture_execution_admission_fence(&state, "review-mismatched")
+            .expect("the active attempt should permit the submitted execution review")
+            .expect("the mismatched review must still fence the execution");
+        let transition = crate::commands::qualification_transition_lock(&state);
+        observe_reserved_real_execution_admission_in_transition(
+            &state,
+            Some(&fence),
+            ExecutionAdmissionObservation {
+                execution_handle: "execution-mismatched".to_string(),
+                review: mismatched,
+                device_handle: "device-one".to_string(),
+            },
+        );
+        drop(transition);
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
+        );
+        assert_eq!(
+            stored
+                .payload
+                .get("qualificationOutcome")
+                .and_then(Value::as_str),
+            Some("not_observed")
+        );
+        assert!(session_status(&state).unwrap().is_none());
     }
 
     #[test]

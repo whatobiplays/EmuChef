@@ -810,44 +810,58 @@ pub fn get_simulated_execution(
     execution_handle: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    get_simulated_execution_with_runtime(&state, &state.sidecar, &execution_handle)
+}
+
+fn get_simulated_execution_with_runtime(
+    state: &AppState,
+    runtime: &impl RuntimeRequester,
+    execution_handle: &str,
+) -> Result<Value, String> {
     let mapping = state
         .executions
         .lock()
         .map_err(|_| execution_state_error())?
         .mapping(
             ExecutionKind::Simulated,
-            &execution_handle,
+            execution_handle,
             "This simulated run is unavailable. Return to Review or generate a new review.",
         )?;
     let response = match runtime_request(
-        &state.sidecar,
+        runtime,
         "getExecution",
         json!({ "executionId": mapping.sidecar_id }),
     ) {
         Ok(response) => response,
         Err(error) => {
-            match execution_session_loss(&error) {
+            return match execution_session_loss(&error) {
                 Some(ExecutionSessionLoss::UnknownExecution) => {
                     state
                         .executions
                         .lock()
                         .map_err(|_| execution_state_error())?
-                        .forget_active(ExecutionKind::Simulated, &execution_handle);
+                        .forget_active(ExecutionKind::Simulated, execution_handle);
+                    // The mapping disappeared, but the shared runtime session
+                    // answered, so only this simulated run is unavailable.
+                    Err(safe_error(
+                        "execution_unavailable",
+                        "The in-memory simulated run was lost. Return to Review or generate a new review.",
+                    ))
                 }
                 Some(ExecutionSessionLoss::RuntimeSessionLost) => {
-                    invalidate_lost_runtime_authority(&state)?;
+                    // Process-wide runtime loss clears every piece of
+                    // runtime-derived authority before the caller learns the
+                    // session is gone, so the frontend must run its
+                    // centralized runtime-loss recovery instead of the
+                    // mapping-local unavailable transition.
+                    invalidate_lost_runtime_authority(state)?;
+                    Err(runtime_session_lost_error())
                 }
-                None => {
-                    return Err(safe_error(
-                        "execution_status_failed",
-                        "The simulated run status could not be refreshed.",
-                    ));
-                }
-            }
-            return Err(safe_error(
-                "execution_unavailable",
-                "The in-memory simulated run was lost. Return to Review or generate a new review.",
-            ));
+                None => Err(safe_error(
+                    "execution_status_failed",
+                    "The simulated run status could not be refreshed.",
+                )),
+            };
         }
     };
     let report = response.get("execution").ok_or_else(|| {
@@ -870,7 +884,7 @@ pub fn get_simulated_execution(
             .map_err(|_| execution_state_error())?
             .mark_terminal_with_report(
                 ExecutionKind::Simulated,
-                &execution_handle,
+                execution_handle,
                 report.clone(),
                 runtime,
             );
@@ -923,10 +937,9 @@ fn get_simulated_execution_events_with_runtime(
             executions,
             after_store_reset,
         )?;
-        return Err(safe_error(
-            "execution_unavailable",
-            "The in-memory simulated run was lost. Return to Review or generate a new review.",
-        ));
+        // The reconciled loss is process-wide, so the frontend receives the
+        // runtime-session classification its centralized recovery handles.
+        return Err(runtime_session_lost_error());
     } else {
         drop(executions);
     }
@@ -1707,6 +1720,22 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             ));
         }
     };
+    // The runtime accepted the start request, so an execution now exists
+    // outside this process. A success response that cannot establish the
+    // local execution identity is a fatal runtime ownership failure, not an
+    // ordinary start failure: the unknown worker could keep mutating behind
+    // the app's ownership model. Fail the runtime session when this seam owns
+    // one, then resolve the loss through the ordered authority transition
+    // while the execution store is still held. The identity rule is not
+    // qualification-specific, so it holds for every caller.
+    if real_start_execution_identity(&start_result).is_none() {
+        let Some(state) = qualification_state else {
+            executions.reset();
+            return Err(runtime_session_lost_error());
+        };
+        state.sidecar.invalidate_runtime_session();
+        return Err(resolve_proven_runtime_session_loss(state, executions));
+    }
     if let Some(state) = qualification_state {
         // The sidecar start request is complete. Retain product admission and
         // notify qualification as one ordered transition so inventory or a
@@ -1796,15 +1825,9 @@ fn bind_real_start_result(
     review: ReviewedPlanSnapshot,
     start_result: &Value,
 ) -> Result<Value, String> {
-    let report = start_result
-        .get("execution")
-        .ok_or_else(real_start_failed)?;
-    let sidecar_id = report
-        .get("executionId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(real_start_failed)?
-        .to_string();
+    let Some((report, sidecar_id)) = real_start_execution_identity(start_result) else {
+        return Err(real_start_failed());
+    };
     let mapping = executions.bind_started(
         ExecutionKind::Real,
         sidecar_id,
@@ -1812,6 +1835,23 @@ fn bind_real_start_result(
         review,
     );
     Ok(project_real_snapshot(&mapping, report))
+}
+
+/// Execution identity required to own an accepted real execution locally.
+///
+/// A successful `startExecution` response always carries a non-empty
+/// execution id. A structurally complete response that omits it proves the
+/// runtime accepted work the app cannot identify, poll, cancel, or bind to
+/// qualification, so the caller must treat it as fatal runtime-session loss
+/// instead of a bounded start failure.
+fn real_start_execution_identity(start_result: &Value) -> Option<(&Value, String)> {
+    let report = start_result.get("execution")?;
+    let sidecar_id = report
+        .get("executionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    Some((report, sidecar_id))
 }
 
 /// Feed one committed real-execution admission to the active attempt.
@@ -8777,6 +8817,8 @@ pub(crate) mod tests {
         requests: Vec<String>,
         /// Whether execution authority remained in flight after the seam returned.
         in_flight: bool,
+        /// Whether the seam failed the process-wide runtime session.
+        runtime_session_lost: bool,
     }
 
     /// Drive one start whose runtime requests are scripted, assert the shared
@@ -9038,6 +9080,7 @@ pub(crate) mod tests {
             error,
             requests,
             in_flight,
+            runtime_session_lost: state.sidecar.runtime_session_was_lost(),
         }
     }
 
@@ -9223,6 +9266,10 @@ pub(crate) mod tests {
             inventory.in_flight,
             "an ordinary inventory failure must leave the caller's reservation intact"
         );
+        assert!(
+            !inventory.runtime_session_lost,
+            "a pre-acceptance failure must not fail the runtime session"
+        );
         assert_eq!(inventory.requests, vec!["listAdbDevices"]);
 
         let probe = start_seam_runtime_loss(
@@ -9249,7 +9296,114 @@ pub(crate) mod tests {
             probe.in_flight,
             "an ordinary probe failure must leave the caller's reservation intact"
         );
+        assert!(
+            !probe.runtime_session_lost,
+            "a pre-acceptance failure must not fail the runtime session"
+        );
         assert_eq!(probe.requests, vec!["listAdbDevices", "probeDevice"]);
+    }
+
+    #[test]
+    fn accepted_real_start_without_execution_object_fails_the_runtime_session_closed() {
+        let outcome = start_seam_runtime_loss(
+            StartSeam::Real,
+            vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
+                Ok(json!({ "accepted": true })),
+            ],
+        );
+
+        assert!(
+            outcome.error.contains("runtime_session_lost"),
+            "{}",
+            outcome.error
+        );
+        assert!(
+            outcome.runtime_session_lost,
+            "an accepted start without a local execution identity must fail and stop the runtime session"
+        );
+        assert!(
+            !outcome.in_flight,
+            "the unowned accepted execution must clear the start reservation"
+        );
+        assert_eq!(
+            outcome.requests.last().map(String::as_str),
+            Some("startExecution")
+        );
+        assert_eq!(
+            outcome
+                .requests
+                .iter()
+                .filter(|request| *request == "probeDevice")
+                .count(),
+            1,
+            "the ownership failure must not add a second device probe"
+        );
+    }
+
+    #[test]
+    fn accepted_real_start_with_empty_execution_id_fails_the_runtime_session_closed() {
+        let outcome = start_seam_runtime_loss(
+            StartSeam::Real,
+            vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
+                Ok(json!({ "execution": { "executionId": "" } })),
+            ],
+        );
+
+        assert!(
+            outcome.error.contains("runtime_session_lost"),
+            "{}",
+            outcome.error
+        );
+        assert!(
+            outcome.runtime_session_lost,
+            "an empty execution id cannot own the accepted execution, so the runtime session must fail closed"
+        );
+        assert!(
+            !outcome.in_flight,
+            "the unowned accepted execution must clear the start reservation"
+        );
+    }
+
+    #[test]
+    fn rejected_real_start_keeps_its_bounded_error_and_a_live_runtime_session() {
+        let outcome = start_seam_runtime_loss(
+            StartSeam::Real,
+            vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
+                Err(json!({
+                    "code": "execution_start_failed",
+                    "message": "The runtime rejected the start request.",
+                    "details": { "code": "artifact_not_ready" },
+                })
+                .to_string()),
+            ],
+        );
+
+        assert!(
+            outcome.error.contains("artifact_not_ready"),
+            "{}",
+            outcome.error
+        );
+        assert!(
+            !outcome.error.contains("runtime_session_lost"),
+            "a structured rejection of the start request is a bounded product error: {}",
+            outcome.error
+        );
+        assert!(
+            !outcome.runtime_session_lost,
+            "a rejected start must not kill the runtime session"
+        );
     }
 
     #[test]
@@ -9453,6 +9607,10 @@ pub(crate) mod tests {
                 .map(|(kind, _)| kind)
                 .collect::<Vec<_>>()
         );
+        assert!(
+            !state.sidecar.runtime_session_was_lost(),
+            "a usable accepted start must leave the runtime session alive"
+        );
         let requests = runtime.requests.lock().unwrap();
         assert_eq!(
             requests
@@ -9648,6 +9806,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn accepted_real_start_without_identity_fails_closed_without_qualification_state() {
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Ok(json!({ "accepted": true })),
+            ]),
+        };
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let platform_tools = PlatformToolsSnapshot {
+            adb_path: "/trusted/adb",
+            runtime_generation: 1,
+            platform_tools_revision: 2,
+        };
+
+        let error = start_real_execution_inner_with_runtime(
+            &review_handle,
+            None,
+            &handles,
+            &root,
+            &mut executions,
+            &runtime,
+            &platform_tools,
+        )
+        .expect_err("an accepted start without a local execution identity must fail closed");
+
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert!(
+            !executions.has_in_flight(),
+            "the unowned accepted execution must clear the start reservation"
+        );
+    }
+
+    #[test]
     fn deterministic_runtime_records_existing_phase_zero_request_shape() {
         let runtime = FakeRuntime {
             requests: Mutex::new(Vec::new()),
@@ -9794,7 +9990,10 @@ pub(crate) mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("execution_unavailable"));
+        // Process-wide loss keeps its runtime-session classification so the
+        // frontend runs the centralized runtime-loss recovery instead of the
+        // mapping-local unavailable transition.
+        assert!(error.contains("runtime_session_lost"), "{error}");
         assert!(reset_was_inside_transition);
         assert!(state
             .executions
@@ -9802,6 +10001,158 @@ pub(crate) mod tests {
             .unwrap()
             .reserve_start(ExecutionKind::Simulated)
             .is_ok());
+    }
+
+    #[test]
+    fn simulated_snapshot_polling_keeps_unknown_execution_mapping_local() {
+        let (_temp, app) = test_app(
+            Mutex::new(ExecutionHandleStore::default()),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let mapping = {
+            let mut executions = state.executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Simulated).unwrap();
+            executions.bind_started(
+                ExecutionKind::Simulated,
+                "sidecar-unknown".into(),
+                "review-unknown".into(),
+                review(),
+            )
+        };
+        let root_key = crate::device_qualification::RootQualificationKey::new("kept-device", 5, 6);
+        {
+            let mut root = state.root_qualification.lock().unwrap();
+            let attempt = root.begin(root_key.clone()).unwrap();
+            assert!(root.complete(attempt, RootQualificationState::Granted));
+        }
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err(json!({ "code": "unknown_execution" }).to_string()),
+        };
+
+        let error = get_simulated_execution_with_runtime(&state, &runtime, &mapping.public_handle)
+            .unwrap_err();
+
+        assert!(error.contains("execution_unavailable"), "{error}");
+        assert!(!error.contains("runtime_session_lost"), "{error}");
+        assert!(
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .mapping(
+                    ExecutionKind::Simulated,
+                    &mapping.public_handle,
+                    "unavailable"
+                )
+                .is_err(),
+            "the vanished simulated mapping must be forgotten"
+        );
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(RootQualificationState::Granted),
+            "a mapping-local loss must not clear runtime-derived device authority"
+        );
+    }
+
+    #[test]
+    fn simulated_event_polling_keeps_unknown_execution_mapping_local() {
+        let (_temp, app) = test_app(
+            Mutex::new(ExecutionHandleStore::default()),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let mapping = {
+            let mut executions = state.executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Simulated).unwrap();
+            executions.bind_started(
+                ExecutionKind::Simulated,
+                "sidecar-unknown".into(),
+                "review-unknown".into(),
+                review(),
+            )
+        };
+        let root_key = crate::device_qualification::RootQualificationKey::new("kept-device", 7, 8);
+        {
+            let mut root = state.root_qualification.lock().unwrap();
+            let attempt = root.begin(root_key.clone()).unwrap();
+            assert!(root.complete(attempt, RootQualificationState::Granted));
+        }
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err(json!({ "code": "unknown_execution" }).to_string()),
+        };
+
+        let error = get_simulated_execution_events_with_runtime(
+            &state,
+            &runtime,
+            &mapping.public_handle,
+            0,
+            || false,
+            || {},
+        )
+        .unwrap_err();
+
+        assert!(error.contains("execution_unavailable"), "{error}");
+        assert!(!error.contains("runtime_session_lost"), "{error}");
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(RootQualificationState::Granted),
+            "a mapping-local loss must not clear runtime-derived device authority"
+        );
+    }
+
+    #[test]
+    fn simulated_snapshot_runtime_loss_clears_authority_and_reports_runtime_session_lost() {
+        let (_temp, app) = test_app(
+            Mutex::new(ExecutionHandleStore::default()),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let mapping = {
+            let mut executions = state.executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Simulated).unwrap();
+            executions.bind_started(
+                ExecutionKind::Simulated,
+                "sidecar-lost".into(),
+                "review-lost".into(),
+                review(),
+            )
+        };
+        let root_key = crate::device_qualification::RootQualificationKey::new("lost-device", 9, 10);
+        {
+            let mut root = state.root_qualification.lock().unwrap();
+            let attempt = root.begin(root_key.clone()).unwrap();
+            assert!(root.complete(attempt, RootQualificationState::Granted));
+        }
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err(json!({ "code": "runtime_session_lost" }).to_string()),
+        };
+
+        let error = get_simulated_execution_with_runtime(&state, &runtime, &mapping.public_handle)
+            .unwrap_err();
+
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert!(!error.contains("execution_unavailable"), "{error}");
+        assert!(
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .reserve_start(ExecutionKind::Simulated)
+                .is_ok(),
+            "process-wide runtime loss must reset the execution store"
+        );
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            None,
+            "process-wide runtime loss must clear runtime-derived root authority"
+        );
     }
 
     #[test]

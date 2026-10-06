@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const mockApi = vi.hoisted(() => ({
   exportExecutionReport: vi.fn(),
+  getSimulatedExecution: vi.fn(),
+  getSimulatedExecutionEvents: vi.fn(),
   startRealExecution: vi.fn(),
   startSimulatedExecution: vi.fn(),
 }));
@@ -99,6 +101,27 @@ function reviewWorkflow(): WorkflowState {
       canExecute: true,
     },
     execution: { kind: "idle" },
+  };
+}
+
+function activeSimulatedWorkflow(executionHandle: string, generation: number): WorkflowState {
+  const snapshot: ExecutionSnapshot = {
+    ...terminalSnapshot(executionHandle, 0),
+    status: "running",
+    finishedAt: null,
+    terminal: false,
+  };
+  return {
+    ...terminalWorkflow(executionHandle, generation, 0),
+    execution: {
+      kind: "active",
+      generation,
+      mode: "simulated",
+      snapshot,
+      events: [],
+      eventCursor: 0,
+      cancellationRequested: false,
+    },
   };
 }
 
@@ -355,5 +378,113 @@ test("an ordinary simulated start rejection does not invoke the runtime-loss han
     });
     expect(onRuntimeSessionLost).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  });
+});
+
+describe("active execution polling classification", () => {
+  test("a lost runtime session during snapshot polling runs the centralized runtime-loss handler", async () => {
+    mockApi.getSimulatedExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    mockApi.getSimulatedExecutionEvents.mockResolvedValue({
+      events: [],
+      latestSequence: 0,
+      terminal: false,
+    });
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={activeSimulatedWorkflow("execution-active", 3)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+    // Process-wide loss must not be projected as a mapping-local transition;
+    // the centralized handler owns the runtime-invalidated workflow state.
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "execution-unavailable" }),
+    );
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  });
+
+  test("a lost runtime session during event polling runs the centralized runtime-loss handler", async () => {
+    mockApi.getSimulatedExecution.mockResolvedValue(
+      JSON.stringify({
+        execution: {
+          status: "running",
+          startedAt: "2026-07-20T12:00:00Z",
+          latestSequence: 1,
+          recipes: [],
+          warnings: [],
+          errors: [],
+        },
+      }),
+    );
+    mockApi.getSimulatedExecutionEvents.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={activeSimulatedWorkflow("execution-active", 4)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "execution-unavailable" }),
+    );
+  });
+
+  test("an ordinary mapping-local loss keeps the execution-unavailable transition", async () => {
+    mockApi.getSimulatedExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "execution_unavailable",
+        message: "The in-memory simulated run was lost. Return to Review or generate a new review.",
+      }),
+    );
+    mockApi.getSimulatedExecutionEvents.mockResolvedValue({
+      events: [],
+      latestSequence: 0,
+      terminal: false,
+    });
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={activeSimulatedWorkflow("execution-active", 5)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "execution-unavailable",
+        generation: 5,
+        executionHandle: "execution-active",
+        message: "The in-memory simulated run was lost. Return to Review or generate a new review.",
+      });
+    });
+    expect(onRuntimeSessionLost).not.toHaveBeenCalled();
   });
 });

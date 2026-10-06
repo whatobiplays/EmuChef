@@ -1025,8 +1025,13 @@ cancel or erase a dry run after it has started.
 Random execution handles are session-scoped, never reused, and lost on restart.
 The shared simulated/real store retains one kind-aware start reservation or
 active mapping and at most the latest terminal mapping. Every failed preflight
-or start releases the reservation; a public handle is bound only after the
-sidecar returns a successful execution identifier. Wrong-kind lookups are
+or rejected start releases the reservation; a public handle is bound only after
+the sidecar returns a successful execution identifier. A successful start
+response that cannot establish that identity — a missing execution object or an
+empty execution identifier — proves the runtime accepted work the app cannot
+identify, poll, cancel, or bind, so Tauri fails and stops that runtime session,
+clears the authority derived from it, and reports `runtime_session_lost`
+instead of an ordinary start failure. Wrong-kind lookups are
 indistinguishable from unknown handles. A lost real sidecar session removes
 only the matching active or latest-terminal mapping, invalidates its originating
 review, and reports an unknown outcome without inferring terminal status.
@@ -1040,7 +1045,11 @@ reviews, and any active qualification attempt — and reports
 `runtime_session_lost` instead of an inventory failure. A frontend request that
 receives this code resets the stale workflow projections and re-reads the
 runtime, Platform-Tools, and qualification projections, so the app-service
-recovery controls are offered again.
+recovery controls are offered again. Simulated execution snapshot and event
+polling classify a proven lost runtime session the same way, so the centralized
+runtime-loss recovery runs instead of an execution-local unavailable
+transition; a genuinely unknown simulated execution remains a mapping-local
+`execution_unavailable` that leaves other authority intact.
 
 When a terminal execution snapshot is retained, the trusted store also retains
 the production report and runtime metadata needed for report capture. The
@@ -1408,7 +1417,12 @@ overlay when trusted mode status is enabled. Rust owns qualification lifecycle,
 device association and reassociation, validity, and candidate finalization.
 Product operations synchronously publish the exact committed typed device
 observation and the authoritative review, admission, terminal, or runtime-loss
-transition to the active session. The product-owned real-execution monitor
+transition to the active session. A real-execution admission is routed to the
+exact qualification attempt that reserved the device when the start began, even
+when that attempt had not yet bound the submitted review: an admission for a
+review created before the attempt binds it, and an admission whose review was
+replaced after reservation fails that attempt closed instead of leaving it
+valid. The product-owned real-execution monitor
 retains terminal state and its report before qualification observes completion.
 Successful Platform-Tools replacement resets root and runtime device authority
 under the same transition boundary and invalidates any currently associated

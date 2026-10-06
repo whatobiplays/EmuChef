@@ -188,6 +188,15 @@ const startSimulation = useCallback(async () => {
         timer = window.setTimeout(pollExecution, 500);
       } catch (error) {
         if (disposed) return;
+        if (errorCode(error) === "runtime_session_lost") {
+          // The shared runtime process that owned this execution is gone and
+          // its native authority was cleared with it. The centralized handler
+          // owns the runtime-invalidated transition and recovery refresh, so
+          // this hook must not project a mapping-local unavailable state.
+          onRuntimeSessionLost();
+          setNotice(errorMessage(error));
+          return;
+        }
         if (errorCode(error) === "execution_unavailable") {
           dispatch({
             type: "execution-unavailable",
@@ -213,6 +222,7 @@ const startSimulation = useCallback(async () => {
     activeExecution?.snapshot.executionHandle,
     announce,
     dispatch,
+    onRuntimeSessionLost,
     setNotice,
     workflowRef,
   ]);
