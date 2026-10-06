@@ -751,11 +751,7 @@ fn resolve_simulated_start_failure(
     error: &str,
     ordinary: impl FnOnce() -> String,
 ) -> String {
-    if !runtime_session_lost(state, error) {
-        return ordinary();
-    }
-    invalidate_lost_runtime_authority_with_store(state, executions);
-    runtime_session_lost_error()
+    resolve_runtime_request_failure(Some(state), executions, error, ordinary)
 }
 
 fn request_dry_run_start(
@@ -1387,7 +1383,20 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         "listAdbDevices",
         json!({ "adbPath": platform_tools.adb_path }),
     )
-    .map_err(|_| device_disconnected())?;
+    .map_err(|error| {
+        // The final-gate inventory request can be the first request to
+        // discover that the shared runtime session is gone, so it takes the
+        // ordered runtime-loss transition instead of a plain
+        // disconnected-device error that would leave the start reservation and
+        // every other piece of authority derived from the lost process
+        // generation in place.
+        resolve_runtime_request_failure(
+            qualification_state,
+            executions,
+            &error,
+            device_disconnected,
+        )
+    })?;
     if let Some(state) = qualification_state {
         crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
             state,
@@ -1440,7 +1449,19 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     ) {
         Ok(facts) => facts,
-        Err(_) => {
+        Err(error) => {
+            // A lost runtime session may already have accepted the probe
+            // before the response was lost, so the whole process generation
+            // fails closed instead of reporting only a failed probe for the
+            // retained device.
+            if qualification_state.is_some_and(|state| runtime_session_lost(state, &error)) {
+                return Err(resolve_runtime_request_failure(
+                    qualification_state,
+                    executions,
+                    &error,
+                    device_disconnected,
+                ));
+            }
             if let Some(state) = qualification_state {
                 let transition = crate::commands::qualification_transition_lock(state);
                 let current = state
@@ -1518,9 +1539,27 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     validate_plan_digest(&refreshed_review)?;
     validate_retained_byo_inputs(&refreshed_review, &SystemInputReadability)?;
 
-    let mut qualification_request =
-        |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
-    let current = match qualification_state {
+    // The passive qualification observation issues its own `qualifyDevice`
+    // request, so it can be the first request to discover that the shared
+    // runtime session is gone. That nested path sanitizes request failures, so
+    // the proven loss is recorded here and resolved through the ordered
+    // runtime-loss transition once the observation has returned and released
+    // its own locks.
+    let mut lost_runtime_session = false;
+    let mut qualification_request = |request_type: &str, payload: Value| match runtime_request(
+        runtime,
+        request_type,
+        payload,
+    ) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if qualification_state.is_some_and(|state| runtime_session_lost(state, &error)) {
+                lost_runtime_session = true;
+            }
+            Err(error)
+        }
+    };
+    let observation = match qualification_state {
         Some(state) => crate::device_observation::qualify_reconciled_current_for_state(
             state,
             platform_tools.adb_path,
@@ -1529,7 +1568,7 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             Some(&refreshed_review.device_handle),
             observation_failure_target.clone(),
             &mut qualification_request,
-        )?,
+        ),
         None => qualify_reconciled_current_with_runtime(
             handles,
             root_qualification,
@@ -1538,8 +1577,14 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             platform_tools.platform_tools_revision,
             Some(&refreshed_review.device_handle),
             &mut qualification_request,
-        )?,
+        ),
     };
+    if lost_runtime_session {
+        if let Some(state) = qualification_state {
+            return Err(resolve_proven_runtime_session_loss(state, executions));
+        }
+    }
+    let current = observation?;
     if current
         .context
         .as_ref()
@@ -1578,11 +1623,27 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             "matchDevice",
             json!({ "catalog": catalog, "facts": facts }),
         )
+        .map_err(|error| {
+            // The catalog match is qualification-only, so an ordinary failure
+            // still only reports a device observation failure below. A proven
+            // runtime-session loss is not an ordinary failure: it is resolved
+            // through the ordered runtime-loss transition instead of being
+            // presented as an observation of a dead device session.
+            if qualification_state.is_some_and(|state| runtime_session_lost(state, &error)) {
+                lost_runtime_session = true;
+            }
+            error
+        })
         .ok()?;
         let public = crate::commands::public_match(&match_result, Some(&serial));
         let projection = crate::device_observation::DeviceMatchProjection::decode(&public)?;
         crate::device_observation::matched_profile_id(&projection, device_plan)
     });
+    if lost_runtime_session {
+        if let Some(state) = qualification_state {
+            return Err(resolve_proven_runtime_session_loss(state, executions));
+        }
+    }
 
     {
         let transition = qualification_state.map(crate::commands::qualification_transition_lock);
@@ -1638,10 +1699,11 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     let start_result = match request_real_start(runtime, &refreshed_review) {
         Ok(public) => public,
         Err(error) => {
-            return Err(resolve_real_start_failure(
+            return Err(resolve_runtime_request_failure(
                 qualification_state,
                 executions,
                 &error,
+                || real_start_error(&error),
             ));
         }
     };
@@ -1670,24 +1732,41 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     }
 }
 
-/// Resolve one failed real-execution start request. A lost runtime session
-/// means the sidecar may already have accepted the request and begun device
-/// mutations before the response was lost, so the product clears every piece of
-/// authority derived from that process generation and publishes the loss to
-/// qualification through the ordered runtime-loss transition. The caller still
-/// receives a sanitized failure, and ordinary start rejections keep their
-/// product error.
-fn resolve_real_start_failure(
+/// Resolve one failed runtime request in a real-execution start seam.
+///
+/// A lost runtime session means the sidecar may already have accepted the
+/// request and begun device mutations before the response was lost, so the
+/// product clears every piece of authority derived from that process
+/// generation and publishes the loss to qualification through the ordered
+/// runtime-loss transition while the caller already owns the execution store.
+/// The caller then receives the sanitized runtime-loss failure. `ordinary`
+/// produces the error every other failure already had at that request, so a
+/// seam without qualification state keeps its previous behavior.
+fn resolve_runtime_request_failure(
     qualification_state: Option<&AppState>,
     executions: &mut ExecutionHandleStore,
     error: &str,
+    ordinary: impl FnOnce() -> String,
 ) -> String {
     let Some(state) = qualification_state else {
-        return real_start_error(error);
+        return ordinary();
     };
     if !runtime_session_lost(state, error) {
-        return real_start_error(error);
+        return ordinary();
     }
+    resolve_proven_runtime_session_loss(state, executions)
+}
+
+/// Clear every piece of authority derived from a runtime session that is
+/// already proven lost and return the sanitized public failure.
+///
+/// A nested observation request can prove the loss without surfacing the raw
+/// request error, so the seam records that proof and resolves it here. The
+/// caller already owns the execution store.
+fn resolve_proven_runtime_session_loss(
+    state: &AppState,
+    executions: &mut ExecutionHandleStore,
+) -> String {
     invalidate_lost_runtime_authority_with_store(state, executions);
     runtime_session_lost_error()
 }
@@ -8683,11 +8762,93 @@ pub(crate) mod tests {
         assert_eq!(adb.revision(), 2);
     }
 
-    /// Drive one simulated start whose runtime requests are scripted so the
-    /// first failing request proves a lost runtime session, assert the shared
-    /// fail-closed consequences, and return the request types the runtime
-    /// observed.
-    fn simulated_start_runtime_loss(responses: Vec<Result<Value, String>>) -> Vec<String> {
+    /// Start seam under test for scripted runtime-request coverage.
+    #[derive(Clone, Copy)]
+    enum StartSeam {
+        Simulated,
+        Real,
+    }
+
+    /// Observable consequences of one scripted start attempt.
+    struct StartSeamOutcome {
+        /// Sanitized error the seam returned.
+        error: String,
+        /// Runtime request types the scripted requester observed, in order.
+        requests: Vec<String>,
+        /// Whether execution authority remained in flight after the seam returned.
+        in_flight: bool,
+    }
+
+    /// Drive one start whose runtime requests are scripted, assert the shared
+    /// fail-closed consequences whenever a request proves a lost runtime session,
+    /// and report the observable outcome.
+    fn start_seam_runtime_loss(
+        seam: StartSeam,
+        responses: Vec<Result<Value, String>>,
+    ) -> StartSeamOutcome {
+        start_seam_runtime_loss_with_effect(seam, responses, StartSeamEffect::None)
+    }
+
+    /// One in-flight native side effect the scripted start-seam runtime commits
+    /// before its scripted response is read.
+    #[derive(Clone, Copy)]
+    enum StartSeamEffect {
+        /// Return the scripted response without touching native state.
+        None,
+        /// Advance the native device session epoch while a request is in flight,
+        /// so the delayed response belongs to a replaced device session.
+        AdvanceDeviceEpoch,
+    }
+
+    /// Scripted runtime for the start-seam loss driver. It records every
+    /// request and can commit one in-flight native side effect before the
+    /// scripted response is read.
+    struct StartSeamRuntime<'a> {
+        handles: &'a Mutex<SessionHandles>,
+        requests: Mutex<Vec<(String, Value)>>,
+        responses: Mutex<Vec<Result<Value, String>>>,
+        effect: StartSeamEffect,
+    }
+
+    impl RuntimeRequester for StartSeamRuntime<'_> {
+        fn request(&self, request_type: &str, payload: Value) -> Result<Value, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request_type.to_string(), payload));
+            match self.effect {
+                StartSeamEffect::AdvanceDeviceEpoch if request_type == "qualifyDevice" => {
+                    let mut handles = self.handles.lock().unwrap();
+                    let handle = handles
+                        .single_available_device_handle()
+                        .expect("the scripted device session must stay addressable");
+                    let before = handles
+                        .device_session_epoch(&handle)
+                        .expect("the scripted device session must retain an epoch");
+                    handles
+                        .update_devices(&supported_inventory("transport-2"))
+                        .unwrap();
+                    let after = handles
+                        .device_session_epoch(&handle)
+                        .expect("the replaced device session must retain an epoch");
+                    assert_ne!(
+                        before, after,
+                        "the scripted side effect must advance the native device session epoch"
+                    );
+                }
+                _ => {}
+            }
+            self.responses.lock().unwrap().remove(0)
+        }
+    }
+
+    /// Drive one start seam whose scripted runtime commits the requested
+    /// in-flight side effect and then returns its scripted response.
+    fn start_seam_runtime_loss_with_effect(
+        seam: StartSeam,
+        responses: Vec<Result<Value, String>>,
+        effect: StartSeamEffect,
+    ) -> StartSeamOutcome {
         let repository_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
         std::fs::write(
@@ -8791,65 +8952,119 @@ pub(crate) mod tests {
         )
         .unwrap();
         let mut executions = ExecutionHandleStore::default();
-        executions.reserve_start(ExecutionKind::Simulated).unwrap();
-        let runtime = ScriptedRuntime {
+        executions
+            .reserve_start(match seam {
+                StartSeam::Simulated => ExecutionKind::Simulated,
+                StartSeam::Real => ExecutionKind::Real,
+            })
+            .unwrap();
+        let runtime = StartSeamRuntime {
+            handles: &state.handles,
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses),
+            effect,
         };
 
-        let error = start_simulated_execution_inner_with_runtime(
-            &review_handle,
-            &state,
-            &mut executions,
-            &runtime,
-        )
-        .expect_err("a lost runtime session must fail the simulated start");
-        assert!(
-            error.contains("runtime_session_lost"),
-            "{error} after {:?}",
-            runtime.requests.lock().unwrap()
-        );
-        assert!(
-            !executions.has_in_flight(),
-            "a lost runtime session must clear the reserved simulated execution authority"
-        );
-        assert!(
-            state
-                .handles
-                .lock()
+        let error = match seam {
+            StartSeam::Simulated => start_simulated_execution_inner_with_runtime(
+                &review_handle,
+                &state,
+                &mut executions,
+                &runtime,
+            )
+            .expect_err("a scripted start seam must fail"),
+            StartSeam::Real => {
+                let platform_tools = PlatformToolsSnapshot {
+                    adb_path: "/trusted/adb",
+                    runtime_generation: 1,
+                    platform_tools_revision: 2,
+                };
+                start_real_execution_inner_with_runtime(
+                    &review_handle,
+                    Some(&state),
+                    &state.handles,
+                    &state.root_qualification,
+                    &mut executions,
+                    &runtime,
+                    &platform_tools,
+                )
+                .expect_err("a scripted start seam must fail")
+            }
+        };
+        let in_flight = executions.has_in_flight();
+        if error.contains("runtime_session_lost") {
+            assert!(
+                !in_flight,
+                "a lost runtime session must clear the reserved execution authority"
+            );
+            assert!(
+                state
+                    .handles
+                    .lock()
+                    .unwrap()
+                    .review(&review_handle)
+                    .is_err(),
+                "review authority derived from the lost runtime must be invalidated"
+            );
+            assert!(
+                state
+                    .root_qualification
+                    .lock()
+                    .unwrap()
+                    .get(&lost_root_key)
+                    .is_none(),
+                "root evidence derived from the lost runtime must be invalidated"
+            );
+            let stored = state
+                .qualification_repository
+                .get()
                 .unwrap()
-                .review(&review_handle)
-                .is_err(),
-            "review authority derived from the lost runtime must be invalidated"
-        );
-        assert!(
-            state
-                .root_qualification
-                .lock()
-                .unwrap()
-                .get(&lost_root_key)
-                .is_none(),
-            "root evidence derived from the lost runtime must be invalidated"
-        );
-        let stored = state
-            .qualification_repository
-            .get()
-            .unwrap()
-            .load_candidate(&candidate)
-            .unwrap();
-        assert_eq!(
-            stored.payload.get("runValidity").and_then(Value::as_str),
-            Some("invalid"),
-            "the active attempt must fail closed when the simulated runtime session is lost"
-        );
-        let observed_requests = runtime
+                .load_candidate(&candidate)
+                .unwrap();
+            assert_eq!(
+                stored.payload.get("runValidity").and_then(Value::as_str),
+                Some("invalid"),
+                "the active attempt must fail closed when the runtime session is lost"
+            );
+        }
+        let requests = runtime
             .requests
             .lock()
             .unwrap()
             .iter()
             .map(|(request_type, _)| request_type.clone())
             .collect();
-        observed_requests
+        StartSeamOutcome {
+            error,
+            requests,
+            in_flight,
+        }
+    }
+
+    /// Drive one simulated start whose scripted requests prove a lost runtime
+    /// session and return the request types the runtime observed.
+    fn simulated_start_runtime_loss(responses: Vec<Result<Value, String>>) -> Vec<String> {
+        let outcome = start_seam_runtime_loss(StartSeam::Simulated, responses);
+        assert!(
+            outcome.error.contains("runtime_session_lost"),
+            "{} after {:?}",
+            outcome.error,
+            outcome.requests
+        );
+        outcome.requests
+    }
+
+    /// Drive one real start whose scripted requests prove a lost runtime session
+    /// and return the request types the runtime observed.
+    fn real_start_runtime_loss(responses: Vec<Result<Value, String>>) -> Vec<String> {
+        let outcome = start_seam_runtime_loss(StartSeam::Real, responses);
+        assert!(
+            outcome.error.contains("runtime_session_lost"),
+            "{} after {:?}",
+            outcome.error,
+            outcome.requests
+        );
+        outcome.requests
     }
 
     #[test]
@@ -8890,6 +9105,151 @@ pub(crate) mod tests {
             requests,
             vec!["listAdbDevices", "probeDevice", "startExecution"]
         );
+    }
+
+    #[test]
+    fn lost_runtime_during_real_inventory_clears_authority() {
+        let requests = real_start_runtime_loss(vec![Err(safe_error(
+            "runtime_session_lost",
+            "the runtime session is gone",
+        ))]);
+
+        assert_eq!(requests, vec!["listAdbDevices"]);
+    }
+
+    #[test]
+    fn lost_runtime_during_real_probe_clears_authority() {
+        let requests = real_start_runtime_loss(vec![
+            Ok(supported_inventory("transport-1")),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+
+        assert_eq!(requests, vec!["listAdbDevices", "probeDevice"]);
+    }
+
+    #[test]
+    fn lost_runtime_during_real_qualification_probe_clears_authority() {
+        let requests = real_start_runtime_loss(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+
+        assert_eq!(
+            requests,
+            vec!["listAdbDevices", "probeDevice", "qualifyDevice"]
+        );
+    }
+
+    #[test]
+    fn lost_runtime_during_real_match_clears_authority() {
+        let requests = real_start_runtime_loss(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Ok(supported_qualification()),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+
+        assert_eq!(
+            requests,
+            vec![
+                "listAdbDevices",
+                "probeDevice",
+                "qualifyDevice",
+                "matchDevice"
+            ]
+        );
+    }
+
+    /// A passive qualification probe can prove the shared runtime session is
+    /// gone while the device session it answered for has already been
+    /// replaced. The proven loss must still take the ordered runtime-loss
+    /// transition instead of being reported as an ordinary device change.
+    #[test]
+    fn device_change_during_lost_probe_still_clears_runtime_authority() {
+        let outcome = start_seam_runtime_loss_with_effect(
+            StartSeam::Real,
+            vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Err(safe_error(
+                    "runtime_session_lost",
+                    "the runtime session is gone",
+                )),
+            ],
+            StartSeamEffect::AdvanceDeviceEpoch,
+        );
+
+        assert!(
+            outcome.error.contains("runtime_session_lost"),
+            "a device change that arrives with a lost-runtime probe response must not mask the proven loss: {}",
+            outcome.error
+        );
+        assert_eq!(
+            outcome.requests,
+            vec!["listAdbDevices", "probeDevice", "qualifyDevice"]
+        );
+    }
+
+    #[test]
+    fn ordinary_real_start_device_failures_keep_their_product_classification() {
+        let inventory = start_seam_runtime_loss(
+            StartSeam::Real,
+            vec![Err(safe_error(
+                "device_unavailable",
+                "adb could not list devices",
+            ))],
+        );
+        assert!(
+            inventory.error.contains("device_disconnected"),
+            "{}",
+            inventory.error
+        );
+        assert!(
+            !inventory.error.contains("runtime_session_lost"),
+            "{}",
+            inventory.error
+        );
+        assert!(
+            inventory.in_flight,
+            "an ordinary inventory failure must leave the caller's reservation intact"
+        );
+        assert_eq!(inventory.requests, vec!["listAdbDevices"]);
+
+        let probe = start_seam_runtime_loss(
+            StartSeam::Real,
+            vec![
+                Ok(supported_inventory("transport-1")),
+                Err(safe_error(
+                    "device_unavailable",
+                    "adb could not probe the device",
+                )),
+            ],
+        );
+        assert!(
+            probe.error.contains("device_disconnected"),
+            "{}",
+            probe.error
+        );
+        assert!(
+            !probe.error.contains("runtime_session_lost"),
+            "{}",
+            probe.error
+        );
+        assert!(
+            probe.in_flight,
+            "an ordinary probe failure must leave the caller's reservation intact"
+        );
+        assert_eq!(probe.requests, vec!["listAdbDevices", "probeDevice"]);
     }
 
     #[test]
