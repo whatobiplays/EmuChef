@@ -237,6 +237,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
   const [deviceQualification, setDeviceQualification] = useState<DeviceQualificationSnapshot | null>(null);
+  // Monotonic revision of successful authoritative inventory commits. Rust
+  // closes or invalidates an active qualification attempt during inventory
+  // reconciliation, and that transition is invisible in the public device list,
+  // so the qualification presentation layer re-reads its sanitized status
+  // whenever this revision advances.
+  const [qualificationInventoryRevision, setQualificationInventoryRevision] = useState(0);
   const [rootCheckPhase, setRootCheckPhase] = useState<"idle" | "checking">("idle");
   const [executionCapabilitiesRefresh, setExecutionCapabilitiesRefresh] = useState<
     "idle" | "refreshing" | "failed"
@@ -300,6 +306,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const qualification = useDeviceQualificationMode({
     enabled: startupReady,
+    inventoryRevision: qualificationInventoryRevision,
     workflow,
     workflowRef,
   });
@@ -406,10 +413,32 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   // A request that proves the shared runtime session is gone must re-read the
   // runtime projection: the backend has already discarded every handle derived
   // from that process generation, so keeping the previous projection would
-  // offer review and execution controls that can only fail.
+  // offer review and execution controls that can only fail. The generation
+  // fences advance synchronously, before the invalidation and the re-read, so
+  // an operation that captured the previous generation can no longer apply a
+  // stale result over the invalidated workflow or restore dead-process device,
+  // review, or execution facts.
   const handleRuntimeSessionLost = useCallback(() => {
-    void initialize();
-  }, [initialize]);
+    const runtimeGeneration = ++runtimeGenerationRef.current;
+    platformToolsGenerationRef.current += 1;
+    executionCapabilitiesGenerationRef.current += 1;
+    devicePollGenerationRef.current += 1;
+    deviceSelectionGenerationRef.current += 1;
+    rootCheckGenerationRef.current += 1;
+    supportGenerationRef.current += 1;
+    setRootCheckPhase("idle");
+    if (deviceRefreshTimerRef.current !== null) {
+      window.clearTimeout(deviceRefreshTimerRef.current);
+      deviceRefreshTimerRef.current = null;
+    }
+    setPlatformToolsOperation({ phase: "idle", kind: "import" });
+    setRepairPreparing(false);
+    manualDeviceRefreshRef.current = false;
+    setDeviceRefresh({ phase: "idle", generation: 0, message: null });
+    setBusy(false);
+    dispatch({ type: "runtime-invalidated" });
+    void initialize(runtimeGeneration);
+  }, [dispatch, initialize]);
 
   const {
     cancelExecution,
@@ -1584,6 +1613,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
     try {
       const next = await api.pollDevices(expectedSupportGeneration);
+      // The inventory request above is the authoritative commit in Rust:
+      // transitions such as a second available device, a disappeared device,
+      // or a new native session epoch for the same handle invalidate and close
+      // an active qualification attempt there. Announce the committed
+      // inventory to the qualification presentation layer before the
+      // follow-up device qualification read, so a failing read cannot leave
+      // the overlay presenting a closed attempt as active.
+      setQualificationInventoryRevision((revision) => revision + 1);
       const qualification = await api.deviceQualification(
         next.length === 1 ? next[0].deviceHandle : null,
       );
@@ -1638,9 +1675,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         // runtime session is gone. The backend has already discarded every
         // handle derived from that process generation, so clear the stale
         // workflow projections and re-read the runtime projection to offer
-        // the app-service recovery controls again.
+        // the app-service recovery controls again. The centralized handler
+        // owns the invalidation dispatch, the generation fences, and the
+        // re-read so every runtime-loss caller cannot get the ordering wrong.
         if (errorCode(error) === "runtime_session_lost") {
-          dispatch({ type: "runtime-invalidated" });
           handleRuntimeSessionLost();
         }
         setNotice(errorMessage(error));

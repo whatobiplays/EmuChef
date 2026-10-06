@@ -50,6 +50,13 @@ export interface DeviceQualificationModeController {
 export interface UseDeviceQualificationModeOptions {
   enabled?: boolean;
   /**
+   * Monotonic revision of successful authoritative inventory commits observed
+   * by the host component. Rust invalidates or closes an active attempt during
+   * inventory reconciliation without changing any workflow-visible value, so
+   * the adapter re-reads the sanitized status whenever this revision advances.
+   */
+  inventoryRevision?: number;
+  /**
    * Live product workflow snapshot supplied by the host component. It is only
    * read when an operator action needs the currently selected device or setup;
    * qualification lifecycle state always comes from Rust, never from workflow
@@ -102,6 +109,7 @@ function executionRefreshSignal(execution: WorkflowState["execution"] | undefine
  */
 export function useDeviceQualificationMode({
   enabled = true,
+  inventoryRevision = 0,
   workflow,
   workflowRef,
 }: UseDeviceQualificationModeOptions): DeviceQualificationModeController {
@@ -117,6 +125,12 @@ export function useDeviceQualificationMode({
   const [error, setError] = useState<string | null>(null);
   const busyCountRef = useRef(0);
   const refreshGenerationRef = useRef(0);
+  // The refresh generation of the last status that reached the projection. An
+  // explicit command snapshot is authoritative for the session state it
+  // returns, but a status read that landed after the command started already
+  // describes newer lifecycle state and must not be replaced by the delayed
+  // command response.
+  const appliedStatusGenerationRef = useRef(0);
   const beginStatusGenerationRef = useRef<number | null>(null);
   const beginSessionHandleRef = useRef<string | null>(null);
   // The successful begin result is authoritative, but status refresh may lag it.
@@ -152,6 +166,7 @@ export function useDeviceQualificationMode({
   }, [finishBusy, startBusy]);
 
   const applyStatus = useCallback((nextStatus: QualificationModeStatus, generation: number) => {
+    appliedStatusGenerationRef.current = generation;
     const pendingBeginGeneration = beginStatusGenerationRef.current;
     const pendingSessionHandle = beginSessionHandleRef.current;
     const statusMatchesBegunSession = pendingSessionHandle !== null
@@ -193,31 +208,98 @@ export function useDeviceQualificationMode({
     });
   }, []);
 
-  const refresh = useCallback(async () => {
+  // Apply the session snapshot a successful begin, checkpoint, or abandon
+  // command returned. The snapshot is authoritative for the attempt, so it is
+  // projected before the follow-up status refresh: a failed refresh must not
+  // leave a recorded checkpoint looking unrecorded, an abandoned attempt
+  // looking active, or the association state stale. A status read that landed
+  // after the command started already describes newer lifecycle state, so the
+  // delayed command response must not replace it.
+  const applyAuthoritativeSessionSnapshot = useCallback((
+    nextSession: QualificationSessionSnapshot,
+    statusGeneration: number,
+    options?: { pendingAssociation?: boolean },
+  ) => {
+    if (appliedStatusGenerationRef.current !== statusGeneration) return;
+    setSession(nextSession);
+    if (nextSession.phase === "closed") {
+      beginStatusGenerationRef.current = null;
+      beginSessionHandleRef.current = null;
+      setBeginAssociationPending(false);
+      return;
+    }
+    if (options?.pendingAssociation) {
+      beginStatusGenerationRef.current = refreshGenerationRef.current;
+      beginSessionHandleRef.current = nextSession.sessionHandle;
+      setBeginAssociationPending(true);
+    }
+  }, []);
+
+  // Re-read the sanitized status. Operator and lifecycle refreshes present the
+  // adapter as busy and surface failures; background synchronization after an
+  // authoritative inventory commit neither flashes the operator controls into
+  // a busy state nor replaces an operator-facing error.
+  const loadStatus = useCallback(async (presentBusy: boolean) => {
     if (!enabled) return;
     const generation = ++refreshGenerationRef.current;
-    startBusy();
-    setError(null);
+    if (presentBusy) {
+      startBusy();
+      setError(null);
+    }
     try {
       const nextStatus = await api.deviceQualificationModeStatus();
       if (generation === refreshGenerationRef.current) applyStatus(nextStatus, generation);
     } catch (refreshError) {
-      if (generation === refreshGenerationRef.current) setError(errorMessage(refreshError));
+      if (presentBusy && generation === refreshGenerationRef.current) {
+        setError(errorMessage(refreshError));
+      }
     } finally {
-      finishBusy();
+      if (presentBusy) finishBusy();
     }
   }, [applyStatus, enabled, finishBusy, startBusy]);
 
+  const refresh = useCallback(async () => {
+    await loadStatus(true);
+  }, [loadStatus]);
+
+  const presentationSignalsRef = useRef<{
+    deviceFacts: unknown;
+    deviceHandle: string | null;
+    reviewHandle: string | null;
+    executionSignal: string;
+  } | null>(null);
+
   useEffect(() => {
-    if (!enabled) return;
-    void refresh();
+    if (!enabled) {
+      presentationSignalsRef.current = null;
+      return;
+    }
+    const signals = { deviceFacts, deviceHandle, reviewHandle, executionSignal };
+    const previous = presentationSignalsRef.current;
+    presentationSignalsRef.current = signals;
+    // Product lifecycle is owned by Rust. Only stable device, review, and
+    // execution lifecycle signals trigger a presenting refresh; event batches,
+    // progress snapshots, and editable workflow intent do not. An authoritative
+    // inventory commit can close or invalidate an attempt without changing any
+    // of those signals, so it synchronizes quietly instead.
+    const inventoryOnly = previous !== null
+      && previous.deviceFacts === signals.deviceFacts
+      && previous.deviceHandle === signals.deviceHandle
+      && previous.reviewHandle === signals.reviewHandle
+      && previous.executionSignal === signals.executionSignal;
+    void loadStatus(!inventoryOnly);
     return () => {
       refreshGenerationRef.current += 1;
     };
-  // Product lifecycle is owned by Rust. Only stable device, review, and
-  // execution lifecycle signals trigger a presentation refresh; event batches,
-  // progress snapshots, and editable workflow intent do not.
-  }, [deviceFacts, deviceHandle, enabled, executionSignal, refresh, reviewHandle]);
+  }, [
+    deviceFacts,
+    deviceHandle,
+    enabled,
+    executionSignal,
+    inventoryRevision,
+    loadStatus,
+    reviewHandle,
+  ]);
 
   const beginSession = useCallback(async (request: {
     deviceHandle: string;
@@ -226,23 +308,17 @@ export function useDeviceQualificationMode({
     workflowId: string;
   }) => {
     if (!enabled || !status?.enabled) return;
+    const statusGeneration = appliedStatusGenerationRef.current;
     const result = await runOperation(
       () => api.beginQualificationSession(request),
-      (nextSession) => {
-        setSession(nextSession);
-        if (nextSession.phase === "closed") {
-          beginStatusGenerationRef.current = null;
-          beginSessionHandleRef.current = null;
-          setBeginAssociationPending(false);
-        } else {
-          beginStatusGenerationRef.current = refreshGenerationRef.current;
-          beginSessionHandleRef.current = nextSession.sessionHandle;
-          setBeginAssociationPending(true);
-        }
-      },
+      (nextSession) => applyAuthoritativeSessionSnapshot(
+        nextSession,
+        statusGeneration,
+        { pendingAssociation: true },
+      ),
     );
     if (result !== null) await refresh();
-  }, [enabled, refresh, runOperation, status?.enabled]);
+  }, [applyAuthoritativeSessionSnapshot, enabled, refresh, runOperation, status?.enabled]);
 
   const createTargetCandidate = useCallback(async (connectionType: QualificationConnectionType) => {
     if (!enabled || !status?.enabled) return;
@@ -276,28 +352,38 @@ export function useDeviceQualificationMode({
     outcome: QualificationCheckpointOutcome,
   ) => {
     if (!enabled || !status?.enabled || !session) return;
+    const statusGeneration = appliedStatusGenerationRef.current;
     const result = await runOperation(
       () => api.recordQualificationCheckpoint(session.sessionHandle, checkpointId, outcome),
+      (nextSession) => applyAuthoritativeSessionSnapshot(nextSession, statusGeneration),
     );
     if (result !== null) await refresh();
-  }, [enabled, refresh, runOperation, session, status?.enabled]);
+  }, [
+    applyAuthoritativeSessionSnapshot,
+    enabled,
+    refresh,
+    runOperation,
+    session,
+    status?.enabled,
+  ]);
 
   const abandonSession = useCallback(async () => {
     if (!enabled || !status?.enabled || !session) return;
+    const statusGeneration = appliedStatusGenerationRef.current;
     const result = await runOperation(
       () => api.abandonQualificationSession(session.sessionHandle),
-      (closedSession) => {
-        setSession(closedSession);
-        if (closedSession.phase === "closed") {
-          beginStatusGenerationRef.current = null;
-          beginSessionHandleRef.current = null;
-          setBeginAssociationPending(false);
-        }
-      },
+      (closedSession) => applyAuthoritativeSessionSnapshot(closedSession, statusGeneration),
     );
     if (result === null) return;
     await refresh();
-  }, [enabled, refresh, runOperation, session, status?.enabled]);
+  }, [
+    applyAuthoritativeSessionSnapshot,
+    enabled,
+    refresh,
+    runOperation,
+    session,
+    status?.enabled,
+  ]);
 
   const recordRun = useCallback(async (candidateHandle: string) => {
     if (!enabled || !status?.enabled || recordingCandidateHandlesRef.current.has(candidateHandle)) return;

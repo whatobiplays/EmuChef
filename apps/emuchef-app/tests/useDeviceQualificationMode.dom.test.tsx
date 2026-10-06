@@ -202,10 +202,16 @@ function targetCandidateSummary(
   };
 }
 
-function Harness({ workflow }: { workflow: WorkflowState }) {
+function Harness({
+  workflow,
+  inventoryRevision,
+}: {
+  workflow: WorkflowState;
+  inventoryRevision?: number;
+}) {
   const workflowRef = useRef(workflow);
   workflowRef.current = workflow;
-  const controller = useDeviceQualificationMode({ workflow, workflowRef });
+  const controller = useDeviceQualificationMode({ workflow, workflowRef, inventoryRevision });
   return (
     <>
       <output data-testid="qualification-active">{String(controller.intentLock !== null)}</output>
@@ -768,6 +774,101 @@ test("a delayed checkpoint response cannot replace newer finalized status", asyn
   expect(statusCalls).toBe(3);
   await act(async () => resolveFollowUpStatus(finalizedStatus));
   await waitFor(() => expect(screen.getByTestId("qualification-busy").textContent).toBe("false"));
+});
+
+test("a recorded checkpoint stays visible when the follow-up status refresh fails", async () => {
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }))
+    .mockRejectedValueOnce(new Error("status temporarily unavailable"));
+  mockApi.recordQualificationCheckpoint.mockResolvedValueOnce(
+    sessionSnapshot({
+      recordedCheckpoints: [
+        {
+          checkpointId: "device_state_verified",
+          outcome: "pass",
+          observedAt: "2026-10-03T11:00:00Z",
+        },
+      ],
+    }),
+  );
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Record checkpoint" }));
+
+  await waitFor(() => {
+    expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
+  });
+  expect(screen.getByTestId("qualification-checkpoint").textContent).toBe("2026-10-03T11:00:00Z");
+  expect(screen.getByTestId("qualification-phase").textContent).toBe("executionActive");
+  expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+});
+
+test("a checkpoint that closes the attempt releases the locks when the status refresh fails", async () => {
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }))
+    .mockRejectedValueOnce(new Error("status temporarily unavailable"));
+  mockApi.recordQualificationCheckpoint.mockResolvedValueOnce(
+    sessionSnapshot({
+      phase: "closed",
+      runValidity: "invalid",
+      recordable: false,
+      invalidReason: "The device session ended before the attempt completed.",
+    }),
+  );
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Record checkpoint" }));
+
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-phase").textContent).toBe("closed");
+    expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
+  });
+  expect(screen.getByTestId("qualification-active").textContent).toBe("false");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+});
+
+test("an authoritative inventory commit refreshes qualification status without presenting busy", async () => {
+  let resolveInventoryStatus!: (status: QualificationModeStatus) => void;
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }))
+    .mockReturnValueOnce(new Promise((resolve) => { resolveInventoryStatus = resolve; }))
+    .mockResolvedValue(activeStatus());
+
+  const { rerender } = render(<Harness workflow={reviewWorkflow()} inventoryRevision={0} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+
+  rerender(<Harness workflow={reviewWorkflow()} inventoryRevision={1} />);
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+  expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
+  expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+
+  await act(async () => {
+    resolveInventoryStatus(activeStatus());
+  });
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("absent");
+  });
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+  expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
 });
 
 test("abandoning an attempt closes it and releases the projected locks", async () => {

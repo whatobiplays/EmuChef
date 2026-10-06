@@ -79,24 +79,30 @@ export function useExecution({
     announcementKeyRef.current = null;
   }, [workflowRef]);
 
-  const startSimulation = useCallback(async () => {
-    const current = workflowRef.current;
-    if (!current.review || current.execution.kind === "starting") return;
-    const generation = current.executionGeneration + 1;
-    dispatch({ type: "execution-starting", generation });
-    setBusy(true);
-    setNotice(null);
-    announce("Starting the simulated dry run.");
-    try {
-      const snapshot = await api.startSimulatedExecution(current.review.reviewHandle);
-      dispatch({ type: "execution-started", generation, snapshot });
-    } catch (error) {
-      dispatch({ type: "execution-start-failed", generation });
-      setNotice(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
-  }, [announce, dispatch, setBusy, setNotice, workflowRef]);
+const startSimulation = useCallback(async () => {
+  const current = workflowRef.current;
+  if (!current.review || current.execution.kind === "starting") return;
+  const generation = current.executionGeneration + 1;
+  dispatch({ type: "execution-starting", generation });
+  setBusy(true);
+  setNotice(null);
+  announce("Starting the simulated dry run.");
+  try {
+    const snapshot = await api.startSimulatedExecution(current.review.reviewHandle);
+    dispatch({ type: "execution-started", generation, snapshot });
+  } catch (error) {
+    dispatch({ type: "execution-start-failed", generation });
+    // A dry run shares the one native runtime session with every other
+    // request, so losing it invalidates the reviewed plan, the retained
+    // device facts, and the review handle exactly as a real start does. The
+    // centralized handler owns the runtime-invalidated dispatch, the
+    // generation fences, and the runtime re-read.
+    if (errorCode(error) === "runtime_session_lost") onRuntimeSessionLost();
+    setNotice(errorMessage(error));
+  } finally {
+    setBusy(false);
+  }
+}, [announce, dispatch, onRuntimeSessionLost, setBusy, setNotice, workflowRef]);
 
   const startRealExecution = useCallback(async (confirmation: RealExecutionConfirmation) => {
     const current = workflowRef.current;
@@ -113,19 +119,19 @@ export function useExecution({
     try {
       const snapshot = await api.startRealExecution(current.review.reviewHandle, confirmation);
       dispatch({ type: "execution-started", generation, snapshot });
-    } catch (error) {
-      dispatch({ type: "execution-start-failed", generation });
-      if (errorCode(error) === "runtime_session_lost") {
-        // The runtime process that owned the reviewed plan, device facts,
-        // and review handles is gone and native authority was cleared with
-        // it. Reset the stale workflow projections and refresh the runtime
-        // projection so the app service recovery controls appear instead
-        // of a review that can only fail with an unknown review handle.
-        dispatch({ type: "runtime-invalidated" });
-        onRuntimeSessionLost();
-      }
-      setNotice(errorMessage(error));
-    } finally {
+  } catch (error) {
+    dispatch({ type: "execution-start-failed", generation });
+    if (errorCode(error) === "runtime_session_lost") {
+      // The runtime process that owned the reviewed plan, device facts,
+      // and review handles is gone and native authority was cleared with
+      // it. The centralized handler resets the stale workflow projections
+      // and refreshes the runtime projection so the app service recovery
+      // controls appear instead of a review that can only fail with an
+      // unknown review handle.
+      onRuntimeSessionLost();
+    }
+    setNotice(errorMessage(error));
+  } finally {
       setBusy(false);
     }
   }, [dispatch, onRuntimeSessionLost, qualification?.state, qualification !== undefined, realExecutionCompiled, setBusy, setNotice, workflowRef]);

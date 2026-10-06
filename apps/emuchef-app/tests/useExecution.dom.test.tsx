@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 const mockApi = vi.hoisted(() => ({
   exportExecutionReport: vi.fn(),
   startRealExecution: vi.fn(),
+  startSimulatedExecution: vi.fn(),
 }));
 
 vi.mock("../src/api", () => ({ api: mockApi }));
@@ -145,11 +146,12 @@ function Harness({
 
   return qualification === undefined
     ? (
-        <button onClick={() => void execution.exportExecutionReport()}>
-          {execution.reportState}
-        </button>
-      )
+      <button onClick={() => void execution.exportExecutionReport()}>
+        {execution.reportState}
+      </button>
+    )
     : (
+      <>
         <button
           onClick={() => void execution.startRealExecution({
             phrase: "RUN",
@@ -160,7 +162,11 @@ function Harness({
         >
           start real execution
         </button>
-      );
+        <button onClick={() => void execution.startSimulation()}>
+          start simulated execution
+        </button>
+      </>
+    );
 }
 
 beforeEach(() => {
@@ -264,9 +270,65 @@ describe("real start failure classification", () => {
     await waitFor(() => {
       expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
     });
-    expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
-    expect(dispatch).toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+  // The runtime-invalidated dispatch belongs to the centralized runtime-loss
+  // handler in the application shell, so this hook must not duplicate it.
+  expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+});
+
+test("a simulated start that loses the runtime session invokes the runtime-loss handler", async () => {
+  mockApi.startSimulatedExecution.mockRejectedValue(
+    JSON.stringify({
+      code: "runtime_session_lost",
+      message: "The execution runtime session is no longer available.",
+    }),
+  );
+  const dispatch = vi.fn();
+  const onRuntimeSessionLost = vi.fn();
+  render(
+    <Harness
+      dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+      onRuntimeSessionLost={onRuntimeSessionLost}
+      qualification={supportedQualification()}
+      workflow={reviewWorkflow()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "start simulated execution" }));
+
+  await waitFor(() => {
+    expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
   });
+  expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+  expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+});
+
+test("an ordinary simulated start rejection does not invoke the runtime-loss handler", async () => {
+  mockApi.startSimulatedExecution.mockRejectedValue(
+    JSON.stringify({
+      code: "review_unknown",
+      message: "The reviewed plan is no longer available.",
+    }),
+  );
+  const dispatch = vi.fn();
+  const onRuntimeSessionLost = vi.fn();
+  render(
+    <Harness
+      dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+      onRuntimeSessionLost={onRuntimeSessionLost}
+      qualification={supportedQualification()}
+      workflow={reviewWorkflow()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "start simulated execution" }));
+
+  await waitFor(() => {
+    expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+  });
+  expect(onRuntimeSessionLost).not.toHaveBeenCalled();
+  expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+});
 
   test("an ordinary start rejection neither resets the workflow nor refreshes runtime state", async () => {
     mockApi.startRealExecution.mockRejectedValue(

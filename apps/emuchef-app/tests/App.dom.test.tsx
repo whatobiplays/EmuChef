@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ConfigurationDescription,
   ExecutionCapabilities,
+  RuntimeStatus,
   SupportSnapshot,
 } from "../src/types";
 
@@ -2073,3 +2074,157 @@ describe("Phase 5F saved setup management", () => {
     expect(mockApi.compareSavedConfigurationPreview).not.toHaveBeenCalled();
   });
 });
+test("a superseded runtime re-read cannot restore the lost runtime projection", async () => {
+  const user = userEvent.setup();
+  await renderReadyApp();
+
+  const pendingRuntimeReads: Array<(status: RuntimeStatus) => void> = [];
+  mockApi.runtimeStatus.mockImplementation(() => new Promise<RuntimeStatus>((resolve) => {
+    pendingRuntimeReads.push(resolve);
+  }));
+  mockApi.pollDevices.mockRejectedValue(JSON.stringify({
+    code: "runtime_session_lost",
+    message: "The execution runtime session is no longer available.",
+  }));
+
+  await user.click(screen.getByRole("button", { name: "Refresh devices" }));
+  await waitFor(() => expect(pendingRuntimeReads).toHaveLength(1));
+  await user.click(screen.getByRole("button", { name: "Refresh devices" }));
+  await waitFor(() => expect(pendingRuntimeReads).toHaveLength(2));
+
+  // The newest re-read resolves first and reports the lost app service.
+  await act(async () => {
+    pendingRuntimeReads[1]({
+      status: "failed",
+      error: { code: "runtime_unavailable", message: "The app service is unavailable." },
+    });
+  });
+  expect(
+    await screen.findByRole("heading", { name: "EmuChef could not start its app service" }),
+  ).toBeTruthy();
+
+  // The superseded re-read returns a ready snapshot afterwards and must be
+  // discarded instead of restoring dead-process device and workflow state.
+  await act(async () => {
+    pendingRuntimeReads[0]({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
+  });
+  expect(screen.queryByRole("heading", { name: "Choose an Android device" })).toBeNull();
+  expect(
+    screen.getByRole("heading", { name: "EmuChef could not start its app service" }),
+  ).toBeTruthy();
+});
+
+test("an authoritative inventory poll reloads qualification status without a manual refresh", async () => {
+  const user = userEvent.setup();
+  const qualificationStatus = {
+    enabled: true,
+    recordable: true,
+    message: null,
+    build: {
+      appVersion: "0.1.0",
+      gitCommit: "commit-opaque",
+      materialBuildDigest: "digest-opaque",
+      realExecutionEnabled: true,
+      qualificationContract: 2,
+    },
+    runtimeContract: "runtime-contract-2",
+    workflows: [{
+      id: "workflow.one",
+      version: 1,
+      purpose: "Workflow one",
+      productionRecipes: ["recipe.one"],
+      requiredCapabilities: [],
+      prerequisites: [],
+      humanCheckpoints: [],
+    }],
+    targets: [{
+      id: "target.one",
+      profileId: "profile.one",
+      manufacturer: "Example",
+      model: "Handheld",
+      androidVersion: "14",
+      androidApi: 34,
+      abiSocClass: "arm64",
+      rootState: "non_root",
+      connectionType: "usb3",
+      firmwareBuild: "firmware-opaque",
+    }],
+    deviceSelectionLocked: false,
+    resumableCandidates: [],
+  };
+  const sessionSnapshot = {
+    sessionHandle: "session-opaque",
+    targetId: "target.one",
+    workflowId: "workflow.one",
+    workflowVersion: 1,
+    devicePlan: "plan.supported",
+    requiredRecipes: ["recipe.one"],
+    humanCheckpoints: [],
+    recordedCheckpoints: [],
+    phase: "executionPending",
+    runValidity: "valid",
+    qualificationOutcome: "not_observed",
+    recordable: true,
+    invalidReason: null,
+    candidate: {
+      candidateHandle: "candidate-opaque",
+      kind: "qualification_run",
+      capturedAt: "2026-08-23T10:00:00Z",
+      promotable: true,
+      nonPromotableReason: null,
+      runValidity: "valid",
+      qualificationOutcome: "not_observed",
+    },
+  };
+  let activeSession: typeof sessionSnapshot | null = null;
+  mockApi.deviceQualificationModeStatus.mockImplementation(async () => ({
+    ...qualificationStatus,
+    deviceSelectionLocked: activeSession !== null,
+    resumableSession: activeSession,
+  }));
+  mockApi.beginQualificationSession.mockImplementation(async () => {
+    activeSession = sessionSnapshot;
+    return sessionSnapshot;
+  });
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+    key: "recipe.one/option",
+    inputId: "option",
+    label: "Optional setting",
+    required: false,
+    sensitive: false,
+  }));
+  mockApi.createReview.mockResolvedValue({
+    reviewHandle: "review-opaque",
+    setup: { name: "Reviewed setup" },
+    target: { label: "Connected Android device" },
+    features: [],
+    inputs: [],
+    notices: [],
+    work: { actionCount: 1 },
+    canExecute: true,
+  });
+
+  await advanceToInputs(user);
+  expect(await screen.findByRole("heading", { name: "Device qualification mode" })).toBeTruthy();
+  const beginSession = screen.getByRole("button", { name: "Begin qualification session" });
+  await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
+  await user.click(beginSession);
+  await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
+
+  const statusReads = mockApi.deviceQualificationModeStatus.mock.calls.length;
+  // Rust closes the attempt while reconciling the next authoritative
+  // inventory. The public device list stays identical, so only the committed
+  // inventory transition can tell the presentation layer to re-read status.
+  activeSession = null;
+
+  await waitFor(
+    () => expect(mockApi.deviceQualificationModeStatus.mock.calls.length).toBeGreaterThan(statusReads),
+    { timeout: 6000, interval: 50 },
+  );
+  await waitFor(
+    () => expect(screen.queryByRole("heading", { name: "Normal workflow intent is locked" })).toBeNull(),
+    { timeout: 6000, interval: 50 },
+  );
+});
+

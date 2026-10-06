@@ -659,6 +659,22 @@ fn start_simulated_execution_inner(
     state: &AppState,
     executions: &mut ExecutionHandleStore,
 ) -> Result<Value, String> {
+    start_simulated_execution_inner_with_runtime(review_handle, state, executions, &state.sidecar)
+}
+
+/// Simulated-start seam that lets tests substitute the runtime requester.
+///
+/// A simulated start issues several runtime requests while the execution start
+/// reservation is held: the inventory preflight, the device probe, and the
+/// dry-run start request. Any of them can be the first request to discover that
+/// the shared runtime session is gone, so every failure is classified at this
+/// seam before it is sanitized for the frontend.
+fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
+    review_handle: &str,
+    state: &AppState,
+    executions: &mut ExecutionHandleStore,
+    runtime: &R,
+) -> Result<Value, String> {
     let review = state
         .handles
         .lock()
@@ -669,15 +685,17 @@ fn start_simulated_execution_inner(
     validate_review_executable(&review)?;
     validate_catalog(&review, state)?;
     let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
-    let _devices = list_and_reconcile_preflight_inventory(state, &state.sidecar, &platform_tools)
+    let _devices = list_and_reconcile_preflight_inventory(state, runtime, &platform_tools)
         .map_err(|failure| match failure {
-        PreflightInventoryFailure::ProductUnavailable => {
-            stale_review("The reviewed device inventory changed.")
-        }
-        PreflightInventoryFailure::Runtime(_) => {
-            stale_review("The reviewed device could not be found.")
-        }
-    })?;
+            PreflightInventoryFailure::ProductUnavailable => {
+                stale_review("The reviewed device inventory changed.")
+            }
+            PreflightInventoryFailure::Runtime(error) => {
+                resolve_simulated_start_failure(state, executions, &error, || {
+                    stale_review("The reviewed device could not be found.")
+                })
+            }
+        })?;
 
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
@@ -693,23 +711,60 @@ fn start_simulated_execution_inner(
         (device.serial.clone(), refreshed)
     };
 
-    let facts = runtime_request(
-        &state.sidecar,
+    let facts = match runtime_request(
+        runtime,
         "probeDevice",
         json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
-    )
-    .map_err(|_| stale_review("The reviewed device facts could not be refreshed."))?;
+    ) {
+        Ok(facts) => facts,
+        Err(error) => {
+            return Err(resolve_simulated_start_failure(
+                state,
+                executions,
+                &error,
+                || stale_review("The reviewed device facts could not be refreshed."),
+            ));
+        }
+    };
     validate_target(&refreshed_review.target, &serial, &facts)?;
     validate_plan_digest(&refreshed_review)?;
 
-    let start_result = request_dry_run_start(&state.sidecar, &refreshed_review)?;
+    let start_result = request_dry_run_start(runtime, &refreshed_review).map_err(|error| {
+        resolve_simulated_start_failure(state, executions, &error, || execution_start_error(&error))
+    })?;
     bind_start_result(executions, review_handle, refreshed_review, &start_result)
+}
+
+/// Resolve one failed simulated-start runtime request.
+///
+/// A lost runtime session means the shared sidecar process may already have
+/// accepted the request before the response was lost, so the product clears
+/// every piece of authority derived from that process generation, including
+/// the active qualification attempt, through the ordered runtime-loss
+/// transition. The caller already owns the execution store, so the loss runs
+/// through the same already-locked helper as the real-start seam and the
+/// frontend receives the sanitized runtime-loss error. Ordinary start
+/// rejections keep their existing product error.
+fn resolve_simulated_start_failure(
+    state: &AppState,
+    executions: &mut ExecutionHandleStore,
+    error: &str,
+    ordinary: impl FnOnce() -> String,
+) -> String {
+    if !runtime_session_lost(state, error) {
+        return ordinary();
+    }
+    invalidate_lost_runtime_authority_with_store(state, executions);
+    runtime_session_lost_error()
 }
 
 fn request_dry_run_start(
     runtime: &impl RuntimeRequester,
     review: &ReviewedPlanSnapshot,
 ) -> Result<Value, String> {
+    // The raw runtime error is preserved so the simulated-start seam can
+    // classify a lost runtime session before the error is sanitized for the
+    // frontend.
     runtime_request(
         runtime,
         "startExecution",
@@ -720,7 +775,6 @@ fn request_dry_run_start(
             "targetDevice": review.target,
         }),
     )
-    .map_err(|error| execution_start_error(&error))
 }
 
 fn bind_start_result(
@@ -8467,7 +8521,7 @@ pub(crate) mod tests {
             provider,
         );
         let state = app.state::<AppState>();
-        align_test_adb_revision(&state, 2);
+        install_test_platform_tools(&state);
         // Retain granted root evidence so the runtime-loss transition can be
         // proven to clear authority that only the lost session produced.
         let lost_root_key =
@@ -8594,6 +8648,330 @@ pub(crate) mod tests {
             Some("invalid"),
             "the active attempt must fail closed when the runtime session is lost"
         );
+    }
+
+    /// Rebind one prepared review to the catalog the test app serves.
+    ///
+    /// The simulated-start seam validates the retained catalog identity before
+    /// any runtime request, so a review built from the shared synthetic fixture
+    /// must be reinserted against the real test catalog to reach the request
+    /// classification under test.
+    fn rebind_review_to_test_catalog(
+        handles: &Mutex<SessionHandles>,
+        review_handle: &str,
+    ) -> String {
+        let mut handles = handles.lock().unwrap();
+        let mut retained = handles.review(review_handle).unwrap().clone();
+        let catalog = crate::catalog::CatalogDescriptor::for_test()
+            .expect("the repository catalog should be available to execution tests");
+        retained.catalog_identity = serde_json::to_value(catalog.public_identity()).unwrap();
+        retained.catalog_digest = catalog.digest().to_string();
+        handles.insert_review(retained)
+    }
+
+    /// Install one managed Platform-Tools tree twice so the simulated-start
+    /// seam resolves a live adb path at the revision the prepared device
+    /// qualification context was built against.
+    fn install_test_platform_tools(state: &AppState) {
+        let mut adb = state.adb.lock().unwrap();
+        for _ in 0..2 {
+            let prepared = crate::adb::test_support::prepare_platform_tools_install(&adb);
+            adb.activate_prepared(prepared)
+                .expect("a prepared test Platform-Tools install should activate")
+                .cleanup_retired_install();
+        }
+        assert_eq!(adb.revision(), 2);
+    }
+
+    /// Drive one simulated start whose runtime requests are scripted so the
+    /// first failing request proves a lost runtime session, assert the shared
+    /// fail-closed consequences, and return the request types the runtime
+    /// observed.
+    fn simulated_start_runtime_loss(responses: Vec<Result<Value, String>>) -> Vec<String> {
+        let repository_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            repository_root
+                .path()
+                .join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let repository =
+            crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                repository_root.path().to_path_buf(),
+                Box::new(NoQualificationToolRunner),
+                serde_json::from_value(qualification_build_json()).unwrap(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: "1".repeat(40),
+                    tracked_worktree_clean: true,
+                },
+            );
+        let candidate = repository
+            .create_candidate(
+                crate::qualification_repository::CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": qualification_build_json(),
+                }),
+                None,
+            )
+            .unwrap();
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let review_handle = rebind_review_to_test_catalog(&handles, &review_handle);
+        let device_handle = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .device_handle
+            .clone();
+        let device_session_epoch = handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .expect("prepared review must retain the device epoch");
+        let provider =
+            crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
+        let (_app_root, app) = test_app_with_qualification(
+            Mutex::new(ExecutionHandleStore::default()),
+            handles,
+            root,
+            provider,
+        );
+        let state = app.state::<AppState>();
+        install_test_platform_tools(&state);
+        // Retain granted root evidence so the runtime-loss transition can be
+        // proven to clear authority that only the lost session produced.
+        let lost_root_key =
+            crate::device_qualification::RootQualificationKey::new("lost-runtime-device", 3, 4);
+        {
+            let mut root_qualification = state.root_qualification.lock().unwrap();
+            let attempt = root_qualification.begin(lost_root_key.clone()).unwrap();
+            assert!(root_qualification.complete(attempt, RootQualificationState::Granted));
+        }
+        let session_handle =
+            crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
+        let mut target = qualification_session_target();
+        target.manufacturer = "AYANEO".to_string();
+        target.model = "Pocket S".to_string();
+        target.android_version = "15".to_string();
+        target.android_api = 33;
+        target.abi_soc_class = "arm64-v8a".to_string();
+        target.firmware_build = "original/build".to_string();
+        let mut observation = qualification_session_observation();
+        observation.device_handle = device_handle.clone();
+        observation.session_epoch = Some(device_session_epoch);
+        observation.manufacturer = Some(target.manufacturer.clone());
+        observation.model = Some(target.model.clone());
+        observation.android_version = Some(target.android_version.clone());
+        observation.android_api = Some(target.android_api);
+        observation.abi_soc_class = Some(target.abi_soc_class.clone());
+        observation.firmware_build = Some(target.firmware_build.clone());
+        crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle: session_handle.clone(),
+                candidate_handle: candidate.clone(),
+                captured_at: "2026-08-23T12:00:00Z".to_string(),
+                device_plan: "test-plan".to_string(),
+                target,
+                workflow: qualification_session_workflow(),
+                build: serde_json::from_value(qualification_build_json()).unwrap(),
+                runtime_contract: "real-execution-v1".to_string(),
+                observation,
+            },
+        )
+        .unwrap();
+        crate::qualification_session::record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            crate::qualification_mode::QualificationCheckpointOutcome::Pass,
+        )
+        .unwrap();
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Simulated).unwrap();
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses),
+        };
+
+        let error = start_simulated_execution_inner_with_runtime(
+            &review_handle,
+            &state,
+            &mut executions,
+            &runtime,
+        )
+        .expect_err("a lost runtime session must fail the simulated start");
+        assert!(
+            error.contains("runtime_session_lost"),
+            "{error} after {:?}",
+            runtime.requests.lock().unwrap()
+        );
+        assert!(
+            !executions.has_in_flight(),
+            "a lost runtime session must clear the reserved simulated execution authority"
+        );
+        assert!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .review(&review_handle)
+                .is_err(),
+            "review authority derived from the lost runtime must be invalidated"
+        );
+        assert!(
+            state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .get(&lost_root_key)
+                .is_none(),
+            "root evidence derived from the lost runtime must be invalidated"
+        );
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid"),
+            "the active attempt must fail closed when the simulated runtime session is lost"
+        );
+        let observed_requests = runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(request_type, _)| request_type.clone())
+            .collect();
+        observed_requests
+    }
+
+    #[test]
+    fn lost_runtime_during_simulated_inventory_clears_authority() {
+        let requests = simulated_start_runtime_loss(vec![Err(safe_error(
+            "runtime_session_lost",
+            "the runtime session is gone",
+        ))]);
+
+        assert_eq!(requests, vec!["listAdbDevices"]);
+    }
+
+    #[test]
+    fn lost_runtime_during_simulated_probe_clears_authority() {
+        let requests = simulated_start_runtime_loss(vec![
+            Ok(supported_inventory("transport-1")),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+
+        assert_eq!(requests, vec!["listAdbDevices", "probeDevice"]);
+    }
+
+    #[test]
+    fn lost_runtime_during_simulated_start_clears_authority() {
+        let requests = simulated_start_runtime_loss(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+
+        assert_eq!(
+            requests,
+            vec!["listAdbDevices", "probeDevice", "startExecution"]
+        );
+    }
+
+    #[test]
+    fn ordinary_simulated_start_failures_keep_their_product_classification() {
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let review_handle = rebind_review_to_test_catalog(&handles, &review_handle);
+        let (_app_root, app) = test_app(Mutex::new(ExecutionHandleStore::default()), handles, root);
+        let state = app.state::<AppState>();
+        install_test_platform_tools(&state);
+
+        let mut inventory_executions = ExecutionHandleStore::default();
+        inventory_executions
+            .reserve_start(ExecutionKind::Simulated)
+            .unwrap();
+        let inventory_runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![Err(safe_error("adb_unavailable", "private detail"))]),
+        };
+        let inventory_error = start_simulated_execution_inner_with_runtime(
+            &review_handle,
+            &state,
+            &mut inventory_executions,
+            &inventory_runtime,
+        )
+        .unwrap_err();
+        assert!(
+            inventory_error.contains("review_stale"),
+            "{inventory_error}"
+        );
+        assert!(!inventory_error.contains("runtime_session_lost"));
+        assert!(!inventory_error.contains("private"));
+        assert!(
+            inventory_executions.has_in_flight(),
+            "an ordinary failure keeps the caller-owned reservation for cleanup"
+        );
+
+        let mut probe_executions = ExecutionHandleStore::default();
+        probe_executions
+            .reserve_start(ExecutionKind::Simulated)
+            .unwrap();
+        let probe_runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Err(safe_error("adb_unavailable", "private detail")),
+            ]),
+        };
+        let probe_error = start_simulated_execution_inner_with_runtime(
+            &review_handle,
+            &state,
+            &mut probe_executions,
+            &probe_runtime,
+        )
+        .unwrap_err();
+        assert!(probe_error.contains("review_stale"), "{probe_error}");
+        assert!(!probe_error.contains("runtime_session_lost"));
+        assert!(!probe_error.contains("private"));
+
+        let mut start_executions = ExecutionHandleStore::default();
+        start_executions
+            .reserve_start(ExecutionKind::Simulated)
+            .unwrap();
+        let start_runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Err(safe_error("execution_in_progress", "private detail")),
+            ]),
+        };
+        let start_error = start_simulated_execution_inner_with_runtime(
+            &review_handle,
+            &state,
+            &mut start_executions,
+            &start_runtime,
+        )
+        .unwrap_err();
+        assert!(
+            start_error.contains("execution_in_progress"),
+            "{start_error}"
+        );
+        assert!(!start_error.contains("runtime_session_lost"));
     }
 
     #[test]
