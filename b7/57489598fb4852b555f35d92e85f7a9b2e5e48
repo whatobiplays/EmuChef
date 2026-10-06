@@ -1,0 +1,59 @@
+apps/emuchef-app/tests/useExecution.dom.test.tsx
+  s_09b05cf592369e::t_3d7371997c710b 7-8,107-125
+  s_09b05cf592369e::t_96991020f2db14 383-490
+  s_09b05cf592369e::t_65395de49cd161 126-127
+docs/testing/phase-6d6/ui-binding-index.json
+  s_09b05cf592369e::t_eca01d7445db3b 6,203
+apps/emuchef-app/src-tauri/src/qualification_session.rs
+  s_09b05cf592369e::t_f6b083e0ce99e5 9094-9097,9155-9158
+  s_09b05cf592369e::t_0073742db97421 5334
+  s_09b05cf592369e::t_1f529a2715cf7d 8966,9007-9016,9018-9019,9021-9029,9031-9038,9087-9093,9098-9140,9145-9154,9159-9215
+  s_09b05cf592369e::t_3bba23402241a5 9141-9144
+  s_09b05cf592369e::t_ccada543a5340b 2491-2500,2523
+  s_09b05cf592369e::t_d93f5f7428b233 2558-2563
+  s_09b05cf592369e::t_7d0d1f1cd3d38d 9216
+apps/emuchef-app/src-tauri/src/sidecar.rs
+  s_09b05cf592369e::t_f409edbdb96a9c 140-155
+apps/emuchef-app/src/useExecution.ts
+  s_09b05cf592369e::t_d4a35901b5cc32 191-199,225
+apps/emuchef-app/src-tauri/src/execution.rs
+  s_09b05cf592369e::t_ae9425f33390c1 9320-9324,9360-9364,9393-9397,10045-10049
+  s_09b05cf592369e::t_f13cd9cb861450 9384-9389
+  s_09b05cf592369e::t_bb27d3413a1a86 1723-1738
+  s_09b05cf592369e::t_315675e375af09 9809-9845
+  s_09b05cf592369e::t_7ee1d0c2fcc46f 9407,9808,9993-9996,10006-10044,10050-10156
+  s_09b05cf592369e::t_dade73262be22b 8820-8821,9083
+  s_09b05cf592369e::t_1a96f4e4523809 9610-9613
+  s_09b05cf592369e::t_5c9ffc4a50e47b 837,844-849,852-856,858,860-864
+  s_09b05cf592369e::t_a3e2bea4c2834f 9269-9272,9299-9302,9306-9319,9325-9359,9365-9383,9390-9392,9398-9406
+  s_09b05cf592369e::t_f6469ab7d2cb2b 813-819,827,831,843,857,887,1855
+  s_09b05cf592369e::t_46b8b910ccb177 940-942
+  s_09b05cf592369e::t_cf62288bd14a4d 1828-1830,1840-1854
+  s_09b05cf592369e::t_4c39bb4e754eb1 812
+  s_09b05cf592369e::t_7f2259b951df39 1856
+  s_09b05cf592369e::t_bb2c1cab1298ba 9408
+  s_09b05cf592369e::t_628af449a4cc57 10157
+CONTEXT.md
+  s_09b05cf592369e::t_af792a0d451988 1028-1034,1048-1052,1420-1425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b757489598fb4852b555f35d92e85f7a9b2e5e48",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_09b05cf592369e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f8e2-4b10-7ff1-bbb2-622c77762fbd",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
