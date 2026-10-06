@@ -26,6 +26,13 @@ interface UseExecutionOptions {
   announce: (text: string, assertive?: boolean) => void;
   dispatch: Dispatch<WorkflowAction>;
   mainRef: MutableValueRef<HTMLElement | null>;
+  /**
+   * Refresh the application's runtime projection after a request proved the
+   * shared runtime session is gone. The backend has already discarded every
+   * authority derived from that process generation, so the presentation must
+   * re-read runtime state instead of continuing to offer stale handles.
+   */
+  onRuntimeSessionLost: () => void;
   realExecutionCompiled: boolean;
   qualification?: DeviceQualificationSnapshot | null;
   runtimeGenerationRef: MutableValueRef<number>;
@@ -43,6 +50,7 @@ export function useExecution({
   announce,
   dispatch,
   mainRef,
+  onRuntimeSessionLost,
   realExecutionCompiled,
   qualification,
   runtimeGenerationRef,
@@ -107,11 +115,20 @@ export function useExecution({
       dispatch({ type: "execution-started", generation, snapshot });
     } catch (error) {
       dispatch({ type: "execution-start-failed", generation });
+      if (errorCode(error) === "runtime_session_lost") {
+        // The runtime process that owned the reviewed plan, device facts,
+        // and review handles is gone and native authority was cleared with
+        // it. Reset the stale workflow projections and refresh the runtime
+        // projection so the app service recovery controls appear instead
+        // of a review that can only fail with an unknown review handle.
+        dispatch({ type: "runtime-invalidated" });
+        onRuntimeSessionLost();
+      }
       setNotice(errorMessage(error));
     } finally {
       setBusy(false);
     }
-  }, [dispatch, qualification?.state, qualification !== undefined, realExecutionCompiled, setBusy, setNotice, workflowRef]);
+  }, [dispatch, onRuntimeSessionLost, qualification?.state, qualification !== undefined, realExecutionCompiled, setBusy, setNotice, workflowRef]);
 
   useEffect(() => {
     if (workflow.execution.kind !== "active" && workflow.execution.kind !== "terminal") return;

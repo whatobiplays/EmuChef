@@ -997,6 +997,24 @@ describe("Phase 5B workflow surfaces", () => {
     vi.useRealTimers();
   });
 
+  test("an inventory refresh that discovers a lost runtime session resets stale projections", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+    const runtimeReads = mockApi.runtimeStatus.mock.calls.length;
+    mockApi.pollDevices.mockRejectedValueOnce(JSON.stringify({
+      code: "runtime_session_lost",
+      message: "The execution runtime session is no longer available.",
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Refresh devices" }));
+
+    expect(
+      await screen.findAllByText("The execution runtime session is no longer available."),
+    ).not.toHaveLength(0);
+    await waitFor(() => expect(mockApi.runtimeStatus.mock.calls.length).toBeGreaterThan(runtimeReads));
+    expect(document.body.textContent).not.toMatch(/runtime_session_lost/);
+  });
+
   test("replacement reconciliation reports rediscovery without a disconnect warning", async () => {
     const user = userEvent.setup();
     mockApi.pollDevices.mockResolvedValue([availableDevice]);

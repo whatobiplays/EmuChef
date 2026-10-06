@@ -11,6 +11,7 @@ import {
 } from "./app-dialogs";
 import {
   diagnosticIsBlocking,
+  errorCode,
   errorMessage,
 } from "./app-helpers";
 import { ExecutionStep } from "./ExecutionStep";
@@ -380,6 +381,36 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const realExecutionCompiled = executionCapabilities?.realExecutionCompiled === true;
 
+  const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
+    const [runtimeStatus, adbStatus, , qualification] = await Promise.all([
+      api.runtimeStatus(),
+      api.adbStatus(),
+      refreshExecutionCapabilities(true),
+      api.deviceQualification(null),
+    ]);
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
+    setRuntime(runtimeStatus);
+    setAdb(adbStatus);
+    setDeviceQualification(qualification);
+    if (runtimeStatus.status === "ready") {
+      const [nextCatalog, recents] = await Promise.all([
+        api.catalog(),
+        api.listRecentConfigurations(),
+      ]);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      setCatalog(nextCatalog);
+      setRecentConfigurations(recents);
+    }
+  }, [refreshExecutionCapabilities]);
+
+  // A request that proves the shared runtime session is gone must re-read the
+  // runtime projection: the backend has already discarded every handle derived
+  // from that process generation, so keeping the previous projection would
+  // offer review and execution controls that can only fail.
+  const handleRuntimeSessionLost = useCallback(() => {
+    void initialize();
+  }, [initialize]);
+
   const {
     cancelExecution,
     exportExecutionReport,
@@ -393,6 +424,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     announce,
     dispatch,
     mainRef,
+    onRuntimeSessionLost: handleRuntimeSessionLost,
     qualification: deviceQualification,
     realExecutionCompiled,
     runtimeGenerationRef,
@@ -460,28 +492,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       }
     });
   }, [navigationBlocked, updateInteractionRevision]);
-
-  const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
-    const [runtimeStatus, adbStatus, , qualification] = await Promise.all([
-      api.runtimeStatus(),
-      api.adbStatus(),
-      refreshExecutionCapabilities(true),
-      api.deviceQualification(null),
-    ]);
-    if (runtimeGenerationRef.current !== runtimeGeneration) return;
-    setRuntime(runtimeStatus);
-    setAdb(adbStatus);
-    setDeviceQualification(qualification);
-    if (runtimeStatus.status === "ready") {
-      const [nextCatalog, recents] = await Promise.all([
-        api.catalog(),
-        api.listRecentConfigurations(),
-      ]);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setCatalog(nextCatalog);
-      setRecentConfigurations(recents);
-    }
-  }, [refreshExecutionCapabilities]);
 
   useEffect(() => {
     savedConfigurationRef.current = savedConfiguration;
@@ -1624,6 +1634,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePollGenerationRef.current === generation
         && runtimeGenerationRef.current === runtimeGeneration
       ) {
+        // A device poll can be the first request to discover that the shared
+        // runtime session is gone. The backend has already discarded every
+        // handle derived from that process generation, so clear the stale
+        // workflow projections and re-read the runtime projection to offer
+        // the app-service recovery controls again.
+        if (errorCode(error) === "runtime_session_lost") {
+          dispatch({ type: "runtime-invalidated" });
+          handleRuntimeSessionLost();
+        }
         setNotice(errorMessage(error));
         if (manual) setDeviceRefresh({ phase: "idle", generation, message: null });
       }
@@ -1635,7 +1654,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         && runtimeGenerationRef.current === runtimeGeneration
       ) manualDeviceRefreshRef.current = false;
     }
-  }, [adb?.status, announce, runtime.status]);
+  }, [adb?.status, announce, handleRuntimeSessionLost, runtime.status]);
 
   const checkDeviceRoot = useCallback(async () => {
     const candidate = devices.length === 1 && devices[0].state === "available"

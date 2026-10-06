@@ -919,7 +919,10 @@ restarting the local app service leaves the marker active while the process is
 alive. Only an accepted application exit, including Cmd+Q, or an
 application-controlled exit/relaunch finalizes it synchronously before process
 termination. A crash or other unclean termination leaves the marker for the
-next launch, preserving genuine interruption detection.
+next launch, preserving genuine interruption detection. Once an accepted
+termination finalizes the marker, qualification lifecycle work that has not
+already committed fails closed instead of writing durable session state that
+the next launch would treat as part of a clean handoff.
 
 Packaged catalog data is materialized under the application resource directory.
 The trusted backend requires the four product directories, ignores only regular
@@ -1029,6 +1032,15 @@ only the matching active or latest-terminal mapping, invalidates its originating
 review, and reports an unknown outcome without inferring terminal status.
 Reviews otherwise retain their independent stale, expiry, discard, and capacity
 lifecycle.
+
+A device-inventory refresh can be the first native request to discover that the
+sidecar generation is gone. That discovery discards the authority derived from
+the lost generation — retained executions, device facts, root evidence,
+reviews, and any active qualification attempt — and reports
+`runtime_session_lost` instead of an inventory failure. A frontend request that
+receives this code resets the stale workflow projections and re-reads the
+runtime, Platform-Tools, and qualification projections, so the app-service
+recovery controls are offered again.
 
 When a terminal execution snapshot is retained, the trusted store also retains
 the production report and runtime metadata needed for report capture. The

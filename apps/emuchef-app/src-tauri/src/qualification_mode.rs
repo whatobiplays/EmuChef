@@ -600,7 +600,7 @@ pub fn discard_qualification_candidate(
     // live attempt may only close through abandonment, which materializes its
     // invalid/not-observed audit evidence.
     let transition = crate::commands::qualification_transition_lock(&state);
-    crate::qualification_session::recover_persisted_sessions(&state, repository)?;
+    crate::qualification_session::recover_persisted_sessions_in_transition(&state, repository)?;
     if crate::qualification_session::candidate_is_active(&state, &candidate_handle) {
         return Err(safe_qualification_error("qualification_candidate_active"));
     }

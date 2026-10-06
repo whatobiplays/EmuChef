@@ -1631,10 +1631,7 @@ fn resolve_real_start_failure(
     let Some(state) = qualification_state else {
         return real_start_error(error);
     };
-    let runtime_session_lost = execution_session_loss(error)
-        == Some(ExecutionSessionLoss::RuntimeSessionLost)
-        || state.sidecar.runtime_session_was_lost();
-    if !runtime_session_lost {
+    if !runtime_session_lost(state, error) {
         return real_start_error(error);
     }
     invalidate_lost_runtime_authority_with_store(state, executions);
@@ -2760,7 +2757,7 @@ fn recover_from_real_execution_loss(
 /// Discard native authority after the shared runtime session is lost. Acquire
 /// the execution store before the transition gate, matching admission and real
 /// execution loss, then publish the qualification consequence before release.
-fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
+pub(crate) fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
     let executions = recover_poisoned_lock(&state.executions);
     invalidate_lost_runtime_authority_with_execution_guard(state, executions, || {})
 }
@@ -2817,11 +2814,22 @@ fn recover_poisoned_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-fn runtime_session_lost_error() -> String {
+/// Sanitized failure for any request that cannot complete because the shared
+/// runtime session that owned native authority is gone.
+pub(crate) fn runtime_session_lost_error() -> String {
     safe_error(
         "runtime_session_lost",
         "The execution runtime session is no longer available.",
     )
+}
+
+/// Whether one raw runtime response proves the shared runtime session is gone.
+/// Request seams classify the raw error before sanitizing it so a lost session
+/// clears every authority derived from that process generation instead of
+/// being reported as an ordinary request failure.
+pub(crate) fn runtime_session_lost(state: &AppState, error: &str) -> bool {
+    execution_session_loss(error) == Some(ExecutionSessionLoss::RuntimeSessionLost)
+        || state.sidecar.runtime_session_was_lost()
 }
 
 fn unknown_execution_error() -> String {
@@ -7401,6 +7409,102 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(stored.payload["runValidity"], "valid");
         assert!(stored.promotable);
+    }
+
+    #[test]
+    fn inventory_request_discovering_a_lost_runtime_publishes_the_global_loss_transition() {
+        let (_repository_root, _app_root, app, execution_handle, _candidate, _device_handle) =
+            begin_monitor_qualification_attempt_with_live_device();
+        let state = app.state::<AppState>();
+        assert!(
+            crate::qualification_session::session_status(&state)
+                .unwrap()
+                .is_some(),
+            "the fixture must begin one active qualification attempt"
+        );
+        let platform_tools = crate::commands::AdbRuntimeSnapshot {
+            adb_path: "adb-inventory-loss-test".to_string(),
+            revision: 0,
+        };
+        let mut request = |_request_type: &str, _payload: Value| {
+            Err(json!({
+                "code": "runtime_session_lost",
+                "message": "The local app service session was lost.",
+            })
+            .to_string())
+        };
+        let error = crate::commands::list_and_reconcile_inventory_for_state(
+            &state,
+            &platform_tools,
+            0,
+            &mut request,
+        )
+        .expect_err("a lost runtime session cannot answer an inventory request");
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert!(
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .mapping(
+                    ExecutionKind::Real,
+                    &execution_handle,
+                    REAL_EXECUTION_UNAVAILABLE,
+                )
+                .is_err(),
+            "the loss transition must clear execution authority for the dead process generation"
+        );
+        assert!(
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .qualification_devices()
+            .is_empty(),
+        "the loss transition must clear device authority derived from the dead process generation"
+    );
+        assert!(
+        crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_none(),
+        "the active attempt must fail closed instead of waiting for evidence it can never receive"
+    );
+    }
+
+    #[test]
+    fn ordinary_inventory_request_failure_keeps_runtime_authority() {
+        let (_repository_root, _app_root, app, execution_handle, _candidate, device_handle) =
+            begin_monitor_qualification_attempt_with_live_device();
+        let state = app.state::<AppState>();
+        let platform_tools = crate::commands::AdbRuntimeSnapshot {
+            adb_path: "adb-inventory-loss-test".to_string(),
+            revision: 0,
+        };
+        let mut request = |_request_type: &str, _payload: Value| {
+            Err(safe_error("adb_inventory_failed", "adb could not be run"))
+        };
+        let error = crate::commands::list_and_reconcile_inventory_for_state(
+            &state,
+            &platform_tools,
+            0,
+            &mut request,
+        )
+        .expect_err("the fixture request fails");
+        assert!(error.contains("adb_inventory_failed"), "{error}");
+        assert!(state.handles.lock().unwrap().device(&device_handle).is_ok());
+        assert!(state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .is_ok());
+        assert!(crate::qualification_session::session_status(&state)
+            .unwrap()
+            .is_some());
     }
 
     /// Prepare one active qualification attempt bound to one real execution so

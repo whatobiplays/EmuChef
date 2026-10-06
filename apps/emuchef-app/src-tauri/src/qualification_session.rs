@@ -2132,6 +2132,23 @@ pub(crate) fn recover_persisted_sessions(
     state: &AppState,
     provider: &QualificationRepository,
 ) -> Result<(), String> {
+    // Hold the shared transition gate across recovery so no persisted attempt
+    // can be adopted, poisoned, or deferred concurrently with process
+    // finalization or another authoritative qualification mutation. Deferred
+    // candidate materialization is retried by callers that own that step (for
+    // example the qualification status path), not by recovery itself.
+    let _transition = crate::commands::qualification_transition_lock(state);
+    recover_persisted_sessions_in_transition(state, provider)
+}
+
+/// Recover persisted attempts while the caller already owns the shared
+/// transition gate. Recovery can poison, adopt, defer, or close persisted
+/// attempts, so it is ordered with every other authoritative qualification
+/// mutation and with process finalization.
+pub(crate) fn recover_persisted_sessions_in_transition(
+    state: &AppState,
+    provider: &QualificationRepository,
+) -> Result<(), String> {
     let mut store = match state.qualification_sessions.lock() {
         Ok(store) => store,
         Err(poisoned) => {
@@ -2151,18 +2168,17 @@ pub(crate) fn recover_persisted_sessions(
 /// and lifecycle-observation path enters, so no mutation can reach the session
 /// store without it.
 fn qualification_process_handoff_gate(state: &AppState) -> Result<(), String> {
-    let available = state
-        .recovery
-        .lock()
-        .map(|recovery| recovery.qualification_lifecycle_available())
-        .unwrap_or(false);
-    if available {
-        return Ok(());
+    match state.recovery.lock() {
+        Ok(recovery) if recovery.qualification_terminating() => Err(session_error(
+            "qualification_session_unavailable",
+            "Qualification is unavailable while the application is shutting down. Restart EmuChef to continue.",
+        )),
+        Ok(recovery) if recovery.qualification_lifecycle_available() => Ok(()),
+        _ => Err(session_error(
+            "qualification_session_recovery_unavailable",
+            "Qualification is unavailable because this application session could not establish its durable process marker. Restart EmuChef and try again.",
+        )),
     }
-    Err(session_error(
-        "qualification_session_recovery_unavailable",
-        "Qualification is unavailable because this application session could not establish its durable process marker. Restart EmuChef and try again.",
-    ))
 }
 
 /// Retry the already-recovered active attempt when exact authored source was
@@ -2996,31 +3012,31 @@ fn begin_with_candidate_summary(
         .qualification_repository
         .get()
         .ok_or_else(unavailable_error)?;
-    let mut store = state
-        .qualification_sessions
-        .lock()
-        .map_err(|_| persistence_error())?;
-    if store.has_open_attempt() {
-        return Err(session_error(
-            "qualification_session_active",
-            "A qualification attempt is already active. Finish or abandon it before starting another.",
-        ));
-    }
     let candidate_handle = request.candidate_handle.clone();
-    // The candidate was created for this attempt moments ago, so it must never
-    // be recovered as an interrupted attempt from a previous process.
-    store.mark_pending(&candidate_handle);
-    let result = (|| {
-        ensure_recovered(state, provider, &mut store)?;
+    // Claim the provisional candidate as pending before anything can observe
+    // it: the candidate was created for this attempt moments ago, so it must
+    // never be recovered as an interrupted attempt from a previous process.
+    {
+        let mut store = state
+            .qualification_sessions
+            .lock()
+            .map_err(|_| persistence_error())?;
         if store.has_open_attempt() {
             return Err(session_error(
                 "qualification_session_active",
                 "A qualification attempt is already active. Finish or abandon it before starting another.",
             ));
         }
+        store.mark_pending(&candidate_handle);
+    }
+    // Every failure after the pending claim funnels through one outcome so the
+    // process-local claim is released again. Leaving it behind would keep the
+    // provisional candidate marked as pending for the rest of the process,
+    // which hides it from recovery without ever starting its attempt.
+    let outcome = (|| -> Result<QualificationSessionSnapshot, String> {
         let mut session = QualificationSession::new(
             request.session_handle,
-            request.candidate_handle.clone(),
+            candidate_handle.clone(),
             request.captured_at,
             request.target,
             request.workflow,
@@ -3028,6 +3044,9 @@ fn begin_with_candidate_summary(
             request.runtime_contract,
         )?
         .with_device_plan(request.device_plan);
+        // Source identity may invoke Git and read authored files. Capture it before
+        // the transition gate is acquired so the ordered commit below never holds
+        // the gate across that work.
         let authored_recipe_digests = provider
             .capture_recordable_authored_recipe_digests(session.required_recipes())
             .map_err(|_| {
@@ -3037,48 +3056,77 @@ fn begin_with_candidate_summary(
                 )
             })?;
         session.set_authored_recipe_digests(authored_recipe_digests);
-        if !request.observation.proves_target_compatibility()
-            || request
-                .observation
-                .root_state
-                .as_ref()
-                .and_then(project_root_state)
-                != Some(session.target.root_state.clone())
-        {
-            return Err(session_error(
-                "qualification_target_unverified",
-                "A fresh root check could not verify the registered target state.",
-            ));
-        }
-        session.observe_matching_target(&request.observation);
-        if session.run_validity() == RunValidity::Invalid {
-            return Err(session_error(
-                "qualification_target_unverified",
-                "The selected device does not match the registered qualification target.",
-            ));
-        }
+        // Activation is an authoritative durable mutation, so it commits inside
+        // the shared transition gate together with its process-local association.
+        // Entries queued behind the gate re-check the process handoff state here,
+        // so no attempt can activate after the clean-handoff marker is removed.
+        let transition = crate::commands::qualification_transition_lock(state);
+        let result = (|| {
+            qualification_process_handoff_gate(state)?;
+            let mut store = state
+                .qualification_sessions
+                .lock()
+                .map_err(|_| persistence_error())?;
+            if store.has_open_attempt() {
+                return Err(session_error(
+                    "qualification_session_active",
+                    "A qualification attempt is already active. Finish or abandon it before starting another.",
+                ));
+            }
+            ensure_recovered(state, provider, &mut store)?;
+            if store.has_open_attempt() {
+                return Err(session_error(
+                    "qualification_session_active",
+                    "A qualification attempt is already active. Finish or abandon it before starting another.",
+                ));
+            }
+            if !request.observation.proves_target_compatibility()
+                || request
+                    .observation
+                    .root_state
+                    .as_ref()
+                    .and_then(project_root_state)
+                    != Some(session.target.root_state.clone())
+            {
+                return Err(session_error(
+                    "qualification_target_unverified",
+                    "A fresh root check could not verify the registered target state.",
+                ));
+            }
+            session.observe_matching_target(&request.observation);
+            if session.run_validity() == RunValidity::Invalid {
+                return Err(session_error(
+                    "qualification_target_unverified",
+                    "The selected device does not match the registered qualification target.",
+                ));
+            }
 
-        // Build every fallible response projection before durable or
-        // process-local activation. A malformed/missing provisional candidate
-        // must leave no active pointer or current-process provenance behind.
-        let candidate = summarize_candidate(provider, session.candidate_handle())
-            .map_err(|_| persistence_error())?;
-        let snapshot = session.snapshot(Some(candidate));
-        let mut recovery = state.recovery.lock().map_err(|_| persistence_error())?;
-        persist(provider, &session)?;
-        recovery.note_qualification_session_started(&candidate_handle);
-        drop(recovery);
-        store.set_active(candidate_handle.clone());
-        store.associate(
-            request.observation.device_handle.clone(),
-            request.observation.session_epoch,
-        );
-        Ok(snapshot)
+            // Build every fallible response projection before durable or
+            // process-local activation. A malformed/missing provisional candidate
+            // must leave no active pointer or current-process provenance behind.
+            let candidate = summarize_candidate(provider, session.candidate_handle())
+                .map_err(|_| persistence_error())?;
+            let snapshot = session.snapshot(Some(candidate));
+            let mut recovery = state.recovery.lock().map_err(|_| persistence_error())?;
+            persist(provider, &session)?;
+            recovery.note_qualification_session_started(&candidate_handle);
+            drop(recovery);
+            store.set_active(candidate_handle.clone());
+            store.associate(
+                request.observation.device_handle.clone(),
+                request.observation.session_epoch,
+            );
+            Ok(snapshot)
+        })();
+        transition.release_and_retry_best_effort();
+        result
     })();
-    if result.is_err() {
-        store.forget(&candidate_handle);
+    if outcome.is_err() {
+        if let Ok(mut store) = state.qualification_sessions.lock() {
+            store.forget(&candidate_handle);
+        }
     }
-    result
+    outcome
 }
 
 /// Record one explicit operator checkpoint. When the terminal execution is
@@ -3229,30 +3277,40 @@ pub(crate) fn abandon(
         .get()
         .ok_or_else(unavailable_error)?;
     let candidate_handle = candidate_handle_for_session(session_handle)?;
-    let mut store = state
-        .qualification_sessions
-        .lock()
-        .map_err(|_| persistence_error())?;
-    ensure_recovered(state, provider, &mut store)?;
-    if store.is_poisoned(&candidate_handle) {
-        store.forget(&candidate_handle);
-        return Err(persistence_error());
-    }
-    if store.active_candidate() != Some(candidate_handle.as_str()) {
-        return Err(inactive_error());
-    }
-    let mut session = load_active_session(provider, &store, &candidate_handle)?;
-    session.invalidate(QualificationInvalidation::OperatorAbandoned);
-    let session = finish_transition(
-        state,
-        provider,
-        &mut store,
-        session,
-        AuthoredSourceVerification::NotVerified,
-    )
-    .ok_or_else(persistence_error)?;
-    let candidate = candidate_summary(provider, &candidate_handle)?;
-    Ok(session.snapshot(Some(candidate)))
+    // Closing an attempt is an authoritative durable mutation, so it runs
+    // inside the shared transition gate. That orders it with product
+    // transitions and with process finalization: an abandonment that has not
+    // begun before the clean-handoff marker is removed can no longer commit
+    // behind it.
+    let transition = crate::commands::qualification_transition_lock(state);
+    let result = (|| {
+        let mut store = state
+            .qualification_sessions
+            .lock()
+            .map_err(|_| persistence_error())?;
+        ensure_recovered(state, provider, &mut store)?;
+        if store.is_poisoned(&candidate_handle) {
+            store.forget(&candidate_handle);
+            return Err(persistence_error());
+        }
+        if store.active_candidate() != Some(candidate_handle.as_str()) {
+            return Err(inactive_error());
+        }
+        let mut session = load_active_session(provider, &store, &candidate_handle)?;
+        session.invalidate(QualificationInvalidation::OperatorAbandoned);
+        let session = finish_transition(
+            state,
+            provider,
+            &mut store,
+            session,
+            AuthoredSourceVerification::NotVerified,
+        )
+        .ok_or_else(persistence_error)?;
+        let candidate = candidate_summary(provider, &candidate_handle)?;
+        Ok(session.snapshot(Some(candidate)))
+    })();
+    transition.release_and_retry_best_effort();
+    result
 }
 
 /// Drop process-local authority for one candidate. Called after the operator
@@ -4342,13 +4400,7 @@ mod tests {
             begin_request(&previous_candidate, CAPTURED_AT, previous_capture),
         )
         .unwrap();
-        let candidate = create_run_candidate(
-            app.state::<AppState>()
-                .qualification_repository
-                .get()
-                .unwrap(),
-            CAPTURED_AT,
-        );
+        let candidate = publish_run_candidate(&app.state::<AppState>(), CAPTURED_AT);
         let stale_failure_target = capture_device_observation_failure_target(
             &app.state::<AppState>(),
             &device_handle,
@@ -4686,6 +4738,118 @@ mod tests {
                 .active_candidate(),
             Some(candidate.as_str())
         );
+    }
+
+    #[test]
+    fn lifecycle_mutations_fail_closed_after_the_accepted_process_termination() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let provider = state.qualification_repository.get().unwrap();
+        let (device_handle, session_epoch) = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "terminating-race",
+                        "state": "available",
+                        "model": "Device",
+                        "transportId": "terminating-transport"
+                    }]
+                }))
+                .unwrap();
+            let device = handles.qualification_devices().remove(0);
+            (device.handle, device.session_epoch)
+        };
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        let active = begin(&state, begin_request(&candidate, CAPTURED_AT, capture)).unwrap();
+        // The accepted termination removes the clean-handoff marker. Lifecycle
+        // work that acquires the transition gate afterwards must fail closed,
+        // because a mutation committed now could be interrupted by the exit
+        // without leaving any trace for the next launch.
+        assert!(crate::commands::finish_recovery_process_session(&state));
+        let checkpoint_error = record_checkpoint(
+            &state,
+            &active.session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .expect_err("a checkpoint must not be recorded after the process marker is removed");
+        assert!(
+            checkpoint_error.contains("qualification_session_unavailable"),
+            "{checkpoint_error}"
+        );
+        let abandon_error = abandon(&state, &active.session_handle)
+            .expect_err("an attempt must not close after the process marker is removed");
+        assert!(
+            abandon_error.contains("qualification_session_unavailable"),
+            "{abandon_error}"
+        );
+        let retry_error = retry_deferred_finalization(&state)
+            .expect_err("deferred finalization must not run after the process marker is removed");
+        assert!(
+            retry_error.contains("qualification_session_unavailable"),
+            "{retry_error}"
+        );
+        let recovery_error = recover_persisted_sessions(&state, provider)
+            .expect_err("recovery must not run after the process marker is removed");
+        assert!(
+            recovery_error.contains("qualification_session_unavailable"),
+            "{recovery_error}"
+        );
+        // Nothing was advanced, poisoned, or closed behind the removed marker.
+        assert!(!provider.session_is_poisoned(&candidate).unwrap());
+        let snapshot = session_status(&state).unwrap().expect("active session");
+        assert_eq!(snapshot.session_handle, active.session_handle);
+        assert!(
+            snapshot.recorded_checkpoints.is_empty(),
+            "the rejected checkpoint must not be retained"
+        );
+    }
+
+    #[test]
+    fn a_begin_that_fails_before_activation_releases_its_pending_candidate_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let repository = state.qualification_repository.get().unwrap();
+        repository.set_source_state_for_test(QualificationSourceState {
+            head: test_build().git_commit,
+            tracked_worktree_clean: false,
+        });
+        let error = begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .expect_err("a dirty checkout cannot retain a new qualification attempt");
+        assert!(error.contains("qualification_source_changed"), "{error}");
+        assert!(
+            !state
+                .qualification_sessions
+                .lock()
+                .unwrap()
+                .is_pending(&candidate),
+            "a begin that never activated must release its process-local claim"
+        );
+        assert!(session_status(&state).unwrap().is_none());
+        // The released claim leaves the harness free for a later attempt.
+        repository.set_source_state_for_test(QualificationSourceState {
+            head: test_build().git_commit,
+            tracked_worktree_clean: true,
+        });
+        let retry_candidate = create_run_candidate(repository, CAPTURED_AT);
+        begin(
+            &state,
+            begin_request(&retry_candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .expect("a released claim must not block the next attempt");
     }
 
     #[test]
@@ -5717,8 +5881,7 @@ mod tests {
             begin_request(&previous_candidate, CAPTURED_AT, capture),
         )
         .unwrap();
-        let current_candidate =
-            create_run_candidate(state.qualification_repository.get().unwrap(), CAPTURED_AT);
+        let current_candidate = publish_run_candidate(&state, CAPTURED_AT);
 
         let result = crate::commands::probe_device_facts_with(&device_handle, &state, |_| {
             let previous = session_status(&state).unwrap().unwrap();
@@ -5893,6 +6056,26 @@ mod tests {
                 None,
             )
             .expect("run candidate should be created")
+    }
+
+    /// Publish a run candidate exactly like the production begin command does: the
+    /// provisional candidate is marked pending atomically with its publication, so
+    /// an interleaved recovery can never mistake the not-yet-written session
+    /// document for corruption and durably poison the attempt.
+    fn publish_run_candidate(state: &AppState, captured_at: &str) -> String {
+        let repository = state
+            .qualification_repository
+            .get()
+            .expect("test repository should be available");
+        crate::qualification_session::publish_pending_candidate(
+            state,
+            repository,
+            &json!({
+                "capturedAt": captured_at,
+                "build": build_json(),
+            }),
+        )
+        .expect("run candidate should be published")
     }
 
     fn begin_request(

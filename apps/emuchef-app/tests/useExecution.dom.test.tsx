@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, type Dispatch } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -115,9 +115,13 @@ function deferred<Result>(): {
 function Harness({
   workflow,
   qualification,
+  dispatch = vi.fn() as unknown as Dispatch<WorkflowAction>,
+  onRuntimeSessionLost = vi.fn(),
 }: {
   workflow: WorkflowState;
   qualification?: DeviceQualificationSnapshot;
+  dispatch?: Dispatch<WorkflowAction>;
+  onRuntimeSessionLost?: () => void;
 }) {
   const workflowRef = useRef(workflow);
   const runtimeGenerationRef = useRef(1);
@@ -126,8 +130,9 @@ function Harness({
 
   const execution = useExecution({
     announce: vi.fn(),
-    dispatch: vi.fn() as unknown as Dispatch<WorkflowAction>,
+    dispatch,
     mainRef,
+    onRuntimeSessionLost,
     realExecutionCompiled: qualification !== undefined,
     qualification,
     runtimeGenerationRef,
@@ -215,4 +220,78 @@ test("unsupported qualification remains blocking in the React execution boundary
   fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
 
   expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+});
+
+function supportedQualification(): DeviceQualificationSnapshot {
+  return {
+    state: "supported",
+    summary: "This device is supported.",
+    limitations: [],
+    androidMajor: 15,
+    androidApiLevel: 35,
+    abiClass: "arm64",
+    storage: "available",
+    packageManager: "available",
+    activityManager: "available",
+    root: null,
+    runtimeGeneration: 7,
+    qualificationRevision: 9,
+    deviceIdentity: "opaque-authority",
+  };
+}
+
+describe("real start failure classification", () => {
+  test("a lost runtime session clears stale projections and refreshes runtime state", async () => {
+    mockApi.startRealExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={reviewWorkflow()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+    expect(dispatch).toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  });
+
+  test("an ordinary start rejection neither resets the workflow nor refreshes runtime state", async () => {
+    mockApi.startRealExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "review_unknown",
+        message: "The reviewed plan is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={reviewWorkflow()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+    });
+    expect(onRuntimeSessionLost).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  });
 });

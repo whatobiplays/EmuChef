@@ -96,16 +96,28 @@ pub(crate) fn list_and_reconcile_inventory_for_state<F>(
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
-    let inventory = request(
+    let inventory = match request(
         "listAdbDevices",
         json!({ "adbPath": platform_tools.adb_path }),
-    )
-    .map_err(|_| {
-        safe_error(
-            "adb_inventory_failed",
-            "Connected Android devices could not be listed.",
-        )
-    })?;
+    ) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            // A periodic inventory poll is often the first request to discover
+            // that the shared runtime session is gone. Classify the raw
+            // runtime error before it is sanitized so the loss clears every
+            // piece of authority derived from that process generation instead
+            // of reporting an ordinary inventory failure that a qualification
+            // attempt could still read cached device facts from.
+            if crate::execution::runtime_session_lost(state, &error) {
+                let _ = crate::execution::invalidate_lost_runtime_authority(state);
+                return Err(crate::execution::runtime_session_lost_error());
+            }
+            return Err(safe_error(
+                "adb_inventory_failed",
+                "Connected Android devices could not be listed.",
+            ));
+        }
+    };
     reconcile_inventory_snapshot_with_state_and_hook(
         state,
         &inventory,

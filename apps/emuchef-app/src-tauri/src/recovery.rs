@@ -79,6 +79,12 @@ pub struct RecoveryStore {
     /// launch, so qualification lifecycle work stays disabled until a later
     /// launch establishes its own marker.
     process_marker_unavailable: bool,
+    /// Set once this process has finalized its accepted termination. From that
+    /// point the clean-handoff marker is gone, so any lifecycle mutation that
+    /// still started could be lost without a trace while the next launch
+    /// believes the handoff was clean. Qualification lifecycle work therefore
+    /// stays closed for the remaining lifetime of the process.
+    terminating: bool,
     /// Qualification candidates begun in this process. Unlike the presentation
     /// session store, this provenance survives frontend session resets.
     current_process_qualification_candidates: HashSet<String>,
@@ -107,6 +113,7 @@ impl RecoveryStore {
             clean_handoff_proven,
             preserve_marker_on_exit: false,
             process_marker_unavailable: false,
+            terminating: false,
             current_process_qualification_candidates: HashSet::new(),
         }
     }
@@ -209,6 +216,15 @@ impl RecoveryStore {
     /// unavailable.
     pub(crate) fn qualification_lifecycle_available(&self) -> bool {
         !self.process_marker_unavailable
+    }
+
+    /// Whether this process has already finalized its accepted termination.
+    /// Once that has happened the clean-handoff marker is gone, so lifecycle
+    /// work that began afterwards could be interrupted without leaving any
+    /// trace for the next launch. Qualification lifecycle work must therefore
+    /// stay closed instead of committing behind the removed marker.
+    pub(crate) fn qualification_terminating(&self) -> bool {
+        self.terminating
     }
 
     /// Record that native code began this qualification candidate in the
@@ -429,6 +445,11 @@ impl RecoveryStore {
     /// termination. Recovery drafts intentionally survive so they can be
     /// offered on the next launch.
     pub fn finish_process_termination(&mut self) -> Result<(), String> {
+        // Close lifecycle work before the marker is removed. Callers hold the
+        // qualification transition gate, so any queued lifecycle entry re-checks
+        // this state after acquiring the gate and can no longer mutate durable
+        // qualification state behind the disappeared clean-handoff marker.
+        self.terminating = true;
         if self.preserve_marker_on_exit {
             return Ok(());
         }
