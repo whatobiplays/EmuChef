@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::commands::{safe_error, AppState};
-use crate::device_observation::SelectedDeviceObservation;
+use crate::device_observation::{QualificationContextKey, SelectedDeviceObservation};
 use crate::device_qualification::RootQualificationState;
 use crate::handles::ReviewedPlanSnapshot;
 use crate::qualification_build::QualificationBuildIdentity;
@@ -41,7 +41,8 @@ use crate::qualification_repository::{
 /// the observation-owned lifecycle existed, and version 2 sessions recorded
 /// process-local handles as durable authority. Neither can prove that every
 /// authoritative transition was captured, so both fail closed.
-pub(crate) const SESSION_SCHEMA_VERSION: u64 = 4;
+pub(crate) const SESSION_SCHEMA_VERSION: u64 = 5;
+const INCOMPATIBLE_SESSION_SCHEMA_VERSION: u64 = 4;
 const SESSION_HANDLE_PREFIX: &str = "qualification-session-";
 const SESSION_HANDLE_HEX_LENGTH: usize = 32;
 
@@ -232,10 +233,145 @@ pub(crate) struct PersistedQualificationSession {
     pub(crate) execution_admitted: bool,
     pub(crate) terminal_execution_status: Option<String>,
     pub(crate) terminal_observed_at: Option<String>,
+    pub(crate) terminal_report_commitment: Option<TerminalReportCommitment>,
     pub(crate) terminal_outcome: QualificationOutcome,
     pub(crate) authored_recipe_digests: Option<Vec<AuthoredRecipeDigest>>,
     pub(crate) awaiting_evidence: bool,
     pub(crate) closed: bool,
+}
+
+/// Exact schema-v4 session shape. Version 4 predates the durable commitment to
+/// terminal-report bytes, so it can only be converted to an incompatible audit
+/// candidate and must never enter the current resumable-session path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedQualificationSessionV4 {
+    session_schema_version: u64,
+    session_handle: String,
+    candidate_handle: String,
+    captured_at: String,
+    target_id: String,
+    target: QualificationTargetBinding,
+    workflow_id: String,
+    workflow_version: u64,
+    device_plan: String,
+    required_recipes: Vec<String>,
+    prerequisites: Vec<String>,
+    human_checkpoints: Vec<QualificationWorkflowCheckpoint>,
+    automated_observations: Vec<QualificationWorkflowObservation>,
+    recorded_checkpoints: Vec<RecordedQualificationCheckpoint>,
+    build: QualificationBuildIdentity,
+    runtime_contract: String,
+    run_validity: RunValidity,
+    invalidation: Option<QualificationInvalidation>,
+    execution_admitted: bool,
+    terminal_execution_status: Option<String>,
+    terminal_observed_at: Option<String>,
+    terminal_outcome: QualificationOutcome,
+    authored_recipe_digests: Option<Vec<AuthoredRecipeDigest>>,
+    awaiting_evidence: bool,
+    closed: bool,
+}
+
+struct PersistedSessionValidation<'a> {
+    session_handle: &'a str,
+    candidate_handle: &'a str,
+    captured_at: &'a str,
+    target_id: &'a str,
+    target: &'a QualificationTargetBinding,
+    workflow_id: &'a str,
+    runtime_contract: &'a str,
+    device_plan: &'a str,
+    required_recipes: &'a [String],
+    authored_recipe_digests: Option<&'a [AuthoredRecipeDigest]>,
+    recorded_checkpoints: &'a [RecordedQualificationCheckpoint],
+    human_checkpoints: &'a [QualificationWorkflowCheckpoint],
+    invalidation: Option<&'a QualificationInvalidation>,
+    run_validity: &'a RunValidity,
+    terminal_outcome: &'a QualificationOutcome,
+    execution_admitted: bool,
+    terminal_execution_status: Option<&'a str>,
+    terminal_observed_at: Option<&'a str>,
+    awaiting_evidence: bool,
+}
+
+impl<'a> From<&'a PersistedQualificationSession> for PersistedSessionValidation<'a> {
+    fn from(persisted: &'a PersistedQualificationSession) -> Self {
+        Self {
+            session_handle: &persisted.session_handle,
+            candidate_handle: &persisted.candidate_handle,
+            captured_at: &persisted.captured_at,
+            target_id: &persisted.target_id,
+            target: &persisted.target,
+            workflow_id: &persisted.workflow_id,
+            runtime_contract: &persisted.runtime_contract,
+            device_plan: &persisted.device_plan,
+            required_recipes: &persisted.required_recipes,
+            authored_recipe_digests: persisted.authored_recipe_digests.as_deref(),
+            recorded_checkpoints: &persisted.recorded_checkpoints,
+            human_checkpoints: &persisted.human_checkpoints,
+            invalidation: persisted.invalidation.as_ref(),
+            run_validity: &persisted.run_validity,
+            terminal_outcome: &persisted.terminal_outcome,
+            execution_admitted: persisted.execution_admitted,
+            terminal_execution_status: persisted.terminal_execution_status.as_deref(),
+            terminal_observed_at: persisted.terminal_observed_at.as_deref(),
+            awaiting_evidence: persisted.awaiting_evidence,
+        }
+    }
+}
+
+impl<'a> From<&'a PersistedQualificationSessionV4> for PersistedSessionValidation<'a> {
+    fn from(persisted: &'a PersistedQualificationSessionV4) -> Self {
+        Self {
+            session_handle: &persisted.session_handle,
+            candidate_handle: &persisted.candidate_handle,
+            captured_at: &persisted.captured_at,
+            target_id: &persisted.target_id,
+            target: &persisted.target,
+            workflow_id: &persisted.workflow_id,
+            runtime_contract: &persisted.runtime_contract,
+            device_plan: &persisted.device_plan,
+            required_recipes: &persisted.required_recipes,
+            authored_recipe_digests: persisted.authored_recipe_digests.as_deref(),
+            recorded_checkpoints: &persisted.recorded_checkpoints,
+            human_checkpoints: &persisted.human_checkpoints,
+            invalidation: persisted.invalidation.as_ref(),
+            run_validity: &persisted.run_validity,
+            terminal_outcome: &persisted.terminal_outcome,
+            execution_admitted: persisted.execution_admitted,
+            terminal_execution_status: persisted.terminal_execution_status.as_deref(),
+            terminal_observed_at: persisted.terminal_observed_at.as_deref(),
+            awaiting_evidence: persisted.awaiting_evidence,
+        }
+    }
+}
+
+/// Commitment to the exact sanitized report bytes retained for a terminal run.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TerminalReportCommitment {
+    byte_length: u64,
+    sha256: String,
+}
+
+impl TerminalReportCommitment {
+    fn for_bytes(bytes: &[u8]) -> Self {
+        Self {
+            byte_length: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(bytes)),
+        }
+    }
+
+    fn matches(&self, bytes: &[u8]) -> bool {
+        self.byte_length == bytes.len() as u64
+            && self.sha256.len() == 64
+            && self
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && self.sha256 == hex::encode(Sha256::digest(bytes))
+    }
 }
 
 /// Sanitized session state returned to the overlay. Handles are opaque and no
@@ -302,6 +438,7 @@ pub(crate) struct QualificationSession {
     execution_admitted: bool,
     terminal_execution_status: Option<String>,
     terminal_observed_at: Option<String>,
+    terminal_report_commitment: Option<TerminalReportCommitment>,
     terminal_outcome: QualificationOutcome,
     authored_recipe_digests: Option<Vec<AuthoredRecipeDigest>>,
     /// Exact sanitized terminal execution report bytes retained with the
@@ -354,6 +491,7 @@ impl QualificationSession {
             execution_admitted: false,
             terminal_execution_status: None,
             terminal_observed_at: None,
+            terminal_report_commitment: None,
             terminal_outcome: QualificationOutcome::NotObserved,
             authored_recipe_digests: None,
             terminal_report: None,
@@ -794,10 +932,6 @@ impl QualificationSession {
             }
             Some(_) => {}
         }
-        if observation.authority_invalidated {
-            self.invalidate(QualificationInvalidation::ExecutionEvidenceInvalidated);
-            return;
-        }
         let Some(status) = observation.status.as_deref() else {
             self.invalidate(QualificationInvalidation::ExecutionUnavailable);
             return;
@@ -814,9 +948,22 @@ impl QualificationSession {
             self.invalidate(QualificationInvalidation::ExecutionUnavailable);
             return;
         }
+        let Some(report_bytes) = observation.report_bytes.as_deref() else {
+            self.invalidate(QualificationInvalidation::ExecutionUnavailable);
+            return;
+        };
+        if !terminal_report_bytes_match_status(report_bytes, status) {
+            self.invalidate(QualificationInvalidation::ExecutionUnavailable);
+            return;
+        }
         self.terminal_execution_status = Some(status.to_string());
         self.terminal_observed_at = Some(observation.observed_at.clone());
-        self.terminal_report = observation.report_bytes.clone();
+        self.terminal_report = Some(report_bytes.to_vec());
+        self.terminal_report_commitment = Some(TerminalReportCommitment::for_bytes(report_bytes));
+        if observation.authority_invalidated {
+            self.invalidate(QualificationInvalidation::ExecutionEvidenceInvalidated);
+            return;
+        }
         if status == "cancelled" {
             self.invalidate(QualificationInvalidation::ExecutionCancelled);
             return;
@@ -976,6 +1123,7 @@ impl QualificationSession {
             execution_admitted: self.execution_admitted,
             terminal_execution_status: self.terminal_execution_status.clone(),
             terminal_observed_at: self.terminal_observed_at.clone(),
+            terminal_report_commitment: self.terminal_report_commitment.clone(),
             terminal_outcome: self.qualification_outcome(),
             authored_recipe_digests: self.authored_recipe_digests.clone(),
             awaiting_evidence: self.awaiting_evidence,
@@ -987,94 +1135,22 @@ impl QualificationSession {
         if persisted.session_schema_version != SESSION_SCHEMA_VERSION {
             return Err("qualification session schema version is unsupported".to_string());
         }
-        validate_session_handle(&persisted.session_handle)?;
-        if persisted.candidate_handle.is_empty()
-            || persisted.captured_at.is_empty()
-            || persisted.target_id.is_empty()
-            || persisted.workflow_id.is_empty()
-            || persisted.runtime_contract.is_empty()
-            || persisted.device_plan.is_empty()
-        {
-            return Err("qualification session metadata is incomplete".to_string());
-        }
-        if persisted.target_id != persisted.target.target_id
-            || persisted
-                .human_checkpoints
-                .iter()
-                .any(|checkpoint| checkpoint.id.is_empty())
-        {
-            return Err("qualification session binding is inconsistent".to_string());
-        }
-        let required_recipe_ids = persisted
-            .required_recipes
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        let Some(authored_recipe_digests) = persisted.authored_recipe_digests.as_ref() else {
-            return Err("qualification session recipe digests are missing".to_string());
-        };
-        let digest_recipe_ids = authored_recipe_digests
-            .iter()
-            .map(|digest| digest.id.as_str())
-            .collect::<BTreeSet<_>>();
-        if required_recipe_ids.len() != persisted.required_recipes.len()
-            || digest_recipe_ids.len() != authored_recipe_digests.len()
-            || digest_recipe_ids != required_recipe_ids
-            || persisted
-                .required_recipes
-                .iter()
-                .any(|recipe| !valid_qualification_recipe_id(recipe))
-            || authored_recipe_digests.iter().any(|digest| {
-                !valid_qualification_recipe_id(&digest.id)
-                    || digest.sha256.len() != 64
-                    || !digest
+        validate_persisted_session_fields(PersistedSessionValidation::from(&persisted))?;
+        match (
+            persisted.terminal_execution_status.as_deref(),
+            persisted.terminal_report_commitment.as_ref(),
+        ) {
+            (None, None) => {}
+            (Some(_), Some(commitment))
+                if commitment.byte_length > 0
+                    && commitment.sha256.len() == 64
+                    && commitment
                         .sha256
                         .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-        {
-            return Err("qualification session recipe digests are inconsistent".to_string());
-        }
-        let mut ids = BTreeSet::new();
-        for checkpoint in &persisted.recorded_checkpoints {
-            if !ids.insert(checkpoint.checkpoint_id.clone()) {
-                return Err("qualification session records a checkpoint more than once".to_string());
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
+            _ => {
+                return Err("qualification terminal report commitment is inconsistent".to_string());
             }
-            let declaration = persisted
-                .human_checkpoints
-                .iter()
-                .find(|declared| declared.id == checkpoint.checkpoint_id)
-                .ok_or_else(|| "qualification session records an unknown checkpoint".to_string())?;
-            if !declaration.allowed_outcomes.contains(&checkpoint.outcome)
-                || validate_checkpoint_timestamp(&checkpoint.observed_at).is_err()
-            {
-                return Err("qualification session checkpoint record is invalid".to_string());
-            }
-        }
-        let invalid = persisted.invalidation.is_some();
-        if (invalid && persisted.run_validity != RunValidity::Invalid)
-            || (!invalid && persisted.run_validity != RunValidity::Valid)
-        {
-            return Err("qualification session validity is inconsistent".to_string());
-        }
-        if invalid && persisted.terminal_outcome != QualificationOutcome::NotObserved {
-            return Err("invalid qualification session has a product outcome".to_string());
-        }
-        if persisted.awaiting_evidence && persisted.terminal_execution_status.is_none() {
-            return Err("qualification session awaits evidence without a terminal run".to_string());
-        }
-        if persisted.terminal_execution_status.is_some() && !persisted.execution_admitted {
-            return Err(
-                "qualification session retained a terminal run it never admitted".to_string(),
-            );
-        }
-        if persisted.terminal_execution_status.is_some()
-            && persisted
-                .terminal_observed_at
-                .as_deref()
-                .is_none_or(|timestamp| validate_checkpoint_timestamp(timestamp).is_err())
-        {
-            return Err("qualification terminal observation timestamp is invalid".to_string());
         }
         Ok(Self {
             session_handle: persisted.session_handle,
@@ -1100,11 +1176,48 @@ impl QualificationSession {
             execution_admitted: persisted.execution_admitted,
             terminal_execution_status: persisted.terminal_execution_status,
             terminal_observed_at: persisted.terminal_observed_at,
+            terminal_report_commitment: persisted.terminal_report_commitment,
             terminal_outcome: persisted.terminal_outcome,
             authored_recipe_digests: persisted.authored_recipe_digests,
             awaiting_evidence: persisted.awaiting_evidence,
             closed: persisted.closed,
             terminal_report: None,
+        })
+    }
+
+    fn from_incompatible_v4(persisted: PersistedQualificationSessionV4) -> Result<Self, String> {
+        if persisted.session_schema_version != INCOMPATIBLE_SESSION_SCHEMA_VERSION {
+            return Err("qualification session schema version is unsupported".to_string());
+        }
+        validate_persisted_session_fields(PersistedSessionValidation::from(&persisted))?;
+        Ok(Self {
+            session_handle: persisted.session_handle,
+            candidate_handle: persisted.candidate_handle,
+            captured_at: persisted.captured_at,
+            target_id: persisted.target_id,
+            target: persisted.target,
+            workflow_id: persisted.workflow_id,
+            workflow_version: persisted.workflow_version,
+            device_plan: persisted.device_plan,
+            required_recipes: persisted.required_recipes,
+            prerequisites: persisted.prerequisites,
+            human_checkpoints: persisted.human_checkpoints,
+            automated_observations: persisted.automated_observations,
+            recorded_checkpoints: persisted.recorded_checkpoints,
+            build: persisted.build,
+            runtime_contract: persisted.runtime_contract,
+            invalidation: persisted.invalidation,
+            bound_review_handle: None,
+            bound_execution_handle: None,
+            execution_admitted: persisted.execution_admitted,
+            terminal_execution_status: persisted.terminal_execution_status,
+            terminal_observed_at: persisted.terminal_observed_at,
+            terminal_report_commitment: None,
+            terminal_outcome: persisted.terminal_outcome,
+            authored_recipe_digests: persisted.authored_recipe_digests,
+            terminal_report: None,
+            awaiting_evidence: persisted.awaiting_evidence,
+            closed: persisted.closed,
         })
     }
 
@@ -1143,6 +1256,102 @@ pub(crate) fn project_root_state(root: &RootQualificationState) -> Option<Qualif
         }
         RootQualificationState::CheckFailed { .. } => None,
     }
+}
+
+fn validate_persisted_session_fields(fields: PersistedSessionValidation<'_>) -> Result<(), String> {
+    validate_session_handle(fields.session_handle)?;
+    if fields.candidate_handle.is_empty()
+        || fields.captured_at.is_empty()
+        || fields.target_id.is_empty()
+        || fields.workflow_id.is_empty()
+        || fields.runtime_contract.is_empty()
+        || fields.device_plan.is_empty()
+    {
+        return Err("qualification session metadata is incomplete".to_string());
+    }
+    if fields.target_id != fields.target.target_id
+        || fields
+            .human_checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id.is_empty())
+    {
+        return Err("qualification session binding is inconsistent".to_string());
+    }
+    let required_recipe_ids = fields
+        .required_recipes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let Some(authored_recipe_digests) = fields.authored_recipe_digests else {
+        return Err("qualification session recipe digests are missing".to_string());
+    };
+    let digest_recipe_ids = authored_recipe_digests
+        .iter()
+        .map(|digest| digest.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if required_recipe_ids.len() != fields.required_recipes.len()
+        || digest_recipe_ids.len() != authored_recipe_digests.len()
+        || digest_recipe_ids != required_recipe_ids
+        || fields
+            .required_recipes
+            .iter()
+            .any(|recipe| !valid_qualification_recipe_id(recipe))
+        || authored_recipe_digests.iter().any(|digest| {
+            !valid_qualification_recipe_id(&digest.id)
+                || digest.sha256.len() != 64
+                || !digest
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err("qualification session recipe digests are inconsistent".to_string());
+    }
+    let mut ids = BTreeSet::new();
+    for checkpoint in fields.recorded_checkpoints {
+        if !ids.insert(checkpoint.checkpoint_id.clone()) {
+            return Err("qualification session records a checkpoint more than once".to_string());
+        }
+        let declaration = fields
+            .human_checkpoints
+            .iter()
+            .find(|declared| declared.id == checkpoint.checkpoint_id)
+            .ok_or_else(|| "qualification session records an unknown checkpoint".to_string())?;
+        if !declaration.allowed_outcomes.contains(&checkpoint.outcome)
+            || validate_checkpoint_timestamp(&checkpoint.observed_at).is_err()
+        {
+            return Err("qualification session checkpoint record is invalid".to_string());
+        }
+    }
+    let invalid = fields.invalidation.is_some();
+    if (invalid && *fields.run_validity != RunValidity::Invalid)
+        || (!invalid && *fields.run_validity != RunValidity::Valid)
+    {
+        return Err("qualification session validity is inconsistent".to_string());
+    }
+    if invalid && *fields.terminal_outcome != QualificationOutcome::NotObserved {
+        return Err("invalid qualification session has a product outcome".to_string());
+    }
+    if fields.awaiting_evidence && fields.terminal_execution_status.is_none() {
+        return Err("qualification session awaits evidence without a terminal run".to_string());
+    }
+    match fields.terminal_execution_status {
+        None if fields.terminal_observed_at.is_some() => {
+            return Err("qualification terminal observation timestamp is inconsistent".to_string());
+        }
+        None => {}
+        Some(status)
+            if !is_terminal_execution_status(status)
+                || !fields.execution_admitted
+                || fields
+                    .terminal_observed_at
+                    .is_none_or(|timestamp| validate_checkpoint_timestamp(timestamp).is_err()) =>
+        {
+            return Err("qualification terminal observation is invalid".to_string());
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 fn is_terminal_execution_status(status: &str) -> bool {
@@ -1711,9 +1920,11 @@ fn load_session(
     }
     let mut session =
         QualificationSession::from_persisted(persisted).map_err(|_| invalid_error())?;
-    if session.terminal_execution_status().is_some() {
-        session.set_terminal_report(provider.load_session_report(candidate_handle)?);
-    }
+    attach_retained_terminal_report_for_recovery(
+        provider,
+        &mut session,
+        TerminalReportRecoveryKind::CurrentSession,
+    )?;
     Ok(session)
 }
 
@@ -1721,11 +1932,18 @@ fn load_session(
 /// process. Persisted sessions never carry process-local authority, so the
 /// process-local store is the only source for those bindings.
 fn load_active_session(
+    state: &AppState,
     provider: &QualificationRepository,
-    store: &QualificationSessionStore,
+    store: &mut QualificationSessionStore,
     candidate_handle: &str,
 ) -> Result<QualificationSession, String> {
-    let mut session = load_session(provider, candidate_handle)?;
+    let mut session = match load_session(provider, candidate_handle) {
+        Ok(session) => session,
+        Err(_) => {
+            poison_attempt(state, provider, store, candidate_handle);
+            return Err(persistence_error());
+        }
+    };
     session.attach_process_local_bindings(
         store.bound_review_handle().map(str::to_string),
         store.bound_execution_handle().map(str::to_string),
@@ -1909,7 +2127,20 @@ fn resumable_candidates(
 /// process. The latter survives frontend presentation resets.
 enum PreparedQualificationSession {
     Current(QualificationSession),
+    IncompatibleV4(QualificationSession),
     Legacy(QualificationSession),
+}
+
+#[derive(Clone, Copy)]
+enum TerminalReportRecoveryKind {
+    CurrentSession,
+    IncompatibleAudit,
+}
+
+#[derive(Clone, Copy)]
+enum IncompatibleSessionCleanup {
+    RemoveVersionFourSessionDurably,
+    PreserveLegacySession,
 }
 
 struct PreparedQualificationRecovery {
@@ -1937,15 +2168,26 @@ fn prepare_qualification_recovery(
         .get("sessionSchemaVersion")
         .and_then(Value::as_u64)
         .ok_or_else(invalid_error)?;
-    let session = if session_schema_version == SESSION_SCHEMA_VERSION {
-        let persisted: PersistedQualificationSession =
-            serde_json::from_value(value).map_err(|_| invalid_error())?;
-        if persisted.candidate_handle != candidate.candidate_handle {
-            return Err(invalid_error());
+    let session = match session_schema_version {
+        SESSION_SCHEMA_VERSION => {
+            let persisted: PersistedQualificationSession =
+                serde_json::from_value(value).map_err(|_| invalid_error())?;
+            if persisted.candidate_handle != candidate.candidate_handle {
+                return Err(invalid_error());
+            }
+            PreparedQualificationSession::Current(QualificationSession::from_persisted(persisted)?)
         }
-        PreparedQualificationSession::Current(QualificationSession::from_persisted(persisted)?)
-    } else {
-        PreparedQualificationSession::Legacy(legacy_session_for_recovery(&value)?)
+        INCOMPATIBLE_SESSION_SCHEMA_VERSION => {
+            let persisted: PersistedQualificationSessionV4 =
+                serde_json::from_value(value).map_err(|_| invalid_error())?;
+            if persisted.candidate_handle != candidate.candidate_handle {
+                return Err(invalid_error());
+            }
+            PreparedQualificationSession::IncompatibleV4(
+                QualificationSession::from_incompatible_v4(persisted)?,
+            )
+        }
+        _ => PreparedQualificationSession::Legacy(legacy_session_for_recovery(&value)?),
     };
     Ok(PreparedQualificationRecovery {
         candidate,
@@ -2047,15 +2289,24 @@ fn recover_prepared_qualification_candidate(
         .session_is_poisoned(candidate_handle)
         .unwrap_or(true)
     {
-        let mut session = match prepared.session {
-            PreparedQualificationSession::Current(session)
-            | PreparedQualificationSession::Legacy(session) => session,
+        let (mut session, recovery_kind) = match prepared.session {
+            PreparedQualificationSession::Current(session) => {
+                (session, TerminalReportRecoveryKind::CurrentSession)
+            }
+            PreparedQualificationSession::IncompatibleV4(session) => {
+                (session, TerminalReportRecoveryKind::IncompatibleAudit)
+            }
+            PreparedQualificationSession::Legacy(session) => {
+                (session, TerminalReportRecoveryKind::IncompatibleAudit)
+            }
         };
         // Preserve any retained product evidence before the audit candidate is
         // materialized. When durable state proves a terminal transition but the
         // report cannot be read, the durable poison marker keeps the attempt
         // non-resumable and the candidate visible for the operator.
-        if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
+        if attach_retained_terminal_report_for_recovery(provider, &mut session, recovery_kind)
+            .is_err()
+        {
             return Ok(false);
         }
         session.invalidate(QualificationInvalidation::ObservationFailed);
@@ -2070,6 +2321,16 @@ fn recover_prepared_qualification_candidate(
         return Ok(false);
     }
     match prepared.session {
+        PreparedQualificationSession::IncompatibleV4(session) => {
+            finalize_incompatible_session_as_audit(
+                state,
+                provider,
+                store,
+                candidate_handle,
+                session,
+                IncompatibleSessionCleanup::RemoveVersionFourSessionDurably,
+            )
+        }
         PreparedQualificationSession::Legacy(mut session) => {
             match provider.capture_authored_recipe_digests(session.required_recipes()) {
                 Ok(digests) => session.set_authored_recipe_digests(digests),
@@ -2078,29 +2339,14 @@ fn recover_prepared_qualification_candidate(
                     return Ok(false);
                 }
             }
-            if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
-                poison_attempt(state, provider, store, candidate_handle);
-                return Err(persistence_error());
-            }
-            session.invalidate(QualificationInvalidation::IncompatibleSessionVersion);
-            if provider
-                .mark_candidate_audit_only(candidate_handle)
-                .is_err()
-            {
-                poison_attempt(state, provider, store, candidate_handle);
-                return Err(persistence_error());
-            }
-            match finalize_candidate(provider, &session) {
-                Ok(()) => {
-                    let _ = provider.remove_session_report(candidate_handle);
-                    store.forget(candidate_handle);
-                    Ok(false)
-                }
-                Err(error) => {
-                    poison_attempt(state, provider, store, candidate_handle);
-                    Err(error)
-                }
-            }
+            finalize_incompatible_session_as_audit(
+                state,
+                provider,
+                store,
+                candidate_handle,
+                session,
+                IncompatibleSessionCleanup::PreserveLegacySession,
+            )
         }
         PreparedQualificationSession::Current(session) => recover_current_candidate(
             state,
@@ -2111,6 +2357,60 @@ fn recover_prepared_qualification_candidate(
             prepared.handoff_proven,
         ),
     }
+}
+
+fn finalize_incompatible_session_as_audit(
+    state: &AppState,
+    provider: &QualificationRepository,
+    store: &mut QualificationSessionStore,
+    candidate_handle: &str,
+    mut session: QualificationSession,
+    cleanup: IncompatibleSessionCleanup,
+) -> Result<bool, String> {
+    if attach_retained_terminal_report_for_recovery(
+        provider,
+        &mut session,
+        TerminalReportRecoveryKind::IncompatibleAudit,
+    )
+    .is_err()
+    {
+        poison_attempt(state, provider, store, candidate_handle);
+        return Err(persistence_error());
+    }
+    session.invalidate(QualificationInvalidation::IncompatibleSessionVersion);
+    if provider
+        .mark_candidate_audit_only(candidate_handle)
+        .is_err()
+    {
+        poison_attempt(state, provider, store, candidate_handle);
+        return Err(persistence_error());
+    }
+    if let Err(error) = finalize_candidate(provider, &session) {
+        poison_attempt(state, provider, store, candidate_handle);
+        return Err(error);
+    }
+
+    let cleanup_result = match cleanup {
+        IncompatibleSessionCleanup::RemoveVersionFourSessionDurably => provider
+            .remove_session_report(candidate_handle)
+            .and_then(|()| provider.remove_session(candidate_handle)),
+        IncompatibleSessionCleanup::PreserveLegacySession => {
+            let _ = provider.remove_session_report(candidate_handle);
+            Ok(())
+        }
+    };
+    if cleanup_result.is_err() {
+        poison_attempt(state, provider, store, candidate_handle);
+        return Err(persistence_error());
+    }
+    store.forget(candidate_handle);
+    if matches!(
+        cleanup,
+        IncompatibleSessionCleanup::RemoveVersionFourSessionDurably
+    ) {
+        forget_current_process_provenance(state, candidate_handle);
+    }
+    Ok(false)
 }
 
 /// Recover one persisted candidate. Returns true when it resumed as the active
@@ -2219,7 +2519,7 @@ pub(crate) fn retry_deferred_finalization(
         if store.finalization_check_in_progress(&candidate_handle) {
             return Ok(None);
         }
-        let session = load_active_session(provider, &store, &candidate_handle)?;
+        let session = load_active_session(state, provider, &mut store, &candidate_handle)?;
         if !deferred_session_has_complete_evidence(&session) {
             return Ok(None);
         }
@@ -2253,7 +2553,7 @@ pub(crate) fn retry_deferred_finalization(
     {
         return Ok(None);
     }
-    let session = load_active_session(provider, &store, &ready_session.0)?;
+    let session = load_active_session(state, provider, &mut store, &ready_session.0)?;
     if !deferred_session_has_complete_evidence(&session)
         || session.authored_recipe_digests() != Some(ready_session.1.as_slice())
     {
@@ -2296,18 +2596,20 @@ fn recover_current_candidate(
     handoff_proven: bool,
 ) -> Result<bool, String> {
     let candidate_handle = &candidate.candidate_handle;
+    if attach_retained_terminal_report_for_recovery(
+        provider,
+        &mut session,
+        TerminalReportRecoveryKind::CurrentSession,
+    )
+    .is_err()
+    {
+        poison_attempt(state, provider, store, candidate_handle);
+        return Err(persistence_error());
+    }
     if session.run_validity() == RunValidity::Invalid {
-        if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
-            poison_attempt(state, provider, store, candidate_handle);
-            return Err(persistence_error());
-        }
         return finalize_recovered_invalid(state, provider, store, session);
     }
     if !handoff_proven {
-        if attach_retained_terminal_report_for_recovery(provider, &mut session).is_err() {
-            poison_attempt(state, provider, store, candidate_handle);
-            return Err(persistence_error());
-        }
         session.invalidate(QualificationInvalidation::UnprovenShutdown);
         if persist(provider, &session).is_err() {
             poison_attempt(state, provider, store, candidate_handle);
@@ -2325,7 +2627,6 @@ fn recover_current_candidate(
         store.defer_candidate(candidate_handle);
         return Ok(false);
     }
-    session.set_terminal_report(provider.load_session_report(candidate_handle)?);
     if session.execution_admitted() && session.terminal_execution_status().is_none() {
         // The previous process admitted a real execution but never retained
         // its authoritative terminal transition. The attempt can never prove
@@ -2351,13 +2652,31 @@ fn recover_current_candidate(
 fn attach_retained_terminal_report_for_recovery(
     provider: &QualificationRepository,
     session: &mut QualificationSession,
+    recovery_kind: TerminalReportRecoveryKind,
 ) -> Result<(), String> {
-    if session.terminal_execution_status().is_none() {
+    let Some(status) = session.terminal_execution_status() else {
+        if session.terminal_report_commitment.is_some() || session.terminal_observed_at.is_some() {
+            return Err(persistence_error());
+        }
         return Ok(());
-    }
+    };
     let report = provider
         .load_session_report(session.candidate_handle())?
         .ok_or_else(persistence_error)?;
+    let report_status_matches = terminal_report_bytes_match_status(&report, status);
+    let bytes_are_committed = session
+        .terminal_report_commitment
+        .as_ref()
+        .is_some_and(|commitment| commitment.matches(&report));
+    let report_trust_matches = match recovery_kind {
+        TerminalReportRecoveryKind::CurrentSession => bytes_are_committed,
+        TerminalReportRecoveryKind::IncompatibleAudit => {
+            session.terminal_report_commitment.is_none()
+        }
+    };
+    if !report_status_matches || !report_trust_matches {
+        return Err(persistence_error());
+    }
     session.set_terminal_report(Some(report));
     Ok(())
 }
@@ -2641,7 +2960,7 @@ fn observe_recovered_in_transition(
     if store.is_poisoned(&candidate_handle) {
         return;
     }
-    let mut session = match load_active_session(provider, store, &candidate_handle) {
+    let mut session = match load_active_session(state, provider, store, &candidate_handle) {
         Ok(session) => session,
         Err(_) => {
             poison_attempt(state, provider, store, &candidate_handle);
@@ -2982,6 +3301,14 @@ fn terminal_report_matches_status(session: &QualificationSession) -> bool {
     let Some(report_bytes) = session.terminal_report_bytes() else {
         return false;
     };
+    let Some(commitment) = session.terminal_report_commitment.as_ref() else {
+        return false;
+    };
+    commitment.matches(report_bytes)
+        && terminal_report_bytes_match_status(report_bytes, expected_status)
+}
+
+fn terminal_report_bytes_match_status(report_bytes: &[u8], expected_status: &str) -> bool {
     let Ok(report) = serde_json::from_slice::<Value>(report_bytes) else {
         return false;
     };
@@ -3008,6 +3335,132 @@ pub(crate) struct BeginSessionRequest {
     pub(crate) observation: SelectedDeviceObservation,
 }
 
+/// Short-lived native authority captured before authored-source hashing and
+/// candidate preparation, then rechecked immediately before session activation.
+#[derive(Clone)]
+pub(crate) enum BeginDeviceAuthority {
+    Captured {
+        device_handle: String,
+        session_epoch: u64,
+        qualification_context: QualificationContextKey,
+        root_state: RootQualificationState,
+    },
+    #[cfg(test)]
+    TestOnly,
+}
+
+pub(crate) fn capture_begin_device_authority(
+    state: &AppState,
+    observation: &SelectedDeviceObservation,
+    context: &QualificationContextKey,
+) -> Result<BeginDeviceAuthority, String> {
+    let target_unverified = || {
+        session_error(
+            "qualification_target_unverified",
+            "The selected device authority changed before the attempt could start.",
+        )
+    };
+    let session_epoch = observation.session_epoch.ok_or_else(target_unverified)?;
+    if observation.device_handle != context.device_handle || session_epoch != context.session_epoch
+    {
+        return Err(target_unverified());
+    }
+    let current_context = {
+        let handles = state.handles.lock().map_err(|_| target_unverified())?;
+        let device = handles
+            .device(&observation.device_handle)
+            .map_err(|_| target_unverified())?;
+        if device.state != "available" || device.session_epoch != session_epoch {
+            return Err(target_unverified());
+        }
+        handles.qualification_context(&observation.device_handle)
+    };
+    if current_context.as_ref() != Some(context) {
+        return Err(target_unverified());
+    }
+    let root_state = observation
+        .root_state
+        .clone()
+        .filter(|root| project_root_state(root).is_some())
+        .ok_or_else(target_unverified)?;
+    let root_key = crate::device_qualification::RootQualificationKey::from_context(context);
+    if state
+        .root_qualification
+        .lock()
+        .map_err(|_| target_unverified())?
+        .get(&root_key)
+        .as_ref()
+        != Some(&root_state)
+    {
+        return Err(target_unverified());
+    }
+    Ok(BeginDeviceAuthority::Captured {
+        device_handle: observation.device_handle.clone(),
+        session_epoch,
+        qualification_context: context.clone(),
+        root_state,
+    })
+}
+
+fn revalidate_begin_device_authority(
+    state: &AppState,
+    authority: &BeginDeviceAuthority,
+    observation: &SelectedDeviceObservation,
+) -> Result<(), String> {
+    let (device_handle, session_epoch, qualification_context, root_state) = match authority {
+        BeginDeviceAuthority::Captured {
+            device_handle,
+            session_epoch,
+            qualification_context,
+            root_state,
+        } => (
+            device_handle,
+            session_epoch,
+            qualification_context,
+            root_state,
+        ),
+        #[cfg(test)]
+        BeginDeviceAuthority::TestOnly => return Ok(()),
+    };
+    let target_unverified = || {
+        session_error(
+            "qualification_target_unverified",
+            "The selected device authority changed before the attempt could start.",
+        )
+    };
+    if observation.device_handle.as_str() != device_handle.as_str()
+        || observation.session_epoch != Some(*session_epoch)
+        || observation.root_state.as_ref() != Some(root_state)
+    {
+        return Err(target_unverified());
+    }
+    {
+        let handles = state.handles.lock().map_err(|_| target_unverified())?;
+        let device = handles
+            .device(device_handle)
+            .map_err(|_| target_unverified())?;
+        if device.state != "available"
+            || device.session_epoch != *session_epoch
+            || handles.qualification_context(device_handle).as_ref() != Some(qualification_context)
+        {
+            return Err(target_unverified());
+        }
+    }
+    let root_key =
+        crate::device_qualification::RootQualificationKey::from_context(qualification_context);
+    if state
+        .root_qualification
+        .lock()
+        .map_err(|_| target_unverified())?
+        .get(&root_key)
+        .as_ref()
+        != Some(root_state)
+    {
+        return Err(target_unverified());
+    }
+    Ok(())
+}
+
 /// Publish one qualification-run candidate and immediately mark it pending.
 /// Publication makes the candidate visible to concurrent recovery paths, so the
 /// process-local store is held across both steps: a status refresh or product
@@ -3025,11 +3478,25 @@ pub(crate) fn publish_pending_candidate(
     Ok(candidate_handle)
 }
 
+#[cfg(test)]
 pub(crate) fn begin(
     state: &AppState,
     request: BeginSessionRequest,
 ) -> Result<QualificationSessionSnapshot, String> {
-    begin_with_candidate_summary(state, request, candidate_summary)
+    begin_with_candidate_summary(
+        state,
+        request,
+        candidate_summary,
+        BeginDeviceAuthority::TestOnly,
+    )
+}
+
+pub(crate) fn begin_with_device_authority(
+    state: &AppState,
+    request: BeginSessionRequest,
+    authority: BeginDeviceAuthority,
+) -> Result<QualificationSessionSnapshot, String> {
+    begin_with_candidate_summary(state, request, candidate_summary, authority)
 }
 
 fn begin_with_candidate_summary(
@@ -3039,6 +3506,7 @@ fn begin_with_candidate_summary(
         &QualificationRepository,
         &str,
     ) -> Result<QualificationCandidateSummaryDto, String>,
+    activation_authority: BeginDeviceAuthority,
 ) -> Result<QualificationSessionSnapshot, String> {
     let provider = state
         .qualification_repository
@@ -3113,6 +3581,7 @@ fn begin_with_candidate_summary(
                     "A qualification attempt is already active. Finish or abandon it before starting another.",
                 ));
             }
+            revalidate_begin_device_authority(state, &activation_authority, &request.observation)?;
             if !request.observation.proves_target_compatibility()
                 || request
                     .observation
@@ -3228,7 +3697,7 @@ pub(crate) fn record_checkpoint(
         .iter()
         .any(|(handle, epoch)| handle == &associated_handle && *epoch == associated_epoch)
     {
-        let mut session = load_active_session(provider, &store, &candidate_handle)?;
+        let mut session = load_active_session(state, provider, &mut store, &candidate_handle)?;
         session.invalidate(QualificationInvalidation::DeviceUnavailable);
         let retained = finish_transition(
             state,
@@ -3248,7 +3717,7 @@ pub(crate) fn record_checkpoint(
             "The selected device is no longer available for this checkpoint.",
         ));
     }
-    let mut session = load_active_session(provider, &store, &candidate_handle)?;
+    let mut session = load_active_session(state, provider, &mut store, &candidate_handle)?;
     session
         .record_checkpoint(checkpoint_id, outcome)
         .map_err(|_| {
@@ -3345,7 +3814,7 @@ pub(crate) fn abandon(
         if store.active_candidate() != Some(candidate_handle.as_str()) {
             return Err(inactive_error());
         }
-        let mut session = load_active_session(provider, &store, &candidate_handle)?;
+        let mut session = load_active_session(state, provider, &mut store, &candidate_handle)?;
         session.invalidate(QualificationInvalidation::OperatorAbandoned);
         let session = finish_transition(
             state,
@@ -3488,7 +3957,7 @@ pub(crate) fn observe_device_inventory_in_transition(
     if associated_is_sole_available_device {
         return;
     }
-    let mut session = match load_active_session(provider, &store, &candidate_handle) {
+    let mut session = match load_active_session(state, provider, &mut store, &candidate_handle) {
         Ok(session) => session,
         Err(_) => {
             poison_attempt(state, provider, &mut store, &candidate_handle);
@@ -3516,7 +3985,7 @@ pub(crate) fn session_status(
     let Some(provider) = state.qualification_repository.get() else {
         return Ok(None);
     };
-    let store = match state.qualification_sessions.lock() {
+    let mut store = match state.qualification_sessions.lock() {
         Ok(store) => store,
         Err(poisoned) => {
             state.qualification_sessions.clear_poison();
@@ -3529,7 +3998,7 @@ pub(crate) fn session_status(
     if store.is_poisoned(&candidate_handle) {
         return Ok(None);
     }
-    session_snapshot(provider, &store, &candidate_handle).map(Some)
+    session_snapshot(state, provider, &mut store, &candidate_handle).map(Some)
 }
 
 /// Whether a valid active or cross-build-deferred attempt reserves the
@@ -3539,11 +4008,12 @@ pub(crate) fn has_open_attempt(state: &AppState) -> bool {
     lock_session_store(state).has_open_attempt()
 }
 
-/// Whether this process currently owns the given candidate as its active
-/// attempt. Candidates deferred because they belong to another build are not
-/// active here, so an operator may still discard them.
-pub(crate) fn candidate_is_active(state: &AppState, candidate_handle: &str) -> bool {
-    lock_session_store(state).active_candidate() == Some(candidate_handle)
+/// Whether an active attempt or a begin operation currently owns this
+/// candidate in process. Cross-build deferred candidates are intentionally not
+/// owned, so an operator may discard them.
+pub(crate) fn candidate_is_owned_for_discard(state: &AppState, candidate_handle: &str) -> bool {
+    let store = lock_session_store(state);
+    store.active_candidate() == Some(candidate_handle) || store.is_pending(candidate_handle)
 }
 
 /// One lifecycle-consistent view used by qualification status. Callers hold
@@ -3559,11 +4029,12 @@ pub(crate) fn project_lifecycle_status_in_transition(
     state: &AppState,
     provider: &QualificationRepository,
 ) -> Result<QualificationLifecycleStatusProjection, String> {
-    let store = lock_session_store(state);
+    let mut store = lock_session_store(state);
     let candidates = provider.list_candidates()?;
-    let (session, device_selection_locked) = match store.active_candidate.as_deref() {
+    let active_candidate = store.active_candidate.clone();
+    let (session, device_selection_locked) = match active_candidate.as_deref() {
         Some(candidate_handle) if !store.is_poisoned(candidate_handle) => (
-            session_snapshot(provider, &store, candidate_handle).map(Some)?,
+            session_snapshot(state, provider, &mut store, candidate_handle).map(Some)?,
             store.associated_device_handle().is_some(),
         ),
         _ => (None, false),
@@ -3593,7 +4064,7 @@ pub(crate) fn active_device_plan(state: &AppState) -> Option<String> {
     if store.is_poisoned(&candidate_handle) {
         return None;
     }
-    load_active_session(provider, &store, &candidate_handle)
+    load_active_session(state, provider, &mut store, &candidate_handle)
         .ok()
         .map(|session| session.device_plan.clone())
 }
@@ -3624,11 +4095,12 @@ pub(crate) fn device_selection_locked(state: &AppState) -> Result<bool, String> 
 
 /// Snapshot of one candidate's session state as sanitized presentation data.
 fn session_snapshot(
+    state: &AppState,
     provider: &QualificationRepository,
-    store: &QualificationSessionStore,
+    store: &mut QualificationSessionStore,
     candidate_handle: &str,
 ) -> Result<QualificationSessionSnapshot, String> {
-    let session = load_active_session(provider, store, candidate_handle)?;
+    let session = load_active_session(state, provider, store, candidate_handle)?;
     let candidate = candidate_summary(provider, candidate_handle)?;
     Ok(session.snapshot(Some(candidate)))
 }
@@ -6465,6 +6937,22 @@ mod tests {
         device_handle: &str,
         session_epoch: u64,
     ) -> String {
+        terminal_awaiting_device_checkpoint_with_report(
+            app,
+            candidate,
+            device_handle,
+            session_epoch,
+            b"{\"status\":\"succeeded\"}",
+        )
+    }
+
+    fn terminal_awaiting_device_checkpoint_with_report(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        candidate: &str,
+        device_handle: &str,
+        session_epoch: u64,
+        report_bytes: &[u8],
+    ) -> String {
         let mut capture = observation(device_handle);
         capture.session_epoch = Some(session_epoch);
         begin(
@@ -6486,7 +6974,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: CAPTURED_AT.to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(report_bytes.to_vec()),
                     authority_invalidated: false,
                 },
             )),
@@ -7299,6 +7787,101 @@ mod tests {
     }
 
     #[test]
+    fn authority_invalidated_terminal_retains_report_in_invalid_candidate() {
+        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        const TERMINAL_AT: &str = "2026-10-02T19:27:12Z";
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        begin(
+            &app.state::<AppState>(),
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        begin_with_prerequisite_and_admission(&app, &candidate);
+
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+                TerminalExecutionObservation {
+                    execution_handle: "execution-one".to_string(),
+                    status: Some("succeeded".to_string()),
+                    observed_at: TERMINAL_AT.to_string(),
+                    report_available: true,
+                    report_bytes: Some(REPORT.to_vec()),
+                    authority_invalidated: true,
+                },
+            )),
+        );
+
+        let state = app.state::<AppState>();
+        let repository = state.qualification_repository.get().unwrap();
+        let stored = repository
+            .load_candidate(&candidate)
+            .expect("the authority-invalidated run must remain auditable");
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+        assert_eq!(
+            std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&candidate)
+                    .join("execution-report.json")
+            )
+            .expect("the structurally valid product report must be retained"),
+            REPORT
+        );
+    }
+
+    #[test]
+    fn authority_invalidated_terminal_classification_retains_report_commitment() {
+        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        const TERMINAL_AT: &str = "2026-10-02T19:27:12Z";
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        begin_with_prerequisite_and_admission(&app, &candidate);
+        let provider = state.qualification_repository.get().unwrap();
+        let mut store = state.qualification_sessions.lock().unwrap();
+        let mut session = load_active_session(&state, provider, &mut store, &candidate).unwrap();
+
+        session.classify_terminal(&TerminalExecutionObservation {
+            execution_handle: "execution-one".to_string(),
+            status: Some("succeeded".to_string()),
+            observed_at: TERMINAL_AT.to_string(),
+            report_available: true,
+            report_bytes: Some(REPORT.to_vec()),
+            authority_invalidated: true,
+        });
+
+        assert_eq!(session.run_validity(), RunValidity::Invalid);
+        assert_eq!(
+            session.qualification_outcome(),
+            QualificationOutcome::NotObserved
+        );
+        assert_eq!(session.terminal_execution_status(), Some("succeeded"));
+        assert_eq!(session.terminal_observed_at.as_deref(), Some(TERMINAL_AT));
+        assert_eq!(session.terminal_report_bytes(), Some(REPORT));
+        assert_eq!(
+            session.terminal_report_commitment,
+            Some(TerminalReportCommitment {
+                byte_length: REPORT.len() as u64,
+                sha256: hex::encode(Sha256::digest(REPORT)),
+            })
+        );
+    }
+
+    #[test]
     fn matching_review_rebinds_before_admission_and_is_fixed_after_admission() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -7698,83 +8281,59 @@ mod tests {
     }
 
     #[test]
-    fn status_keeps_deferred_attempt_pending_without_a_matching_terminal_report() {
+    fn terminal_without_a_usable_report_fails_closed_as_invalid_evidence() {
         let temp = tempfile::tempdir().unwrap();
-        let candidate = {
-            let repository = test_repository(&temp);
-            let candidate = create_run_candidate(&repository, CAPTURED_AT);
-            let provider = QualificationRepositoryProvider::for_test(repository);
-            let (_app_temp, app) = test_app(provider, true);
-            let state = app.state::<AppState>();
-            begin(
-                &state,
-                begin_request(&candidate, CAPTURED_AT, observation("device-one")),
-            )
-            .unwrap();
-            begin_with_prerequisite_and_admission(&app, &candidate);
-            std::fs::write(
-                temp.path().join("authored/recipes/test.recipe.yaml"),
-                b"id: test.recipe\nsteps:\n  - temporary change\n",
-            )
-            .unwrap();
-            observe(
-                &state,
-                QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
-                    TerminalExecutionObservation {
-                        execution_handle: "execution-one".to_string(),
-                        status: Some("succeeded".to_string()),
-                        observed_at: "2026-09-30T19:27:12Z".to_string(),
-                        report_available: true,
-                        report_bytes: None,
-                        authority_invalidated: false,
-                    },
-                )),
-            );
-            record_checkpoint(
-                &state,
-                &session_handle_for_candidate(&candidate).unwrap(),
-                "device_state_verified",
-                QualificationCheckpointOutcome::Pass,
-            )
-            .unwrap();
-            candidate
-        };
-
-        let (_restart_temp, app) = clean_restart(&temp);
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
         let state = app.state::<AppState>();
-        let repository = state.qualification_repository.get().unwrap();
-        std::fs::write(
-            temp.path().join("authored/recipes/test.recipe.yaml"),
-            b"id: test.recipe\nsteps:\n  - temporary change\n",
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
         )
         .unwrap();
-        let _ = crate::qualification_mode::get_device_qualification_mode_status(app.state());
-        assert!(repository
-            .load_candidate(&candidate)
-            .unwrap()
-            .payload
-            .get("runValidity")
-            .is_none());
-
-        std::fs::write(
-            temp.path().join("authored/recipes/test.recipe.yaml"),
-            b"id: test.recipe\n",
-        )
-        .unwrap();
-        let _ = crate::qualification_mode::get_device_qualification_mode_status(app.state());
-
-        assert!(repository
-            .load_candidate(&candidate)
-            .unwrap()
-            .payload
-            .get("runValidity")
-            .is_none());
-        let pending = session_status(&state).unwrap().unwrap();
-        assert_eq!(
-            pending.phase,
-            QualificationSessionPhase::TerminalAwaitingEvidence
+        begin_with_prerequisite_and_admission(&app, &candidate);
+        observe(
+            &state,
+            QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+                TerminalExecutionObservation {
+                    execution_handle: "execution-one".to_string(),
+                    status: Some("succeeded".to_string()),
+                    observed_at: "2026-09-30T19:27:12Z".to_string(),
+                    report_available: true,
+                    report_bytes: None,
+                    authority_invalidated: false,
+                },
+            )),
         );
-        assert!(pending.recordable);
+
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+        assert!(!repository
+            .candidate_root()
+            .join(&candidate)
+            .join("execution-report.json")
+            .exists());
+
+        let (_restart_temp, restarted) = clean_restart(&temp);
+        assert!(session_status(&restarted.state::<AppState>())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            restarted
+                .state::<AppState>()
+                .qualification_repository
+                .get()
+                .unwrap()
+                .load_candidate(&candidate)
+                .unwrap()
+                .payload["runValidity"],
+            "invalid"
+        );
     }
 
     #[test]
@@ -8195,6 +8754,323 @@ mod tests {
     }
 
     #[test]
+    fn terminal_report_recovery_integrity_failures_poison_and_cannot_resurrect() {
+        const REPORT: &[u8] = b"{\"status\":\"succeeded\",\"a\":1}";
+        const SAME_STATUS_DIFFERENT_BYTES: &[u8] = b"{\"a\":1,\"status\":\"succeeded\"}";
+        assert_eq!(REPORT.len(), SAME_STATUS_DIFFERENT_BYTES.len());
+
+        for corruption in [
+            "unreadable",
+            "missing",
+            "same-status-different-bytes",
+            "length-mismatch",
+            "digest-mismatch",
+            "malformed",
+            "status-mismatch",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repository = test_repository(&temp);
+            let candidate = create_run_candidate(&repository, CAPTURED_AT);
+            let report_path = repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session-terminal-report.json");
+            let session_path = repository
+                .candidate_root()
+                .join(&candidate)
+                .join("session.json");
+            {
+                let provider = QualificationRepositoryProvider::for_test(repository);
+                let (_app_temp, app) = test_app(provider, true);
+                let state = app.state::<AppState>();
+                let (device_handle, epoch) = available_test_device(&state, "report-integrity");
+                terminal_awaiting_device_checkpoint_with_report(
+                    &app,
+                    &candidate,
+                    &device_handle,
+                    epoch,
+                    REPORT,
+                );
+            }
+
+            match corruption {
+                "unreadable" => {
+                    std::fs::remove_file(&report_path).unwrap();
+                    std::fs::create_dir(&report_path).unwrap();
+                }
+                "missing" => std::fs::remove_file(&report_path).unwrap(),
+                "same-status-different-bytes" => {
+                    std::fs::write(&report_path, SAME_STATUS_DIFFERENT_BYTES).unwrap();
+                }
+                "malformed" => std::fs::write(&report_path, b"{invalid").unwrap(),
+                "status-mismatch" => {
+                    std::fs::write(&report_path, b"{\"status\":\"failed\"}").unwrap();
+                }
+                "length-mismatch" | "digest-mismatch" => {
+                    let mut persisted: Value =
+                        serde_json::from_slice(&std::fs::read(&session_path).unwrap()).unwrap();
+                    let commitment = persisted
+                        .get_mut("terminalReportCommitment")
+                        .and_then(Value::as_object_mut)
+                        .expect("terminal session must persist its report commitment");
+                    if corruption == "length-mismatch" {
+                        let length = commitment
+                            .get("byteLength")
+                            .and_then(Value::as_u64)
+                            .unwrap();
+                        commitment.insert("byteLength".to_string(), Value::from(length + 1));
+                    } else {
+                        let digest = commitment.get("sha256").and_then(Value::as_str).unwrap();
+                        let replacement = if digest.starts_with('0') { '1' } else { '0' };
+                        commitment.insert(
+                            "sha256".to_string(),
+                            Value::from(format!("{replacement}{}", &digest[1..])),
+                        );
+                    }
+                    std::fs::write(&session_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let (_app_temp, app) = clean_restart(&temp);
+            let state = app.state::<AppState>();
+            assert!(session_status(&state).unwrap().is_none(), "{corruption}");
+            let repository = state.qualification_repository.get().unwrap();
+            assert!(
+                repository.session_is_poisoned(&candidate).unwrap(),
+                "{corruption} must durably poison the terminal attempt"
+            );
+
+            if report_path.is_dir() {
+                std::fs::remove_dir_all(&report_path).unwrap();
+            }
+            std::fs::write(&report_path, REPORT).unwrap();
+            let (_second_app_temp, second_app) = clean_restart(&temp);
+            assert!(
+                session_status(&second_app.state::<AppState>())
+                    .unwrap()
+                    .is_none(),
+                "restoring report bytes must not resurrect poisoned {corruption} session"
+            );
+            assert!(second_app
+                .state::<AppState>()
+                .qualification_repository
+                .get()
+                .unwrap()
+                .session_is_poisoned(&candidate)
+                .unwrap());
+        }
+    }
+
+    fn rewrite_session_as_version_four(session_path: &std::path::Path) {
+        let mut persisted: Value =
+            serde_json::from_slice(&std::fs::read(session_path).unwrap()).unwrap();
+        persisted["sessionSchemaVersion"] = Value::from(4);
+        persisted
+            .as_object_mut()
+            .unwrap()
+            .remove("terminalReportCommitment");
+        std::fs::write(session_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn version_four_terminal_session_materializes_as_audit_only_without_commitment_upgrade() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let candidate_directory = repository.candidate_root().join(&candidate);
+        let session_path = candidate_directory.join("session.json");
+        let expected_report = {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            let (device_handle, epoch) = available_test_device(&state, "old-session-version");
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+            std::fs::read(candidate_directory.join("session-terminal-report.json")).unwrap()
+        };
+        rewrite_session_as_version_four(&session_path);
+
+        let (_app_temp, app) = clean_restart(&temp);
+        let state = app.state::<AppState>();
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        assert!(!repository.session_is_poisoned(&candidate).unwrap());
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+        assert!(!stored.promotable);
+        assert!(candidate_directory.join("session-audit-only").is_file());
+        assert_eq!(
+            std::fs::read(candidate_directory.join("execution-report.json")).unwrap(),
+            expected_report,
+        );
+        assert!(
+            !session_path.exists(),
+            "incompatible v4 session must be closed"
+        );
+        assert!(
+            !candidate_directory
+                .join("session-terminal-report.json")
+                .exists(),
+            "the report is retained in the audit candidate, not as resumable session state"
+        );
+    }
+
+    #[test]
+    fn version_four_nonterminal_session_materializes_as_audit_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let session_path = repository
+            .candidate_root()
+            .join(&candidate)
+            .join("session.json");
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(
+                &app.state::<AppState>(),
+                begin_request(&candidate, CAPTURED_AT, observation("version-four-open")),
+            )
+            .unwrap();
+        }
+        rewrite_session_as_version_four(&session_path);
+
+        let (_app_temp, app) = clean_restart(&temp);
+        let state = app.state::<AppState>();
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+        assert!(!stored.promotable);
+        let candidate_directory = repository.candidate_root().join(&candidate);
+        assert!(candidate_directory.join("session-audit-only").is_file());
+        assert!(!repository.session_is_poisoned(&candidate).unwrap());
+        assert!(!session_path.exists());
+        assert!(!candidate_directory.join("execution-report.json").exists());
+    }
+
+    #[test]
+    fn malformed_version_four_session_is_poisoned_instead_of_audited() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let candidate_directory = repository.candidate_root().join(&candidate);
+        let session_path = candidate_directory.join("session.json");
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            begin(
+                &app.state::<AppState>(),
+                begin_request(&candidate, CAPTURED_AT, observation("corrupt-version-four")),
+            )
+            .unwrap();
+        }
+        rewrite_session_as_version_four(&session_path);
+        let mut malformed: Value =
+            serde_json::from_slice(&std::fs::read(&session_path).unwrap()).unwrap();
+        malformed.as_object_mut().unwrap().remove("workflowId");
+        std::fs::write(&session_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+
+        let (_app_temp, app) = clean_restart(&temp);
+        let state = app.state::<AppState>();
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        assert!(repository.session_is_poisoned(&candidate).unwrap());
+        assert!(!candidate_directory.join("session-audit-only").exists());
+        assert!(!candidate_directory.join("execution-report.json").exists());
+        assert_eq!(
+            repository
+                .load_candidate(&candidate)
+                .unwrap()
+                .payload
+                .get("runValidity"),
+            None,
+        );
+    }
+
+    #[test]
+    fn version_four_terminal_report_failures_poison_without_audit_artifact() {
+        for failure in ["missing", "status-mismatch"] {
+            let temp = tempfile::tempdir().unwrap();
+            let repository = test_repository(&temp);
+            let candidate = create_run_candidate(&repository, CAPTURED_AT);
+            let candidate_directory = repository.candidate_root().join(&candidate);
+            let session_path = candidate_directory.join("session.json");
+            let report_path = candidate_directory.join("session-terminal-report.json");
+            {
+                let provider = QualificationRepositoryProvider::for_test(repository);
+                let (_app_temp, app) = test_app(provider, true);
+                let state = app.state::<AppState>();
+                let (device_handle, epoch) =
+                    available_test_device(&state, "version-four-report-failure");
+                terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+            }
+            rewrite_session_as_version_four(&session_path);
+            match failure {
+                "missing" => std::fs::remove_file(&report_path).unwrap(),
+                "status-mismatch" => {
+                    std::fs::write(&report_path, br#"{"status":"failed"}"#).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let (_app_temp, app) = clean_restart(&temp);
+            let state = app.state::<AppState>();
+            assert!(session_status(&state).unwrap().is_none());
+            let repository = state.qualification_repository.get().unwrap();
+            assert!(
+                repository.session_is_poisoned(&candidate).unwrap(),
+                "{failure}"
+            );
+            assert!(!candidate_directory.join("session-audit-only").exists());
+            assert!(!candidate_directory.join("execution-report.json").exists());
+            assert_eq!(
+                repository
+                    .load_candidate(&candidate)
+                    .unwrap()
+                    .payload
+                    .get("runValidity"),
+                None,
+                "{failure} must not publish an unsupported audit claim"
+            );
+        }
+    }
+
+    #[test]
+    fn version_five_terminal_session_without_report_commitment_is_poisoned() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let candidate_directory = repository.candidate_root().join(&candidate);
+        let session_path = candidate_directory.join("session.json");
+        {
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let state = app.state::<AppState>();
+            let (device_handle, epoch) =
+                available_test_device(&state, "version-five-no-commitment");
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, epoch);
+        }
+        let mut persisted: Value =
+            serde_json::from_slice(&std::fs::read(&session_path).unwrap()).unwrap();
+        persisted
+            .as_object_mut()
+            .unwrap()
+            .remove("terminalReportCommitment");
+        std::fs::write(&session_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+        let (_app_temp, app) = clean_restart(&temp);
+        let state = app.state::<AppState>();
+        assert!(session_status(&state).unwrap().is_none());
+        let repository = state.qualification_repository.get().unwrap();
+        assert!(repository.session_is_poisoned(&candidate).unwrap());
+        assert!(!candidate_directory.join("session-audit-only").exists());
+        assert!(!candidate_directory.join("execution-report.json").exists());
+    }
+
+    #[test]
     fn candidate_finalization_failure_cannot_materialize_valid_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -8477,6 +9353,16 @@ mod tests {
             retained_before,
             "the other build must leave the deferred attempt unchanged"
         );
+        {
+            let mut store = state.qualification_sessions.lock().unwrap();
+            assert_eq!(store.active_candidate(), None);
+            assert!(store.is_pending(&deferred_candidate));
+            assert!(store.is_deferred(&deferred_candidate));
+            // The in-flight-begin guard has completed in this test. Clear only
+            // that synthetic claim so the deferred repository candidate can
+            // exercise its independent operator-discard path.
+            store.pending_candidates.remove(&deferred_candidate);
+        }
 
         crate::qualification_mode::discard_qualification_candidate(
             deferred_candidate.clone(),
@@ -8554,6 +9440,81 @@ mod tests {
             "a rejected discard must leave the attempt active"
         );
         assert!(repository.load_candidate(&candidate).is_ok());
+    }
+
+    #[test]
+    fn targeted_discard_ignores_unrelated_corrupt_candidates_and_publication_transactions() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let malformed = create_run_candidate(&repository, CAPTURED_AT);
+        let valid = create_run_candidate(&repository, CAPTURED_AT);
+        let interrupted = create_run_candidate(&repository, CAPTURED_AT);
+        let root = repository.candidate_root().to_path_buf();
+        std::fs::write(
+            root.join(&malformed).join("candidate.json"),
+            b"{malformed candidate envelope",
+        )
+        .unwrap();
+        let interrupted_transaction = root
+            .join(&interrupted)
+            .join(".qualification-candidate-publication.json");
+        std::fs::write(
+            &interrupted_transaction,
+            b"{invalid publication transaction",
+        )
+        .unwrap();
+        let malformed_before = std::fs::read(root.join(&malformed).join("candidate.json")).unwrap();
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+
+        crate::qualification_mode::discard_qualification_candidate(valid.clone(), app.state())
+            .expect("a corrupt unrelated candidate must not block targeted discard");
+        assert!(!root.join(&valid).exists());
+        assert_eq!(
+            std::fs::read(root.join(&malformed).join("candidate.json")).unwrap(),
+            malformed_before,
+            "discarding another handle must leave the corrupt candidate byte-identical"
+        );
+        assert!(root.join(&interrupted).is_dir());
+
+        crate::qualification_mode::discard_qualification_candidate(malformed.clone(), app.state())
+            .expect("an untrusted candidate envelope must remain discardable");
+        assert!(!root.join(&malformed).exists());
+        crate::qualification_mode::discard_qualification_candidate(
+            interrupted.clone(),
+            app.state(),
+        )
+        .expect("an unrecoverable publication transaction must remain discardable");
+        assert!(!root.join(&interrupted).exists());
+    }
+
+    #[test]
+    fn targeted_discard_rejects_a_process_local_pending_candidate_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        app.state::<AppState>()
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .mark_pending(&candidate);
+
+        let error = crate::qualification_mode::discard_qualification_candidate(
+            candidate.clone(),
+            app.state(),
+        )
+        .expect_err("a begin operation's provisional candidate claim must be protected");
+
+        assert!(error.contains("qualification_candidate_active"));
+        assert!(app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .is_ok());
     }
 
     #[test]
@@ -8830,8 +9791,9 @@ mod tests {
             )
             .unwrap();
             let provider = state.qualification_repository.get().unwrap();
-            let store = state.qualification_sessions.lock().unwrap();
-            let mut session = load_active_session(provider, &store, &candidate).unwrap();
+            let mut store = state.qualification_sessions.lock().unwrap();
+            let mut session =
+                load_active_session(&state, provider, &mut store, &candidate).unwrap();
             session.invalidate(QualificationInvalidation::ObservationFailed);
             persist(provider, &session).unwrap();
         }
@@ -10035,13 +10997,14 @@ mod tests {
             &state,
             begin_request(&failed_candidate, CAPTURED_AT, observation("device-one")),
             |_, _| Err("injected candidate projection failure".to_string()),
+            BeginDeviceAuthority::TestOnly,
         )
         .expect_err("a failed candidate projection cannot produce a success snapshot");
         let public_error: Value = serde_json::from_str(&error)
             .expect("the begin failure must remain a sanitized IPC error");
         assert_eq!(public_error["code"], "qualification_session_unavailable");
         {
-            let store = state.qualification_sessions.lock().unwrap();
+            let mut store = state.qualification_sessions.lock().unwrap();
             assert!(store.active_candidate().is_none());
             assert!(store.associated_device_handle().is_none());
             assert!(!store.is_pending(&failed_candidate));
@@ -11252,7 +12215,7 @@ mod tests {
         .unwrap();
         let provider = state.qualification_repository.get().unwrap();
         let mut store = state.qualification_sessions.lock().unwrap();
-        let mut session = load_active_session(provider, &store, &candidate).unwrap();
+        let mut session = load_active_session(&state, provider, &mut store, &candidate).unwrap();
         session.invalidate(QualificationInvalidation::ObservationFailed);
         persist(provider, &session).unwrap();
         provider.fail_next_audit_only_marker_for_test();

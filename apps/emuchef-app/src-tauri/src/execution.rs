@@ -420,6 +420,20 @@ impl ExecutionHandleStore {
             })
     }
 
+    /// Check whether the exact real mapping still owns the active execution
+    /// slot. A captured mapping stops being authority as soon as it is removed
+    /// or replaced, even if a delayed runtime response still names its handle.
+    fn owns_active_mapping(&self, expected: &ExecutionMapping) -> bool {
+        self.active.as_ref().is_some_and(|current| {
+            current.kind == expected.kind
+                && current.public_handle == expected.public_handle
+                && current.sidecar_id == expected.sidecar_id
+                && current.review_handle == expected.review_handle
+                && current.review.device_handle == expected.review.device_handle
+                && current.review.plan_digest == expected.review.plan_digest
+        })
+    }
+
     fn is_lost(&self, public_handle: &str) -> bool {
         self.latest_lost
             .as_ref()
@@ -2086,6 +2100,23 @@ fn retain_terminal_real_execution(
     report: &Value,
     observed_at: &str,
 ) -> Result<Option<RealExecutionMonitorEvent>, String> {
+    // Reject a response whose captured mapping no longer owns the product
+    // execution before consulting report metadata or touching device/root
+    // authority. Recheck below after report construction because ownership can
+    // change while the report bytes are being prepared.
+    {
+        let executions = state.executions.lock().map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Real-device execution state is unavailable.",
+            )
+        })?;
+        if executions.terminal_retained(ExecutionKind::Real, &mapping.public_handle)
+            || !executions.owns_active_mapping(mapping)
+        {
+            return Ok(None);
+        }
+    }
     let report_runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
         safe_error(
             "report_serialization_failed",
@@ -2107,6 +2138,9 @@ fn retain_terminal_real_execution(
     })?;
     let transition = crate::commands::qualification_transition_lock(state);
     if executions.terminal_retained(ExecutionKind::Real, &mapping.public_handle) {
+        return Ok(None);
+    }
+    if !executions.owns_active_mapping(mapping) {
         return Ok(None);
     }
     if identity_failed {
@@ -2559,7 +2593,10 @@ fn run_launch_action_attempt<T>(
             Ok(value)
         }
         Err(error) => {
-            if attempt.finish_failure() {
+            let retry_available = attempt.finish_failure();
+            if execution_session_loss(&error) == Some(ExecutionSessionLoss::RuntimeSessionLost)
+                || retry_available
+            {
                 Err(error)
             } else {
                 Err(launch_unavailable())
@@ -5068,6 +5105,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn runtime_session_loss_survives_launch_attempt_cleanup_without_replacement() {
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = executions.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            json!({ "status": "ready" }),
+        );
+        let first = executions.launch_action(&mapping, &report).unwrap();
+        let first_handle = first["handle"].as_str().unwrap().to_string();
+        let (_temp, app) = test_app(
+            Mutex::new(executions),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+
+        let error = run_launch_action_attempt(&state, &first_handle, |_| {
+            state
+                .executions
+                .lock()
+                .unwrap()
+                .mark_lost(&mapping.public_handle, Some(mapping.clone()));
+            Err::<(), _>(runtime_session_lost_error())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("runtime_session_lost"));
+        let executions = state.executions.lock().unwrap();
+        assert!(executions.is_lost(&mapping.public_handle));
+        assert!(executions.launch_actions.is_empty());
+        assert!(executions.launch_attempts_in_flight.is_empty());
+    }
+
+    #[test]
     fn concurrent_duplicate_launch_consumption_has_one_winner() {
         use std::sync::{Arc, Barrier};
 
@@ -5970,6 +6050,34 @@ pub(crate) mod tests {
                 .unwrap()
                 .push((request_type.to_string(), payload));
             self.responses.lock().unwrap().remove(0)
+        }
+    }
+
+    struct ReplaceMappingWhenTerminalRuntime<'a> {
+        state: &'a AppState,
+        stale_handle: String,
+        terminal_response: Value,
+        requests: Mutex<usize>,
+        replacement_handle: Mutex<Option<String>>,
+    }
+
+    impl RuntimeRequester for ReplaceMappingWhenTerminalRuntime<'_> {
+        fn request(&self, request_type: &str, _payload: Value) -> Result<Value, String> {
+            assert_eq!(request_type, "getExecution");
+            *self.requests.lock().unwrap() += 1;
+            let mut executions = self.state.executions.lock().unwrap();
+            assert!(executions
+                .forget_mapping(ExecutionKind::Real, &self.stale_handle)
+                .is_some());
+            executions.reserve_start(ExecutionKind::Real).unwrap();
+            let replacement = executions.bind_started(
+                ExecutionKind::Real,
+                "newer-sidecar-execution".to_string(),
+                "newer-review".to_string(),
+                review(),
+            );
+            *self.replacement_handle.lock().unwrap() = Some(replacement.public_handle);
+            Ok(self.terminal_response.clone())
         }
     }
 
@@ -7433,6 +7541,91 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn terminal_monitor_drops_stale_mapping_before_any_retention_side_effect() {
+        let (_repository_root, _app_root, app, execution_handle, candidate, device_handle) =
+            begin_monitor_qualification_attempt_with_live_device();
+        let state = app.state::<AppState>();
+        let (review_handle, root_key) = {
+            let mut handles = state.handles.lock().unwrap();
+            let mut retained_review = review();
+            retained_review.device_handle = device_handle.clone();
+            let review_handle = handles.insert_review(retained_review.clone());
+            let mut executions = state.executions.lock().unwrap();
+            let active = executions.active.as_mut().unwrap();
+            active.review_handle = review_handle.clone();
+            active.review = retained_review;
+            let root_key = RootQualificationKey::new(device_handle.clone(), 1, 1);
+            let mut roots = state.root_qualification.lock().unwrap();
+            let attempt = roots.begin(root_key.clone()).unwrap();
+            assert!(roots.complete(attempt, RootQualificationState::Granted));
+            (review_handle, root_key)
+        };
+        let runtime = ReplaceMappingWhenTerminalRuntime {
+            state: &state,
+            stale_handle: execution_handle.clone(),
+            terminal_response: json!({
+                "execution": {
+                    "executionId": "sidecar-qualification",
+                    "status": "failed",
+                    "errors": [{ "code": "device_identity_changed" }],
+                    "recipes": []
+                }
+            }),
+            requests: Mutex::new(0),
+            replacement_handle: Mutex::new(None),
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {
+                panic!("a stale terminal result must not retry after losing mapping ownership")
+            })
+        }));
+
+        assert!(
+            result.is_ok(),
+            "stale monitor result must exit without retrying"
+        );
+        assert!(result.unwrap().is_none());
+        assert_eq!(*runtime.requests.lock().unwrap(), 1);
+        let replacement = runtime
+            .replacement_handle
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the newer product execution should remain active");
+        let executions = state.executions.lock().unwrap();
+        assert!(executions
+            .mapping(
+                ExecutionKind::Real,
+                &replacement,
+                REAL_EXECUTION_UNAVAILABLE
+            )
+            .is_ok());
+        assert!(!executions.terminal_retained(ExecutionKind::Real, &execution_handle));
+        assert!(!executions
+            .launch_actions
+            .values()
+            .any(|action| action.mapping.public_handle == execution_handle));
+        drop(executions);
+
+        let mut handles = state.handles.lock().unwrap();
+        assert!(handles.device(&device_handle).is_ok());
+        assert!(handles.review(&review_handle).is_ok());
+        drop(handles);
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(RootQualificationState::Granted)
+        );
+        let provider = state.qualification_repository.get().unwrap();
+        let persisted = provider.load_session(&candidate).unwrap();
+        assert!(persisted.terminal_execution_status.is_none());
+        assert_eq!(
+            persisted.run_validity,
+            crate::qualification_session::RunValidity::Valid
+        );
+    }
+
+    #[test]
     fn product_terminal_monitor_recovers_a_poisoned_execution_store_as_product_loss() {
         let (_repository_root, _app_root, app, execution_handle, candidate) =
             begin_monitor_qualification_attempt();
@@ -8250,11 +8443,35 @@ pub(crate) mod tests {
             .get("automatedObservations")
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty));
-        assert!(stored
+        let artifacts = stored
             .payload
             .get("artifacts")
             .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty));
+            .expect("the retained product report must remain an invalid-run artifact");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["id"], "execution-report");
+        assert_eq!(artifacts[0]["path"], "execution-report.json");
+        let report_bytes = observation
+            .report_bytes
+            .as_deref()
+            .expect("the product monitor must retain exact sanitized report bytes");
+        assert_eq!(
+            artifacts[0]["sha256"],
+            hex::encode(Sha256::digest(report_bytes))
+        );
+        assert_eq!(
+            std::fs::read(
+                state
+                    .qualification_repository
+                    .get()
+                    .unwrap()
+                    .candidate_root()
+                    .join(&candidate)
+                    .join("execution-report.json")
+            )
+            .expect("the invalid candidate must preserve its execution report"),
+            report_bytes
+        );
         assert!(crate::qualification_session::session_status(&state)
             .unwrap()
             .is_none());

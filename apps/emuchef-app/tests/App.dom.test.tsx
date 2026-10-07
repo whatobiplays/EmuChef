@@ -2121,6 +2121,47 @@ test("a superseded runtime re-read cannot restore the lost runtime projection", 
   ).toBeTruthy();
 });
 
+test("runtime-loss recovery presents the failed app service when device qualification cannot answer", async () => {
+  const user = userEvent.setup();
+  await renderReadyApp();
+
+  const unhandledRejections: unknown[] = [];
+  const captureUnhandled = (reason: unknown) => unhandledRejections.push(reason);
+  process.on("unhandledRejection", captureUnhandled);
+  try {
+    mockApi.runtimeStatus.mockResolvedValueOnce({
+      status: "failed",
+      error: { code: "runtime_unavailable", message: "The app service is unavailable." },
+    });
+    // Sidecar-backed projections can no longer answer once the runtime session
+    // is gone. The failed runtime status must still be presented so the
+    // app-service recovery controls remain reachable.
+    mockApi.deviceQualification.mockRejectedValueOnce(new Error("The device service is unavailable."));
+    mockApi.executionCapabilities.mockRejectedValueOnce(new Error("The app service is unavailable."));
+    mockApi.pollDevices.mockRejectedValue(JSON.stringify({
+      code: "runtime_session_lost",
+      message: "The execution runtime session is no longer available.",
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Refresh devices" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "EmuChef could not start its app service" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Choose an Android device" })).toBeNull();
+
+    // The fire-and-forget recovery re-read must never leave a rejection behind.
+    await act(async () => {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+    expect(unhandledRejections).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", captureUnhandled);
+  }
+});
+
 test("an authoritative inventory poll reloads qualification status without a manual refresh", async () => {
   const user = userEvent.setup();
   const qualificationStatus = {
@@ -2236,4 +2277,3 @@ test("an authoritative inventory poll reloads qualification status without a man
     { timeout: 6000, interval: 50 },
   );
 });
-

@@ -389,25 +389,48 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const realExecutionCompiled = executionCapabilities?.realExecutionCompiled === true;
 
   const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
-    const [runtimeStatus, adbStatus, , qualification] = await Promise.all([
-      api.runtimeStatus(),
+    // The sanitized runtime projection is applied before any dependent
+    // projection is awaited. After a proven runtime-session loss the backend
+    // has already discarded the process authority that the sidecar-backed
+    // requests need, so the failed runtime status and its recovery controls
+    // must be presented even when those requests can no longer answer.
+    const runtimeStatus = await api.runtimeStatus();
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
+    setRuntime(runtimeStatus);
+    if (runtimeStatus.status !== "ready") {
+      // Nothing sidecar-backed can answer while the app service is
+      // failed/unsupported. Settle the dependent reads so no request is left
+      // dangling, apply whatever still succeeded, and never let their failures
+      // reject the recovery re-read.
+      const [adbResult, , qualificationResult] = await Promise.allSettled([
+        api.adbStatus(),
+        refreshExecutionCapabilities(true),
+        api.deviceQualification(null),
+      ]);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (adbResult.status === "fulfilled") setAdb(adbResult.value);
+      if (qualificationResult.status === "fulfilled") {
+        setDeviceQualification(qualificationResult.value);
+      }
+      return;
+    }
+    // A ready runtime keeps the strict startup contract: the dependent
+    // projections are required before the ready workspace is offered.
+    const [adbStatus, , qualification] = await Promise.all([
       api.adbStatus(),
       refreshExecutionCapabilities(true),
       api.deviceQualification(null),
     ]);
     if (runtimeGenerationRef.current !== runtimeGeneration) return;
-    setRuntime(runtimeStatus);
     setAdb(adbStatus);
     setDeviceQualification(qualification);
-    if (runtimeStatus.status === "ready") {
-      const [nextCatalog, recents] = await Promise.all([
-        api.catalog(),
-        api.listRecentConfigurations(),
-      ]);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setCatalog(nextCatalog);
-      setRecentConfigurations(recents);
-    }
+    const [nextCatalog, recents] = await Promise.all([
+      api.catalog(),
+      api.listRecentConfigurations(),
+    ]);
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
+    setCatalog(nextCatalog);
+    setRecentConfigurations(recents);
   }, [refreshExecutionCapabilities]);
 
   // A request that proves the shared runtime session is gone must re-read the
@@ -437,7 +460,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setDeviceRefresh({ phase: "idle", generation: 0, message: null });
     setBusy(false);
     dispatch({ type: "runtime-invalidated" });
-    void initialize(runtimeGeneration);
+    void initialize(runtimeGeneration).catch((error) => {
+      // Even the sanitized runtime status could not be read back after the
+      // proven loss. Surface the bounded failure instead of leaving the
+      // fire-and-forget recovery as an unhandled rejection.
+      setNotice(errorMessage(error));
+    });
   }, [dispatch, initialize]);
 
   const {

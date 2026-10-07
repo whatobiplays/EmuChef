@@ -3,7 +3,7 @@
   "sourceDigests": {
     "docs/testing/phase-6d6/scenario-manifest.json": "sha256:9fc75d0fea6d5eb5d8ef89b1384d4599a2a29a58e276c3f97161b566e8faf397",
     "docs/testing/phase-6d6/evidence-schema.json": "sha256:866fb6082a30f7508a217f9a97c762d23692d143dce9b2e8c56b1a091b40b571",
-    "apps/emuchef-app/src-tauri/src/execution.rs": "sha256:2623618c66c8a287a64dfa7e7a9df2f3fb72bfcfe0f3668bc1053e53b486d919",
+    "apps/emuchef-app/src-tauri/src/execution.rs": "sha256:bf068128993f8e519d028e5ba3e222977cdbe6378d81ecb581b325e12e6999ba",
     "tools/phase-6d6-evidence.mjs": "sha256:b677bdf226ffef50d44657f197a133a2b8440dec0463dc332fa0e3e4fbda03c6"
   },
   "bindings": {
@@ -200,5 +200,5 @@
       }
     ]
   },
-  "digest": "sha256:e8933554c1487e42fab16974920200b9fad360443fe25a4793eaffa1dbef3600"
+  "digest": "sha256:fb27e260e17426747cbcfbd6968b18262a0feaba30e5ecd258645db3829a2aaa"
 }

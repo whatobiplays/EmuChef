@@ -323,9 +323,10 @@ fn safe_qualification_error(code: &str) -> String {
     safe_error(code, message)
 }
 
-/// Serialize operations that require no active attempt. Session start holds the
-/// same gate across observation and candidate creation, before device or root
-/// side effects can occur.
+/// Serialize operations that require no open attempt with the provisional
+/// reservation made by session start. Device/source capture and candidate
+/// creation run under this begin guard; authoritative session activation is
+/// committed separately under the product-transition gate.
 pub(crate) fn with_inactive_qualification_session<T>(
     state: &AppState,
     repository: &crate::qualification_repository::QualificationRepository,
@@ -613,18 +614,19 @@ pub fn discard_qualification_candidate(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    // Recover and inspect ownership while the product-transition gate is held
-    // so the candidate can neither become the active attempt between the check
-    // and the deletion nor be deleted while an active attempt still owns it. A
-    // live attempt may only close through abandonment, which materializes its
-    // invalid/not-observed audit evidence.
+    let _begin_guard = repository
+        .lock_begin()
+        .map_err(|_| safe_qualification_error("qualification_candidate_active"))?;
+    // Inspect process-local ownership while the product-transition gate is
+    // held. Global recovery would let an unrelated malformed candidate block
+    // an explicit discard; pending and active candidates remain protected from
+    // deletion while a begin operation or live attempt owns them.
     let transition = crate::commands::qualification_transition_lock(&state);
-    crate::qualification_session::recover_persisted_sessions_in_transition(&state, repository)?;
-    if crate::qualification_session::candidate_is_active(&state, &candidate_handle) {
+    if crate::qualification_session::candidate_is_owned_for_discard(&state, &candidate_handle) {
         return Err(safe_qualification_error("qualification_candidate_active"));
     }
     repository
-        .discard_candidate(&candidate_handle)
+        .discard_untrusted_candidate(&candidate_handle)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
     crate::qualification_session::forget_candidate(&state, &candidate_handle);
     drop(transition);
@@ -693,6 +695,23 @@ fn begin_qualification_session_with_source<
             .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
         let capture =
             source.capture_selected_device(&request.device_handle, &request.device_plan)?;
+        let activation_authority = match capture.qualification_context.as_ref() {
+            Some(context) => crate::qualification_session::capture_begin_device_authority(
+                &state,
+                &capture.observation,
+                context,
+            )?,
+            None => {
+                #[cfg(test)]
+                {
+                    crate::qualification_session::BeginDeviceAuthority::TestOnly
+                }
+                #[cfg(not(test))]
+                {
+                    return Err(safe_qualification_error("qualification_target_unverified"));
+                }
+            }
+        };
         if workflow.required_capabilities.iter().any(|required| {
             !capture
                 .capabilities
@@ -724,7 +743,7 @@ fn begin_qualification_session_with_source<
                     return Err(error);
                 }
             };
-        let started = crate::qualification_session::begin(
+        let started = crate::qualification_session::begin_with_device_authority(
             &state,
             crate::qualification_session::BeginSessionRequest {
                 session_handle,
@@ -737,6 +756,7 @@ fn begin_qualification_session_with_source<
                 runtime_contract: description.runtime_contract,
                 observation: capture.observation,
             },
+            activation_authority,
         );
         match started {
             Ok(snapshot) => Ok(snapshot),
@@ -851,11 +871,34 @@ impl SelectedDeviceObservationSource for QualificationObservationSource<'_> {
         {
             return Err(crate::device_observation::unverified_device_error());
         }
+        let context = capture
+            .qualification_context
+            .as_ref()
+            .ok_or_else(crate::device_observation::unverified_device_error)?;
+        let current_context = self
+            .state
+            .handles
+            .lock()
+            .map_err(|_| crate::device_observation::unverified_device_error())?
+            .qualification_context(device_handle);
+        if current_context.as_ref() != Some(context)
+            || self
+                .state
+                .root_qualification
+                .lock()
+                .map_err(|_| crate::device_observation::unverified_device_error())?
+                .get(&crate::device_qualification::RootQualificationKey::from_context(context))
+                .as_ref()
+                != Some(&root.qualification)
+        {
+            return Err(crate::device_observation::unverified_device_error());
+        }
         let observation = capture.observation.with_root_state(root.qualification);
         crate::device_observation::commit_selected_observation(self.state, observation.clone())?;
         Ok(SelectedDeviceCapture {
             observation,
             capabilities: capture.capabilities,
+            qualification_context: capture.qualification_context,
         })
     }
 }
@@ -1191,6 +1234,7 @@ mod tests {
                 })
                 .with_root_state(RootQualificationState::Denied),
             capabilities: vec!["apk_install".to_string()],
+            qualification_context: None,
         }
     }
 
@@ -1562,6 +1606,212 @@ mod tests {
             .lock()
             .unwrap()
             .has_current_process_qualification_provenance());
+    }
+
+    #[test]
+    fn session_start_revalidates_captured_device_and_root_authority_at_activation() {
+        for mutation in ["remove", "reconnect", "context", "root", "unchanged"] {
+            let temp = tempfile::tempdir().expect("test repository directory should be created");
+            std::fs::create_dir_all(temp.path().join("authored/recipes"))
+                .expect("recipe directory should be created");
+            std::fs::write(
+                temp.path().join("authored/recipes/test.recipe.yaml"),
+                b"id: test.recipe\n",
+            )
+            .expect("recipe fixture should be written");
+            let build = test_build();
+            let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                temp.path().to_path_buf(),
+                Box::new(BeginDescriptionRunner {
+                    description: begin_test_description(&build),
+                }),
+                build.clone(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: build.git_commit.clone(),
+                    tracked_worktree_clean: true,
+                },
+            );
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+            let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+            let continue_rx = Arc::new(Mutex::new(continue_rx));
+            let continue_rx_for_hook = Arc::clone(&continue_rx);
+            repository.set_authored_recipe_digest_capture_hook_for_test(Arc::new(move || {
+                entered_tx
+                    .send(())
+                    .expect("the activation test should reach digest capture");
+                continue_rx_for_hook
+                    .lock()
+                    .expect("the activation barrier should not be poisoned")
+                    .recv()
+                    .expect("the test should release digest capture");
+            }));
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider);
+            let state = app.state::<AppState>();
+            let device_handle = {
+                let mut handles = state.handles.lock().unwrap();
+                handles
+                    .update_devices(&json!({
+                        "devices": [{
+                            "serial": "begin-activation-serial",
+                            "state": "available",
+                            "model": "Pocket S2",
+                            "transportId": "transport-1"
+                        }]
+                    }))
+                    .unwrap();
+                handles.single_available_device_handle().unwrap()
+            };
+            let device_epoch = state
+                .handles
+                .lock()
+                .unwrap()
+                .device(&device_handle)
+                .unwrap()
+                .session_epoch;
+            let device_generation = state.handles.lock().unwrap().device_generation();
+            let context = crate::device_observation::QualificationContextKey::new(
+                device_handle.clone(),
+                device_epoch,
+                7,
+                3,
+                5,
+                "begin-activation-capability-fingerprint",
+            );
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .set_qualification_context(context.clone());
+            let root_key =
+                crate::device_qualification::RootQualificationKey::from_context(&context);
+            let root_attempt = state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .begin(root_key.clone())
+                .unwrap();
+            assert!(state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .complete(root_attempt, RootQualificationState::Denied,));
+            let mut capture = trusted_capture();
+            capture.observation.device_handle = device_handle.clone();
+            capture.observation.session_epoch = Some(device_epoch);
+            capture.qualification_context = Some(context.clone());
+            let mut source = FakeDeviceSource::returning(capture);
+            let request = BeginQualificationSessionRequest {
+                device_handle: device_handle.clone(),
+                device_plan: "selected-plan".to_string(),
+                target_id: "target-test".to_string(),
+                workflow_id: "test-workflow".to_string(),
+            };
+            let app_state = state.inner();
+
+            let result = std::thread::scope(|scope| {
+                let worker = scope.spawn(move || {
+                    begin_qualification_session_with_source(request, app_state, &mut source)
+                });
+                entered_rx
+                    .recv()
+                    .expect("session start should capture authority before recipe digests");
+                match mutation {
+                    "remove" => {
+                        state
+                            .handles
+                            .lock()
+                            .unwrap()
+                            .update_devices(&json!({ "devices": [] }))
+                            .unwrap();
+                    }
+                    "reconnect" => {
+                        let mut handles = state.handles.lock().unwrap();
+                        handles.update_devices(&json!({ "devices": [] })).unwrap();
+                        handles
+                            .update_devices(&json!({
+                                "devices": [{
+                                    "serial": "begin-activation-serial",
+                                    "state": "available",
+                                    "model": "Pocket S2",
+                                    "transportId": "transport-2"
+                                }]
+                            }))
+                            .unwrap();
+                    }
+                    "context" => {
+                        state.handles.lock().unwrap().set_qualification_context(
+                            crate::device_observation::QualificationContextKey::new(
+                                device_handle.clone(),
+                                device_epoch,
+                                7,
+                                3,
+                                6,
+                                "replacement-capability-fingerprint",
+                            ),
+                        );
+                    }
+                    "root" => {
+                        let attempt = state
+                            .root_qualification
+                            .lock()
+                            .unwrap()
+                            .begin(root_key.clone())
+                            .unwrap();
+                        assert!(state
+                            .root_qualification
+                            .lock()
+                            .unwrap()
+                            .complete(attempt, RootQualificationState::Granted,));
+                    }
+                    "unchanged" => {
+                        state
+                            .handles
+                            .lock()
+                            .unwrap()
+                            .update_devices(&json!({
+                                "devices": [{
+                                    "serial": "begin-activation-serial",
+                                    "state": "available",
+                                    "model": "Pocket S2",
+                                    "transportId": "transport-1"
+                                }]
+                            }))
+                            .unwrap();
+                        assert_eq!(
+                            state.handles.lock().unwrap().device_generation(),
+                            device_generation.saturating_add(1),
+                            "the unchanged poll must advance inventory generation"
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                continue_tx
+                    .send(())
+                    .expect("digest capture should resume after the authority mutation");
+                worker.join().expect("session start should not panic")
+            });
+
+            let repository = state.qualification_repository.get().unwrap();
+            if mutation == "unchanged" {
+                assert!(result.is_ok(), "unchanged native authority should activate");
+                assert_eq!(repository.list_candidates().unwrap().len(), 1);
+            } else {
+                let error = result.expect_err("changed native authority must reject activation");
+                let error: Value = serde_json::from_str(&error).unwrap();
+                assert_eq!(
+                    error["code"], "qualification_target_unverified",
+                    "{mutation}"
+                );
+                assert!(
+                    repository.list_candidates().unwrap().is_empty(),
+                    "the provisional candidate must be removed after {mutation}"
+                );
+                assert!(crate::qualification_session::session_status(&state)
+                    .unwrap()
+                    .is_none());
+            }
+        }
     }
 
     #[test]

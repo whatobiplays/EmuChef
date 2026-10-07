@@ -442,6 +442,9 @@ impl SelectedDeviceObservation {
 pub(crate) struct SelectedDeviceCapture {
     pub(crate) observation: SelectedDeviceObservation,
     pub(crate) capabilities: Vec<String>,
+    /// Native context that produced the passive facts. Session activation uses
+    /// it as a short-lived fence across candidate/source preparation.
+    pub(crate) qualification_context: Option<QualificationContextKey>,
 }
 
 /// The trusted observation boundary consumed by qualification orchestration.
@@ -519,6 +522,7 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
         Ok(SelectedDeviceCapture {
             observation,
             capabilities,
+            qualification_context: current.context.clone(),
         })
     }
 }

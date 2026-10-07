@@ -993,6 +993,38 @@ impl QualificationRepository {
             .map_err(|_| "qualification candidate could not be discarded".to_string())
     }
 
+    /// Remove one explicitly selected untrusted candidate without parsing its
+    /// contents or replaying its publication transaction. The handle and both
+    /// fixed-root and candidate-directory identities are still validated, so
+    /// this path can remove corrupt state without following a substituted path.
+    pub(crate) fn discard_untrusted_candidate(&self, handle: &str) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(handle)?;
+        let metadata = fs::symlink_metadata(&directory)
+            .map_err(|_| "qualification candidate could not be inspected".to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("qualification candidate directory is a symlink".to_string());
+        }
+        if !metadata.is_dir() {
+            return Err("qualification candidate directory is invalid".to_string());
+        }
+        // Re-resolve the validated handle immediately before deletion. This
+        // rejects a directory replaced after the first path validation.
+        if self.candidate_directory_unlocked(handle)? != directory {
+            return Err("qualification candidate directory changed".to_string());
+        }
+        let current = fs::symlink_metadata(&directory)
+            .map_err(|_| "qualification candidate could not be inspected".to_string())?;
+        if current.file_type().is_symlink() {
+            return Err("qualification candidate directory is a symlink".to_string());
+        }
+        if !current.is_dir() {
+            return Err("qualification candidate directory is invalid".to_string());
+        }
+        fs::remove_dir_all(directory)
+            .map_err(|_| "qualification candidate could not be discarded".to_string())
+    }
+
     /// Invokes the canonical tool's bounded repository description operation.
     pub fn describe(&self) -> Result<RepositoryQualificationDescription, String> {
         let _operation = self.lock_operation()?;
@@ -3293,6 +3325,7 @@ mod tests {
             .expect("candidate directory symlink should be created");
 
         assert!(repository.list_candidates().is_err());
+        assert!(repository.discard_untrusted_candidate(&handle).is_err());
         assert!(outside_directory.join(CANDIDATE_FILE).exists());
     }
 

@@ -886,6 +886,48 @@ test("recording the same target or run twice rejects the second write without mu
   }
 });
 
+test("canonical run promotion rejects candidate-local poison and audit-only markers before mutation", () => {
+  const cases = [
+    { marker: "session-poison.json", shape: "file" },
+    { marker: "session-audit-only", shape: "file" },
+    { marker: "session-poison.json", shape: "symlink" },
+    { marker: "session-audit-only", shape: "directory" },
+  ];
+  for (const { marker, shape } of cases) {
+    const repoRoot = createTempQualificationRepo({
+      deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
+    });
+    try {
+      const candidate = runCandidateForRepo(repoRoot);
+      writeCandidateFixture(repoRoot, candidate, REPORT_BYTES);
+      const candidateDirectory = path.join(
+        repoRoot,
+        ".emuchef_runtime/qualification-candidates",
+        candidate.candidateId,
+      );
+      const markerPath = path.join(candidateDirectory, marker);
+      if (shape === "file") writeFileSync(markerPath, "candidate is non-promotable\n", "utf8");
+      if (shape === "symlink") symlinkSync("candidate.json", markerPath);
+      if (shape === "directory") mkdirSync(markerPath);
+
+      const evidenceRoot = path.join(repoRoot, "docs/testing/device-qualification/evidence");
+      const matrixPath = path.join(repoRoot, "docs/qualification/device-qualification-matrix.md");
+      const evidenceBefore = snapshotTree(evidenceRoot);
+      const matrixBefore = readFileSync(matrixPath, "utf8");
+
+      assert.throws(
+        () => recordQualificationRunCandidate(candidate.candidateId, { repoRoot }),
+        /non-promotable marker|candidate.*(?:non-promotable|marker|symlink|regular file)/i,
+      );
+
+      assert.deepEqual(snapshotTree(evidenceRoot), evidenceBefore);
+      assert.equal(readFileSync(matrixPath, "utf8"), matrixBefore);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("the canonical recorder rejects an incomplete provisional run candidate without mutation", () => {
   const repoRoot = createTempQualificationRepo({
     deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
