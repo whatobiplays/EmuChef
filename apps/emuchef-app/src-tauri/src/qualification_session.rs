@@ -1136,6 +1136,11 @@ impl QualificationSession {
             return Err("qualification session schema version is unsupported".to_string());
         }
         validate_persisted_session_fields(PersistedSessionValidation::from(&persisted))?;
+        if !automated_observations_supported(&persisted.automated_observations) {
+            return Err(
+                "qualification session requires unsupported automated evidence".to_string(),
+            );
+        }
         match (
             persisted.terminal_execution_status.as_deref(),
             persisted.terminal_report_commitment.as_ref(),
@@ -1243,6 +1248,23 @@ impl QualificationSession {
             lifecycle_revision: 0,
         }
     }
+}
+
+/// Whether the current Rust lifecycle can satisfy every required automated
+/// observation in a repository workflow. Rust currently retains only the
+/// authoritative execution report; optional workflow observations may be
+/// omitted, but a valid run must always declare the report it will produce.
+pub(crate) fn automated_observations_supported(
+    observations: &[QualificationWorkflowObservation],
+) -> bool {
+    let execution_report_count = observations
+        .iter()
+        .filter(|observation| observation.id == "execution-report")
+        .count();
+    execution_report_count == 1
+        && !observations
+            .iter()
+            .any(|observation| observation.required && observation.id != "execution-report")
 }
 
 /// Project one committed explicit root-check result into the target contract.
@@ -1901,6 +1923,13 @@ fn poison_attempt(
     if durable {
         return;
     }
+    preserve_unproven_handoff(state);
+}
+
+/// Make lifecycle ordering unprovable for this process and the next launch.
+/// Used when an authoritative transition cannot identify its persisted owner,
+/// and as the fallback when candidate-local poisoning cannot be retained.
+fn preserve_unproven_handoff(state: &AppState) {
     match state.recovery.lock() {
         Ok(mut recovery) => recovery.preserve_unproven_handoff(),
         Err(poisoned) => {
@@ -2890,6 +2919,7 @@ fn observe_reserved_real_execution_admission_with_hook(
     };
     let mut store = lock_session_store(state);
     if ensure_recovered(state, provider, &mut store).is_err() {
+        poison_attempt(state, provider, &mut store, &fence.candidate_handle);
         return;
     }
     // Route to the exact attempt captured at reservation time. The attempt's
@@ -2940,6 +2970,11 @@ fn observe_in_transition_with_store(
     observation: QualificationLifecycleObservation,
 ) {
     if ensure_recovered(state, provider, store).is_err() {
+        if let Some(candidate_handle) = store.active_candidate().map(str::to_string) {
+            poison_attempt(state, provider, store, &candidate_handle);
+        } else {
+            preserve_unproven_handoff(state);
+        }
         return;
     }
     observe_recovered_in_transition(state, provider, store, observation);
@@ -3508,6 +3543,12 @@ fn begin_with_candidate_summary(
     ) -> Result<QualificationCandidateSummaryDto, String>,
     activation_authority: BeginDeviceAuthority,
 ) -> Result<QualificationSessionSnapshot, String> {
+    if !automated_observations_supported(&request.workflow.automated_observations) {
+        return Err(session_error(
+            "qualification_observation_unsupported",
+            "The selected workflow requires automated evidence this build cannot collect.",
+        ));
+    }
     let provider = state
         .qualification_repository
         .get()
@@ -6835,6 +6876,35 @@ mod tests {
     }
 
     #[test]
+    fn direct_session_begin_rejects_required_observations_rust_cannot_produce() {
+        for automated_observations in [
+            vec![QualificationWorkflowObservation {
+                id: "future-device-audit".to_string(),
+                required: true,
+            }],
+            Vec::new(),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repository = test_repository(&temp);
+            let candidate = create_run_candidate(&repository, CAPTURED_AT);
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider, true);
+            let mut request = begin_request(&candidate, CAPTURED_AT, observation("device-one"));
+            request.workflow.automated_observations = automated_observations;
+
+            let error = begin(&app.state::<AppState>(), request)
+                .expect_err("unsupported required automated evidence must fail closed");
+
+            assert!(error.contains("qualification_observation_unsupported"));
+            assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+            let state = app.state::<AppState>();
+            let store = state.qualification_sessions.lock().unwrap();
+            assert!(store.active_candidate().is_none());
+            assert!(store.associated_device_handle().is_none());
+        }
+    }
+
+    #[test]
     fn begin_rejects_a_device_that_does_not_match_the_registered_target() {
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
@@ -6929,6 +6999,18 @@ mod tests {
         if !already_current {
             handles.retain_available_device_for_test(handle, epoch);
         }
+    }
+
+    fn poison_recovery_mutex(recovery: &Mutex<RecoveryStore>) {
+        std::thread::scope(|scope| {
+            let poisoned = scope
+                .spawn(|| {
+                    let _recovery = recovery.lock().unwrap();
+                    panic!("inject a recovery lock failure");
+                })
+                .join();
+            assert!(poisoned.is_err());
+        });
     }
 
     fn terminal_awaiting_device_checkpoint(
@@ -7784,6 +7866,65 @@ mod tests {
         );
         assert!(stored.promotable);
         assert!(session_status(&app.state::<AppState>()).unwrap().is_none());
+    }
+
+    #[test]
+    fn optional_unsupported_automated_observation_is_omitted_from_valid_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let mut request = begin_request(&candidate, CAPTURED_AT, observation("device-one"));
+        request
+            .workflow
+            .automated_observations
+            .push(QualificationWorkflowObservation {
+                id: "future-device-audit".to_string(),
+                required: false,
+            });
+        begin(&app.state::<AppState>(), request)
+            .expect("the supported execution-report workflow may include optional observations");
+        begin_with_prerequisite_and_admission(&app, &candidate);
+        observe(
+            &app.state::<AppState>(),
+            QualificationLifecycleObservation::RealExecutionTerminal(Box::new(
+                TerminalExecutionObservation {
+                    execution_handle: "execution-one".to_string(),
+                    status: Some("succeeded".to_string()),
+                    observed_at: "2026-10-02T19:27:12Z".to_string(),
+                    report_available: true,
+                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    authority_invalidated: false,
+                },
+            )),
+        );
+        record_checkpoint(
+            &app.state::<AppState>(),
+            &session_handle_for_candidate(&candidate).unwrap(),
+            "device_state_verified",
+            QualificationCheckpointOutcome::Pass,
+        )
+        .unwrap();
+
+        let stored = app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert!(stored.promotable);
+        assert_eq!(stored.payload["runValidity"], "valid");
+        assert_eq!(
+            stored.payload["automatedObservations"],
+            json!([{
+                "id": "execution-report",
+                "outcome": "passed",
+                "observedAt": "2026-10-02T19:27:12Z"
+            }])
+        );
+        assert_eq!(stored.payload["artifacts"][0]["id"], "execution-report");
     }
 
     #[test]
@@ -9167,6 +9308,153 @@ mod tests {
         );
         let loaded = RecoveryStore::load(app_temp.path().join("draft.json"), marker);
         assert!(!loaded.session_handoff_proven());
+    }
+
+    #[test]
+    fn unavailable_qualification_repository_keeps_product_observations_noop_on_clean_exit() {
+        let provider = QualificationRepositoryProvider::unavailable_for_test();
+        let (app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let marker = app_temp.path().join("session-active.marker");
+        assert!(marker.is_file(), "the current process marker should exist");
+
+        {
+            let _transition = crate::commands::qualification_transition_lock(&state);
+            observe_in_transition(
+                &state,
+                QualificationLifecycleObservation::ReviewCreated(Box::new(review(
+                    "review-one",
+                    "device-one",
+                ))),
+            );
+        }
+
+        {
+            let sessions = state.qualification_sessions.lock().unwrap();
+            assert!(sessions.active_candidate().is_none());
+            assert!(sessions.poisoned_candidate().is_none());
+            assert!(sessions.pending_candidates.is_empty());
+        }
+        assert!(state.recovery.lock().unwrap().session_handoff_proven());
+
+        {
+            let _transition = crate::commands::qualification_transition_lock(&state);
+            state
+                .recovery
+                .lock()
+                .unwrap()
+                .finish_process_termination()
+                .expect("accepted termination should remove the process marker");
+        }
+        assert!(
+            !marker.exists(),
+            "an unavailable qualification repository must not preserve the marker"
+        );
+
+        let restarted = RecoveryStore::load(app_temp.path().join("recovery-draft.json"), marker);
+        assert!(restarted.session_handoff_proven());
+    }
+
+    #[test]
+    fn missed_product_observation_marks_unproven_handoff_and_never_resumes_valid() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, epoch) = available_test_device(&state, "recovery-observation-failure");
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(epoch);
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, capture.clone()),
+        )
+        .unwrap();
+
+        // Simulate a persisted attempt that has not yet been restored into this
+        // process-local session store.
+        state
+            .qualification_sessions
+            .lock()
+            .unwrap()
+            .forget(&candidate);
+        poison_recovery_mutex(&state.recovery);
+
+        // The product observation commit remains successful even though the
+        // qualification recovery hook cannot establish which persisted attempt
+        // owned the missed transition.
+        assert!(crate::device_observation::commit_selected_observation(&state, capture).is_ok());
+        assert!(state.handles.lock().unwrap().device(&device_handle).is_ok());
+        assert!(!state.recovery.lock().unwrap().session_handoff_proven());
+
+        let repository = state.qualification_repository.get().unwrap();
+        recover_persisted_sessions(&state, repository).unwrap();
+        assert!(session_status(&state).unwrap().is_none());
+        let stored = repository.load_candidate(&candidate).unwrap();
+        assert_eq!(stored.payload["runValidity"], "invalid");
+        assert!(!stored.promotable);
+
+        let marker = app_temp.path().join("session-active.marker");
+        state
+            .recovery
+            .lock()
+            .unwrap()
+            .finish_process_termination()
+            .unwrap();
+        assert!(
+            marker.is_file(),
+            "unproven handoff must retain the process marker"
+        );
+        let restarted = RecoveryStore::load(app_temp.path().join("draft.json"), marker);
+        assert!(!restarted.session_handoff_proven());
+    }
+
+    #[test]
+    fn missed_fenced_admission_durably_poisons_its_exact_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        begin(
+            &state,
+            begin_request(&candidate, CAPTURED_AT, observation("device-one")),
+        )
+        .unwrap();
+        let fence = capture_execution_admission_fence(&state, "review-one")
+            .unwrap()
+            .expect("the active session should provide an admission fence");
+        poison_recovery_mutex(&state.recovery);
+
+        // This hook receives an already-committed product admission and has no
+        // error return that could change the successful execution result.
+        let transition = crate::commands::qualification_transition_lock(&state);
+        observe_reserved_real_execution_admission_in_transition(
+            &state,
+            Some(&fence),
+            ExecutionAdmissionObservation {
+                execution_handle: "execution-one".to_string(),
+                review: review("review-one", "device-one"),
+                device_handle: "device-one".to_string(),
+            },
+        );
+        transition.release_and_retry_best_effort();
+
+        let repository = state.qualification_repository.get().unwrap();
+        assert!(repository.session_is_poisoned(&candidate).unwrap());
+        let sessions = state.qualification_sessions.lock().unwrap();
+        assert!(sessions.active_candidate().is_none());
+        assert!(sessions.is_poisoned(&candidate));
+        drop(sessions);
+
+        // Once the simulated lock failure is cleared, recovery still cannot
+        // adopt the session because the exact candidate poison is durable.
+        state.recovery.clear_poison();
+        recover_persisted_sessions(&state, repository).unwrap();
+        assert!(session_status(&state).unwrap().is_none());
+        assert!(!repository.load_candidate(&candidate).unwrap().promotable);
     }
 
     #[test]

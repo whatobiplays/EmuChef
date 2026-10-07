@@ -300,6 +300,9 @@ fn safe_qualification_error(code: &str) -> String {
         "qualification_target_unverified" => {
             "The connected device target could not be verified from trusted observations."
         }
+        "qualification_observation_unsupported" => {
+            "The selected workflow requires automated evidence this build cannot collect."
+        }
         "qualification_execution_active" => {
             "A real-device execution is starting or active. Wait for it to finish before starting a qualification attempt."
         }
@@ -689,6 +692,13 @@ fn begin_qualification_session_with_source<
             .into_iter()
             .find(|workflow| workflow.id == request.workflow_id)
             .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+        if !crate::qualification_session::automated_observations_supported(
+            &workflow.automated_observations,
+        ) {
+            return Err(safe_qualification_error(
+                "qualification_observation_unsupported",
+            ));
+        }
         let target = targets_from_description(&description)?
             .into_iter()
             .find(|target| target.id == request.target_id)
@@ -1273,7 +1283,10 @@ mod tests {
                     "requiredCapabilities": ["apk_install"],
                     "prerequisites": [],
                     "humanCheckpoints": [],
-                    "automatedObservations": []
+                    "automatedObservations": [{
+                        "id": "execution-report",
+                        "required": true
+                    }]
                 }]
             },
             "deviceTargets": {
@@ -1606,6 +1619,61 @@ mod tests {
             .lock()
             .unwrap()
             .has_current_process_qualification_provenance());
+    }
+
+    #[test]
+    fn session_start_rejects_unproducible_required_observations_before_capture_or_candidate_creation(
+    ) {
+        for observations in [
+            json!([
+                { "id": "execution-report", "required": true },
+                { "id": "future-device-audit", "required": true }
+            ]),
+            json!([]),
+        ] {
+            let temp = tempfile::tempdir().expect("test repository directory should be created");
+            std::fs::create_dir_all(temp.path().join("authored/recipes"))
+                .expect("recipe directory should be created");
+            std::fs::write(
+                temp.path().join("authored/recipes/test.recipe.yaml"),
+                b"id: test.recipe\n",
+            )
+            .expect("recipe fixture should be written");
+            let build = test_build();
+            let mut description = begin_test_description(&build);
+            description["workflowCatalog"]["workflows"][0]["automatedObservations"] = observations;
+            let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                temp.path().to_path_buf(),
+                Box::new(BeginDescriptionRunner { description }),
+                build.clone(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: build.git_commit.clone(),
+                    tracked_worktree_clean: true,
+                },
+            );
+            let provider = QualificationRepositoryProvider::for_test(repository);
+            let (_app_temp, app) = test_app(provider);
+            let state = app.state::<AppState>();
+            let request = session_start_test_request();
+            let mut source = FakeDeviceSource::returning(session_start_test_capture());
+
+            let error = begin_qualification_session_with_source(request, &state, &mut source)
+                .expect_err("a workflow the Rust lifecycle cannot complete must be rejected");
+
+            assert_eq!(error_code(&error), "qualification_observation_unsupported");
+            assert_eq!(source.calls, 0, "rejection must precede device observation");
+            let repository = state
+                .qualification_repository
+                .get()
+                .expect("test repository should be available");
+            assert!(
+                repository.list_candidates().unwrap().is_empty(),
+                "rejection must not leave a provisional candidate"
+            );
+            assert!(crate::qualification_session::session_status(&state)
+                .unwrap()
+                .is_none());
+        }
     }
 
     #[test]

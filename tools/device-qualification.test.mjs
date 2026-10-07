@@ -243,6 +243,15 @@ function copyTrackedFile(repoRoot, relativePath) {
   cpSync(path.join(REPO_ROOT, relativePath), destination);
 }
 
+function removeTempTree(root) {
+  rmSync(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+}
+
 function createTempQualificationRepo({ deviceTargetsSource } = {}) {
   const repoRoot = mkdtempSync(path.join(tmpdir(), "device-qualification-"));
   mkdirSync(path.join(repoRoot, "docs/testing/device-qualification/evidence"), { recursive: true });
@@ -282,6 +291,9 @@ function createTempQualificationRepo({ deviceTargetsSource } = {}) {
   }
 
   execFileSync("git", ["init"], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["config", "--local", "core.fsmonitor", "false"], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["config", "--local", "maintenance.auto", "false"], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["config", "--local", "gc.auto", "0"], { cwd: repoRoot, stdio: "pipe" });
   execFileSync("git", ["config", "user.name", "Codex"], { cwd: repoRoot, stdio: "pipe" });
   execFileSync("git", ["config", "user.email", "codex@example.com"], { cwd: repoRoot, stdio: "pipe" });
   execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "pipe" });
@@ -655,6 +667,30 @@ test("material build digest changes for product inputs but ignores qualification
   assert.equal(withEvidence, original);
 });
 
+test("temporary qualification repositories disable Git background writers locally", () => {
+  const repoRoot = createTempQualificationRepo();
+  try {
+    for (const [key, expected] of [
+      ["core.fsmonitor", "false"],
+      ["maintenance.auto", "false"],
+      ["gc.auto", "0"],
+      ["user.name", "Codex"],
+      ["user.email", "codex@example.com"],
+    ]) {
+      assert.equal(
+        execFileSync("git", ["config", "--local", "--get", key], {
+          cwd: repoRoot,
+          encoding: "utf8",
+        }).trim(),
+        expected,
+        `${key} should be set in the temporary repository's local Git config`,
+      );
+    }
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
 test("material identity refreshes for changed inputs and rejects dirty state", () => {
   const repoRoot = createTempQualificationRepo();
   const toolDestination = path.join(repoRoot, "tools/device-qualification.mjs");
@@ -690,7 +726,7 @@ test("material identity refreshes for changed inputs and rejects dirty state", (
     assert.notEqual(dirtyResult.status, 0);
     assert.match(`${dirtyResult.stdout}${dirtyResult.stderr}`, /clean tracked worktree/);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    removeTempTree(repoRoot);
   }
 });
 
@@ -856,7 +892,7 @@ test("recording the same target or run twice rejects the second write without mu
       registeredBytes,
     );
   } finally {
-    rmSync(emptyRepo, { recursive: true, force: true });
+    removeTempTree(emptyRepo);
   }
 
   const seededRepo = createTempQualificationRepo({
@@ -882,7 +918,7 @@ test("recording the same target or run twice rejects the second write without mu
     assert.deepEqual(snapshotTree(evidenceRoot), before);
     assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
   } finally {
-    rmSync(seededRepo, { recursive: true, force: true });
+    removeTempTree(seededRepo);
   }
 });
 
@@ -923,7 +959,7 @@ test("canonical run promotion rejects candidate-local poison and audit-only mark
       assert.deepEqual(snapshotTree(evidenceRoot), evidenceBefore);
       assert.equal(readFileSync(matrixPath, "utf8"), matrixBefore);
     } finally {
-      rmSync(repoRoot, { recursive: true, force: true });
+      removeTempTree(repoRoot);
     }
   }
 });
@@ -950,7 +986,7 @@ test("the canonical recorder rejects an incomplete provisional run candidate wit
     );
     assert.deepEqual(snapshotTree(evidenceRoot), before);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    removeTempTree(repoRoot);
   }
 });
 
@@ -1010,7 +1046,7 @@ test("recording a run refuses a destination reserved by another invocation witho
     assert.ok(after.some((entry) => entry.path.endsWith(`/${raceMarker}`)));
     assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    removeTempTree(repoRoot);
   }
 });
 
@@ -1038,7 +1074,7 @@ test("tampered existing evidence bundle report blocks both promotions before can
     assert.equal(readFileSync(targetRegistryPath, "utf8"), beforeRegistry);
     assert.equal(readFileSync(targetMatrixPath, "utf8"), beforeMatrix);
   } finally {
-    rmSync(targetRepo, { recursive: true, force: true });
+    removeTempTree(targetRepo);
   }
 
   const runRepo = createTempQualificationRepo();
@@ -1062,7 +1098,7 @@ test("tampered existing evidence bundle report blocks both promotions before can
     assert.deepEqual(snapshotTree(evidenceRoot), beforeEvidence);
     assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
   } finally {
-    rmSync(runRepo, { recursive: true, force: true });
+    removeTempTree(runRepo);
   }
 });
 
@@ -1101,7 +1137,7 @@ test("target registration restores registry and matrix bytes when matrix replace
     assert.equal(readFileSync(registryPath, "utf8"), beforeRegistry);
     assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    removeTempTree(repoRoot);
   }
 });
 
@@ -1142,7 +1178,7 @@ test("recording a run rolls back the newly created evidence bundle when matrix r
     assert.deepEqual(snapshotTree(evidenceRoot), beforeEvidence);
     assert.equal(readFileSync(registryPath, "utf8"), beforeRegistry);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
+    removeTempTree(repoRoot);
   }
 });
 
@@ -1159,8 +1195,8 @@ test("canonical promotion rejects a symlinked candidate root before reading it",
     );
     assert.deepEqual(readdirSync(outside), []);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTempTree(repoRoot);
+    removeTempTree(outside);
   }
 });
 
@@ -1191,8 +1227,8 @@ test("canonical promotion rejects a symlinked candidate file before mutation", (
     assert.equal(readFileSync(registryPath, "utf8"), before);
     assert.ok(existsSync(outsidePath));
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTempTree(repoRoot);
+    removeTempTree(outside);
   }
 });
 
@@ -1224,8 +1260,8 @@ test("canonical run promotion rejects a symlinked execution report before mutati
     );
     assert.deepEqual(snapshotTree(evidenceRoot), before);
   } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-    rmSync(outside, { recursive: true, force: true });
+    removeTempTree(repoRoot);
+    removeTempTree(outside);
   }
 });
 
@@ -1342,6 +1378,18 @@ test("a passed record requires every required automated observation", () => {
     () => validateEvidenceRecord(sealRecord(record), syntheticContext()),
     /missing required automated observation/,
   );
+});
+
+test("a passed record may omit an optional automated observation", () => {
+  const context = syntheticContext();
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
+  const workflow = context.workflowCatalog.workflows.find(
+    (candidate) => candidate.id === record.workflowId,
+  );
+  assert.ok(workflow, "fixture workflow should be present");
+  workflow.automatedObservations.push({ id: "future-device-audit", required: false });
+
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(record), context));
 });
 
 test("a failed required automated observation produces a valid failed record", () => {
