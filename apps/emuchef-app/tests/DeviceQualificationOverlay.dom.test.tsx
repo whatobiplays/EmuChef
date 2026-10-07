@@ -27,6 +27,7 @@ function status(): QualificationModeStatus {
     workflows: [],
     targets: [],
     resumableCandidates: [],
+    lifecycleRevision: 1,
   };
 }
 
@@ -56,6 +57,7 @@ function session(
       runValidity: "valid",
       qualificationOutcome: "not_observed",
     },
+    lifecycleRevision: 1,
     ...overrides,
   };
 }

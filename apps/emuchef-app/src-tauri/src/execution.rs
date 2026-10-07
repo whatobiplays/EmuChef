@@ -2623,6 +2623,86 @@ fn launch_configured_app_after_consumption(
     state: &AppState,
     action: &LaunchActionRecord,
 ) -> Result<Value, String> {
+    launch_configured_app_after_consumption_with_runtime(state, action, &state.sidecar)
+}
+
+/// Classify one raw runtime failure from the configured-app launch path and run
+/// the shared ordered runtime-loss recovery before the launch surface replaces
+/// the failure with a launch-local error.
+///
+/// A proven `RuntimeSessionLost` already cleared the process-wide execution,
+/// review, device, and root authority, so the frontend must receive the same
+/// sanitized runtime-loss classification its centralized recovery handles.
+/// `UnknownExecution` and ordinary failures from an otherwise-live runtime keep
+/// the caller's bounded launch-local classification. Returns `None` when the
+/// caller must keep that local error.
+fn recover_launch_runtime_failure(
+    state: &AppState,
+    public_handle: &str,
+    error: &str,
+) -> Result<Option<String>, String> {
+    let process_loss =
+        execution_session_loss(error) == Some(ExecutionSessionLoss::RuntimeSessionLost);
+    recover_from_real_execution_loss(state, public_handle, error)?;
+    Ok(process_loss.then(runtime_session_lost_error))
+}
+
+/// Resolve the trusted Platform-Tools runtime a configured-app launch must use
+/// from the installation identity the reviewed plan retained. A replaced or
+/// removed installation is refused before any runtime request.
+fn resolve_launch_platform_tools(
+    state: &AppState,
+    review: &ReviewedPlanSnapshot,
+) -> Result<crate::commands::AdbRuntimeSnapshot, String> {
+    let expected_adb = review
+        .platform_tools_identity
+        .as_ref()
+        .ok_or_else(platform_tools_unavailable)?;
+    crate::commands::revalidated_adb_runtime_snapshot(state, expected_adb).map_err(|error| {
+        match error {
+            AdbRevalidationError::Unavailable => platform_tools_unavailable(),
+            AdbRevalidationError::Changed => launch_stale_target(),
+        }
+    })
+}
+
+/// Consume one already-validated launch action against one runtime requester.
+///
+/// The requester parameter lets tests drive every runtime request of the launch
+/// path with scripted responses. Production always passes the process sidecar.
+fn launch_configured_app_after_consumption_with_runtime<R: RuntimeRequester>(
+    state: &AppState,
+    action: &LaunchActionRecord,
+    runtime: &R,
+) -> Result<Value, String> {
+    launch_configured_app_after_consumption_with_platform_tools(
+        state,
+        action,
+        runtime,
+        resolve_launch_platform_tools,
+    )
+}
+
+/// Consume one already-validated launch action after re-reading and validating
+/// the reviewed plan.
+///
+/// The platform-tools resolver is injectable so tests can drive every runtime
+/// request with scripted responses without a physically signed Platform-Tools
+/// installation. Production always revalidates the reviewed installation
+/// identity through the live manager.
+fn launch_configured_app_after_consumption_with_platform_tools<R, F>(
+    state: &AppState,
+    action: &LaunchActionRecord,
+    runtime: &R,
+    resolve_platform_tools: F,
+) -> Result<Value, String>
+where
+    R: RuntimeRequester,
+    F: FnOnce(
+        &AppState,
+        &ReviewedPlanSnapshot,
+    ) -> Result<crate::commands::AdbRuntimeSnapshot, String>,
+{
     let mapping = &action.mapping;
 
     let review = state
@@ -2633,27 +2713,22 @@ fn launch_configured_app_after_consumption(
         .map_err(|_| launch_stale_target())?
         .clone();
     validate_catalog(&review, &state).map_err(|_| launch_stale_target())?;
-    let expected_adb = review
-        .platform_tools_identity
-        .as_ref()
-        .ok_or_else(platform_tools_unavailable)?;
-    let platform_tools = crate::commands::revalidated_adb_runtime_snapshot(state, expected_adb)
-        .map_err(|error| match error {
-            AdbRevalidationError::Unavailable => platform_tools_unavailable(),
-            AdbRevalidationError::Changed => launch_stale_target(),
-        })?;
+    let platform_tools = resolve_platform_tools(state, &review)?;
 
-    let _devices =
-        match list_and_reconcile_preflight_inventory(&state, &state.sidecar, &platform_tools) {
-            Ok(devices) => devices,
-            Err(PreflightInventoryFailure::ProductUnavailable) => {
-                return Err(device_disconnected());
+    let _devices = match list_and_reconcile_preflight_inventory(&state, runtime, &platform_tools) {
+        Ok(devices) => devices,
+        Err(PreflightInventoryFailure::ProductUnavailable) => {
+            return Err(device_disconnected());
+        }
+        Err(PreflightInventoryFailure::Runtime(error)) => {
+            if let Some(lost) =
+                recover_launch_runtime_failure(state, &mapping.public_handle, &error)?
+            {
+                return Err(lost);
             }
-            Err(PreflightInventoryFailure::Runtime(error)) => {
-                recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
-                return Err(device_disconnected());
-            }
-        };
+            return Err(device_disconnected());
+        }
+    };
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
         let refreshed = handles
@@ -2669,13 +2744,17 @@ fn launch_configured_app_after_consumption(
         (device.serial.clone(), refreshed)
     };
     let facts = match runtime_request(
-        &state.sidecar,
+        runtime,
         "probeDevice",
         json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     ) {
         Ok(facts) => facts,
         Err(error) => {
-            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            if let Some(lost) =
+                recover_launch_runtime_failure(state, &mapping.public_handle, &error)?
+            {
+                return Err(lost);
+            }
             return Err(device_disconnected());
         }
     };
@@ -2684,13 +2763,17 @@ fn launch_configured_app_after_consumption(
     validate_plan_digest(&refreshed_review).map_err(|_| launch_stale_target())?;
 
     let report_response = match runtime_request(
-        &state.sidecar,
+        runtime,
         "getExecution",
         json!({ "executionId": mapping.sidecar_id }),
     ) {
         Ok(response) => response,
         Err(error) => {
-            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            if let Some(lost) =
+                recover_launch_runtime_failure(state, &mapping.public_handle, &error)?
+            {
+                return Err(lost);
+            }
             return Err(launch_unavailable());
         }
     };
@@ -2700,13 +2783,17 @@ fn launch_configured_app_after_consumption(
     eligible_launch_label(&mapping, report).ok_or_else(launch_unavailable)?;
 
     match runtime_request(
-        &state.sidecar,
+        runtime,
         "launchExecutionApp",
         json!({ "executionId": mapping.sidecar_id }),
     ) {
         Ok(_) => {}
         Err(error) => {
-            recover_from_real_execution_loss(state, &mapping.public_handle, &error)?;
+            if let Some(lost) =
+                recover_launch_runtime_failure(state, &mapping.public_handle, &error)?
+            {
+                return Err(lost);
+            }
             return Err(safe_error(
             "launch_failed",
             "The configured app could not be launched. Refresh the completed execution to create a new launch action.",
@@ -5945,7 +6032,7 @@ pub(crate) mod tests {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
             catalog: Ok(catalog),
             qualification_repository,
-            qualification_transition_gate: Mutex::new(()),
+            qualification_transition_gate: crate::commands::QualificationTransitionGate::new(),
             adb: Mutex::new(crate::adb::AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(
                 crate::commands::PlatformToolsSelectionStore::default(),
@@ -9108,6 +9195,406 @@ pub(crate) mod tests {
             outcome.requests
         );
         outcome.requests
+    }
+
+    /// Observable consequences of one scripted configured-app launch attempt.
+    struct LaunchSeamOutcome {
+        /// Result the launch path returned.
+        result: Result<Value, String>,
+        /// Runtime request types the scripted requester observed, in order.
+        requests: Vec<String>,
+        /// Whether the terminal execution mapping survived the attempt.
+        mapping_retained: bool,
+        /// Whether the reviewed plan retained by the execution stayed usable.
+        review_retained: bool,
+        /// Whether the active qualification attempt failed closed.
+        attempt_invalidated: bool,
+    }
+
+    /// Drive one configured-app launch whose runtime requests are scripted.
+    ///
+    /// The harness builds the authority a production launch runs against: a
+    /// reviewed plan with a launch step, a trusted Platform-Tools identity, one
+    /// terminal execution retaining one launch action, and an active
+    /// qualification attempt bound to that execution.
+    fn launch_seam_outcome(responses: Vec<Result<Value, String>>) -> LaunchSeamOutcome {
+        let repository_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
+        std::fs::write(
+            repository_root
+                .path()
+                .join("authored/recipes/test.recipe.yaml"),
+            b"id: test.recipe\n",
+        )
+        .unwrap();
+        let repository =
+            crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+                repository_root.path().to_path_buf(),
+                Box::new(NoQualificationToolRunner),
+                serde_json::from_value(qualification_build_json()).unwrap(),
+                crate::qualification_repository::QualificationSourceState {
+                    head: "1".repeat(40),
+                    tracked_worktree_clean: true,
+                },
+            );
+        let candidate = repository
+            .create_candidate(
+                crate::qualification_repository::CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": qualification_build_json(),
+                }),
+                None,
+            )
+            .unwrap();
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let provider =
+            crate::qualification_repository::QualificationRepositoryProvider::for_test(repository);
+        let (_app_root, app) = test_app_with_qualification(
+            Mutex::new(ExecutionHandleStore::default()),
+            handles,
+            root,
+            provider,
+        );
+        let state = app.state::<AppState>();
+        install_test_platform_tools(&state);
+        let review_handle = rebind_review_to_test_catalog(&state.handles, &review_handle);
+        // The launch path resolves its launch step from the reviewed plan and
+        // revalidates the trusted Platform-Tools identity the review retained.
+        let review_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            let mut retained = handles.review(&review_handle).unwrap().clone();
+            retained.response["plan"]["steps"] = json!([{
+                "id": "recipe.one/launch",
+                "recipe_ref": "recipe.one",
+                "type": "launch_app",
+                "name": "Launch app",
+                "note": "Launch configured app",
+                "params": {
+                    "package_name": { "value": "com.example.app" },
+                    "activity": { "value": ".MainActivity" }
+                }
+            }]);
+            retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
+            retained.platform_tools_identity =
+                Some(state.adb.lock().unwrap().installation_identity().unwrap());
+            handles.insert_review(retained)
+        };
+        let device_handle = state
+            .handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .device_handle
+            .clone();
+        let device_session_epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .expect("the prepared review must retain the device epoch");
+        // One terminal execution that retained exactly one launch action.
+        let (execution_handle, action) = {
+            let mut executions = state.executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Real).unwrap();
+            let mapping = executions.bind_started(
+                ExecutionKind::Real,
+                "sidecar-real".into(),
+                review_handle.clone(),
+                state
+                    .handles
+                    .lock()
+                    .unwrap()
+                    .review(&review_handle)
+                    .unwrap()
+                    .clone(),
+            );
+            let report = eligible_launch_report("succeeded");
+            executions.mark_terminal_with_report(
+                ExecutionKind::Real,
+                &mapping.public_handle,
+                report.clone(),
+                json!({ "status": "ready" }),
+            );
+            let handle = executions
+                .launch_action(&mapping, &report)
+                .expect("the terminal report must retain one launch action");
+            let action = executions
+                .consume_launch_action(handle["handle"].as_str().unwrap())
+                .unwrap();
+            (mapping.public_handle, action)
+        };
+        // Retain granted root evidence so a process-wide runtime loss can be
+        // proven to clear authority that only the lost session produced.
+        let lost_root_key = crate::device_qualification::RootQualificationKey::new(
+            "launch-runtime-loss-device",
+            device_session_epoch,
+            35,
+        );
+        {
+            let mut root_qualification = state.root_qualification.lock().unwrap();
+            let attempt = root_qualification.begin(lost_root_key.clone()).unwrap();
+            assert!(root_qualification.complete(attempt, RootQualificationState::Granted));
+        }
+        // An active qualification attempt that owns the same device authority
+        // and is bound to the terminal execution, so a proven process-wide
+        // runtime loss can be shown to fail it closed.
+        let session_handle =
+            crate::qualification_session::session_handle_for_candidate(&candidate).unwrap();
+        let mut observation = qualification_session_observation_for(&device_handle);
+        observation.session_epoch = Some(device_session_epoch);
+        crate::qualification_session::begin(
+            &state,
+            crate::qualification_session::BeginSessionRequest {
+                session_handle: session_handle.clone(),
+                candidate_handle: candidate.clone(),
+                captured_at: "2026-08-23T12:00:00Z".to_string(),
+                device_plan: "test-plan".to_string(),
+                target: qualification_session_target(),
+                workflow: qualification_session_workflow(),
+                build: serde_json::from_value(qualification_build_json()).unwrap(),
+                runtime_contract: "real-execution-v1".to_string(),
+                observation,
+            },
+        )
+        .expect("the attempt should begin against the prepared candidate");
+        crate::qualification_session::record_checkpoint(
+            &state,
+            &session_handle,
+            "device_state_verified",
+            crate::qualification_mode::QualificationCheckpointOutcome::Pass,
+        )
+        .expect("the required checkpoint should be recorded");
+        crate::qualification_session::observe(
+            &state,
+            crate::qualification_session::QualificationLifecycleObservation::RealExecutionAdmitted(
+                Box::new(
+                    crate::qualification_session::ExecutionAdmissionObservation {
+                        execution_handle: execution_handle.clone(),
+                        review: qualification_admission_review_for(&device_handle),
+                        device_handle: device_handle.clone(),
+                    },
+                ),
+            ),
+        );
+
+        let runtime = StartSeamRuntime {
+            handles: &state.handles,
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses),
+            effect: StartSeamEffect::None,
+        };
+        // The trusted Platform-Tools resolver is injected because a physically
+        // signed installation cannot exist in a test environment.
+        let result = launch_configured_app_after_consumption_with_platform_tools(
+            &state,
+            &action,
+            &runtime,
+            |_state, _review| {
+                Ok(crate::commands::AdbRuntimeSnapshot {
+                    adb_path: "/trusted/adb".to_string(),
+                    revision: 2,
+                })
+            },
+        );
+        let requests = runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(request_type, _)| request_type.clone())
+            .collect();
+        let attempt_invalidated = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap()
+            .payload
+            .get("runValidity")
+            .and_then(Value::as_str)
+            == Some("invalid");
+        let mapping_retained = state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .is_ok();
+        let review_retained = state.handles.lock().unwrap().review(&review_handle).is_ok();
+        LaunchSeamOutcome {
+            result,
+            requests,
+            mapping_retained,
+            review_retained,
+            attempt_invalidated,
+        }
+    }
+
+    /// One proven runtime-session loss at a configured-app launch request seam
+    /// must reach the frontend as the process-wide classification and clear the
+    /// authority derived from the lost session.
+    #[test]
+    fn lost_runtime_during_launch_inventory_reports_process_loss_and_clears_authority() {
+        let outcome = launch_seam_outcome(vec![Err(safe_error(
+            "runtime_session_lost",
+            "the runtime session is gone",
+        ))]);
+        let error = outcome.result.expect_err("the launch seam must fail");
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert_eq!(outcome.requests, vec!["listAdbDevices"]);
+        assert!(!outcome.mapping_retained);
+        assert!(!outcome.review_retained);
+        assert!(outcome.attempt_invalidated);
+    }
+
+    #[test]
+    fn lost_runtime_during_launch_probe_reports_process_loss_and_clears_authority() {
+        let outcome = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+        let error = outcome.result.expect_err("the launch seam must fail");
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert_eq!(outcome.requests, vec!["listAdbDevices", "probeDevice"]);
+        assert!(!outcome.mapping_retained);
+        assert!(!outcome.review_retained);
+        assert!(outcome.attempt_invalidated);
+    }
+
+    #[test]
+    fn lost_runtime_during_launch_report_reports_process_loss_and_clears_authority() {
+        let outcome = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+        let error = outcome.result.expect_err("the launch seam must fail");
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert_eq!(
+            outcome.requests,
+            vec!["listAdbDevices", "probeDevice", "getExecution"]
+        );
+        assert!(!outcome.mapping_retained);
+        assert!(outcome.attempt_invalidated);
+    }
+
+    #[test]
+    fn lost_runtime_during_launch_request_reports_process_loss_and_clears_authority() {
+        let outcome = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Ok(json!({ "execution": eligible_launch_report("succeeded") })),
+            Err(safe_error(
+                "runtime_session_lost",
+                "the runtime session is gone",
+            )),
+        ]);
+        let error = outcome.result.expect_err("the launch seam must fail");
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        assert_eq!(
+            outcome.requests,
+            vec![
+                "listAdbDevices",
+                "probeDevice",
+                "getExecution",
+                "launchExecutionApp"
+            ]
+        );
+        assert!(!outcome.mapping_retained);
+        assert!(outcome.attempt_invalidated);
+    }
+
+    /// A configured-app launch whose requests all succeed keeps its existing
+    /// success result.
+    #[test]
+    fn configured_app_launch_still_succeeds_for_a_live_runtime() {
+        let outcome = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Ok(json!({ "execution": eligible_launch_report("succeeded") })),
+            Ok(json!({ "accepted": true })),
+        ]);
+        let result = outcome.result.expect("the launch must succeed");
+        assert_eq!(result["launched"], Value::Bool(true));
+        assert!(outcome.mapping_retained);
+        assert!(outcome.review_retained);
+        assert!(!outcome.attempt_invalidated);
+    }
+
+    /// Ordinary runtime-request failures from an otherwise-live runtime keep
+    /// the bounded launch-local classifications and must not invalidate
+    /// unrelated process or qualification authority.
+    #[test]
+    fn ordinary_launch_request_failures_keep_their_local_classifications() {
+        let inventory = launch_seam_outcome(vec![Err(safe_error(
+            "adb_unavailable",
+            "adb could not list devices",
+        ))]);
+        let error = inventory.result.expect_err("the launch seam must fail");
+        assert!(error.contains("device_disconnected"), "{error}");
+        assert!(!error.contains("runtime_session_lost"));
+        assert!(inventory.mapping_retained);
+        assert!(!inventory.attempt_invalidated);
+
+        let probe = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Err(safe_error("probe_failed", "the device probe failed")),
+        ]);
+        let error = probe.result.expect_err("the launch seam must fail");
+        assert!(error.contains("device_disconnected"), "{error}");
+        assert!(probe.mapping_retained);
+        assert!(!probe.attempt_invalidated);
+
+        let report = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Err(safe_error("status_failed", "the report could not be read")),
+        ]);
+        let error = report.result.expect_err("the launch seam must fail");
+        assert!(error.contains("launch_unavailable"), "{error}");
+        assert!(report.mapping_retained);
+        assert!(!report.attempt_invalidated);
+
+        let launch = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Ok(json!({ "execution": eligible_launch_report("succeeded") })),
+            Err(safe_error("launch_rejected", "the launch request failed")),
+        ]);
+        let error = launch.result.expect_err("the launch seam must fail");
+        assert!(error.contains("launch_failed"), "{error}");
+        assert!(!error.contains("runtime_session_lost"));
+        assert!(launch.mapping_retained);
+        assert!(!launch.attempt_invalidated);
+    }
+
+    /// A mapping-local `unknown_execution` failure stays a bounded launch
+    /// failure and never becomes a process-wide runtime-session loss.
+    #[test]
+    fn unknown_execution_during_launch_stays_a_bounded_failure() {
+        let outcome = launch_seam_outcome(vec![
+            Ok(supported_inventory("transport-1")),
+            Ok(target_facts()),
+            Err(safe_error(
+                "unknown_execution",
+                "the execution mapping does not exist",
+            )),
+        ]);
+        let error = outcome.result.expect_err("the launch seam must fail");
+        assert!(error.contains("launch_unavailable"), "{error}");
+        assert!(!error.contains("runtime_session_lost"));
+        assert!(!outcome.mapping_retained);
+        // The bounded loss drops exactly that mapping's review authority and
+        // fails the attempt bound to it closed; nothing else is cleared.
+        assert!(!outcome.review_retained);
+        assert!(outcome.attempt_invalidated);
     }
 
     #[test]

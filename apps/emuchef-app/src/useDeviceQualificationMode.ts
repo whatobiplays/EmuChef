@@ -80,6 +80,15 @@ function candidatePreviewFromSummary(
   };
 }
 
+/**
+ * Normalize a backend lifecycle revision. Only a finite positive revision
+ * carries an ordering claim; a missing or zero revision means the projection
+ * contains no lifecycle state and must never update the presented session.
+ */
+function orderingRevision(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 /** Refresh only when the execution phase or stable execution identity changes. */
 function executionRefreshSignal(execution: WorkflowState["execution"] | undefined): string {
   if (!execution) return "none";
@@ -125,15 +134,22 @@ export function useDeviceQualificationMode({
   const [error, setError] = useState<string | null>(null);
   const busyCountRef = useRef(0);
   const refreshGenerationRef = useRef(0);
-  // The refresh generation of the last status that reached the projection. An
-  // explicit command snapshot is authoritative for the session state it
-  // returns, but a status read that landed after the command started already
-  // describes newer lifecycle state and must not be replaced by the delayed
-  // command response.
-  const appliedStatusGenerationRef = useRef(0);
-  const beginStatusGenerationRef = useRef<number | null>(null);
-  const beginSessionHandleRef = useRef<string | null>(null);
-  // The successful begin result is authoritative, but status refresh may lag it.
+  // Backend transition revision of the newest qualification lifecycle
+  // projection this adapter has applied. Rust serializes every qualification
+  // transition through the qualification transition gate and stamps each
+  // projection with the revision of the acquisition that produced it, so
+  // revisions are the only lifecycle ordering authority. A status projection
+  // taken before a command always carries a lower revision than the committed
+  // command snapshot, so it can never roll that snapshot back however late
+  // its response arrives, while a status genuinely ordered after the command
+  // supersedes it.
+  const appliedLifecycleRevisionRef = useRef(0);
+  // Backend-authored device-selection lock of the newest applied projection.
+  const [deviceSelectionLocked, setDeviceSelectionLocked] = useState(false);
+  // A successful begin result is authoritative for the active attempt it
+  // committed, but the device-selection lock it owns is projected by the next
+  // status. Until a revision-bearing status supersedes the begin snapshot, keep
+  // presenting the lock that attempt owns.
   const [beginAssociationPending, setBeginAssociationPending] = useState(false);
   const recordingCandidateHandlesRef = useRef(new Set<string>());
 
@@ -165,33 +181,21 @@ export function useDeviceQualificationMode({
     }
   }, [finishBusy, startBusy]);
 
-  const applyStatus = useCallback((nextStatus: QualificationModeStatus, generation: number) => {
-    appliedStatusGenerationRef.current = generation;
-    const pendingBeginGeneration = beginStatusGenerationRef.current;
-    const pendingSessionHandle = beginSessionHandleRef.current;
-    const statusMatchesBegunSession = pendingSessionHandle !== null
-      && nextStatus.resumableSession?.sessionHandle === pendingSessionHandle;
-    const statusConfirmsBeginClosed = !nextStatus.enabled
-      || (statusMatchesBegunSession && nextStatus.resumableSession?.phase === "closed")
-      || (nextStatus.resumableSession == null && !nextStatus.deviceSelectionLocked);
-    const statusConfirmsBeginAssociated = statusMatchesBegunSession
-      && nextStatus.deviceSelectionLocked;
-    if (
-      pendingBeginGeneration !== null
-      && generation > pendingBeginGeneration
-      && (statusConfirmsBeginAssociated || statusConfirmsBeginClosed)
-    ) {
-      beginStatusGenerationRef.current = null;
-      beginSessionHandleRef.current = null;
-      setBeginAssociationPending(false);
-    }
-    setStatus(nextStatus);
-    if (!nextStatus.enabled) {
-      setSession(null);
-      setTargetCandidate(null);
-      setRunCandidates([]);
-      return;
-    }
+  // Lifecycle state is ordered exclusively by the backend transition revision:
+  // every successful status response offers its projection here, even when a
+  // newer request superseded this one's frontend refresh generation, because a
+  // projection taken under a newer Rust transition must win however late its
+  // response arrives. Frontend request generations never order lifecycle state.
+  const mergeLifecycleProjection = useCallback((nextStatus: QualificationModeStatus) => {
+    const revision = orderingRevision(nextStatus.lifecycleRevision);
+    // A response without a lifecycle revision makes no lifecycle claim, and a
+    // projection older than the newest applied revision describes state that a
+    // newer transition already superseded. Neither may update the presented
+    // session, candidates, or device-selection lock.
+    if (revision === 0 || revision < appliedLifecycleRevisionRef.current) return;
+    appliedLifecycleRevisionRef.current = revision;
+    setBeginAssociationPending(false);
+    setDeviceSelectionLocked(nextStatus.deviceSelectionLocked);
     setSession(nextStatus.resumableSession ?? null);
     setRunCandidates(nextStatus.resumableCandidates.filter((candidate) => candidate.kind === "qualification_run"));
     setTargetCandidate((current) => {
@@ -208,31 +212,32 @@ export function useDeviceQualificationMode({
     });
   }, []);
 
+  // Non-lifecycle presentation (build identity, catalog, recordability,
+  // messages) reflects the newest status response; which response that is stays
+  // a property of the frontend refresh generation.
+  const applyStatusPresentation = useCallback((nextStatus: QualificationModeStatus) => {
+    setStatus(nextStatus);
+  }, []);
+
   // Apply the session snapshot a successful begin, checkpoint, or abandon
-  // command returned. The snapshot is authoritative for the attempt, so it is
-  // projected before the follow-up status refresh: a failed refresh must not
-  // leave a recorded checkpoint looking unrecorded, an abandoned attempt
-  // looking active, or the association state stale. A status read that landed
-  // after the command started already describes newer lifecycle state, so the
-  // delayed command response must not replace it.
+  // command returned. The snapshot carries the revision of the transition that
+  // committed the command, so it is applied unless a genuinely newer
+  // qualification projection already superseded it. Projecting it before the
+  // follow-up status refresh means a failed refresh cannot leave a recorded
+  // checkpoint looking unrecorded or an abandoned attempt looking active.
   const applyAuthoritativeSessionSnapshot = useCallback((
     nextSession: QualificationSessionSnapshot,
-    statusGeneration: number,
     options?: { pendingAssociation?: boolean },
   ) => {
-    if (appliedStatusGenerationRef.current !== statusGeneration) return;
+    const revision = orderingRevision(nextSession.lifecycleRevision);
+    if (revision !== 0 && revision < appliedLifecycleRevisionRef.current) return;
+    if (revision !== 0) appliedLifecycleRevisionRef.current = revision;
     setSession(nextSession);
     if (nextSession.phase === "closed") {
-      beginStatusGenerationRef.current = null;
-      beginSessionHandleRef.current = null;
       setBeginAssociationPending(false);
       return;
     }
-    if (options?.pendingAssociation) {
-      beginStatusGenerationRef.current = refreshGenerationRef.current;
-      beginSessionHandleRef.current = nextSession.sessionHandle;
-      setBeginAssociationPending(true);
-    }
+    if (options?.pendingAssociation) setBeginAssociationPending(true);
   }, []);
 
   // Re-read the sanitized status. Operator and lifecycle refreshes present the
@@ -248,7 +253,12 @@ export function useDeviceQualificationMode({
     }
     try {
       const nextStatus = await api.deviceQualificationModeStatus();
-      if (generation === refreshGenerationRef.current) applyStatus(nextStatus, generation);
+      // Lifecycle merging is ordered only by the backend transition revision,
+      // so every successful response offers its projection even when a newer
+      // request superseded this one's frontend refresh generation.
+      mergeLifecycleProjection(nextStatus);
+      // The remaining status presentation still follows the newest request.
+      if (generation === refreshGenerationRef.current) applyStatusPresentation(nextStatus);
     } catch (refreshError) {
       if (presentBusy && generation === refreshGenerationRef.current) {
         setError(errorMessage(refreshError));
@@ -256,7 +266,7 @@ export function useDeviceQualificationMode({
     } finally {
       if (presentBusy) finishBusy();
     }
-  }, [applyStatus, enabled, finishBusy, startBusy]);
+  }, [applyStatusPresentation, enabled, finishBusy, mergeLifecycleProjection, startBusy]);
 
   const refresh = useCallback(async () => {
     await loadStatus(true);
@@ -308,14 +318,9 @@ export function useDeviceQualificationMode({
     workflowId: string;
   }) => {
     if (!enabled || !status?.enabled) return;
-    const statusGeneration = appliedStatusGenerationRef.current;
     const result = await runOperation(
       () => api.beginQualificationSession(request),
-      (nextSession) => applyAuthoritativeSessionSnapshot(
-        nextSession,
-        statusGeneration,
-        { pendingAssociation: true },
-      ),
+      (nextSession) => applyAuthoritativeSessionSnapshot(nextSession, { pendingAssociation: true }),
     );
     if (result !== null) await refresh();
   }, [applyAuthoritativeSessionSnapshot, enabled, refresh, runOperation, status?.enabled]);
@@ -352,10 +357,9 @@ export function useDeviceQualificationMode({
     outcome: QualificationCheckpointOutcome,
   ) => {
     if (!enabled || !status?.enabled || !session) return;
-    const statusGeneration = appliedStatusGenerationRef.current;
     const result = await runOperation(
       () => api.recordQualificationCheckpoint(session.sessionHandle, checkpointId, outcome),
-      (nextSession) => applyAuthoritativeSessionSnapshot(nextSession, statusGeneration),
+      (nextSession) => applyAuthoritativeSessionSnapshot(nextSession),
     );
     if (result !== null) await refresh();
   }, [
@@ -369,10 +373,9 @@ export function useDeviceQualificationMode({
 
   const abandonSession = useCallback(async () => {
     if (!enabled || !status?.enabled || !session) return;
-    const statusGeneration = appliedStatusGenerationRef.current;
     const result = await runOperation(
       () => api.abandonQualificationSession(session.sessionHandle),
-      (closedSession) => applyAuthoritativeSessionSnapshot(closedSession, statusGeneration),
+      (closedSession) => applyAuthoritativeSessionSnapshot(closedSession),
     );
     if (result === null) return;
     await refresh();
@@ -410,9 +413,9 @@ export function useDeviceQualificationMode({
     await refresh();
   }, [enabled, refresh, runOperation, session, status?.enabled]);
 
-  const deviceSelectionLocked = session?.phase === "closed"
+  const presentedDeviceSelectionLocked = session?.phase === "closed"
     ? false
-    : beginAssociationPending || (status?.deviceSelectionLocked ?? false);
+    : beginAssociationPending || deviceSelectionLocked;
   const intentLock = session && session.phase !== "closed"
     ? { devicePlan: session.devicePlan, selectedRecipes: [...session.requiredRecipes] }
     : null;
@@ -423,7 +426,7 @@ export function useDeviceQualificationMode({
     targetCandidate,
     runCandidates,
     intentLock,
-    deviceSelectionLocked,
+    deviceSelectionLocked: presentedDeviceSelectionLocked,
     busy,
     error,
     refresh,

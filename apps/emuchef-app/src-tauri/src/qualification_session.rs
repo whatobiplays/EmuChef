@@ -259,6 +259,20 @@ pub(crate) struct QualificationSessionSnapshot {
     pub(crate) recordable: bool,
     pub(crate) invalid_reason: Option<String>,
     pub(crate) candidate: Option<QualificationCandidateSummaryDto>,
+    /// Revision of the serialized Rust transition under which this projection
+    /// was taken. A command response carries the revision of the transition
+    /// that committed the command; a status projection carries the revision of
+    /// the transition under which its lifecycle state was read.
+    ///
+    /// The overlay applies a snapshot only when its revision is not older than
+    /// the newest revision it already applied, so a pre-command status that
+    /// reaches the frontend after the command response cannot roll the
+    /// authoritative command result back, while a status that genuinely
+    /// follows the command may replace it. Zero means the snapshot was
+    /// projected outside any transition and therefore carries no ordering
+    /// claim.
+    #[serde(default)]
+    pub(crate) lifecycle_revision: u64,
 }
 
 /// Pure lifecycle state for one qualification run candidate.
@@ -1113,6 +1127,7 @@ impl QualificationSession {
             recordable: self.recordable(),
             invalid_reason: self.invalid_reason(),
             candidate,
+            lifecycle_revision: 0,
         }
     }
 }
@@ -2224,7 +2239,8 @@ pub(crate) fn retry_deferred_finalization(
     // outside both the transition gate and the qualification-session mutex.
     let source_matches = provider.authored_recipe_digests_match(&ready_session.1);
 
-    let _transition = crate::commands::qualification_transition_lock(state);
+    let transition = crate::commands::qualification_transition_lock(state);
+    let transition_revision = transition.revision();
     let mut store = lock_session_store(state);
     store.complete_finalization_check(&ready_session.0);
     ensure_recovered(state, provider, &mut store)?;
@@ -2252,9 +2268,11 @@ pub(crate) fn retry_deferred_finalization(
     )
     .ok_or_else(persistence_error)?;
     drop(store);
-    drop(_transition);
+    drop(transition);
     let candidate = candidate_summary(provider, session.candidate_handle())?;
-    Ok(Some(session.snapshot(Some(candidate))))
+    let mut snapshot = session.snapshot(Some(candidate));
+    snapshot.lifecycle_revision = transition_revision;
+    Ok(Some(snapshot))
 }
 
 fn deferred_session_has_complete_evidence(session: &QualificationSession) -> bool {
@@ -3075,6 +3093,7 @@ fn begin_with_candidate_summary(
         // Entries queued behind the gate re-check the process handoff state here,
         // so no attempt can activate after the clean-handoff marker is removed.
         let transition = crate::commands::qualification_transition_lock(state);
+        let transition_revision = transition.revision();
         let result = (|| {
             qualification_process_handoff_gate(state)?;
             let mut store = state
@@ -3120,7 +3139,8 @@ fn begin_with_candidate_summary(
             // must leave no active pointer or current-process provenance behind.
             let candidate = summarize_candidate(provider, session.candidate_handle())
                 .map_err(|_| persistence_error())?;
-            let snapshot = session.snapshot(Some(candidate));
+            let mut snapshot = session.snapshot(Some(candidate));
+            snapshot.lifecycle_revision = transition_revision;
             let mut recovery = state.recovery.lock().map_err(|_| persistence_error())?;
             persist(provider, &session)?;
             recovery.note_qualification_session_started(&candidate_handle);
@@ -3176,6 +3196,7 @@ pub(crate) fn record_checkpoint(
         ));
     }
     let transition = crate::commands::qualification_transition_lock(state);
+    let transition_revision = transition.revision();
     let (generation, available_devices) =
         crate::commands::current_qualification_inventory_snapshot(state);
     observe_device_inventory_in_transition(state, generation, &available_devices);
@@ -3256,17 +3277,30 @@ pub(crate) fn record_checkpoint(
         return Ok(finalized);
     }
     if !session.is_closed() {
-        let current = session_status(state)?;
+        // The checkpoint did not close the attempt, so the response projects
+        // the attempt's current state instead of the committed checkpoint
+        // transition. Read that state under a fresh gate acquisition so the
+        // revision the overlay receives describes the transition whose
+        // serialized position the projection actually occupies.
+        let reprojection = crate::commands::qualification_transition_lock(state);
+        let reprojection_revision = reprojection.revision();
+        let current = session_status(state);
+        drop(reprojection);
+        let current = current?;
         if current
             .as_ref()
             .is_none_or(|current| current.session_handle != session_handle)
         {
             return Err(inactive_error());
         }
-        return Ok(current.expect("the session identity was checked above"));
+        let mut current = current.expect("the session identity was checked above");
+        current.lifecycle_revision = reprojection_revision;
+        return Ok(current);
     }
     let candidate = candidate_summary(provider, &candidate_handle)?;
-    Ok(session.snapshot(Some(candidate)))
+    let mut snapshot = session.snapshot(Some(candidate));
+    snapshot.lifecycle_revision = transition_revision;
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -3297,6 +3331,7 @@ pub(crate) fn abandon(
     // begun before the clean-handoff marker is removed can no longer commit
     // behind it.
     let transition = crate::commands::qualification_transition_lock(state);
+    let transition_revision = transition.revision();
     let result = (|| {
         let mut store = state
             .qualification_sessions
@@ -3321,7 +3356,9 @@ pub(crate) fn abandon(
         )
         .ok_or_else(persistence_error)?;
         let candidate = candidate_summary(provider, &candidate_handle)?;
-        Ok(session.snapshot(Some(candidate)))
+        let mut snapshot = session.snapshot(Some(candidate));
+        snapshot.lifecycle_revision = transition_revision;
+        Ok(snapshot)
     })();
     transition.release_and_retry_best_effort();
     result
@@ -3923,7 +3960,7 @@ mod tests {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
             catalog: Err("test catalog is not needed by qualification commands".to_string()),
             qualification_repository: provider,
-            qualification_transition_gate: Mutex::new(()),
+            qualification_transition_gate: crate::commands::QualificationTransitionGate::new(),
             adb: Mutex::new(AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
             input_contracts: Mutex::new(InputContractSnapshot::default()),
@@ -4204,6 +4241,123 @@ mod tests {
             .expect("the finalized run candidate should remain visible");
         assert_eq!(candidate.run_validity.as_deref(), Some("valid"));
         assert!(candidate.promotable);
+    }
+
+    /// The overlay orders a status projection against a command response by the
+    /// backend transition revision. A status read that acquired the transition
+    /// gate before the checkpoint therefore keeps a lower revision than the
+    /// committed command, so its delayed response can never replace the
+    /// authoritative command result the overlay already applied.
+    #[test]
+    fn status_projection_that_precedes_a_checkpoint_keeps_a_lower_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = status_test_repository(&temp);
+        let candidate = create_run_candidate(&repository, CAPTURED_AT);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        let (device_handle, session_epoch) = available_test_device(&state, "status-revision-order");
+        let session_handle =
+            terminal_awaiting_device_checkpoint(&app, &candidate, &device_handle, session_epoch);
+
+        // The status read the operator's UI already applied before the
+        // checkpoint command committed. It projects the pre-command attempt.
+        let pre_command =
+            crate::qualification_mode::get_device_qualification_mode_status_with_hook(
+                state.inner(),
+                || {},
+            )
+            .unwrap();
+        assert_eq!(
+            pre_command
+                .resumable_session
+                .as_ref()
+                .map(|session| session.phase),
+            Some(QualificationSessionPhase::TerminalAwaitingEvidence)
+        );
+
+        let committed = record_checkpoint(
+            state.inner(),
+            &session_handle,
+            "device_state_verified",
+            CheckpointOutcome::Pass,
+        )
+        .unwrap();
+        assert_eq!(committed.phase, QualificationSessionPhase::Closed);
+        assert!(
+            committed.lifecycle_revision > pre_command.lifecycle_revision,
+            "the committed command must carry a newer revision than a status projection that preceded it"
+        );
+
+        // A status that genuinely follows the command carries a newer revision,
+        // so the overlay is allowed to let it replace the command snapshot.
+        let post_command =
+            crate::qualification_mode::get_device_qualification_mode_status_with_hook(
+                state.inner(),
+                || {},
+            )
+            .unwrap();
+        assert!(
+            post_command.lifecycle_revision > committed.lifecycle_revision,
+            "a status projection that follows a command must carry a newer revision"
+        );
+        assert!(post_command.resumable_session.is_none());
+    }
+
+    /// Begin and abandon responses carry the revision of the transition that
+    /// committed them, and a later status projection always carries a newer
+    /// revision than the command it follows.
+    #[test]
+    fn begin_and_abandon_snapshots_order_against_status_projections() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = status_test_repository(&temp);
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider, true);
+        let state = app.state::<AppState>();
+        // Publish exactly like the production begin command: the provisional
+        // candidate is claimed pending atomically with its publication, so the
+        // status projection below can never mistake it for an interrupted
+        // attempt and durably poison it before the attempt starts.
+        let candidate = publish_run_candidate(&state, CAPTURED_AT);
+        let (device_handle, session_epoch) = available_test_device(&state, "begin-revision-order");
+
+        let before_begin =
+            crate::qualification_mode::get_device_qualification_mode_status_with_hook(
+                state.inner(),
+                || {},
+            )
+            .unwrap();
+        assert!(before_begin.resumable_session.is_none());
+
+        let mut capture = observation(&device_handle);
+        capture.session_epoch = Some(session_epoch);
+        let begun = begin(
+            state.inner(),
+            begin_request(&candidate, CAPTURED_AT, capture),
+        )
+        .unwrap();
+        assert!(
+            begun.lifecycle_revision > before_begin.lifecycle_revision,
+            "a begin response must carry a newer revision than a status projection that preceded it"
+        );
+
+        let abandoned = abandon(state.inner(), &begun.session_handle).unwrap();
+        assert_eq!(abandoned.phase, QualificationSessionPhase::Closed);
+        assert!(
+            abandoned.lifecycle_revision > begun.lifecycle_revision,
+            "an abandon response must carry a newer revision than the begin it follows"
+        );
+
+        let after_abandon =
+            crate::qualification_mode::get_device_qualification_mode_status_with_hook(
+                state.inner(),
+                || {},
+            )
+            .unwrap();
+        assert!(
+            after_abandon.lifecycle_revision > abandoned.lifecycle_revision,
+            "a status projection that follows an abandon must carry a newer revision"
+        );
     }
 
     #[test]

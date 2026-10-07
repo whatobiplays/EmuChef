@@ -299,6 +299,7 @@ function resetApi(): void {
     targets: [],
     deviceSelectionLocked: false,
     resumableCandidates: [],
+    lifecycleRevision: 0,
   });
   mockApi.catalog.mockResolvedValue({
     catalog: {
@@ -1254,6 +1255,7 @@ describe("device qualification controller integration", () => {
         runValidity: "valid",
         qualificationOutcome: "not_observed",
       },
+      lifecycleRevision: 1,
     };
     mockApi.deviceQualificationModeStatus.mockResolvedValue({
       enabled: true,
@@ -1271,6 +1273,7 @@ describe("device qualification controller integration", () => {
       targets: [],
       deviceSelectionLocked: false,
       resumableCandidates: [],
+      lifecycleRevision: 1,
       resumableSession,
     });
     mockApi.pollDevices.mockResolvedValue([availableDevice]);
@@ -1330,6 +1333,7 @@ describe("device qualification controller integration", () => {
       }],
       deviceSelectionLocked: false,
       resumableCandidates: [],
+      lifecycleRevision: 1,
     };
     const sessionSnapshot = {
       sessionHandle: "session-root-refresh",
@@ -1354,6 +1358,7 @@ describe("device qualification controller integration", () => {
         runValidity: "valid",
         qualificationOutcome: "not_observed",
       },
+      lifecycleRevision: 1,
     };
     // The root command commits product qualification authority, so the
     // backend it talks to closes the attempt before the sanitized status is
@@ -1525,6 +1530,7 @@ describe("device qualification controller integration", () => {
       }],
       deviceSelectionLocked: false,
       resumableCandidates: [],
+      lifecycleRevision: 1,
     };
     const beginSessionSnapshot = {
       sessionHandle: "session-opaque",
@@ -1549,6 +1555,7 @@ describe("device qualification controller integration", () => {
         runValidity: "valid",
         qualificationOutcome: "not_observed",
       },
+      lifecycleRevision: 1,
     };
     let activeSession: typeof beginSessionSnapshot | null = null;
     mockApi.deviceQualificationModeStatus.mockImplementation(async () => ({
@@ -2151,6 +2158,7 @@ test("an authoritative inventory poll reloads qualification status without a man
     }],
     deviceSelectionLocked: false,
     resumableCandidates: [],
+    lifecycleRevision: 1,
   };
   const sessionSnapshot = {
     sessionHandle: "session-opaque",
@@ -2175,6 +2183,7 @@ test("an authoritative inventory poll reloads qualification status without a man
       runValidity: "valid",
       qualificationOutcome: "not_observed",
     },
+    lifecycleRevision: 1,
   };
   let activeSession: typeof sessionSnapshot | null = null;
   mockApi.deviceQualificationModeStatus.mockImplementation(async () => ({

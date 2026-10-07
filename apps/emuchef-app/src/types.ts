@@ -524,6 +524,13 @@ export interface QualificationModeStatus {
   targets: QualificationTargetSummary[];
   resumableCandidates: QualificationCandidateSummary[];
   resumableSession?: QualificationSessionSnapshot | null;
+  /**
+   * Backend transition revision of the serialized Rust qualification
+   * transition under which this projection was read. Zero means the response
+   * carries no lifecycle state (qualification mode disabled or the trusted
+   * repository unavailable) and never updates the presented session.
+   */
+  lifecycleRevision: number;
 }
 
 export interface BeginQualificationSessionRequest {
@@ -569,6 +576,14 @@ export interface QualificationSessionSnapshot {
    */
   invalidReason: string | null;
   candidate: QualificationCandidateSummary | null;
+  /**
+   * Revision of the serialized Rust qualification transition that produced
+   * this snapshot. A command response carries the transition that committed
+   * the command; a status projection carries the transition under which its
+   * lifecycle state was read. The presentation layer applies a snapshot only
+   * when its revision is not older than the newest revision already applied.
+   */
+  lifecycleRevision: number;
 }
 
 export interface QualificationRunRecordingResult {

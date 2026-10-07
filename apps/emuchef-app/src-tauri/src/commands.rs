@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -41,8 +42,10 @@ pub struct AppState {
     /// Serializes trusted product commits with their qualification observation.
     /// Acquire it only after sidecar/ADB work is complete. When an execution
     /// store must also be locked, execution state precedes this gate; all other
-    /// callers acquire the gate before product authority stores.
-    pub qualification_transition_gate: Mutex<()>,
+    /// callers acquire the gate before product authority stores. Every
+    /// acquisition also receives the monotonic revision that orders
+    /// qualification projections against each other.
+    pub qualification_transition_gate: QualificationTransitionGate,
     pub adb: Mutex<AdbManager>,
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
@@ -219,14 +222,65 @@ fn report_device_inventory_to_qualification(
 
 /// Serialize a product observation commit and its qualification notification.
 /// A poisoned mutex is recovered because losing this ordering boundary must
-/// never silently drop a committed product transition. Deferred source checks
-/// run only after this guard releases the product-transition gate.
+/// never silently drop a committed product transition.
+///
+/// Every acquisition also receives the next monotonic transition revision.
+/// Qualification projections carry the revision of the acquisition under which
+/// they were taken, so the presentation layer can order a status projection
+/// against a command snapshot by the serialized Rust transition order instead
+/// of by frontend request timing.
+pub(crate) struct QualificationTransitionGate {
+    lock: Mutex<()>,
+    revision: AtomicU64,
+}
+
+impl QualificationTransitionGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            lock: Mutex::new(()),
+            revision: AtomicU64::new(0),
+        }
+    }
+
+    /// Acquire the gate, recovering a poisoned mutex, and allocate the
+    /// revision that orders every projection taken under this acquisition.
+    fn acquire(&self) -> (MutexGuard<'_, ()>, u64) {
+        let guard = match self.lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let guard = poisoned.into_inner();
+                self.lock.clear_poison();
+                guard
+            }
+        };
+        let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        (guard, revision)
+    }
+
+    /// Probe whether another thread currently holds the gate. This supports
+    /// race assertions and never orders lifecycle work, so it allocates no
+    /// revision.
+    #[cfg(test)]
+    pub(crate) fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
+        self.lock.try_lock()
+    }
+}
+
+/// Held guard for one transition-gate acquisition. Deferred source checks run
+/// only after this guard releases the product-transition gate.
 pub(crate) struct QualificationTransitionGuard<'a> {
     state: &'a AppState,
     guard: Option<MutexGuard<'a, ()>>,
+    revision: u64,
 }
 
 impl QualificationTransitionGuard<'_> {
+    /// The revision allocated for this gate acquisition. Every qualification
+    /// projection produced while this guard is held carries this value.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Release the transition gate before retrying materialization that may
     /// inspect the current authored-source checkout.
     pub(crate) fn release_and_retry(
@@ -254,17 +308,11 @@ impl Drop for QualificationTransitionGuard<'_> {
 }
 
 pub(crate) fn qualification_transition_lock(state: &AppState) -> QualificationTransitionGuard<'_> {
-    let guard = match state.qualification_transition_gate.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let guard = poisoned.into_inner();
-            state.qualification_transition_gate.clear_poison();
-            guard
-        }
-    };
+    let (guard, revision) = state.qualification_transition_gate.acquire();
     QualificationTransitionGuard {
         state,
         guard: Some(guard),
+        revision,
     }
 }
 
@@ -2615,7 +2663,7 @@ mod tests {
             catalog: Err("catalog is not used by session reset".to_string()),
             qualification_repository:
                 crate::qualification_repository::QualificationRepositoryProvider::default(),
-            qualification_transition_gate: Mutex::new(()),
+            qualification_transition_gate: QualificationTransitionGate::new(),
             adb: Mutex::new(crate::adb::AdbManager::new(root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
             input_contracts: Mutex::new(InputContractSnapshot::default()),
@@ -3498,5 +3546,60 @@ mod tests {
         assert!(!serialized.contains("exact-serial"));
         assert!(!serialized.contains("internalRoot"));
         assert!(!serialized.contains("/private"));
+    }
+
+    #[test]
+    fn failed_marker_removal_rejects_termination_without_closing_lifecycle_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let marker = temp.path().join("session-active.marker");
+        // A directory in place of the marker file cannot be removed by the
+        // finalization path, which simulates a filesystem failure during exit.
+        std::fs::create_dir(&marker).unwrap();
+        assert!(!finish_recovery_process_session(&state));
+        assert!(!state.recovery.lock().unwrap().qualification_terminating());
+        std::fs::remove_dir(&marker).unwrap();
+        // With the marker removable again, a later exit attempt finalizes
+        // normally and closes lifecycle work.
+        assert!(finish_recovery_process_session(&state));
+        assert!(state.recovery.lock().unwrap().qualification_terminating());
+    }
+
+    /// The backend-authored transition revision is the overlay's only lifecycle
+    /// ordering authority. Revisions must follow the serialized order the
+    /// transition gate establishes, so a projection taken first always carries
+    /// a lower revision than a command that follows it, regardless of which
+    /// frontend response arrives first.
+    #[test]
+    fn transition_gate_revisions_follow_serialized_acquisition_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let observed = Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let guard = qualification_transition_lock(&state);
+                    // The guard stays held until this thread has published its
+                    // revision, so the observed order is the acquisition order.
+                    observed.lock().unwrap().push(guard.revision());
+                });
+            }
+        });
+        let observed = observed.into_inner().unwrap();
+        assert_eq!(
+            observed.len(),
+            4,
+            "every acquisition must publish one revision"
+        );
+        assert_eq!(observed[0], 1, "a fresh gate starts at the first revision");
+        assert!(
+            observed.windows(2).all(|window| window[0] < window[1]),
+            "revisions must increase in acquisition order: {observed:?}"
+        );
+        assert_eq!(
+            observed,
+            (1..=4).collect::<Vec<u64>>(),
+            "consecutive acquisitions must allocate consecutive revisions"
+        );
     }
 }

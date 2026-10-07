@@ -453,7 +453,18 @@ impl RecoveryStore {
         if self.preserve_marker_on_exit {
             return Ok(());
         }
-        remove_if_present(&self.marker_path, "recovery_session_marker_failed")
+        match remove_if_present(&self.marker_path, "recovery_session_marker_failed") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The caller rejects termination when the marker cannot be
+                // finalized, so the process keeps running. Because the marker
+                // still makes an eventual abrupt termination detectable,
+                // lifecycle work may safely resume instead of staying closed
+                // for the lifetime of a still-running process.
+                self.terminating = false;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -874,6 +885,35 @@ mod tests {
         );
         store.begin_session().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn failed_marker_removal_restores_lifecycle_availability() {
+        let temp = tempdir().unwrap();
+        let marker = temp.path().join("active");
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker.clone());
+        store.begin_session().unwrap();
+        // A directory in place of the marker file cannot be removed by the
+        // finalization path, which simulates a filesystem failure while the
+        // application is trying to exit.
+        fs::remove_file(&marker).unwrap();
+        fs::create_dir(&marker).unwrap();
+        assert!(store.finish_process_termination().is_err());
+        // The failed removal rolls the lifecycle back so qualification work can
+        // resume: the marker is still on disk, so an abrupt termination remains
+        // detectable on the next launch.
+        assert!(!store.qualification_terminating());
+        assert!(store.qualification_lifecycle_available());
+        assert!(marker.exists());
+        // A later exit attempt finalizes normally once the marker is removable.
+        fs::remove_dir(&marker).unwrap();
+        assert!(store.finish_process_termination().is_ok());
+        // Successful finalization closes the lifecycle by removing the marker.
+        // Lifecycle availability tracks marker-write health only, so it stays
+        // true here; the closed state is expressed by the terminating flag and
+        // the missing marker that no longer makes abrupt termination detectable.
+        assert!(store.qualification_terminating());
+        assert!(!marker.exists());
     }
 
     #[test]

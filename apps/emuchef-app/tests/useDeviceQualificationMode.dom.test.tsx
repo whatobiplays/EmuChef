@@ -36,6 +36,7 @@ function disabledStatus(): QualificationModeStatus {
     workflows: [],
     targets: [],
     resumableCandidates: [],
+    lifecycleRevision: 0,
   };
 }
 
@@ -58,6 +59,7 @@ function activeStatus(
     workflows: [],
     targets: [],
     resumableCandidates: [],
+    lifecycleRevision: 1,
     ...overrides,
   };
 }
@@ -88,6 +90,7 @@ function sessionSnapshot(
       runValidity: "valid",
       qualificationOutcome: "not_observed",
     },
+    lifecycleRevision: 1,
     ...overrides,
   };
 }
@@ -219,6 +222,7 @@ function Harness({
       <output data-testid="qualification-session-present">
         {controller.session === null ? "absent" : "present"}
       </output>
+      <output data-testid="qualification-session-handle">{controller.session?.sessionHandle ?? "none"}</output>
       <output data-testid="qualification-device-selection-locked">
         {controller.deviceSelectionLocked ? "locked" : "unlocked"}
       </output>
@@ -574,6 +578,9 @@ test("an active attempt exposes only its bound plan and recipes without starting
 test("a successful begin keeps selection locked until status confirms association", async () => {
   let resolveStaleStatus!: (status: QualificationModeStatus) => void;
   let resolveCurrentStatus!: (status: QualificationModeStatus) => void;
+  mockApi.beginQualificationSession.mockResolvedValueOnce(
+    sessionSnapshot({ lifecycleRevision: 2 }),
+  );
   mockApi.deviceQualificationModeStatus
     .mockResolvedValueOnce(activeStatus())
     .mockReturnValueOnce(new Promise((resolve) => { resolveStaleStatus = resolve; }))
@@ -595,18 +602,23 @@ test("a successful begin keeps selection locked until status confirms associatio
 
   await act(async () => {
     resolveStaleStatus(activeStatus({
+      lifecycleRevision: 1,
       deviceSelectionLocked: false,
-      resumableSession: sessionSnapshot(),
+      resumableSession: sessionSnapshot({ lifecycleRevision: 1 }),
     }));
   });
   expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+  // The stale projection was ordered before the begin command, so it cannot
+  // replace the session the begin response committed.
+  expect(screen.getByTestId("qualification-session-handle").textContent).toBe("session-opaque");
 
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(3));
   await act(async () => {
     resolveCurrentStatus(activeStatus({
+      lifecycleRevision: 3,
       deviceSelectionLocked: true,
-      resumableSession: sessionSnapshot(),
+      resumableSession: sessionSnapshot({ lifecycleRevision: 3 }),
     }));
   });
   expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
@@ -614,6 +626,9 @@ test("a successful begin keeps selection locked until status confirms associatio
 
 test("a fresh status with no active session releases the temporary begin lock", async () => {
   let resolveNoSessionStatus!: (status: QualificationModeStatus) => void;
+  mockApi.beginQualificationSession.mockResolvedValueOnce(
+    sessionSnapshot({ lifecycleRevision: 2 }),
+  );
   mockApi.deviceQualificationModeStatus
     .mockResolvedValueOnce(activeStatus())
     .mockReturnValueOnce(new Promise((resolve) => { resolveNoSessionStatus = resolve; }));
@@ -631,6 +646,7 @@ test("a fresh status with no active session releases the temporary begin lock", 
 
   await act(async () => {
     resolveNoSessionStatus(activeStatus({
+      lifecycleRevision: 3,
       deviceSelectionLocked: false,
       resumableSession: null,
     }));
@@ -642,11 +658,14 @@ test("a fresh status with no active session releases the temporary begin lock", 
   });
 });
 
-test("an unrelated locked session cannot clear the pending begin lock", async () => {
-  let resolveUnrelatedStatus!: (status: QualificationModeStatus) => void;
+test("an older status describing another session cannot clear the pending begin lock", async () => {
+  let resolveOlderStatus!: (status: QualificationModeStatus) => void;
+  mockApi.beginQualificationSession.mockResolvedValueOnce(
+    sessionSnapshot({ lifecycleRevision: 2 }),
+  );
   mockApi.deviceQualificationModeStatus
     .mockResolvedValueOnce(activeStatus())
-    .mockReturnValueOnce(new Promise((resolve) => { resolveUnrelatedStatus = resolve; }));
+    .mockReturnValueOnce(new Promise((resolve) => { resolveOlderStatus = resolve; }));
 
   render(<Harness workflow={reviewWorkflow()} />);
   await waitFor(() => {
@@ -657,11 +676,15 @@ test("an unrelated locked session cannot clear the pending begin lock", async ()
   await waitFor(() => expect(mockApi.beginQualificationSession).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
   await act(async () => {
-    resolveUnrelatedStatus(activeStatus({
+    resolveOlderStatus(activeStatus({
+      lifecycleRevision: 1,
       deviceSelectionLocked: true,
-      resumableSession: sessionSnapshot({ sessionHandle: "unrelated-session" }),
+      resumableSession: sessionSnapshot({ sessionHandle: "unrelated-session", lifecycleRevision: 1 }),
     }));
   });
+  // The projection was ordered before the begin command, so the begun attempt
+  // keeps owning the presentation and its device-selection lock.
+  expect(screen.getByTestId("qualification-session-handle").textContent).toBe("session-opaque");
   expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
 });
 
@@ -730,6 +753,7 @@ test("a delayed checkpoint response cannot replace newer finalized status", asyn
   let resolveFollowUpStatus!: (status: QualificationModeStatus) => void;
   let statusCalls = 0;
   const finalizedStatus = activeStatus({
+    lifecycleRevision: 3,
     resumableSession: null,
     resumableCandidates: [{
       candidateHandle: "finalized-run",
@@ -766,7 +790,7 @@ test("a delayed checkpoint response cannot replace newer finalized status", asyn
   });
 
   await act(async () => {
-    resolveCheckpoint(sessionSnapshot());
+    resolveCheckpoint(sessionSnapshot({ lifecycleRevision: 2 }));
     await Promise.resolve();
   });
   expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("finalized-run");
@@ -774,6 +798,139 @@ test("a delayed checkpoint response cannot replace newer finalized status", asyn
   expect(statusCalls).toBe(3);
   await act(async () => resolveFollowUpStatus(finalizedStatus));
   await waitFor(() => expect(screen.getByTestId("qualification-busy").textContent).toBe("false"));
+});
+
+test("a status projected before a checkpoint cannot suppress the committed snapshot", async () => {
+  let resolveCheckpoint!: (session: QualificationSessionSnapshot) => void;
+  let resolveInterimStatus!: (status: QualificationModeStatus) => void;
+  let resolveFollowUpStatus!: (status: QualificationModeStatus) => void;
+  let statusCalls = 0;
+  mockApi.deviceQualificationModeStatus.mockImplementation(() => {
+    statusCalls += 1;
+    if (statusCalls === 1) {
+      return Promise.resolve(activeStatus({
+        deviceSelectionLocked: true,
+        resumableSession: sessionSnapshot(),
+      }));
+    }
+    if (statusCalls === 2) {
+      return new Promise((resolve) => { resolveInterimStatus = resolve; });
+    }
+    if (statusCalls === 3) {
+      return new Promise((resolve) => { resolveFollowUpStatus = resolve; });
+    }
+    return Promise.resolve(activeStatus());
+  });
+  const committed = sessionSnapshot({
+    lifecycleRevision: 2,
+    recordedCheckpoints: [{
+      checkpointId: "device_state_verified",
+      outcome: "pass",
+      observedAt: "2026-10-03T11:00:00Z",
+    }],
+  });
+  mockApi.recordQualificationCheckpoint.mockReturnValueOnce(
+    new Promise((resolve) => { resolveCheckpoint = resolve; }),
+  );
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Record checkpoint" }));
+  await waitFor(() => expect(mockApi.recordQualificationCheckpoint).toHaveBeenCalledTimes(1));
+
+  // A background refresh acquires the transition gate before the command and
+  // projects the pre-command attempt while the command is still in flight.
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    resolveInterimStatus(activeStatus({
+      lifecycleRevision: 1,
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot({ lifecycleRevision: 1 }),
+    }));
+  });
+  expect(screen.getByTestId("qualification-checkpoint").textContent).toBe("");
+
+  // The command committed under a newer transition revision, so its snapshot
+  // must replace the pre-command projection even though it lands later.
+  await act(async () => {
+    resolveCheckpoint(committed);
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-checkpoint").textContent).toBe("2026-10-03T11:00:00Z");
+  });
+
+  // A status genuinely ordered after the command still supersedes it.
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(3));
+  await act(async () => {
+    resolveFollowUpStatus(activeStatus({
+      lifecycleRevision: 3,
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot({
+        lifecycleRevision: 3,
+        recordedCheckpoints: committed.recordedCheckpoints,
+      }),
+    }));
+  });
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-checkpoint").textContent).toBe("2026-10-03T11:00:00Z");
+    expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
+  });
+});
+
+test("a status projected before an abandon cannot restore the abandoned attempt", async () => {
+  let resolveAbandon!: (session: QualificationSessionSnapshot) => void;
+  let resolveInterimStatus!: (status: QualificationModeStatus) => void;
+  let statusCalls = 0;
+  mockApi.deviceQualificationModeStatus.mockImplementation(() => {
+    statusCalls += 1;
+    if (statusCalls === 1) {
+      return Promise.resolve(activeStatus({
+        deviceSelectionLocked: true,
+        resumableSession: sessionSnapshot(),
+      }));
+    }
+    if (statusCalls === 2) {
+      return new Promise((resolve) => { resolveInterimStatus = resolve; });
+    }
+    return Promise.resolve(activeStatus());
+  });
+  const closed = sessionSnapshot({ lifecycleRevision: 2, phase: "closed" });
+  mockApi.abandonQualificationSession.mockReturnValueOnce(
+    new Promise((resolve) => { resolveAbandon = resolve; }),
+  );
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Abandon" }));
+  await waitFor(() => expect(mockApi.abandonQualificationSession).toHaveBeenCalledTimes(1));
+
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2));
+  await act(async () => {
+    resolveInterimStatus(activeStatus({
+      lifecycleRevision: 1,
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot({ lifecycleRevision: 1 }),
+    }));
+  });
+  expect(screen.getByTestId("qualification-session-present").textContent).toBe("present");
+
+  await act(async () => {
+    resolveAbandon(closed);
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-phase").textContent).toBe("closed");
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
+  });
 });
 
 test("a recorded checkpoint stays visible when the follow-up status refresh fails", async () => {
@@ -956,7 +1113,7 @@ test("meaningful execution lifecycle transitions trigger a presentation-only sta
   expect(mockApi.recordQualificationCheckpoint).not.toHaveBeenCalled();
 });
 
-test("a late earlier status refresh cannot replace the latest presentation", async () => {
+test("a late earlier status refresh with an older backend revision cannot replace the latest presentation", async () => {
   let resolveFirst!: (status: QualificationModeStatus) => void;
   let resolveSecond!: (status: QualificationModeStatus) => void;
   const first = new Promise<QualificationModeStatus>((resolve) => { resolveFirst = resolve; });
@@ -968,7 +1125,10 @@ test("a late earlier status refresh cannot replace the latest presentation", asy
   expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(2);
   expect(screen.getByTestId("qualification-busy").textContent).toBe("true");
 
+  // The later-issued request projected a newer Rust transition revision, so its
+  // presentation is authoritative.
   const latest = activeStatus({
+    lifecycleRevision: 2,
     resumableCandidates: [{
       candidateHandle: "latest-run",
       kind: "qualification_run",
@@ -985,8 +1145,11 @@ test("a late earlier status refresh cannot replace the latest presentation", asy
   });
   expect(screen.getByTestId("qualification-busy").textContent).toBe("true");
 
+  // The stalled earlier request answers last but carries an older backend
+  // revision, so it describes state the newer projection already superseded.
   await act(async () => resolveFirst(activeStatus({
-    resumableSession: sessionSnapshot(),
+    lifecycleRevision: 1,
+    resumableSession: sessionSnapshot({ lifecycleRevision: 1 }),
     resumableCandidates: [{
       candidateHandle: "stale-run",
       kind: "qualification_run",
@@ -1000,6 +1163,64 @@ test("a late earlier status refresh cannot replace the latest presentation", asy
 
   expect(screen.getByTestId("qualification-run-candidates").textContent).toBe("latest-run");
   expect(screen.getByTestId("qualification-session-present").textContent).toBe("absent");
+  expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
+});
+
+test("a superseded status refresh still merges a newer backend lifecycle revision", async () => {
+  let resolveSuperseded!: (status: QualificationModeStatus) => void;
+  let resolveLatest!: (status: QualificationModeStatus) => void;
+  const superseded = new Promise<QualificationModeStatus>((resolve) => { resolveSuperseded = resolve; });
+  const latest = new Promise<QualificationModeStatus>((resolve) => { resolveLatest = resolve; });
+  mockApi.deviceQualificationModeStatus
+    .mockResolvedValueOnce(activeStatus({
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot(),
+    }))
+    .mockReturnValueOnce(superseded)
+    .mockReturnValueOnce(latest);
+
+  render(<Harness workflow={reviewWorkflow()} />);
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-phase").textContent).toBe("executionActive");
+  });
+
+  // Request A (older frontend generation) stalls before the Rust transition
+  // gate; request B overtakes it and projects a newer revision first.
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(3);
+
+  await act(async () => {
+    resolveLatest(activeStatus({
+      lifecycleRevision: 2,
+      deviceSelectionLocked: true,
+      resumableSession: sessionSnapshot({ lifecycleRevision: 2 }),
+    }));
+  });
+  await waitFor(() => {
+    expect(screen.getByTestId("qualification-phase").textContent).toBe("executionActive");
+    expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("locked");
+  });
+
+  // Request A then acquires the gate and projects the genuinely newer
+  // lifecycle state. It must win on the backend revision alone even though its
+  // frontend request generation is no longer current.
+  await act(async () => {
+    resolveSuperseded(activeStatus({
+      lifecycleRevision: 3,
+      deviceSelectionLocked: false,
+      resumableSession: sessionSnapshot({
+        lifecycleRevision: 3,
+        phase: "closed",
+        runValidity: "invalid",
+        recordable: false,
+      }),
+    }));
+  });
+
+  expect(screen.getByTestId("qualification-phase").textContent).toBe("closed");
+  expect(screen.getByTestId("qualification-active").textContent).toBe("false");
+  expect(screen.getByTestId("qualification-device-selection-locked").textContent).toBe("unlocked");
   expect(screen.getByTestId("qualification-busy").textContent).toBe("false");
 });
 

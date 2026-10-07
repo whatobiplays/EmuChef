@@ -182,6 +182,18 @@ pub(crate) struct QualificationModeStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resumable_session:
         Option<crate::qualification_session::QualificationSessionSnapshot>,
+    /// Revision of the serialized Rust transition under which the lifecycle
+    /// state of this projection was read. The overlay accepts the projected
+    /// session only from a status whose revision is not older than the newest
+    /// revision it already applied, so a status response that reaches the
+    /// frontend after a command response can never roll the committed command
+    /// result back.
+    ///
+    /// Zero means this projection contains no lifecycle state (qualification
+    /// mode disabled or the trusted repository unavailable). Such a response
+    /// makes no lifecycle claim and never updates the presented session.
+    #[serde(default)]
+    pub(crate) lifecycle_revision: u64,
 }
 
 /// The only input accepted by target-registration capture.
@@ -389,7 +401,8 @@ where
     // builds cannot hold an attempt and must not initialize the repository.
     if status.enabled {
         if let Some(repository) = state.qualification_repository.get() {
-            let _transition = crate::commands::qualification_transition_lock(state);
+            let transition = crate::commands::qualification_transition_lock(state);
+            let revision = transition.revision();
             let projection = crate::qualification_session::project_lifecycle_status_in_transition(
                 state, repository,
             )
@@ -399,8 +412,12 @@ where
                 .into_iter()
                 .map(candidate_summary_from_repository)
                 .collect::<Result<Vec<_>, _>>()?;
-            status.resumable_session = projection.session;
+            status.resumable_session = projection.session.map(|mut session| {
+                session.lifecycle_revision = revision;
+                session
+            });
             status.device_selection_locked = projection.device_selection_locked;
+            status.lifecycle_revision = revision;
         }
     }
     Ok(status)
@@ -450,6 +467,7 @@ fn qualification_mode_status(
         targets,
         resumable_candidates: candidates,
         resumable_session: None,
+        lifecycle_revision: 0,
     })
 }
 
@@ -467,6 +485,7 @@ fn disabled_mode_status() -> QualificationModeStatus {
         targets: Vec::new(),
         resumable_candidates: Vec::new(),
         resumable_session: None,
+        lifecycle_revision: 0,
     }
 }
 
@@ -1242,7 +1261,7 @@ mod tests {
             sidecar: SidecarState::new(app_root.join("sidecar-cache")),
             catalog: Err("test catalog is not needed by qualification commands".to_string()),
             qualification_repository: provider,
-            qualification_transition_gate: Mutex::new(()),
+            qualification_transition_gate: crate::commands::QualificationTransitionGate::new(),
             adb: Mutex::new(AdbManager::new(app_root.join("platform-tools"))),
             platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
             input_contracts: Mutex::new(InputContractSnapshot::default()),

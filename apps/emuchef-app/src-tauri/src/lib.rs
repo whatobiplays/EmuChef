@@ -60,7 +60,7 @@ pub fn run() {
                 sidecar,
                 catalog,
                 qualification_repository: qualification_repository::QualificationRepositoryProvider::default(),
-                qualification_transition_gate: Mutex::new(()),
+                qualification_transition_gate: commands::QualificationTransitionGate::new(),
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
                 platform_tools_selections: Mutex::new(
                     commands::PlatformToolsSelectionStore::default(),

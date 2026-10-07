@@ -297,6 +297,15 @@ const startSimulation = useCallback(async () => {
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setLaunchState("failed");
       setNotice(errorMessage(error));
+      if (errorCode(error) === "runtime_session_lost") {
+        // The launch request proved the process-wide runtime session was lost,
+        // so the authority behind the reviewed plan, retained device facts,
+        // and review handle was already cleared natively. Run the centralized
+        // runtime-loss recovery used by starts and polling instead of
+        // refreshing an execution the backend can no longer report.
+        onRuntimeSessionLost();
+        return;
+      }
       try {
         const refreshed = await api.getRealExecution(snapshot.executionHandle);
         if (runtimeGenerationRef.current !== runtimeGeneration) return;
@@ -305,7 +314,7 @@ const startSimulation = useCallback(async () => {
         // The original sanitized launch error remains authoritative.
       }
     }
-  }, [dispatch, runtimeGenerationRef, setNotice, workflowRef]);
+  }, [dispatch, onRuntimeSessionLost, runtimeGenerationRef, setNotice, workflowRef]);
 
   return {
     cancelExecution,

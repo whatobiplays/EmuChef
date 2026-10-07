@@ -46,6 +46,7 @@ const enabledStatus: QualificationModeStatus = {
   workflows: [],
   targets: [],
   resumableCandidates: [targetPreview],
+  lifecycleRevision: 1,
 };
 
 const sessionSnapshot: QualificationSessionSnapshot = {
@@ -63,6 +64,7 @@ const sessionSnapshot: QualificationSessionSnapshot = {
   recordable: true,
   invalidReason: null,
   candidate: null,
+  lifecycleRevision: 1,
 };
 
 const recordingResult: QualificationRunRecordingResult = {
