@@ -137,6 +137,22 @@ impl SidecarState {
             .unwrap_or(false)
     }
 
+    /// Fail the current in-memory runtime session because a successful
+    /// protocol response was structurally unusable for the caller.
+    ///
+    /// Real-execution start reaches an irreversible product boundary as soon
+    /// as the runtime accepts the request. When the accepted response cannot
+    /// establish the execution identity the app must retain, the unknown
+    /// worker cannot be allowed to keep mutating behind the app's ownership
+    /// model. This applies the same fail-and-stop behavior used for broken
+    /// protocol responses: the status becomes a stable
+    /// `runtime_session_lost` failure, the owned child is stopped, and every
+    /// later request in this generation stays lost.
+    pub(crate) fn invalidate_runtime_session(&self) {
+        let mut client = self.inner.lock().expect("sidecar mutex poisoned");
+        client.fail_runtime_session();
+    }
+
     /// Return fixed, path-free runtime compatibility data for support export.
     pub fn diagnostics(&self) -> Value {
         let status = match self.status() {

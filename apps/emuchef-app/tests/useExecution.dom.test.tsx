@@ -1,16 +1,25 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, type Dispatch } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const mockApi = vi.hoisted(() => ({
   exportExecutionReport: vi.fn(),
+  getRealExecution: vi.fn(),
+  getSimulatedExecution: vi.fn(),
+  getSimulatedExecutionEvents: vi.fn(),
+  launchConfiguredApp: vi.fn(),
   startRealExecution: vi.fn(),
+  startSimulatedExecution: vi.fn(),
 }));
 
 vi.mock("../src/api", () => ({ api: mockApi }));
 
 import { useExecution } from "../src/useExecution";
-import type { DeviceQualificationSnapshot, ExecutionSnapshot } from "../src/types";
+import type {
+  DeviceQualificationSnapshot,
+  ExecutionSnapshot,
+  RealExecutionSnapshot,
+} from "../src/types";
 import type { WorkflowAction, WorkflowState } from "../src/workflow";
 
 function terminalSnapshot(executionHandle: string, latestSequence = 1): ExecutionSnapshot {
@@ -101,6 +110,53 @@ function reviewWorkflow(): WorkflowState {
   };
 }
 
+function activeSimulatedWorkflow(executionHandle: string, generation: number): WorkflowState {
+  const snapshot: ExecutionSnapshot = {
+    ...terminalSnapshot(executionHandle, 0),
+    status: "running",
+    finishedAt: null,
+    terminal: false,
+  };
+  return {
+    ...terminalWorkflow(executionHandle, generation, 0),
+    execution: {
+      kind: "active",
+      generation,
+      mode: "simulated",
+      snapshot,
+      events: [],
+      eventCursor: 0,
+      cancellationRequested: false,
+    },
+  };
+}
+
+function launchableSnapshot(executionHandle: string): RealExecutionSnapshot {
+  return {
+    ...terminalSnapshot(executionHandle),
+    simulated: false,
+    verificationScope: "real_device",
+    target: { label: "Connected Android device" },
+    launchAction: { handle: "launch-action-opaque", label: "Open configured app" },
+  };
+}
+
+function launchableWorkflow(executionHandle: string, generation: number): WorkflowState {
+  const workflow = terminalWorkflow(executionHandle, generation);
+  return {
+    ...workflow,
+    execution: {
+      kind: "terminal",
+      generation,
+      mode: "real",
+      snapshot: launchableSnapshot(executionHandle),
+      events: [],
+      eventCursor: 1,
+      cancellationRequested: false,
+    },
+  };
+}
+
 function deferred<Result>(): {
   promise: Promise<Result>;
   resolve: (result: Result) => void;
@@ -115,9 +171,15 @@ function deferred<Result>(): {
 function Harness({
   workflow,
   qualification,
+  dispatch = vi.fn() as unknown as Dispatch<WorkflowAction>,
+  onRuntimeSessionLost = vi.fn(),
+  setNotice = vi.fn(),
 }: {
   workflow: WorkflowState;
   qualification?: DeviceQualificationSnapshot;
+  dispatch?: Dispatch<WorkflowAction>;
+  onRuntimeSessionLost?: () => void;
+  setNotice?: (notice: string | null) => void;
 }) {
   const workflowRef = useRef(workflow);
   const runtimeGenerationRef = useRef(1);
@@ -126,13 +188,14 @@ function Harness({
 
   const execution = useExecution({
     announce: vi.fn(),
-    dispatch: vi.fn() as unknown as Dispatch<WorkflowAction>,
+    dispatch,
     mainRef,
+    onRuntimeSessionLost,
     realExecutionCompiled: qualification !== undefined,
     qualification,
     runtimeGenerationRef,
     setBusy: vi.fn(),
-    setNotice: vi.fn(),
+    setNotice,
     withNativeDialogFocus: async <Result,>(action: () => Promise<Result>) => action(),
     workflow,
     workflowRef,
@@ -140,11 +203,12 @@ function Harness({
 
   return qualification === undefined
     ? (
-        <button onClick={() => void execution.exportExecutionReport()}>
-          {execution.reportState}
-        </button>
-      )
+      <button onClick={() => void execution.exportExecutionReport()}>
+        {execution.reportState}
+      </button>
+    )
     : (
+      <>
         <button
           onClick={() => void execution.startRealExecution({
             phrase: "RUN",
@@ -155,7 +219,14 @@ function Harness({
         >
           start real execution
         </button>
-      );
+        <button onClick={() => void execution.startSimulation()}>
+          start simulated execution
+        </button>
+        <button onClick={() => void execution.launchConfiguredApp()}>
+          launch configured app
+        </button>
+      </>
+    );
 }
 
 beforeEach(() => {
@@ -215,4 +286,312 @@ test("unsupported qualification remains blocking in the React execution boundary
   fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
 
   expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+});
+
+function supportedQualification(): DeviceQualificationSnapshot {
+  return {
+    state: "supported",
+    summary: "This device is supported.",
+    limitations: [],
+    androidMajor: 15,
+    androidApiLevel: 35,
+    abiClass: "arm64",
+    storage: "available",
+    packageManager: "available",
+    activityManager: "available",
+    root: null,
+    runtimeGeneration: 7,
+    qualificationRevision: 9,
+    deviceIdentity: "opaque-authority",
+  };
+}
+
+describe("real start failure classification", () => {
+  test("a lost runtime session clears stale projections and refreshes runtime state", async () => {
+    mockApi.startRealExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={reviewWorkflow()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+  expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+  // The runtime-invalidated dispatch belongs to the centralized runtime-loss
+  // handler in the application shell, so this hook must not duplicate it.
+  expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+});
+
+test("a simulated start that loses the runtime session invokes the runtime-loss handler", async () => {
+  mockApi.startSimulatedExecution.mockRejectedValue(
+    JSON.stringify({
+      code: "runtime_session_lost",
+      message: "The execution runtime session is no longer available.",
+    }),
+  );
+  const dispatch = vi.fn();
+  const onRuntimeSessionLost = vi.fn();
+  render(
+    <Harness
+      dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+      onRuntimeSessionLost={onRuntimeSessionLost}
+      qualification={supportedQualification()}
+      workflow={reviewWorkflow()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "start simulated execution" }));
+
+  await waitFor(() => {
+    expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+  });
+  expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+  expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+});
+
+test("an ordinary simulated start rejection does not invoke the runtime-loss handler", async () => {
+  mockApi.startSimulatedExecution.mockRejectedValue(
+    JSON.stringify({
+      code: "review_unknown",
+      message: "The reviewed plan is no longer available.",
+    }),
+  );
+  const dispatch = vi.fn();
+  const onRuntimeSessionLost = vi.fn();
+  render(
+    <Harness
+      dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+      onRuntimeSessionLost={onRuntimeSessionLost}
+      qualification={supportedQualification()}
+      workflow={reviewWorkflow()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "start simulated execution" }));
+
+  await waitFor(() => {
+    expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+  });
+  expect(onRuntimeSessionLost).not.toHaveBeenCalled();
+  expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+});
+
+  test("an ordinary start rejection neither resets the workflow nor refreshes runtime state", async () => {
+    mockApi.startRealExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "review_unknown",
+        message: "The reviewed plan is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={reviewWorkflow()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({ type: "execution-start-failed", generation: 1 });
+    });
+    expect(onRuntimeSessionLost).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  });
+});
+
+describe("configured-app launch classification", () => {
+  test("a lost runtime session during launch runs centralized recovery without a stale refresh", async () => {
+    mockApi.launchConfiguredApp.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    const setNotice = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        setNotice={setNotice}
+        workflow={launchableWorkflow("execution-opaque", 1)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "launch configured app" }));
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+    // The sanitized runtime-loss notice stays presented to the operator.
+    expect(setNotice).toHaveBeenCalledWith("The execution runtime session is no longer available.");
+    // Native authority behind the execution was already cleared with the lost
+    // session, so the hook must not re-read an execution the backend can no
+    // longer report.
+    expect(mockApi.getRealExecution).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "execution-snapshot" }),
+    );
+  });
+
+  test("an ordinary launch rejection still refreshes the execution snapshot", async () => {
+    mockApi.launchConfiguredApp.mockRejectedValue(
+      JSON.stringify({
+        code: "launch_failed",
+        message: "The configured app could not be launched.",
+      }),
+    );
+    mockApi.getRealExecution.mockResolvedValue(launchableSnapshot("execution-opaque"));
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={launchableWorkflow("execution-opaque", 1)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "launch configured app" }));
+
+    await waitFor(() => {
+      expect(mockApi.getRealExecution).toHaveBeenCalledWith("execution-opaque");
+    });
+    expect(onRuntimeSessionLost).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "execution-snapshot" }),
+      );
+    });
+  });
+});
+
+describe("active execution polling classification", () => {
+  test("a lost runtime session during snapshot polling runs the centralized runtime-loss handler", async () => {
+    mockApi.getSimulatedExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    mockApi.getSimulatedExecutionEvents.mockResolvedValue({
+      events: [],
+      latestSequence: 0,
+      terminal: false,
+    });
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={activeSimulatedWorkflow("execution-active", 3)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+    // Process-wide loss must not be projected as a mapping-local transition;
+    // the centralized handler owns the runtime-invalidated workflow state.
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "execution-unavailable" }),
+    );
+    expect(dispatch).not.toHaveBeenCalledWith({ type: "runtime-invalidated" });
+  });
+
+  test("a lost runtime session during event polling runs the centralized runtime-loss handler", async () => {
+    mockApi.getSimulatedExecution.mockResolvedValue(
+      JSON.stringify({
+        execution: {
+          status: "running",
+          startedAt: "2026-07-20T12:00:00Z",
+          latestSequence: 1,
+          recipes: [],
+          warnings: [],
+          errors: [],
+        },
+      }),
+    );
+    mockApi.getSimulatedExecutionEvents.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={activeSimulatedWorkflow("execution-active", 4)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onRuntimeSessionLost).toHaveBeenCalledTimes(1);
+    });
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "execution-unavailable" }),
+    );
+  });
+
+  test("an ordinary mapping-local loss keeps the execution-unavailable transition", async () => {
+    mockApi.getSimulatedExecution.mockRejectedValue(
+      JSON.stringify({
+        code: "execution_unavailable",
+        message: "The in-memory simulated run was lost. Return to Review or generate a new review.",
+      }),
+    );
+    mockApi.getSimulatedExecutionEvents.mockResolvedValue({
+      events: [],
+      latestSequence: 0,
+      terminal: false,
+    });
+    const dispatch = vi.fn();
+    const onRuntimeSessionLost = vi.fn();
+    render(
+      <Harness
+        dispatch={dispatch as unknown as Dispatch<WorkflowAction>}
+        onRuntimeSessionLost={onRuntimeSessionLost}
+        qualification={supportedQualification()}
+        workflow={activeSimulatedWorkflow("execution-active", 5)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "execution-unavailable",
+        generation: 5,
+        executionHandle: "execution-active",
+        message: "The in-memory simulated run was lost. Return to Review or generate a new review.",
+      });
+    });
+    expect(onRuntimeSessionLost).not.toHaveBeenCalled();
+  });
 });

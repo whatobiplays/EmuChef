@@ -26,6 +26,13 @@ interface UseExecutionOptions {
   announce: (text: string, assertive?: boolean) => void;
   dispatch: Dispatch<WorkflowAction>;
   mainRef: MutableValueRef<HTMLElement | null>;
+  /**
+   * Refresh the application's runtime projection after a request proved the
+   * shared runtime session is gone. The backend has already discarded every
+   * authority derived from that process generation, so the presentation must
+   * re-read runtime state instead of continuing to offer stale handles.
+   */
+  onRuntimeSessionLost: () => void;
   realExecutionCompiled: boolean;
   qualification?: DeviceQualificationSnapshot | null;
   runtimeGenerationRef: MutableValueRef<number>;
@@ -43,6 +50,7 @@ export function useExecution({
   announce,
   dispatch,
   mainRef,
+  onRuntimeSessionLost,
   realExecutionCompiled,
   qualification,
   runtimeGenerationRef,
@@ -71,24 +79,30 @@ export function useExecution({
     announcementKeyRef.current = null;
   }, [workflowRef]);
 
-  const startSimulation = useCallback(async () => {
-    const current = workflowRef.current;
-    if (!current.review || current.execution.kind === "starting") return;
-    const generation = current.executionGeneration + 1;
-    dispatch({ type: "execution-starting", generation });
-    setBusy(true);
-    setNotice(null);
-    announce("Starting the simulated dry run.");
-    try {
-      const snapshot = await api.startSimulatedExecution(current.review.reviewHandle);
-      dispatch({ type: "execution-started", generation, snapshot });
-    } catch (error) {
-      dispatch({ type: "execution-start-failed", generation });
-      setNotice(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
-  }, [announce, dispatch, setBusy, setNotice, workflowRef]);
+const startSimulation = useCallback(async () => {
+  const current = workflowRef.current;
+  if (!current.review || current.execution.kind === "starting") return;
+  const generation = current.executionGeneration + 1;
+  dispatch({ type: "execution-starting", generation });
+  setBusy(true);
+  setNotice(null);
+  announce("Starting the simulated dry run.");
+  try {
+    const snapshot = await api.startSimulatedExecution(current.review.reviewHandle);
+    dispatch({ type: "execution-started", generation, snapshot });
+  } catch (error) {
+    dispatch({ type: "execution-start-failed", generation });
+    // A dry run shares the one native runtime session with every other
+    // request, so losing it invalidates the reviewed plan, the retained
+    // device facts, and the review handle exactly as a real start does. The
+    // centralized handler owns the runtime-invalidated dispatch, the
+    // generation fences, and the runtime re-read.
+    if (errorCode(error) === "runtime_session_lost") onRuntimeSessionLost();
+    setNotice(errorMessage(error));
+  } finally {
+    setBusy(false);
+  }
+}, [announce, dispatch, onRuntimeSessionLost, setBusy, setNotice, workflowRef]);
 
   const startRealExecution = useCallback(async (confirmation: RealExecutionConfirmation) => {
     const current = workflowRef.current;
@@ -105,13 +119,22 @@ export function useExecution({
     try {
       const snapshot = await api.startRealExecution(current.review.reviewHandle, confirmation);
       dispatch({ type: "execution-started", generation, snapshot });
-    } catch (error) {
-      dispatch({ type: "execution-start-failed", generation });
-      setNotice(errorMessage(error));
-    } finally {
+  } catch (error) {
+    dispatch({ type: "execution-start-failed", generation });
+    if (errorCode(error) === "runtime_session_lost") {
+      // The runtime process that owned the reviewed plan, device facts,
+      // and review handles is gone and native authority was cleared with
+      // it. The centralized handler resets the stale workflow projections
+      // and refreshes the runtime projection so the app service recovery
+      // controls appear instead of a review that can only fail with an
+      // unknown review handle.
+      onRuntimeSessionLost();
+    }
+    setNotice(errorMessage(error));
+  } finally {
       setBusy(false);
     }
-  }, [dispatch, qualification?.state, qualification !== undefined, realExecutionCompiled, setBusy, setNotice, workflowRef]);
+  }, [dispatch, onRuntimeSessionLost, qualification?.state, qualification !== undefined, realExecutionCompiled, setBusy, setNotice, workflowRef]);
 
   useEffect(() => {
     if (workflow.execution.kind !== "active" && workflow.execution.kind !== "terminal") return;
@@ -165,6 +188,15 @@ export function useExecution({
         timer = window.setTimeout(pollExecution, 500);
       } catch (error) {
         if (disposed) return;
+        if (errorCode(error) === "runtime_session_lost") {
+          // The shared runtime process that owned this execution is gone and
+          // its native authority was cleared with it. The centralized handler
+          // owns the runtime-invalidated transition and recovery refresh, so
+          // this hook must not project a mapping-local unavailable state.
+          onRuntimeSessionLost();
+          setNotice(errorMessage(error));
+          return;
+        }
         if (errorCode(error) === "execution_unavailable") {
           dispatch({
             type: "execution-unavailable",
@@ -190,6 +222,7 @@ export function useExecution({
     activeExecution?.snapshot.executionHandle,
     announce,
     dispatch,
+    onRuntimeSessionLost,
     setNotice,
     workflowRef,
   ]);
@@ -264,6 +297,15 @@ export function useExecution({
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setLaunchState("failed");
       setNotice(errorMessage(error));
+      if (errorCode(error) === "runtime_session_lost") {
+        // The launch request proved the process-wide runtime session was lost,
+        // so the authority behind the reviewed plan, retained device facts,
+        // and review handle was already cleared natively. Run the centralized
+        // runtime-loss recovery used by starts and polling instead of
+        // refreshing an execution the backend can no longer report.
+        onRuntimeSessionLost();
+        return;
+      }
       try {
         const refreshed = await api.getRealExecution(snapshot.executionHandle);
         if (runtimeGenerationRef.current !== runtimeGeneration) return;
@@ -272,7 +314,7 @@ export function useExecution({
         // The original sanitized launch error remains authoritative.
       }
     }
-  }, [dispatch, runtimeGenerationRef, setNotice, workflowRef]);
+  }, [dispatch, onRuntimeSessionLost, runtimeGenerationRef, setNotice, workflowRef]);
 
   return {
     cancelExecution,

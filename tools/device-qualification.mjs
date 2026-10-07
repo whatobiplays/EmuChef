@@ -1289,6 +1289,22 @@ function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
   };
 }
 
+function assertCandidateMarkersAllowPromotion(candidateId, repoRoot = REPO_ROOT) {
+  const directory = candidateDirectory(candidateId, repoRoot);
+  assertCandidateRootIsSafe(repoRoot);
+  const directoryMetadata = lstatIfPresent(directory);
+  if (directoryMetadata?.isSymbolicLink()) fail("qualification candidate directory is a symlink");
+  if (directoryMetadata === null || !directoryMetadata.isDirectory()) {
+    fail("qualification candidate directory is invalid");
+  }
+  for (const marker of ["session-poison.json", "session-audit-only"]) {
+    const markerPath = path.join(directory, marker);
+    if (assertRegularCandidateFile(markerPath, "qualification non-promotable marker", { required: false })) {
+      fail("qualification candidate is marked non-promotable");
+    }
+  }
+}
+
 function validateCandidateEnvelope(candidate, { kind, fields }) {
   assertExactKeys(candidate, fields, `${kind} candidate`);
   if (candidate.candidateSchemaVersion !== 1) {
@@ -1605,6 +1621,7 @@ export function registerQualificationTargetCandidate(candidateId, { repoRoot = R
 
 export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {}) {
   const { candidate, reportBytes } = loadCandidateJson(candidateId, repoRoot);
+  assertCandidateMarkersAllowPromotion(candidateId, repoRoot);
   validateQualificationRunCandidate(candidate);
   const { paths, workflowCatalog, targets, authoredContentDigests } = currentQualificationContext(repoRoot);
   const workflow = workflowCatalog.workflows.find((item) => item.id === candidate.workflowId);

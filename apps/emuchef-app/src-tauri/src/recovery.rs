@@ -66,12 +66,38 @@ pub struct RecoveryStore {
     disposition: Option<DraftDisposition>,
     sensitivity: HashMap<String, bool>,
     required_reentry: HashSet<String>,
+    /// Prior-process handoff proof captured from the marker at native store
+    /// load. An absent marker proves a clean handoff; a present or ambiguous
+    /// marker fails closed. This fact is available before frontend startup and
+    /// does not depend on recovery-draft contents.
+    clean_handoff_proven: Option<bool>,
+    /// Keep the active-process marker when a durable qualification poison
+    /// marker could not be written. The next process must then fail closed.
+    preserve_marker_on_exit: bool,
+    /// Set when the active-process marker could not be written for this process.
+    /// Without that marker an abrupt termination is undetectable on the next
+    /// launch, so qualification lifecycle work stays disabled until a later
+    /// launch establishes its own marker.
+    process_marker_unavailable: bool,
+    /// Set once this process has finalized its accepted termination. From that
+    /// point the clean-handoff marker is gone, so any lifecycle mutation that
+    /// still started could be lost without a trace while the next launch
+    /// believes the handoff was clean. Qualification lifecycle work therefore
+    /// stays closed for the remaining lifetime of the process.
+    terminating: bool,
+    /// Qualification candidates begun in this process. Unlike the presentation
+    /// session store, this provenance survives frontend session resets.
+    current_process_qualification_candidates: HashSet<String>,
 }
 
 impl RecoveryStore {
     pub fn load(path: PathBuf, marker_path: PathBuf) -> Self {
         let (record, load_notice) = load_record(&path);
         let latest_record_generation = record.as_ref().map_or(0, |record| record.generation);
+        let clean_handoff_proven = match fs::symlink_metadata(&marker_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(true),
+            _ => Some(false),
+        };
         Self {
             path,
             marker_path,
@@ -84,14 +110,30 @@ impl RecoveryStore {
             disposition: None,
             sensitivity: HashMap::new(),
             required_reentry: HashSet::new(),
+            clean_handoff_proven,
+            preserve_marker_on_exit: false,
+            process_marker_unavailable: false,
+            terminating: false,
+            current_process_qualification_candidates: HashSet::new(),
         }
     }
 
+    /// Begin frontend recovery presentation and mark the current process as
+    /// active. The previous-process handoff proof was fixed at native store
+    /// load and is not established or changed by this operation.
     pub fn begin_session(&mut self) -> Result<Value, String> {
         let first_process_session = self.session_generation == 0;
-        let interrupted_session = first_process_session && self.marker_path.is_file();
+        let interrupted_session = first_process_session && !self.session_handoff_proven();
         if first_process_session {
-            atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")?;
+            if let Err(error) =
+                atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")
+            {
+                // This process cannot be detected as crashed on the next launch, so
+                // it must not begin, resume, or mutate qualification lifecycle
+                // state that a later launch would otherwise trust.
+                self.process_marker_unavailable = true;
+                return Err(error);
+            }
         }
 
         self.session_generation = self.session_generation.saturating_add(1).max(1);
@@ -156,6 +198,72 @@ impl RecoveryStore {
         let mut keys = self.required_reentry.iter().cloned().collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    /// Whether the marker state observed during `RecoveryStore::load` proves
+    /// that the previous application process ended through the accepted
+    /// termination contract. An absent marker proves the handoff; a present or
+    /// ambiguous marker returns false. `begin_session` does not change this
+    /// proof when it writes the current process marker.
+    pub fn session_handoff_proven(&self) -> bool {
+        self.clean_handoff_proven.unwrap_or(false)
+    }
+
+    /// Whether qualification lifecycle work may proceed in this process. A
+    /// process that could not establish its active-process marker cannot make
+    /// an abrupt termination detectable, so it must not create or continue
+    /// resumable attempts. Returns false while the recovery state is
+    /// unavailable.
+    pub(crate) fn qualification_lifecycle_available(&self) -> bool {
+        !self.process_marker_unavailable
+    }
+
+    /// Whether this process has already finalized its accepted termination.
+    /// Once that has happened the clean-handoff marker is gone, so lifecycle
+    /// work that began afterwards could be interrupted without leaving any
+    /// trace for the next launch. Qualification lifecycle work must therefore
+    /// stay closed instead of committing behind the removed marker.
+    pub(crate) fn qualification_terminating(&self) -> bool {
+        self.terminating
+    }
+
+    /// Record that native code began this qualification candidate in the
+    /// current process. This is process-local provenance, not durable session
+    /// authority, and remains available if presentation state is reset.
+    pub(crate) fn note_qualification_session_started(&mut self, candidate_handle: &str) {
+        self.current_process_qualification_candidates
+            .insert(candidate_handle.to_string());
+    }
+
+    /// Forget process-local qualification provenance after a candidate reaches
+    /// a durable terminal state or is explicitly discarded.
+    pub(crate) fn forget_qualification_session(&mut self, candidate_handle: &str) {
+        self.current_process_qualification_candidates
+            .remove(candidate_handle);
+    }
+
+    /// A candidate begun in this process does not depend on the stale
+    /// prior-process handoff proof. A failed durable poison write overrides
+    /// that exception and keeps every candidate fail-closed.
+    pub(crate) fn qualification_handoff_proven_for_candidate(
+        &self,
+        candidate_handle: &str,
+    ) -> bool {
+        if self.preserve_marker_on_exit {
+            return false;
+        }
+        self.session_handoff_proven()
+            || self
+                .current_process_qualification_candidates
+                .contains(candidate_handle)
+    }
+
+    /// Record that a fail-closed qualification persistence fallback could not
+    /// itself be retained. This process and the next launch must treat the
+    /// handoff as unproven.
+    pub(crate) fn preserve_unproven_handoff(&mut self) {
+        self.clean_handoff_proven = Some(false);
+        self.preserve_marker_on_exit = true;
     }
 
     /// Aggregate, payload-free facts for troubleshooting and reset options.
@@ -265,6 +373,11 @@ impl RecoveryStore {
         }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_current_process_qualification_provenance(&self) -> bool {
+        !self.current_process_qualification_candidates.is_empty()
+    }
+
     fn defer(&mut self, request: RecoveryRecordRequest) -> Result<(), String> {
         self.require_session(request.session_generation)?;
         self.require_record_generation(request.record_generation)?;
@@ -315,6 +428,9 @@ impl RecoveryStore {
     #[cfg(test)]
     fn finish(&mut self, request: FinishAppSessionRequest) -> Result<(), String> {
         self.require_session(request.session_generation)?;
+        if self.preserve_marker_on_exit {
+            return Ok(());
+        }
         if !request.current_session_dirty
             && self.disposition == Some(DraftDisposition::CurrentSession)
         {
@@ -329,7 +445,26 @@ impl RecoveryStore {
     /// termination. Recovery drafts intentionally survive so they can be
     /// offered on the next launch.
     pub fn finish_process_termination(&mut self) -> Result<(), String> {
-        remove_if_present(&self.marker_path, "recovery_session_marker_failed")
+        // Close lifecycle work before the marker is removed. Callers hold the
+        // qualification transition gate, so any queued lifecycle entry re-checks
+        // this state after acquiring the gate and can no longer mutate durable
+        // qualification state behind the disappeared clean-handoff marker.
+        self.terminating = true;
+        if self.preserve_marker_on_exit {
+            return Ok(());
+        }
+        match remove_if_present(&self.marker_path, "recovery_session_marker_failed") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The caller rejects termination when the marker cannot be
+                // finalized, so the process keeps running. Because the marker
+                // still makes an eventual abrupt termination detectable,
+                // lifecycle work may safely resume instead of staying closed
+                // for the lifetime of a still-running process.
+                self.terminating = false;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -753,6 +888,35 @@ mod tests {
     }
 
     #[test]
+    fn failed_marker_removal_restores_lifecycle_availability() {
+        let temp = tempdir().unwrap();
+        let marker = temp.path().join("active");
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker.clone());
+        store.begin_session().unwrap();
+        // A directory in place of the marker file cannot be removed by the
+        // finalization path, which simulates a filesystem failure while the
+        // application is trying to exit.
+        fs::remove_file(&marker).unwrap();
+        fs::create_dir(&marker).unwrap();
+        assert!(store.finish_process_termination().is_err());
+        // The failed removal rolls the lifecycle back so qualification work can
+        // resume: the marker is still on disk, so an abrupt termination remains
+        // detectable on the next launch.
+        assert!(!store.qualification_terminating());
+        assert!(store.qualification_lifecycle_available());
+        assert!(marker.exists());
+        // A later exit attempt finalizes normally once the marker is removable.
+        fs::remove_dir(&marker).unwrap();
+        assert!(store.finish_process_termination().is_ok());
+        // Successful finalization closes the lifecycle by removing the marker.
+        // Lifecycle availability tracks marker-write health only, so it stays
+        // true here; the closed state is expressed by the terminating flag and
+        // the missing marker that no longer makes abrupt termination detectable.
+        assert!(store.qualification_terminating());
+        assert!(!marker.exists());
+    }
+
+    #[test]
     fn schema_metadata_alone_controls_binding_persistence() {
         let (_temp, mut store) = store();
         store.record_schema(&json!({ "inputs": [
@@ -946,6 +1110,70 @@ mod tests {
         let status = reloaded.begin_session().unwrap();
         assert_eq!(status["interruptedSession"], true);
         assert_eq!(status["recovery"]["state"], "available");
+    }
+
+    #[test]
+    fn clean_handoff_is_known_at_load_before_frontend_session_begins() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("active");
+        let clean = RecoveryStore::load(temp.path().join("recovery.json"), marker.clone());
+        assert!(clean.session_handoff_proven());
+
+        fs::write(&marker, b"1").unwrap();
+        let interrupted = RecoveryStore::load(temp.path().join("recovery.json"), marker);
+        assert!(!interrupted.session_handoff_proven());
+    }
+
+    #[test]
+    fn process_started_qualification_provenance_is_candidate_scoped_and_persistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("active");
+        fs::write(&marker, b"1").unwrap();
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker);
+        assert!(!store.session_handoff_proven());
+
+        store.note_qualification_session_started("candidate-one");
+        store.note_qualification_session_started("candidate-two");
+
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-one"));
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-two"));
+        assert!(!store.qualification_handoff_proven_for_candidate("candidate-other"));
+        store.begin_session().unwrap();
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-one"));
+        assert!(store.qualification_handoff_proven_for_candidate("candidate-two"));
+    }
+
+    #[test]
+    fn failed_durable_qualification_poison_keeps_the_process_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("active");
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker.clone());
+        store.begin_session().unwrap();
+        store.preserve_unproven_handoff();
+
+        store.finish_process_termination().unwrap();
+
+        assert!(marker.is_file());
+        let restarted = RecoveryStore::load(temp.path().join("recovery.json"), marker);
+        assert!(!restarted.session_handoff_proven());
+    }
+
+    #[test]
+    fn failed_process_marker_write_disables_qualification_lifecycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("active");
+        // A directory at the marker path makes the atomic marker write fail.
+        std::fs::create_dir_all(&marker).unwrap();
+        let mut store = RecoveryStore::load(temp.path().join("recovery.json"), marker.clone());
+        assert!(store.qualification_lifecycle_available());
+
+        let error = store.begin_session().unwrap_err();
+        assert!(error.contains("recovery_session_marker_failed"), "{error}");
+        assert!(
+            !store.qualification_lifecycle_available(),
+            "a process that cannot write its marker must not run qualification lifecycle work"
+        );
+        assert!(marker.is_dir(), "the blocked marker path is left untouched");
     }
 
     #[test]

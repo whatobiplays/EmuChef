@@ -348,7 +348,14 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (!executionResponseMatches(state, action.generation, action.snapshot.executionHandle)) return state;
       const current = state.execution;
       if (current.kind !== "active" && current.kind !== "terminal") return state;
-      if (action.snapshot.latestSequence < current.snapshot.latestSequence) return state;
+      // A backend-authored runtime-loss resolution is the sole sequence-regression
+      // exception: the runtime is gone, so the product cannot emit a later sequence.
+      const authoritativeRuntimeLoss = current.kind === "active"
+        && current.mode === "real"
+        && action.snapshot.simulated === false
+        && action.snapshot.terminal
+        && action.snapshot.terminalPolicy?.terminalResolution === "runtime_lost";
+      if (action.snapshot.latestSequence < current.snapshot.latestSequence && !authoritativeRuntimeLoss) return state;
       if (current.kind === "terminal" && !action.snapshot.terminal) return state;
       return {
         ...state,

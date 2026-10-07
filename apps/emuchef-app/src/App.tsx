@@ -11,6 +11,7 @@ import {
 } from "./app-dialogs";
 import {
   diagnosticIsBlocking,
+  errorCode,
   errorMessage,
 } from "./app-helpers";
 import { ExecutionStep } from "./ExecutionStep";
@@ -236,6 +237,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
   const [deviceQualification, setDeviceQualification] = useState<DeviceQualificationSnapshot | null>(null);
+  // Monotonic revision of successful authoritative inventory commits. Rust
+  // closes or invalidates an active qualification attempt during inventory
+  // reconciliation, and that transition is invisible in the public device list,
+  // so the qualification presentation layer re-reads its sanitized status
+  // whenever this revision advances.
+  const [qualificationInventoryRevision, setQualificationInventoryRevision] = useState(0);
   const [rootCheckPhase, setRootCheckPhase] = useState<"idle" | "checking">("idle");
   const [executionCapabilitiesRefresh, setExecutionCapabilitiesRefresh] = useState<
     "idle" | "refreshing" | "failed"
@@ -299,6 +306,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const qualification = useDeviceQualificationMode({
     enabled: startupReady,
+    inventoryRevision: qualificationInventoryRevision,
     workflow,
     workflowRef,
   });
@@ -380,6 +388,86 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const realExecutionCompiled = executionCapabilities?.realExecutionCompiled === true;
 
+  const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
+    // The sanitized runtime projection is applied before any dependent
+    // projection is awaited. After a proven runtime-session loss the backend
+    // has already discarded the process authority that the sidecar-backed
+    // requests need, so the failed runtime status and its recovery controls
+    // must be presented even when those requests can no longer answer.
+    const runtimeStatus = await api.runtimeStatus();
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
+    setRuntime(runtimeStatus);
+    if (runtimeStatus.status !== "ready") {
+      // Nothing sidecar-backed can answer while the app service is
+      // failed/unsupported. Settle the dependent reads so no request is left
+      // dangling, apply whatever still succeeded, and never let their failures
+      // reject the recovery re-read.
+      const [adbResult, , qualificationResult] = await Promise.allSettled([
+        api.adbStatus(),
+        refreshExecutionCapabilities(true),
+        api.deviceQualification(null),
+      ]);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (adbResult.status === "fulfilled") setAdb(adbResult.value);
+      if (qualificationResult.status === "fulfilled") {
+        setDeviceQualification(qualificationResult.value);
+      }
+      return;
+    }
+    // A ready runtime keeps the strict startup contract: the dependent
+    // projections are required before the ready workspace is offered.
+    const [adbStatus, , qualification] = await Promise.all([
+      api.adbStatus(),
+      refreshExecutionCapabilities(true),
+      api.deviceQualification(null),
+    ]);
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
+    setAdb(adbStatus);
+    setDeviceQualification(qualification);
+    const [nextCatalog, recents] = await Promise.all([
+      api.catalog(),
+      api.listRecentConfigurations(),
+    ]);
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
+    setCatalog(nextCatalog);
+    setRecentConfigurations(recents);
+  }, [refreshExecutionCapabilities]);
+
+  // A request that proves the shared runtime session is gone must re-read the
+  // runtime projection: the backend has already discarded every handle derived
+  // from that process generation, so keeping the previous projection would
+  // offer review and execution controls that can only fail. The generation
+  // fences advance synchronously, before the invalidation and the re-read, so
+  // an operation that captured the previous generation can no longer apply a
+  // stale result over the invalidated workflow or restore dead-process device,
+  // review, or execution facts.
+  const handleRuntimeSessionLost = useCallback(() => {
+    const runtimeGeneration = ++runtimeGenerationRef.current;
+    platformToolsGenerationRef.current += 1;
+    executionCapabilitiesGenerationRef.current += 1;
+    devicePollGenerationRef.current += 1;
+    deviceSelectionGenerationRef.current += 1;
+    rootCheckGenerationRef.current += 1;
+    supportGenerationRef.current += 1;
+    setRootCheckPhase("idle");
+    if (deviceRefreshTimerRef.current !== null) {
+      window.clearTimeout(deviceRefreshTimerRef.current);
+      deviceRefreshTimerRef.current = null;
+    }
+    setPlatformToolsOperation({ phase: "idle", kind: "import" });
+    setRepairPreparing(false);
+    manualDeviceRefreshRef.current = false;
+    setDeviceRefresh({ phase: "idle", generation: 0, message: null });
+    setBusy(false);
+    dispatch({ type: "runtime-invalidated" });
+    void initialize(runtimeGeneration).catch((error) => {
+      // Even the sanitized runtime status could not be read back after the
+      // proven loss. Surface the bounded failure instead of leaving the
+      // fire-and-forget recovery as an unhandled rejection.
+      setNotice(errorMessage(error));
+    });
+  }, [dispatch, initialize]);
+
   const {
     cancelExecution,
     exportExecutionReport,
@@ -393,6 +481,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     announce,
     dispatch,
     mainRef,
+    onRuntimeSessionLost: handleRuntimeSessionLost,
     qualification: deviceQualification,
     realExecutionCompiled,
     runtimeGenerationRef,
@@ -460,28 +549,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       }
     });
   }, [navigationBlocked, updateInteractionRevision]);
-
-  const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
-    const [runtimeStatus, adbStatus, , qualification] = await Promise.all([
-      api.runtimeStatus(),
-      api.adbStatus(),
-      refreshExecutionCapabilities(true),
-      api.deviceQualification(null),
-    ]);
-    if (runtimeGenerationRef.current !== runtimeGeneration) return;
-    setRuntime(runtimeStatus);
-    setAdb(adbStatus);
-    setDeviceQualification(qualification);
-    if (runtimeStatus.status === "ready") {
-      const [nextCatalog, recents] = await Promise.all([
-        api.catalog(),
-        api.listRecentConfigurations(),
-      ]);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setCatalog(nextCatalog);
-      setRecentConfigurations(recents);
-    }
-  }, [refreshExecutionCapabilities]);
 
   useEffect(() => {
     savedConfigurationRef.current = savedConfiguration;
@@ -1574,6 +1641,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
     try {
       const next = await api.pollDevices(expectedSupportGeneration);
+      // The inventory request above is the authoritative commit in Rust:
+      // transitions such as a second available device, a disappeared device,
+      // or a new native session epoch for the same handle invalidate and close
+      // an active qualification attempt there. Announce the committed
+      // inventory to the qualification presentation layer before the
+      // follow-up device qualification read, so a failing read cannot leave
+      // the overlay presenting a closed attempt as active.
+      setQualificationInventoryRevision((revision) => revision + 1);
       const qualification = await api.deviceQualification(
         next.length === 1 ? next[0].deviceHandle : null,
       );
@@ -1624,6 +1699,16 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePollGenerationRef.current === generation
         && runtimeGenerationRef.current === runtimeGeneration
       ) {
+        // A device poll can be the first request to discover that the shared
+        // runtime session is gone. The backend has already discarded every
+        // handle derived from that process generation, so clear the stale
+        // workflow projections and re-read the runtime projection to offer
+        // the app-service recovery controls again. The centralized handler
+        // owns the invalidation dispatch, the generation fences, and the
+        // re-read so every runtime-loss caller cannot get the ordering wrong.
+        if (errorCode(error) === "runtime_session_lost") {
+          handleRuntimeSessionLost();
+        }
         setNotice(errorMessage(error));
         if (manual) setDeviceRefresh({ phase: "idle", generation, message: null });
       }
@@ -1635,7 +1720,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         && runtimeGenerationRef.current === runtimeGeneration
       ) manualDeviceRefreshRef.current = false;
     }
-  }, [adb?.status, announce, runtime.status]);
+  }, [adb?.status, announce, handleRuntimeSessionLost, runtime.status]);
 
   const checkDeviceRoot = useCallback(async () => {
     const candidate = devices.length === 1 && devices[0].state === "available"
@@ -1648,6 +1733,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setRootCheckPhase("checking");
     try {
       const result = await api.checkDeviceRoot(candidate);
+      // Rust owns qualification lifecycle and this command can synchronously
+      // invalidate or close the active attempt. Refresh the sanitized status
+      // before the local staleness guards below, which only decide whether the
+      // returned root result updates the local deviceQualification projection;
+      // they never decide whether the backend lifecycle changed.
+      void qualification.refresh();
       if (
         rootCheckGenerationRef.current !== checkGeneration
         || devicePollGenerationRef.current !== pollGeneration
@@ -1666,7 +1757,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     } finally {
       if (rootCheckGenerationRef.current === checkGeneration) setRootCheckPhase("idle");
     }
-  }, [deviceQualification?.state, devices]);
+  }, [deviceQualification?.state, devices, qualification.refresh]);
 
   useEffect(() => {
     void pollDevices();

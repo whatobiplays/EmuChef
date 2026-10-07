@@ -14,7 +14,7 @@ import {
   updateRecipeSelection,
   workflowReducer,
 } from "../src/workflow";
-import type { ExecutionEvent, ExecutionSnapshot } from "../src/types";
+import type { ExecutionEvent, ExecutionSnapshot, RealExecutionSnapshot } from "../src/types";
 import {
   emptyRealExecutionConfirmation,
   realExecutionConfirmationComplete,
@@ -107,6 +107,25 @@ function executionSnapshot(
       features: [],
     },
   };
+}
+
+function lostRealSnapshot(executionHandle: string): RealExecutionSnapshot {
+  const base = executionSnapshot(0, "failed", executionHandle);
+  const terminalPolicy = {
+    authorityInvalidated: true,
+    recoveryState: "requalification_required" as const,
+    partialChangePresentation: "indeterminate" as const,
+    availableControls: ["fresh_workflow"] as const,
+    terminalResolution: "runtime_lost" as const,
+  };
+  return {
+    ...base,
+    simulated: false,
+    verificationScope: "real_device",
+    target: { label: "Connected Android device" },
+    launchAction: null,
+    terminalPolicy,
+  } as unknown as RealExecutionSnapshot;
 }
 
 test("repair keeps authoritative failed and cancelled labels while preserving safe intent", () => {
@@ -950,6 +969,72 @@ test("authoritative snapshots replace progress and reject older responses", () =
       snapshot: executionSnapshot(6, "running"),
     }),
     terminal,
+  );
+});
+
+test("authoritative runtime loss closes a real execution after a sequence regression", () => {
+  const handle = "execution-lost";
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1, mode: "real" },
+  );
+  const started = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: {
+      ...executionSnapshot(0, "running", handle),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+    } as unknown as RealExecutionSnapshot,
+  });
+  const progressed = workflowReducer(started, {
+    type: "execution-snapshot",
+    generation: 1,
+    snapshot: {
+      ...executionSnapshot(8, "running", handle),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+    } as unknown as RealExecutionSnapshot,
+  });
+  const lostEvents = workflowReducer(progressed, {
+    type: "execution-events",
+    generation: 1,
+    batch: { executionHandle: handle, events: [], latestSequence: 0, terminal: true },
+  });
+  assert.equal(lostEvents.execution.kind, "active");
+  assert.equal(lostEvents.execution.kind === "active" && lostEvents.execution.snapshot.latestSequence, 8);
+
+  const ordinaryStaleTerminal = {
+    ...lostRealSnapshot(handle),
+    terminalPolicy: {
+      authorityInvalidated: true,
+      recoveryState: "requalification_required" as const,
+      partialChangePresentation: "indeterminate" as const,
+      availableControls: ["fresh_workflow"] as const,
+    },
+  } as unknown as RealExecutionSnapshot;
+  assert.equal(workflowReducer(lostEvents, {
+    type: "execution-snapshot",
+    generation: 1,
+    snapshot: ordinaryStaleTerminal,
+  }), lostEvents, "ordinary stale terminal snapshots must still be rejected");
+
+  const terminal = workflowReducer(lostEvents, {
+    type: "execution-snapshot",
+    generation: 1,
+    snapshot: lostRealSnapshot(handle),
+  });
+  assert.equal(terminal.execution.kind, "terminal");
+  assert.equal(terminal.execution.kind === "terminal" && terminal.execution.snapshot.status, "failed");
+  assert.equal(
+    terminal.execution.kind === "terminal"
+      && terminal.execution.snapshot.simulated === false
+      && terminal.execution.snapshot.terminalPolicy?.availableControls.includes("fresh_workflow"),
+    true,
   );
 });
 

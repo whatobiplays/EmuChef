@@ -33,6 +33,7 @@ const targetPreview: QualificationTargetCandidatePreview = {
 const enabledStatus: QualificationModeStatus = {
   enabled: true,
   recordable: true,
+  deviceSelectionLocked: false,
   message: null,
   build: {
     appVersion: "0.1.0",
@@ -45,6 +46,7 @@ const enabledStatus: QualificationModeStatus = {
   workflows: [],
   targets: [],
   resumableCandidates: [targetPreview],
+  lifecycleRevision: 1,
 };
 
 const sessionSnapshot: QualificationSessionSnapshot = {
@@ -56,10 +58,13 @@ const sessionSnapshot: QualificationSessionSnapshot = {
   requiredRecipes: ["recipe.opaque"],
   humanCheckpoints: [],
   recordedCheckpoints: [],
+  phase: "executionActive",
   runValidity: "valid",
   qualificationOutcome: "not_observed",
+  recordable: true,
   invalidReason: null,
   candidate: null,
+  lifecycleRevision: 1,
 };
 
 const recordingResult: QualificationRunRecordingResult = {
@@ -82,15 +87,27 @@ test("qualification session DTOs preserve opaque handles and typed outcomes", ()
   assert.equal(recordingResult.runId.startsWith("qualification-run-sha256:"), true);
 });
 
-test("qualification API exposes only opaque candidate operations", () => {
+test("qualification API exposes only opaque candidate and operator operations", () => {
   const apiSource = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
   for (const command of [
     "get_device_qualification_mode_status",
     "create_qualification_target_candidate",
     "register_qualification_target",
     "discard_qualification_candidate",
+    "begin_qualification_session",
+    "record_qualification_checkpoint",
+    "abandon_qualification_session",
+    "record_qualification_run",
   ]) {
     assert.equal(apiSource.includes(command), true, command);
+  }
+  for (const removed of [
+    "refresh_qualification_session",
+    "bind_qualification_review",
+    "bind_qualification_execution",
+    "finalize_qualification_candidate",
+  ]) {
+    assert.equal(apiSource.includes(removed), false, removed);
   }
   for (const forbidden of [
     "candidatePath",

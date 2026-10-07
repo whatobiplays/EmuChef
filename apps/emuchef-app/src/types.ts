@@ -285,6 +285,8 @@ export interface RealTerminalPolicy {
   recoveryState: RecoveryStateId;
   partialChangePresentation: PartialChangePresentation;
   availableControls: TerminalControl[];
+  /** Explicit product-owned terminal resolution for authoritative runtime loss. */
+  terminalResolution?: "runtime_lost";
 }
 
 /** Production-authored cancellation guidance for real terminal snapshots. */
@@ -514,6 +516,7 @@ export interface QualificationCandidateSummary {
 export interface QualificationModeStatus {
   enabled: boolean;
   recordable: boolean;
+  deviceSelectionLocked: boolean;
   message: string | null;
   build: QualificationBuildIdentity | null;
   runtimeContract: string | null;
@@ -521,6 +524,13 @@ export interface QualificationModeStatus {
   targets: QualificationTargetSummary[];
   resumableCandidates: QualificationCandidateSummary[];
   resumableSession?: QualificationSessionSnapshot | null;
+  /**
+   * Backend transition revision of the serialized Rust qualification
+   * transition under which this projection was read. Zero means the response
+   * carries no lifecycle state (qualification mode disabled or the trusted
+   * repository unavailable) and never updates the presented session.
+   */
+  lifecycleRevision: number;
 }
 
 export interface BeginQualificationSessionRequest {
@@ -536,6 +546,15 @@ export interface QualificationRecordedCheckpoint {
   observedAt: string;
 }
 
+export const qualificationSessionPhases = [
+  "executionPending",
+  "executionActive",
+  "terminalAwaitingEvidence",
+  "closed",
+] as const;
+
+export type QualificationSessionPhase = (typeof qualificationSessionPhases)[number];
+
 export interface QualificationSessionSnapshot {
   sessionHandle: string;
   targetId: string;
@@ -545,10 +564,26 @@ export interface QualificationSessionSnapshot {
   requiredRecipes: string[];
   humanCheckpoints: QualificationWorkflow["humanCheckpoints"];
   recordedCheckpoints: QualificationRecordedCheckpoint[];
+  /** Sanitized lifecycle phase authored by Rust. */
+  phase: QualificationSessionPhase;
   runValidity: "valid" | "invalid";
   qualificationOutcome: "passed" | "failed" | "not_observed";
+  /** Whether this attempt can still become recorded evidence. */
+  recordable: boolean;
+  /**
+   * Backend-authored operator explanation. It never carries an internal
+   * invalidation token, path, serial, or raw backend error text.
+   */
   invalidReason: string | null;
   candidate: QualificationCandidateSummary | null;
+  /**
+   * Revision of the serialized Rust qualification transition that produced
+   * this snapshot. A command response carries the transition that committed
+   * the command; a status projection carries the transition under which its
+   * lifecycle state was read. The presentation layer applies a snapshot only
+   * when its revision is not older than the newest revision already applied.
+   */
+  lifecycleRevision: number;
 }
 
 export interface QualificationRunRecordingResult {

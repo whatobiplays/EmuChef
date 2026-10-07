@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -18,7 +19,7 @@ use tauri_plugin_dialog::FilePath;
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
-use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
+use crate::adb::{AdbManager, AdbRevalidationError, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
 #[cfg(test)]
 use crate::device_qualification::RootQualificationInvalidation;
@@ -27,6 +28,7 @@ use crate::device_qualification::{RootQualificationKey, RootQualificationState};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::qualification_repository::QualificationRepositoryProvider;
+use crate::qualification_session::QualificationSessionStore;
 use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
@@ -37,10 +39,18 @@ pub struct AppState {
     pub sidecar: SidecarState,
     pub catalog: Result<CatalogDescriptor, String>,
     pub qualification_repository: QualificationRepositoryProvider,
+    /// Serializes trusted product commits with their qualification observation.
+    /// Acquire it only after sidecar/ADB work is complete. When an execution
+    /// store must also be locked, execution state precedes this gate; all other
+    /// callers acquire the gate before product authority stores. Every
+    /// acquisition also receives the monotonic revision that orders
+    /// qualification projections against each other.
+    pub qualification_transition_gate: QualificationTransitionGate,
     pub adb: Mutex<AdbManager>,
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
     pub handles: Mutex<SessionHandles>,
+    pub qualification_sessions: Mutex<QualificationSessionStore>,
     pub root_qualification: Mutex<RootQualificationStore>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
@@ -48,6 +58,15 @@ pub struct AppState {
     pub support: Mutex<SupportStore>,
     pub updates: UpdateService,
     pub update_activity: ActivityGate,
+}
+
+/// One immutable Platform-Tools identity used to request and retain inventory.
+/// The path and revision are captured while holding the same manager lock so a
+/// delayed response cannot be attributed to a replacement installation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AdbRuntimeSnapshot {
+    pub(crate) adb_path: String,
+    pub(crate) revision: u64,
 }
 
 /// Request one fresh ADB inventory and pass it through the shared native
@@ -59,14 +78,73 @@ pub(crate) fn list_and_reconcile_inventory<F>(
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
-    let adb_path = current_adb_path(state)?;
+    let platform_tools = current_adb_runtime_snapshot(state)?;
     let runtime_generation = state.sidecar.try_generation().map_err(|_| {
         safe_error(
             "runtime_generation_unavailable",
             "Device qualification state is temporarily unavailable.",
         )
     })?;
-    let platform_tools_revision = state
+    list_and_reconcile_inventory_for_state(state, &platform_tools, runtime_generation, request)
+}
+
+/// Serialize inventory authority retention with its qualification observation.
+/// The request is completed before this function acquires the transition gate.
+pub(crate) fn list_and_reconcile_inventory_for_state<F>(
+    state: &AppState,
+    platform_tools: &AdbRuntimeSnapshot,
+    runtime_generation: u64,
+    request: &mut F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    let inventory = match request(
+        "listAdbDevices",
+        json!({ "adbPath": platform_tools.adb_path }),
+    ) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            // A periodic inventory poll is often the first request to discover
+            // that the shared runtime session is gone. Classify the raw
+            // runtime error before it is sanitized so the loss clears every
+            // piece of authority derived from that process generation instead
+            // of reporting an ordinary inventory failure that a qualification
+            // attempt could still read cached device facts from.
+            if crate::execution::runtime_session_lost(state, &error) {
+                let _ = crate::execution::invalidate_lost_runtime_authority(state);
+                return Err(crate::execution::runtime_session_lost_error());
+            }
+            return Err(safe_error(
+                "adb_inventory_failed",
+                "Connected Android devices could not be listed.",
+            ));
+        }
+    };
+    reconcile_inventory_snapshot_with_state_and_hook(
+        state,
+        &inventory,
+        runtime_generation,
+        platform_tools.revision,
+        || {},
+    )
+}
+
+/// Retain one reconciled inventory and notify qualification while holding the
+/// shared transition gate. The hook exists for a deterministic ordering test;
+/// production callers use the same path with an empty hook.
+pub(crate) fn reconcile_inventory_snapshot_with_state_and_hook<F>(
+    state: &AppState,
+    inventory: &Value,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    after_product_commit: F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnOnce(),
+{
+    let transition = qualification_transition_lock(state);
+    let current_platform_tools_revision = state
         .adb
         .lock()
         .map_err(|_| {
@@ -76,14 +154,166 @@ where
             )
         })?
         .revision();
-    list_and_reconcile_inventory_with_authority(
+    if current_platform_tools_revision != platform_tools_revision {
+        return Err(safe_error(
+            "platform_tools_revision_stale",
+            "Device status changed. Refresh device discovery before continuing.",
+        ));
+    }
+    let result = reconcile_inventory_with_context(
         &state.handles,
         &state.root_qualification,
-        &adb_path,
+        inventory,
         runtime_generation,
         platform_tools_revision,
-        request,
-    )
+    );
+    let (generation, available_devices) = current_qualification_inventory_snapshot(state);
+    after_product_commit();
+    report_device_inventory_to_qualification(state, generation, &available_devices);
+    transition.release_and_retry_best_effort();
+    result
+}
+
+/// Capture one immutable, generation-tagged inventory projection from the
+/// native product store.
+pub(crate) fn current_qualification_inventory_snapshot(
+    state: &AppState,
+) -> (u64, Vec<(String, u64)>) {
+    let (generation, available_devices) = match state.handles.lock() {
+        Ok(handles) => (
+            handles.device_generation(),
+            handles
+                .qualification_devices()
+                .into_iter()
+                .filter(|device| device.state == "available")
+                .map(|device| (device.handle, device.session_epoch))
+                .collect::<Vec<_>>(),
+        ),
+        Err(poisoned) => {
+            let handles = poisoned.into_inner();
+            state.handles.clear_poison();
+            (
+                handles.device_generation(),
+                handles
+                    .qualification_devices()
+                    .into_iter()
+                    .filter(|device| device.state == "available")
+                    .map(|device| (device.handle, device.session_epoch))
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    (generation, available_devices)
+}
+
+/// Report one committed inventory generation to the active qualification
+/// attempt. A missing associated device invalidates the attempt.
+fn report_device_inventory_to_qualification(
+    state: &AppState,
+    generation: u64,
+    available_devices: &[(String, u64)],
+) {
+    crate::qualification_session::observe_device_inventory_in_transition(
+        state,
+        generation,
+        available_devices,
+    );
+}
+
+/// Serialize a product observation commit and its qualification notification.
+/// A poisoned mutex is recovered because losing this ordering boundary must
+/// never silently drop a committed product transition.
+///
+/// Every acquisition also receives the next monotonic transition revision.
+/// Qualification projections carry the revision of the acquisition under which
+/// they were taken, so the presentation layer can order a status projection
+/// against a command snapshot by the serialized Rust transition order instead
+/// of by frontend request timing.
+pub(crate) struct QualificationTransitionGate {
+    lock: Mutex<()>,
+    revision: AtomicU64,
+}
+
+impl QualificationTransitionGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            lock: Mutex::new(()),
+            revision: AtomicU64::new(0),
+        }
+    }
+
+    /// Acquire the gate, recovering a poisoned mutex, and allocate the
+    /// revision that orders every projection taken under this acquisition.
+    fn acquire(&self) -> (MutexGuard<'_, ()>, u64) {
+        let guard = match self.lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let guard = poisoned.into_inner();
+                self.lock.clear_poison();
+                guard
+            }
+        };
+        let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        (guard, revision)
+    }
+
+    /// Probe whether another thread currently holds the gate. This supports
+    /// race assertions and never orders lifecycle work, so it allocates no
+    /// revision.
+    #[cfg(test)]
+    pub(crate) fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
+        self.lock.try_lock()
+    }
+}
+
+/// Held guard for one transition-gate acquisition. Deferred source checks run
+/// only after this guard releases the product-transition gate.
+pub(crate) struct QualificationTransitionGuard<'a> {
+    state: &'a AppState,
+    guard: Option<MutexGuard<'a, ()>>,
+    revision: u64,
+}
+
+impl QualificationTransitionGuard<'_> {
+    /// The revision allocated for this gate acquisition. Every qualification
+    /// projection produced while this guard is held carries this value.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Release the transition gate before retrying materialization that may
+    /// inspect the current authored-source checkout.
+    pub(crate) fn release_and_retry(
+        mut self,
+    ) -> Result<Option<crate::qualification_session::QualificationSessionSnapshot>, String> {
+        drop(self.guard.take());
+        crate::qualification_session::retry_deferred_finalization(self.state)
+    }
+
+    /// Release the product-transition gate and retry deferred qualification
+    /// materialization without changing the already-committed product result.
+    pub(crate) fn release_and_retry_best_effort(self) {
+        if self.release_and_retry().is_err() {
+            eprintln!(
+                "Qualification state was retained, but deferred candidate materialization remains pending."
+            );
+        }
+    }
+}
+
+impl Drop for QualificationTransitionGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+    }
+}
+
+pub(crate) fn qualification_transition_lock(state: &AppState) -> QualificationTransitionGuard<'_> {
+    let (guard, revision) = state.qualification_transition_gate.acquire();
+    QualificationTransitionGuard {
+        state,
+        guard: Some(guard),
+        revision,
+    }
 }
 
 /// Request and reconcile one inventory using explicit native authority inputs.
@@ -274,6 +504,24 @@ pub fn begin_app_session(state: State<'_, AppState>) -> Result<Value, String> {
         .begin_session()
 }
 
+/// Finalize the process-lifetime recovery marker for an accepted application
+/// termination. Marker removal is the durable statement that this process ended
+/// through the clean-shutdown contract, so it is serialized with the
+/// qualification transition gate: an invalidation, checkpoint, or abandonment
+/// that is still being persisted completes before the next launch is told the
+/// handoff was clean. Returns false when the marker could not be finalized.
+pub(crate) fn finish_recovery_process_session(state: &AppState) -> bool {
+    let transition = qualification_transition_lock(state);
+    let finalized = state
+        .recovery
+        .lock()
+        .map_err(|_| ())
+        .and_then(|mut recovery| recovery.finish_process_termination().map_err(|_| ()))
+        .is_ok();
+    drop(transition);
+    finalized
+}
+
 /// Restart the Rust sidecar after proving no execution is in flight.
 #[tauri::command]
 pub fn restart_runtime(
@@ -330,6 +578,29 @@ fn public_runtime_status(status: RuntimeStatusDto) -> Value {
 }
 
 fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), String> {
+    reset_app_session_with_hook(state, close_documents, || {})
+}
+
+fn reset_app_session_with_hook<F>(
+    state: &AppState,
+    close_documents: bool,
+    after_execution_lock: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    // Real execution start holds this store while reserving, admitting, and
+    // retaining product authority. Acquire it before the transition gate so a
+    // reset cannot interleave with an admission commit or reverse lock order.
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    after_execution_lock();
+    let transition = qualification_transition_lock(state);
+
     state
         .root_qualification
         .lock()
@@ -370,6 +641,26 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             )
         })?
         .drain_document_ids();
+    state
+        .handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+        .invalidate_all();
+    executions.reset();
+    // A new frontend session drops process-local attempt authority. Persisted
+    // candidates stay resumable and are re-adopted from the first trusted
+    // observation of the new process session.
+    crate::qualification_session::reset_in_transition(state);
+    state
+        .support
+        .lock()
+        .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
+        .invalidate();
+    drop(transition);
+    drop(executions);
+
+    // Closing sidecar documents may be slow; their process-local handles have
+    // already been removed atomically with the other reset authority.
     if close_documents {
         for document_id in document_ids {
             let _ = state.sidecar.request(
@@ -378,26 +669,6 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             );
         }
     }
-    state
-        .handles
-        .lock()
-        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
-        .invalidate_all();
-    state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .reset();
-    state
-        .support
-        .lock()
-        .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
-        .invalidate();
     Ok(())
 }
 
@@ -560,9 +831,9 @@ pub async fn install_platform_tools_selection(
         .take(&selection_handle)?;
 
     let import_app = app.clone();
-    let result = run_import_task(move || {
+    let preparation = {
         let state = import_app.state::<AppState>();
-        let mut adb = state.adb.lock().map_err(|_| {
+        let adb = state.adb.lock().map_err(|_| {
             safe_error(
                 "adb_state_unavailable",
                 "Platform-Tools setup state is unavailable.",
@@ -574,34 +845,100 @@ pub async fn install_platform_tools_selection(
                 "Platform-Tools status changed. Review troubleshooting status before retrying.",
             ));
         }
-        let result = adb.import_zip(&path);
-        drop(adb);
-        result
-    })
-    .await?;
+        adb.import_preparation_context()
+    };
+    let prepared = run_import_task(move || preparation.prepare_zip(&path)).await?;
 
     let state = app.state::<AppState>();
-    state
-        .root_qualification
-        .lock()
-        .map_err(|_| {
+    finish_platform_tools_import(&state, prepared)
+}
+
+/// Activate a prepared installation and commit its authority reset together.
+/// Archive inspection, extraction, and validation finish before this gate is
+/// acquired; the settings/current/revision update and qualification reset share
+/// one serialized product-transition boundary.
+fn finish_platform_tools_import(
+    state: &AppState,
+    prepared: crate::adb::PreparedAdbInstall,
+) -> Result<Value, String> {
+    finish_platform_tools_import_after_activation(state, prepared, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn finish_platform_tools_import_with_hook<F>(
+    state: &AppState,
+    prepared: crate::adb::PreparedAdbInstall,
+    after_product_activation: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+{
+    finish_platform_tools_import_after_activation(state, prepared, after_product_activation)
+}
+
+fn finish_platform_tools_import_after_activation<F>(
+    state: &AppState,
+    prepared: crate::adb::PreparedAdbInstall,
+    after_product_activation: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+{
+    // Activation publishes a new managed ADB identity that an in-flight
+    // execution's reviewed device steps still depend on, so it shares the
+    // execution-store-before-transition-gate boundary with removal and
+    // real-execution start. An execution that is starting or active rejects the
+    // replacement before anything becomes authoritative.
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    let transition = qualification_transition_lock(state);
+    if executions.has_in_flight() {
+        return Err(safe_error(
+            "execution_active",
+            "Platform-Tools cannot be replaced while an execution is starting or active.",
+        ));
+    }
+    let activated = {
+        let mut adb = state.adb.lock().map_err(|_| {
             safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
             )
-        })?
-        .invalidate();
-    state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "The device session could not be reset.",
-            )
-        })?
-        .invalidate_runtime_authority_preserving_identities();
-    Ok(public_adb_status(&result))
+        })?;
+        adb.activate_prepared(prepared)?
+    };
+    after_product_activation();
+
+    let mut root_authority = match state.root_qualification.lock() {
+        Ok(root_authority) => root_authority,
+        Err(poisoned) => {
+            let root_authority = poisoned.into_inner();
+            state.root_qualification.clear_poison();
+            root_authority
+        }
+    };
+    root_authority.invalidate();
+    drop(root_authority);
+
+    let mut handles = match state.handles.lock() {
+        Ok(handles) => handles,
+        Err(poisoned) => {
+            let handles = poisoned.into_inner();
+            state.handles.clear_poison();
+            handles
+        }
+    };
+    handles.invalidate_runtime_authority_preserving_identities();
+    drop(handles);
+    crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
+    drop(executions);
+    transition.release_and_retry_best_effort();
+    let imported_status = activated.cleanup_retired_install();
+    Ok(public_adb_status(&imported_status))
 }
 
 pub(crate) type PickerCompletion<T> = Box<dyn FnOnce(Option<T>) + Send>;
@@ -650,17 +987,47 @@ pub fn remove_platform_tools(
     expected_revision: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    if state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .has_in_flight()
-    {
+    remove_platform_tools_after_mutation(&state, expected_revision, || {}, || {})
+}
+
+#[cfg(test)]
+pub(crate) fn remove_platform_tools_with_lock_hooks<F, G>(
+    state: &AppState,
+    expected_revision: Option<u64>,
+    after_execution_lock: F,
+    after_product_removal: G,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+    G: FnOnce(),
+{
+    remove_platform_tools_after_mutation(
+        state,
+        expected_revision,
+        after_execution_lock,
+        after_product_removal,
+    )
+}
+
+fn remove_platform_tools_after_mutation<F, G>(
+    state: &AppState,
+    expected_revision: Option<u64>,
+    after_execution_lock: F,
+    after_product_removal: G,
+) -> Result<Value, String>
+where
+    F: FnOnce(),
+    G: FnOnce(),
+{
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    after_execution_lock();
+    let transition = qualification_transition_lock(state);
+    if executions.has_in_flight() {
         return Err(safe_error(
             "execution_active",
             "Platform-Tools cannot be removed while an execution is starting or active.",
@@ -694,38 +1061,42 @@ pub fn remove_platform_tools(
             "Only an app-managed Platform-Tools installation can be removed here.",
         ));
     }
-    let result = adb.remove()?;
+    let revision_before_removal = adb.revision();
+    let result = adb.remove();
+    let authority_was_cleared = adb.revision() != revision_before_removal || !adb.is_app_managed();
     drop(adb);
-    state
-        .root_qualification
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
-            )
-        })?
-        .invalidate();
-    state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "The device session could not be reset.",
-            )
-        })?
-        .invalidate_all();
-    state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .reset();
+    if authority_was_cleared {
+        after_product_removal();
+
+        let mut root_authority = match state.root_qualification.lock() {
+            Ok(root_authority) => root_authority,
+            Err(poisoned) => {
+                let root_authority = poisoned.into_inner();
+                state.root_qualification.clear_poison();
+                root_authority
+            }
+        };
+        root_authority.invalidate();
+        drop(root_authority);
+
+        let mut handles = match state.handles.lock() {
+            Ok(handles) => handles,
+            Err(poisoned) => {
+                let handles = poisoned.into_inner();
+                state.handles.clear_poison();
+                handles
+            }
+        };
+        handles.invalidate_all();
+        drop(handles);
+
+        executions.reset();
+
+        crate::qualification_session::observe_platform_tools_authority_reset_in_transition(state);
+    }
+    drop(executions);
+    transition.release_and_retry_best_effort();
+    let result = result?;
     Ok(public_adb_status(&result))
 }
 
@@ -759,8 +1130,26 @@ pub fn poll_devices(
 
 #[tauri::command]
 pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
-    let (facts, serial) = probe_device_facts(&device_handle, &state)?;
-    Ok(public_device_facts(&device_handle, &facts, &serial))
+    let probe = probe_device_facts(&device_handle, &state)?;
+    Ok(public_device_facts(
+        &device_handle,
+        &probe.facts,
+        &probe.serial,
+    ))
+}
+
+/// One trusted device probe result.
+///
+/// The raw payload remains available to the public command and the existing
+/// process-local fact store, while `typed` is the typed projection that
+/// qualification consumes; it is `None` when the payload does not decode, in
+/// which case no identity fact was established and no observation is
+/// committed.
+pub(crate) struct DeviceProbeResult {
+    pub(crate) facts: Value,
+    pub(crate) typed: Option<crate::device_observation::DeviceProbeFacts>,
+    pub(crate) serial: String,
+    pub(crate) session_epoch: u64,
 }
 
 /// Probe one selected device through the production sidecar boundary and retain
@@ -770,43 +1159,130 @@ pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result
 pub(crate) fn probe_device_facts(
     device_handle: &str,
     state: &AppState,
-) -> Result<(Value, String), String> {
+) -> Result<DeviceProbeResult, String> {
     let adb_path = current_adb_path(&state)?;
-    let serial = state
-        .handles
-        .lock()
-        .map_err(|_| {
+    probe_device_facts_with(device_handle, state, |serial| {
+        state
+            .sidecar
+            .request(
+                "probeDevice",
+                json!({ "adbPath": adb_path, "serial": serial }),
+            )
+            .map_err(|_| {
+                safe_error(
+                    "adb_probe_failed",
+                    "The selected device information could not be read.",
+                )
+            })
+    })
+}
+
+/// Run a probe after capturing one device-session identity. The closure makes
+/// the asynchronous observation boundary explicit: its result is retained only
+/// if the same native handle and epoch remain current after it returns.
+pub(crate) fn probe_device_facts_with<F>(
+    device_handle: &str,
+    state: &AppState,
+    probe: F,
+) -> Result<DeviceProbeResult, String>
+where
+    F: FnOnce(&str) -> Result<Value, String>,
+{
+    let (serial, session_epoch) = {
+        let handles = state.handles.lock().map_err(|_| {
             safe_error(
                 "session_state_unavailable",
                 "Device session state is unavailable.",
-            )
-        })?
-        .device(&device_handle)?
-        .serial
-        .clone();
-    let facts = state
-        .sidecar
-        .request(
-            "probeDevice",
-            json!({ "adbPath": adb_path, "serial": &serial }),
-        )
-        .map_err(|_| {
-            safe_error(
-                "adb_probe_failed",
-                "The selected device information could not be read.",
             )
         })?;
-    state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "Device session state is unavailable.",
-            )
-        })?
-        .set_facts(&device_handle, facts.clone())?;
-    Ok((facts, serial))
+        let device = handles.device(device_handle)?;
+        if device.state != "available" {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+        (device.serial.clone(), device.session_epoch)
+    };
+    let failure_target = crate::qualification_session::capture_device_observation_failure_target(
+        state,
+        device_handle,
+        session_epoch,
+    );
+    let facts = match probe(&serial) {
+        Ok(facts) => facts,
+        Err(error) => {
+            let transition = qualification_transition_lock(state);
+            let current = state
+                .handles
+                .lock()
+                .map_err(|_| {
+                    safe_error(
+                        "session_state_unavailable",
+                        "Device session state is unavailable.",
+                    )
+                })?
+                .device(device_handle)
+                .is_ok_and(|device| {
+                    device.state == "available"
+                        && device.serial == serial
+                        && device.session_epoch == session_epoch
+                });
+            if !current {
+                return Err(safe_error(
+                    "device_changed",
+                    "The selected device changed. Refresh device discovery and try again.",
+                ));
+            }
+            crate::qualification_session::observe_device_observation_failure_in_transition(
+                state,
+                failure_target.clone(),
+            );
+            transition.release_and_retry_best_effort();
+            return Err(error);
+        }
+    };
+    let typed = crate::device_observation::DeviceProbeFacts::decode(&facts);
+    let transition = qualification_transition_lock(state);
+    let mut handles = state.handles.lock().map_err(|_| {
+        safe_error(
+            "session_state_unavailable",
+            "Device session state is unavailable.",
+        )
+    })?;
+    let current = handles.device(device_handle).is_ok_and(|device| {
+        device.state == "available"
+            && device.serial == serial
+            && device.session_epoch == session_epoch
+    });
+    if !current {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
+    handles.set_facts_for_epoch(&device_handle, session_epoch, facts.clone())?;
+    drop(handles);
+    if let Some(typed_facts) = typed.as_ref() {
+        crate::device_observation::commit_selected_observation_in_transition(
+            &state,
+            crate::device_observation::SelectedDeviceObservation::new(device_handle)
+                .with_probe_facts(typed_facts)
+                .with_session_epoch(session_epoch),
+        )?;
+    } else {
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
+    }
+    transition.release_and_retry_best_effort();
+    Ok(DeviceProbeResult {
+        facts,
+        typed,
+        serial,
+        session_epoch,
+    })
 }
 
 #[tauri::command]
@@ -821,17 +1297,48 @@ pub(crate) fn match_device_observation(
     device_handle: &str,
     state: &AppState,
 ) -> Result<Value, String> {
-    let facts = state
-        .handles
-        .lock()
-        .map_err(|_| {
+    match_device_result(device_handle, state).map(|(public, _projection)| public)
+}
+
+/// Match a selected device through the production sidecar boundary and return
+/// the typed projection qualification consumes alongside the public DTO.
+pub(crate) fn match_device_projection(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<crate::device_observation::DeviceMatchProjection, String> {
+    match_device_result(device_handle, state).map(|(_public, projection)| projection)
+}
+
+/// Resolve one trusted catalog match and project it both for the client and for
+/// typed qualification consumers from the same sidecar result.
+fn match_device_result(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<(Value, crate::device_observation::DeviceMatchProjection), String> {
+    let (facts, session_epoch) = {
+        let handles = state.handles.lock().map_err(|_| {
             safe_error(
                 "session_state_unavailable",
                 "Device session state is unavailable.",
             )
-        })?
-        .facts(device_handle)?
-        .clone();
+        })?;
+        let device = handles.device(device_handle)?;
+        if device.state != "available" {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+        let (facts, epoch) = handles.facts_with_epoch(device_handle)?;
+        (facts.clone(), epoch)
+    };
+    let qualification_device_plan = crate::qualification_session::active_device_plan(state);
+    let observation_failure_target =
+        crate::qualification_session::capture_device_observation_failure_target(
+            state,
+            device_handle,
+            session_epoch,
+        );
     let catalog = catalog(&state)?;
     let exact_serial = facts
         .get("serial")
@@ -849,7 +1356,81 @@ pub(crate) fn match_device_observation(
                 "The device could not be matched to the setup catalog.",
             )
         })?;
-    Ok(public_match(&result, exact_serial.as_deref()))
+    let transition = qualification_transition_lock(state);
+    {
+        let handles = state.handles.lock().map_err(|_| {
+            safe_error(
+                "session_state_unavailable",
+                "Device session state is unavailable.",
+            )
+        })?;
+        let device = handles.device(device_handle).map_err(|_| {
+            safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            )
+        })?;
+        if device.state != "available"
+            || device.session_epoch != session_epoch
+            || device.facts_session_epoch != Some(session_epoch)
+        {
+            return Err(safe_error(
+                "device_changed",
+                "The selected device changed. Refresh device discovery and try again.",
+            ));
+        }
+    }
+    let public = public_match(&result, exact_serial.as_deref());
+    let projection =
+        crate::device_observation::DeviceMatchProjection::decode(&public).ok_or_else(|| {
+            safe_error(
+                "device_match_failed",
+                "The device could not be matched to the setup catalog.",
+            )
+        })?;
+    let matched_profile_id = qualification_device_plan.as_ref().and_then(|device_plan| {
+        crate::device_observation::matched_profile_id(&projection, device_plan)
+    });
+    commit_match_device_observation_in_transition(
+        state,
+        device_handle,
+        session_epoch,
+        qualification_device_plan.as_deref(),
+        matched_profile_id.as_deref(),
+        observation_failure_target,
+    )?;
+    transition.release_and_retry_best_effort();
+    Ok((public, projection))
+}
+
+/// Publish the catalog profile projection for the exact current device session.
+/// If an active attempt's plan no longer resolves to a catalog profile, fail
+/// that captured attempt closed without changing the product match response.
+pub(crate) fn commit_match_device_observation_in_transition(
+    state: &AppState,
+    device_handle: &str,
+    session_epoch: u64,
+    device_plan: Option<&str>,
+    profile_id: Option<&str>,
+    failure_target: Option<crate::qualification_session::DeviceObservationFailureTarget>,
+) -> Result<(), String> {
+    if device_plan.is_none() {
+        return Ok(());
+    }
+    if let Some(profile_id) = profile_id {
+        crate::device_observation::commit_selected_observation_in_transition(
+            state,
+            crate::device_observation::SelectedDeviceObservation::new(device_handle)
+                .with_profile_id(profile_id)
+                .with_session_epoch(session_epoch),
+        )
+    } else {
+        crate::qualification_session::observe_device_observation_failure_in_transition(
+            state,
+            failure_target,
+        );
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -1035,14 +1616,37 @@ pub fn create_review(
         created: Instant::now(),
         last_access: Instant::now(),
     };
+    let transition = qualification_transition_lock(&state);
     let mut handles = state.handles.lock().map_err(|_| {
         safe_error(
             "session_state_unavailable",
             "Review session state is unavailable.",
         )
     })?;
+    let current_device = handles.device(&device_handle).map_err(|_| {
+        safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        )
+    })?;
+    if current_device.state != "available"
+        || handles.qualification_context(&device_handle) != snapshot.qualification_context
+    {
+        return Err(safe_error(
+            "device_changed",
+            "The selected device changed. Refresh device discovery and try again.",
+        ));
+    }
     handles.invalidate_catalog(catalog(&state)?.digest());
-    let review_handle = handles.insert_review(snapshot);
+    let review_handle = handles.insert_review(snapshot.clone());
+    drop(handles);
+    crate::qualification_session::observe_in_transition(
+        &state,
+        crate::qualification_session::QualificationLifecycleObservation::ReviewCreated(Box::new(
+            crate::qualification_session::review_observation(&review_handle, &snapshot),
+        )),
+    );
+    transition.release_and_retry_best_effort();
     let exact_serial = plan
         .pointer("/target_device/serial")
         .and_then(Value::as_str);
@@ -1346,6 +1950,34 @@ pub(crate) fn current_adb_path(state: &AppState) -> Result<String, String> {
         .into_owned())
 }
 
+pub(crate) fn current_adb_runtime_snapshot(state: &AppState) -> Result<AdbRuntimeSnapshot, String> {
+    let adb = state.adb.lock().map_err(|_| {
+        safe_error(
+            "adb_state_unavailable",
+            "Platform-Tools setup state is unavailable.",
+        )
+    })?;
+    Ok(AdbRuntimeSnapshot {
+        adb_path: adb.adb_path()?.to_string_lossy().into_owned(),
+        revision: adb.revision(),
+    })
+}
+
+pub(crate) fn revalidated_adb_runtime_snapshot(
+    state: &AppState,
+    expected: &crate::adb::AdbInstallationIdentity,
+) -> Result<AdbRuntimeSnapshot, AdbRevalidationError> {
+    let adb = state
+        .adb
+        .lock()
+        .map_err(|_| AdbRevalidationError::Unavailable)?;
+    let adb_path = adb.revalidate_for_execution(expected)?;
+    Ok(AdbRuntimeSnapshot {
+        adb_path: adb_path.to_string_lossy().into_owned(),
+        revision: adb.revision(),
+    })
+}
+
 fn configuration_payload(
     state: &AppState,
     device_handle: &str,
@@ -1462,7 +2094,7 @@ fn public_device_facts(device_handle: &str, facts: &Value, exact_serial: &str) -
     public
 }
 
-fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
+pub(crate) fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
     let candidates = |field: &str| {
         result
             .get(field)
@@ -2025,6 +2657,110 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn reset_test_state(root: &std::path::Path) -> AppState {
+        AppState {
+            sidecar: SidecarState::new(root.join("sidecar-cache")),
+            catalog: Err("catalog is not used by session reset".to_string()),
+            qualification_repository:
+                crate::qualification_repository::QualificationRepositoryProvider::default(),
+            qualification_transition_gate: QualificationTransitionGate::new(),
+            adb: Mutex::new(crate::adb::AdbManager::new(root.join("platform-tools"))),
+            platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
+            input_contracts: Mutex::new(InputContractSnapshot::default()),
+            handles: Mutex::new(SessionHandles::default()),
+            qualification_sessions: Mutex::new(
+                crate::qualification_session::QualificationSessionStore::default(),
+            ),
+            root_qualification: Mutex::new(RootQualificationStore::default()),
+            executions: Mutex::new(ExecutionHandleStore::default()),
+            saved_configurations: Mutex::new(
+                crate::saved_configurations::SavedConfigurationStore::load(
+                    root.join("recent-configurations.json"),
+                ),
+            ),
+            recovery: Mutex::new(crate::recovery::RecoveryStore::load(
+                root.join("recovery-draft.json"),
+                root.join("session-active.marker"),
+            )),
+            support: Mutex::new(crate::support::SupportStore::new(
+                root.join("support-cache"),
+            )),
+            updates: crate::updates::UpdateService::from_production_document()
+                .expect("production update document should be valid in tests"),
+            update_activity: crate::updates::ActivityGate::default(),
+        }
+    }
+
+    #[test]
+    fn inventory_from_a_replaced_platform_tools_revision_is_not_committed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let captured_revision = state.adb.lock().unwrap().revision();
+        state.adb.lock().unwrap().remove().unwrap();
+        assert_ne!(state.adb.lock().unwrap().revision(), captured_revision);
+
+        let mut committed = false;
+        let error = reconcile_inventory_snapshot_with_state_and_hook(
+            &state,
+            &json!({
+                "devices": [{
+                    "serial": "stale-platform-tools-device",
+                    "state": "available",
+                    "transportId": "stale-platform-tools-transport"
+                }]
+            }),
+            1,
+            captured_revision,
+            || committed = true,
+        )
+        .expect_err("a snapshot captured under the old ADB revision must be rejected");
+
+        assert!(error.contains("platform_tools_revision_stale"));
+        assert!(!committed, "qualification must not observe stale inventory");
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .qualification_devices()
+            .is_empty());
+    }
+
+    #[test]
+    fn accepted_termination_marker_removal_waits_for_qualification_transitions() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let marker = temp.path().join("session-active.marker");
+        state.recovery.lock().unwrap().begin_session().unwrap();
+        assert!(marker.is_file());
+
+        // Model a qualification transition that is still being persisted when
+        // the operator accepts termination.
+        let transition = qualification_transition_lock(&state);
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                finished_tx
+                    .send(finish_recovery_process_session(&state))
+                    .unwrap();
+            });
+            assert!(
+                finished_rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_err(),
+                "marker removal must wait for an in-flight qualification transition"
+            );
+            assert!(
+                marker.is_file(),
+                "the clean-handoff marker must survive until the transition finishes"
+            );
+            drop(transition);
+            assert!(finished_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("marker removal must finish after the transition releases"));
+        });
+        assert!(!marker.exists());
+    }
+
     fn review_snapshot(device_handle: &str) -> ReviewedPlanSnapshot {
         ReviewedPlanSnapshot {
             response: json!({ "plan": { "id": "plan" } }),
@@ -2038,6 +2774,60 @@ mod tests {
             created: Instant::now(),
             last_access: Instant::now(),
         }
+    }
+
+    #[test]
+    fn session_reset_holds_execution_before_gate_and_commits_reset_after_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "reset-order-device",
+                        "state": "available",
+                        "transportId": "reset-order-transport"
+                    }]
+                }))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        let transition = qualification_transition_lock(&state);
+        let (reset_locked_execution_tx, reset_locked_execution_rx) =
+            std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let state = &state;
+            let reset = scope.spawn(move || {
+                reset_app_session_with_hook(state, false, move || {
+                    reset_locked_execution_tx
+                        .send(())
+                        .expect("reset should reach the gate after locking execution state");
+                })
+            });
+            reset_locked_execution_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("reset should lock execution state before waiting on the gate");
+            assert!(matches!(
+                state.executions.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            assert!(state.handles.lock().unwrap().device(&device_handle).is_ok());
+
+            drop(transition);
+            reset
+                .join()
+                .expect("reset thread should not panic")
+                .expect("reset should complete after the transition gate is released");
+        });
+
+        assert!(!state.executions.lock().unwrap().has_in_flight());
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .device(&device_handle)
+            .is_err());
     }
 
     #[test]
@@ -2756,5 +3546,60 @@ mod tests {
         assert!(!serialized.contains("exact-serial"));
         assert!(!serialized.contains("internalRoot"));
         assert!(!serialized.contains("/private"));
+    }
+
+    #[test]
+    fn failed_marker_removal_rejects_termination_without_closing_lifecycle_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let marker = temp.path().join("session-active.marker");
+        // A directory in place of the marker file cannot be removed by the
+        // finalization path, which simulates a filesystem failure during exit.
+        std::fs::create_dir(&marker).unwrap();
+        assert!(!finish_recovery_process_session(&state));
+        assert!(!state.recovery.lock().unwrap().qualification_terminating());
+        std::fs::remove_dir(&marker).unwrap();
+        // With the marker removable again, a later exit attempt finalizes
+        // normally and closes lifecycle work.
+        assert!(finish_recovery_process_session(&state));
+        assert!(state.recovery.lock().unwrap().qualification_terminating());
+    }
+
+    /// The backend-authored transition revision is the overlay's only lifecycle
+    /// ordering authority. Revisions must follow the serialized order the
+    /// transition gate establishes, so a projection taken first always carries
+    /// a lower revision than a command that follows it, regardless of which
+    /// frontend response arrives first.
+    #[test]
+    fn transition_gate_revisions_follow_serialized_acquisition_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let observed = Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let guard = qualification_transition_lock(&state);
+                    // The guard stays held until this thread has published its
+                    // revision, so the observed order is the acquisition order.
+                    observed.lock().unwrap().push(guard.revision());
+                });
+            }
+        });
+        let observed = observed.into_inner().unwrap();
+        assert_eq!(
+            observed.len(),
+            4,
+            "every acquisition must publish one revision"
+        );
+        assert_eq!(observed[0], 1, "a fresh gate starts at the first revision");
+        assert!(
+            observed.windows(2).all(|window| window[0] < window[1]),
+            "revisions must increase in acquisition order: {observed:?}"
+        );
+        assert_eq!(
+            observed,
+            (1..=4).collect::<Vec<u64>>(),
+            "consecutive acquisitions must allocate consecutive revisions"
+        );
     }
 }
