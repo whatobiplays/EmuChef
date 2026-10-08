@@ -1,93 +1,102 @@
 # Example authored app definition template.
-# Copy this file into authored/apps/ and replace placeholder values.
+# Copy this file into authored/apps/ and replace the placeholder values.
 # Files under templates/ are examples only and are never loaded by EmuChef.
-# Accepted top-level values:
+# Accepted top-level keys:
 # - schema_version: 1
 # - kind: app_definition
+# - id, name, package_id
+# - description, category, launcher_activity, metadata
+# - artifacts, permission_sets, targets
 
 schema_version: 1
 kind: app_definition
 id: example.app.template
 name: Example App Name
-description: Replace with a short human-readable app description.
-# category is currently a free-form string. Use stable labels like:
+description: Replace this with a short human-readable app description.
+# category is a free-form string. Stable labels used in this repository are:
 # emulator, launcher, utility, frontend, service
 category: emulator
-package:
-  # primary is the canonical Android package name.
-  primary: com.example.app
-  # aliases are optional alternate package names, such as beta/fork variants.
-  aliases:
-    - com.example.app.beta
-install_source:
-  # install_source.type is currently free-form metadata.
-  # Common examples in this repo:
-  # - local_file
-  # install_source.resolver is also currently free-form.
-  # Common examples in this repo:
-  # - none
-  type: local_file
-  resolver: none
-  options:
-    # options is resolver-specific free-form metadata.
-    path: sample_artifacts/example-app.apk
-tracking_source:
-  # tracking_source.type is currently free-form metadata.
-  # Common examples in this repo:
-  # - obtainium_config_snapshot
-  type: obtainium_config_snapshot
-  config_snapshot: vendor/obtainium/apps/example-app.json
-  app_id: example-app
+# package_id is the canonical Android application ID of this app. It carries the
+# app's install and launch identity and must be unique across the catalog.
+package_id: com.example.app
+# launcher_activity is optional. When present it must be exactly one fully
+# qualified activity class name.
+# launcher_activity: com.example.app.MainActivity
+
+# App-owned artifacts. Each entry is a named resource whose kind is apk or file.
+# The apk kind carries APK semantics (the file must be an APK whose manifest
+# package equals package_id, and it is eligible for installation); the file kind
+# is a generic app-owned resource.
+#
+# Exactly three source strategies exist, and each accepts only its own fields:
+# - user_provided: the bound recipe input supplies the file at run time
+# - direct_url: a durable public HTTPS address with an optional lowercase
+#   sha256 checksum of 64 hexadecimal characters
+# - latest_release: a provider release policy resolved when the artifact is
+#   needed, with a required prerelease policy and an optional asset pattern
 artifacts:
-  # For each artifact entry:
-  # - required: true | false | null
-  # - supported: true | false | null
-  # Use required when the artifact must exist.
-  # Use supported when the artifact category is or is not supported.
   apk:
-    required: true
-  shared_storage_config:
-    supported: false
-  app_data_config:
-    supported: false
-  byo_apk:
-    required: false
-provisioning:
-  # launch_once_recommended: true | false
-  launch_once_recommended: false
-  shared_storage_paths:
-    - /sdcard/ExampleApp/
-  app_data_paths: []
-  config_targets:
-    - id: shared_storage_main
-      # config_targets[].type is currently free-form.
-      # Common examples:
-      # - shared_storage
-      # - app_data
-      type: shared_storage
-      path: /sdcard/ExampleApp/
-inputs:
-  # Accepted input values:
-  # - type: file | directory
-  # - role: apk | bios | roms | config_bundle | generic
-  - id: byo_apk_path
-    type: file
-    role: apk
-    label: Example APK
-    description: Optional local APK override for this app.
-    required: false
-    # multiple: true | false
-    multiple: false
-    validation:
-      # validation.path_kind: file | directory | null
-      # allowed_extensions entries may be written with or without the dot:
-      # .apk and apk are treated the same.
-      must_exist: true
-      allowed_extensions:
-        - .apk
-      path_kind: file
-    default: null
-    metadata: {}
+    kind: apk
+    name: Example App APK
+    source:
+      strategy: user_provided
+  # A direct URL source:
+  # source:
+  #   strategy: direct_url
+  #   url: https://downloads.example.invalid/example-app.apk
+  #   sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # A latest-release source. The provider is github, gitlab, or forgejo, and
+  # base_url is the public service origin with no path, query, or fragment:
+  # repository is owner/repository for GitHub and Forgejo, while GitLab also
+  # accepts nested namespaces such as group/subgroup/project. asset_pattern is
+  # optional: without it, selection is by artifact kind alone and still
+  # requires exactly one eligible asset. invert_asset_pattern is only legal
+  # together with asset_pattern, and a false value is omitted because it states
+  # the default behavior.
+  # source:
+  #   strategy: latest_release
+  #   provider: github
+  #   base_url: https://github.com
+  #   repository: owner/repository
+  #   asset_pattern: '^Example-App-[0-9.]+-arm64-v8a[.]apk$'
+  #   invert_asset_pattern: true
+  #   prerelease: false
+  config_bundle:
+    kind: file
+    description: Optional configuration archive copied by a recipe.
+    source:
+      strategy: direct_url
+      url: https://downloads.example.invalid/example-config.zip
+
+# Optional permission sets for standardized package permission automation.
+# Exactly two sets exist. baseline describes automation that runs without root
+# and elevated describes automation that requires root. Either set may be
+# absent, and a set that is present must contain at least one action.
+permission_sets:
+  baseline:
+    runtime:
+      - permission: android.permission.POST_NOTIFICATIONS
+        android_api_min: 33
+  elevated:
+    app_ops:
+      - op: MANAGE_EXTERNAL_STORAGE
+        mode: allow
+
+# Optional named destinations owned by this app on a target device. kind is file
+# or directory, location is app_data, external_app_data, shared_storage, or
+# absolute_device_path, and path depends on the chosen location.
+targets:
+  shared_config:
+    kind: directory
+    location: shared_storage
+    path: ExampleApp
+  app_config:
+    kind: directory
+    location: app_data
+    path: config
+
+# Optional non-authoritative metadata. Canonical top-level schema names are
+# reserved and may only appear nested under this section.
 metadata:
   homepage: https://example.invalid/app
   tags:

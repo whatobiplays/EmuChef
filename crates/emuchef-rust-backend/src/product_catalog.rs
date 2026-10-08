@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::authored_models::{self, DEVICE_PROFILE_KIND};
+use crate::authored_models::{self, APP_DEFINITION_KIND, DEVICE_PROFILE_KIND};
 use crate::catalog_source::CatalogSnapshot;
 use crate::errors::ApiError;
 
@@ -45,10 +45,44 @@ pub(crate) fn describe(snapshot: &CatalogSnapshot) -> Result<Value, ApiError> {
 
     Ok(json!({
         "catalog": snapshot.identity(),
+        "apps": app_inventory(snapshot.root())?,
         "devicePlans": authored_inventory(snapshot.root(), "device_plans", "device_plan")?,
         "deviceProfiles": authored_inventory(snapshot.root(), "device_profiles", "device_profile")?,
         "recipes": recipes,
     }))
+}
+
+/// Project app identity and presentation data without editor internals.
+///
+/// The whole app definition catalog is validated first, so a catalog that
+/// violates per-file or catalog-global app definition invariants fails the
+/// product load instead of partially projecting app identity. The projection
+/// carries only presentation and identity fields; artifact, permission, and
+/// target policy stay out of the product surface.
+fn app_inventory(root: &Path) -> Result<Vec<Value>, ApiError> {
+    let catalog = crate::catalog::load_app_definition_catalog(root);
+    if !catalog.diagnostics.is_empty() {
+        return Err(ApiError::load_failed(
+            "Catalog app definitions failed catalog validation.",
+            json!({
+                "kind": APP_DEFINITION_KIND,
+                "diagnostics": catalog.diagnostics,
+            }),
+        ));
+    }
+    Ok(catalog
+        .entries
+        .into_iter()
+        .map(|(_, app)| {
+            json!({
+                "id": app.id,
+                "name": app.name,
+                "description": app.description,
+                "category": app.category,
+                "packageId": app.package_id,
+            })
+        })
+        .collect())
 }
 
 fn authored_inventory(
@@ -298,5 +332,143 @@ metadata: {}
             value["details"]["diagnostics"][0]["field"],
             "match.model_patterns[0]"
         );
+    }
+
+    /// One valid schema-v1 app definition used by catalog-level tests.
+    fn app_definition_yaml(id: &str, package_id: &str) -> String {
+        format!(
+            r#"schema_version: 1
+kind: app_definition
+id: {id}
+name: Example App
+description: A product app.
+category: emulator
+package_id: {package_id}
+artifacts:
+  apk:
+    kind: apk
+    name: Example APK
+    source: {{strategy: user_provided}}
+permission_sets:
+  baseline:
+    runtime:
+      - permission: android.permission.CAMERA
+targets:
+  data:
+    kind: file
+    location: app_data
+    path: example/settings.cfg
+"#
+        )
+    }
+
+    fn app_catalog_root(apps: &[(&str, &str)]) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+            fs::create_dir_all(temp.path().join(directory)).unwrap();
+        }
+        for (file, yaml) in apps {
+            fs::write(temp.path().join("apps").join(file), yaml).unwrap();
+        }
+        temp
+    }
+
+    fn describe_root(root: &Path) -> Result<Value, ApiError> {
+        let identity = CatalogIdentity {
+            source_kind: CatalogSourceKind::Bundled,
+            source_id: "catalog.example".to_string(),
+            version: Some("1".to_string()),
+            cache_key: None,
+            content_digest: None,
+        };
+        let snapshot = LocalCatalogSource::new(root, identity).resolve().unwrap();
+        describe(&snapshot)
+    }
+
+    fn app_diagnostic_codes(error: &Value) -> Vec<&str> {
+        error["details"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["code"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn product_inventory_projects_app_identity_without_app_policy() {
+        let yaml = app_definition_yaml("app.example", "com.example.app");
+        let temp = app_catalog_root(&[("example.yaml", yaml.as_str())]);
+
+        let result = describe_root(temp.path()).unwrap();
+        let app = &result["apps"][0];
+        assert_eq!(
+            app,
+            &json!({
+                "id": "app.example",
+                "name": "Example App",
+                "description": "A product app.",
+                "category": "emulator",
+                "packageId": "com.example.app",
+            })
+        );
+        assert_eq!(app.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn product_inventory_rejects_duplicate_app_definition_ids() {
+        let first = app_definition_yaml("app.example", "com.example.first");
+        let second = app_definition_yaml("app.example", "com.example.second");
+        let temp = app_catalog_root(&[
+            ("first.yaml", first.as_str()),
+            ("second.yaml", second.as_str()),
+        ]);
+
+        let error = describe_root(temp.path()).unwrap_err().to_value();
+        assert_eq!(error["code"], "load_failed");
+        assert_eq!(error["details"]["kind"], "app_definition");
+        assert!(app_diagnostic_codes(&error).contains(&"app_definition_id_conflict"));
+    }
+
+    #[test]
+    fn product_inventory_rejects_duplicate_app_package_ids() {
+        let first = app_definition_yaml("app.first", "com.example.shared");
+        let second = app_definition_yaml("app.second", "com.example.shared");
+        let temp = app_catalog_root(&[
+            ("first.yaml", first.as_str()),
+            ("second.yaml", second.as_str()),
+        ]);
+
+        let error = describe_root(temp.path()).unwrap_err().to_value();
+        assert_eq!(error["code"], "load_failed");
+        assert!(app_diagnostic_codes(&error).contains(&"app_package_id_conflict"));
+    }
+
+    #[test]
+    fn product_inventory_rejects_semantically_invalid_app_definitions() {
+        let invalid = app_definition_yaml("app.example", "example");
+        let temp = app_catalog_root(&[("example.yaml", invalid.as_str())]);
+
+        let error = describe_root(temp.path()).unwrap_err().to_value();
+        assert_eq!(error["code"], "load_failed");
+        assert_eq!(
+            error["details"]["diagnostics"][0]["code"],
+            "package_id_invalid"
+        );
+        assert_eq!(error["details"]["diagnostics"][0]["field"], "package_id");
+    }
+
+    #[test]
+    fn product_inventory_rejects_an_unreadable_apps_directory() {
+        let yaml = app_definition_yaml("app.example", "com.example.app");
+        let temp = app_catalog_root(&[("example.yaml", yaml.as_str())]);
+        let apps = temp.path().join("apps");
+        fs::remove_dir_all(&apps).unwrap();
+        fs::write(&apps, "not a directory").unwrap();
+
+        // An unreadable directory must not look like an empty catalog that
+        // satisfies the complete App Definition validation promise.
+        let error = describe_root(temp.path()).unwrap_err().to_value();
+        assert_eq!(error["code"], "load_failed");
+        assert!(app_diagnostic_codes(&error).contains(&"app_definition_catalog_unreadable"));
     }
 }

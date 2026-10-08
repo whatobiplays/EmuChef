@@ -36,7 +36,7 @@ fn yaml_files(directory: &Path) -> Vec<PathBuf> {
 #[test]
 fn every_checked_in_app_definition_is_valid_and_canonicalizes_idempotently() {
     let paths = yaml_files(&repo_root().join("authored/apps"));
-    assert_eq!(paths.len(), 3);
+    assert_eq!(paths.len(), 4);
 
     for path in paths {
         let source = fs::read_to_string(&path).unwrap();

@@ -629,6 +629,9 @@ fn local_apk_generation_and_native_inspection_protocols_are_separate_and_safe() 
                 "packageName": "com.example.player",
                 "applicationLabel": "Example Player",
                 "launcherActivities": ["com.example.player/.MainActivity"],
+                "calculatedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checksumStatus": "not_compared",
+                "signatureVerification": "not_performed",
                 "split": false,
                 "base": true
             }
@@ -636,12 +639,18 @@ fn local_apk_generation_and_native_inspection_protocols_are_separate_and_safe() 
     }));
     assert_eq!(generated["ok"], true, "{generated:#}");
     assert_eq!(
-        generated["result"]["app"]["install_source"]["type"],
-        "user_provided_apk"
+        generated["result"]["app"]["package_id"],
+        "com.example.player"
     );
     assert_eq!(
-        generated["result"]["app"]["artifacts"]["byo_apk"]["required"],
-        true
+        generated["result"]["app"]["artifacts"]["apk"]["source"]["strategy"],
+        "user_provided"
+    );
+    assert!(generated["result"]["app"].get("install_source").is_none());
+    assert!(generated["result"]["app"].get("metadata").is_none());
+    assert!(
+        generated["result"]["apkInspection"].is_object(),
+        "{generated:#}"
     );
     assert_eq!(
         generated["result"]["recipe"]["id"],

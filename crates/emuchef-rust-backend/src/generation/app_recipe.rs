@@ -9,14 +9,16 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::authored_models::{
-    emit_app_definition_yaml, validate_app_definition, AppArtifactSupport, AppDefinitionV1,
-    AppInstallSource, AppPackage, AppProvisioning, AppTrackingSource, ConfigArtifactSupport,
-    OrderedValueMap, RequiredArtifactSupport, APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
+    emit_app_definition_yaml, validate_app_definition, AppArtifactKind, AppArtifactSource,
+    AppArtifactV1, AppDefinitionV1, AppOpAction, AppOpMode, AppPermissionSet, AppPermissionSets,
+    AppRuntimePermissionAction, AppTargetKind, AppTargetLocation, AppTargetV1, OrderedValueMap,
+    APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
 };
 use crate::model::{
     InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides, Step,
     StepCondition, StepConstraints,
 };
+use indexmap::IndexMap;
 
 use super::apk::{
     build_apk_inspection_metadata, ApkInspectionFacts, ApkMetadataIssue, SelectedAppOpMetadata,
@@ -359,6 +361,53 @@ pub(crate) fn generated_apk_inspection_metadata(
     build_apk_inspection_metadata(facts, &runtime_permissions, &app_ops)
 }
 
+/// Build the canonical permission sets implied by verified author selections.
+///
+/// The native layer partitions every verified action by its root requirement:
+/// actions that run without root form the baseline set, and actions that
+/// require root form the elevated set. An empty selection produces no sets,
+/// and a partition with no actions is omitted.
+pub(crate) fn app_permission_sets(
+    selection: &PermissionAutomationSelection,
+) -> Option<AppPermissionSets> {
+    if selection.is_empty() {
+        return None;
+    }
+    let mut baseline = AppPermissionSet::default();
+    let mut elevated = AppPermissionSet::default();
+    for action in canonical_runtime_permissions(selection) {
+        let entry = AppRuntimePermissionAction {
+            permission: action.permission_name,
+            android_api_min: Some(i64::from(action.android_api_min)),
+            android_api_max: action.android_api_max.map(i64::from),
+        };
+        if action.requires_root {
+            elevated.runtime.push(entry);
+        } else {
+            baseline.runtime.push(entry);
+        }
+    }
+    for action in canonical_app_ops(selection) {
+        let entry = AppOpAction {
+            op: action.operation_name,
+            mode: AppOpMode::Allow,
+            android_api_min: Some(i64::from(action.android_api_min)),
+            android_api_max: action.android_api_max.map(i64::from),
+        };
+        if action.requires_root {
+            elevated.app_ops.push(entry);
+        } else {
+            baseline.app_ops.push(entry);
+        }
+    }
+    let present =
+        |set: AppPermissionSet| (!set.runtime.is_empty() || !set.app_ops.is_empty()).then_some(set);
+    Some(AppPermissionSets {
+        baseline: present(baseline),
+        elevated: present(elevated),
+    })
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct RecipeDraftEdits {
@@ -372,33 +421,57 @@ pub(crate) struct RecipeDraftEdits {
     launcher_activity: Option<String>,
 }
 
-/// JSON mapping text is retained as text across React so key order is not lost.
+/// Structured author edits applied to the proposed app definition.
+///
+/// Artifact and target rows are structured values so the trusted native layer
+/// can validate them with the same rules that guard saved documents. Only the
+/// opaque metadata map is retained as JSON text, so its key order survives the
+/// round trip through React.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AppMappingEdits {
+    artifacts: Vec<AppArtifactEdit>,
+    targets: Vec<AppTargetEdit>,
+    metadata: String,
+}
+
+/// One authored app artifact row.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct AppMappingEdits {
-    install_source_options: String,
-    tracking_source_fields: String,
-    metadata: String,
+pub(crate) struct AppArtifactEdit {
+    id: String,
+    kind: AppArtifactKind,
     #[serde(default)]
-    inputs: Vec<String>,
+    name: Option<String>,
     #[serde(default)]
-    config_targets: Vec<String>,
+    description: Option<String>,
+    source: AppArtifactSource,
+}
+
+/// One authored app target row.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AppTargetEdit {
+    id: String,
+    kind: AppTargetKind,
+    location: AppTargetLocation,
+    path: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-enum DraftSeverity {
+pub(crate) enum DraftSeverity {
     Error,
     Warning,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct DraftDiagnostic {
-    severity: DraftSeverity,
-    code: String,
-    message: String,
-    field: String,
+pub(crate) struct DraftDiagnostic {
+    pub(crate) severity: DraftSeverity,
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) field: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -430,6 +503,11 @@ struct ProposedDestination {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppRecipeDraft {
     app: AppDefinitionV1,
+    /// Transient APK inspection evidence shown during draft review.
+    ///
+    /// The evidence never becomes part of the saved app definition, so the
+    /// canonical YAML an author reviews matches the YAML that is written.
+    apk_inspection: Option<Value>,
     recipe: Value,
     recipe_edits: RecipeDraftEdits,
     app_canonical_yaml: Option<String>,
@@ -466,17 +544,35 @@ pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRe
     if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
     }
-    app.metadata.shift_remove("apk_inspection");
-    match generated_apk_inspection_metadata(&request.facts, None, false) {
-        Ok(metadata) => {
-            app.metadata.insert("apk_inspection".to_string(), metadata);
-        }
-        Err(issues) => diagnostics.extend(
-            issues
-                .into_iter()
-                .map(|issue| error(issue.code, issue.message, &issue.field)),
-        ),
+    // The generated recipe installs the local APK the author inspected, so the
+    // app definition must keep declaring that artifact. Structured mapping
+    // edits that remove it, retype it as a generic file, or swap in a remote
+    // source would otherwise save an app definition and recipe that disagree
+    // about where the installed APK comes from.
+    match pair_reviewed_artifact(&app, &proposed_app, is_local_apk_artifact) {
+        ReviewedArtifactPairing::Paired(_) => {}
+        ReviewedArtifactPairing::Missing => diagnostics.push(error(
+            "local_artifact_missing",
+            "The app definition no longer declares the user-provided APK artifact this recipe installs. Keep the local APK artifact, or start a draft for a repository source.",
+            "artifacts",
+        )),
+        ReviewedArtifactPairing::Ambiguous => diagnostics.push(error(
+            "local_artifact_ambiguous",
+            "The app definition declares more than one user-provided APK artifact, so the artifact this recipe installs is ambiguous. Keep exactly one local APK artifact.",
+            "artifacts",
+        )),
     }
+    let apk_inspection = match generated_apk_inspection_metadata(&request.facts, None, false) {
+        Ok(metadata) => Some(metadata),
+        Err(issues) => {
+            diagnostics.extend(
+                issues
+                    .into_iter()
+                    .map(|issue| error(issue.code, issue.message, &issue.field)),
+            );
+            None
+        }
+    };
 
     let mut recipe_edits = request
         .recipe
@@ -485,7 +581,14 @@ pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRe
         recipe_edits.ids = Some(generated_ids(&app.id));
     }
     fill_empty_recipe_text(&mut recipe_edits, &app);
-    app.provisioning.launch_once_recommended = recipe_edits.launch_enabled;
+    app.launcher_activity = verified_launcher_activity(
+        &request.facts,
+        recipe_edits.launch_enabled,
+        recipe_edits.launcher_activity.as_deref(),
+    );
+    // Local user-provided APK generation supports no permission automation, so
+    // the generated app definition carries no permission sets.
+    app.permission_sets = None;
 
     diagnostics.extend(app_diagnostics(&app));
     let recipe = build_recipe(&app, &request.facts, &recipe_edits, &mut diagnostics);
@@ -527,6 +630,56 @@ pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRe
         diagnostics,
         blocking,
         app,
+        apk_inspection,
+    }
+}
+
+/// Return the inspected launcher activity the author enabled for launch.
+///
+/// The app definition owns launcher identity, so the activity is recorded only
+/// when the author explicitly enabled launch and APK inspection verified that
+/// exact component. Inspected components arrive in the Android component form
+/// (for example "com.example.app/.MainActivity"), so the recorded value is the
+/// equivalent fully qualified activity class name.
+pub(crate) fn verified_launcher_activity(
+    facts: &ApkInspectionFacts,
+    launch_enabled: bool,
+    launcher_activity: Option<&str>,
+) -> Option<String> {
+    if !launch_enabled {
+        return None;
+    }
+    let launcher = launcher_activity
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    facts
+        .launcher_activities
+        .iter()
+        .any(|value| value == launcher)
+        .then(|| fully_qualified_activity(launcher, facts.package_name.as_deref()))
+}
+
+/// Convert an inspected Android component name into a fully qualified class name.
+///
+/// The accepted inspection forms are "package/.RelativeActivity",
+/// "package/fully.qualified.Activity", and ".RelativeActivity"; a value that is
+/// already fully qualified is returned unchanged.
+fn fully_qualified_activity(component: &str, package_name: Option<&str>) -> String {
+    if let Some((package, class)) = component.split_once('/') {
+        if !package.is_empty() && !class.is_empty() {
+            return if class.starts_with('.') {
+                format!("{package}{class}")
+            } else {
+                class.to_string()
+            };
+        }
+        return component.to_string();
+    }
+    match package_name {
+        Some(package) if component.starts_with('.') && !package.is_empty() => {
+            format!("{package}{component}")
+        }
+        _ => component.to_string(),
     }
 }
 
@@ -536,40 +689,87 @@ fn proposed_app(facts: &ApkInspectionFacts) -> AppDefinitionV1 {
         .as_deref()
         .or(facts.package_name.as_deref())
         .unwrap_or_default();
+    let name = facts
+        .application_label
+        .clone()
+        .or_else(|| facts.package_name.clone())
+        .unwrap_or_default();
+    let mut artifacts = IndexMap::new();
+    artifacts.insert(
+        "apk".to_string(),
+        AppArtifactV1 {
+            kind: AppArtifactKind::Apk,
+            name: (!name.trim().is_empty()).then(|| format!("{name} APK")),
+            description: None,
+            source: AppArtifactSource::UserProvided,
+        },
+    );
     AppDefinitionV1 {
         schema_version: SCHEMA_VERSION_V1,
         kind: APP_DEFINITION_KIND.to_string(),
         id: normalize_identifier_component(id_source),
-        name: facts
-            .application_label
-            .clone()
-            .or_else(|| facts.package_name.clone())
-            .unwrap_or_default(),
+        name,
         description: None,
-        category: String::new(),
-        package: AppPackage {
-            primary: facts.package_name.clone().unwrap_or_default(),
-            aliases: Vec::new(),
-        },
-        install_source: AppInstallSource {
-            type_name: "user_provided_apk".to_string(),
-            resolver: "none".to_string(),
-            options: OrderedValueMap::new(),
-        },
-        tracking_source: AppTrackingSource {
-            type_name: "local_apk".to_string(),
-            fields: OrderedValueMap::new(),
-        },
-        artifacts: AppArtifactSupport {
-            apk: RequiredArtifactSupport { required: false },
-            shared_storage_config: ConfigArtifactSupport { supported: false },
-            app_data_config: ConfigArtifactSupport { supported: false },
-            byo_apk: RequiredArtifactSupport { required: true },
-        },
-        provisioning: AppProvisioning::default(),
-        inputs: Vec::new(),
+        category: None,
+        package_id: facts.package_name.clone().unwrap_or_default(),
+        artifacts,
+        permission_sets: None,
+        targets: IndexMap::new(),
+        launcher_activity: None,
         metadata: OrderedValueMap::new(),
     }
+}
+
+/// How the reviewed App Definition artifact of one generation flow relates to
+/// the artifact registry after structured mapping edits.
+pub(crate) enum ReviewedArtifactPairing {
+    /// The reviewed artifact is declared under this id.
+    Paired(String),
+    /// No artifact represents the reviewed source.
+    Missing,
+    /// Several artifacts represent the reviewed source, so the reviewed
+    /// artifact cannot be identified.
+    Ambiguous,
+}
+
+/// Locate the App Definition artifact that represents the reviewed source of
+/// one generation flow.
+///
+/// The generated draft proposes exactly one artifact. When the author renamed
+/// that artifact, the only artifact whose definition still matches the
+/// reviewed source takes its place. Several matching artifacts are ambiguous:
+/// generation cannot tell which of them the reviewed source belongs to, so a
+/// caller blocks instead of guessing and producing a recipe that belongs to
+/// none of the authored artifacts.
+pub(crate) fn pair_reviewed_artifact(
+    app: &AppDefinitionV1,
+    proposed: &AppDefinitionV1,
+    matches: impl Fn(&AppArtifactV1) -> bool,
+) -> ReviewedArtifactPairing {
+    if let Some(id) = proposed.artifacts.keys().find(|id| {
+        app.artifacts
+            .get(*id)
+            .is_some_and(|artifact| matches(artifact))
+    }) {
+        return ReviewedArtifactPairing::Paired(id.clone());
+    }
+    let mut candidates = app
+        .artifacts
+        .iter()
+        .filter(|(_, artifact)| matches(artifact))
+        .map(|(id, _)| id.clone());
+    match (candidates.next(), candidates.next()) {
+        (Some(id), None) => ReviewedArtifactPairing::Paired(id),
+        (None, _) => ReviewedArtifactPairing::Missing,
+        (Some(_), Some(_)) => ReviewedArtifactPairing::Ambiguous,
+    }
+}
+
+/// Return whether one artifact is a local user-provided APK artifact, the
+/// artifact the local generation flow installs.
+pub(crate) fn is_local_apk_artifact(artifact: &AppArtifactV1) -> bool {
+    artifact.kind == AppArtifactKind::Apk
+        && matches!(artifact.source, AppArtifactSource::UserProvided)
 }
 
 fn generated_ids(app_id: &str) -> GeneratedRecipeIds {
@@ -647,7 +847,7 @@ fn build_recipe(
     let mut skip_params = OrderedMap::new();
     skip_params.insert(
         "package_name".to_string(),
-        Value::String(app.package.primary.clone()),
+        Value::String(app.package_id.clone()),
     );
     let install = Step {
         id: ids.install_step_id.clone(),
@@ -691,7 +891,7 @@ fn build_recipe(
             let mut params = OrderedMap::new();
             params.insert(
                 "package_name".to_string(),
-                ParamValue::Literal(Value::String(app.package.primary.clone())),
+                ParamValue::Literal(Value::String(app.package_id.clone())),
             );
             params.insert(
                 "activity".to_string(),
@@ -738,32 +938,86 @@ fn apply_mapping_edits(
     mappings: AppMappingEdits,
     diagnostics: &mut Vec<DraftDiagnostic>,
 ) {
-    if let Some(value) = parse_mapping(
-        "installSource.options",
-        &mappings.install_source_options,
-        diagnostics,
-    ) {
-        app.install_source.options = value;
-    }
-    if let Some(value) = parse_mapping(
-        "trackingSource",
-        &mappings.tracking_source_fields,
-        diagnostics,
-    ) {
-        app.tracking_source.fields = value;
-    }
+    app.artifacts = collect_artifacts(mappings.artifacts, diagnostics);
+    app.targets = collect_targets(mappings.targets, diagnostics);
     if let Some(value) = parse_mapping("metadata", &mappings.metadata, diagnostics) {
         app.metadata = value;
     }
-    app.inputs = parse_mapping_list("inputs", mappings.inputs, diagnostics);
-    app.provisioning.config_targets = parse_mapping_list(
-        "provisioning.configTargets",
-        mappings.config_targets,
-        diagnostics,
-    );
 }
 
-fn parse_mapping(
+pub(crate) fn collect_artifacts(
+    edits: Vec<AppArtifactEdit>,
+    diagnostics: &mut Vec<DraftDiagnostic>,
+) -> IndexMap<String, AppArtifactV1> {
+    let mut artifacts = IndexMap::new();
+    for (index, edit) in edits.into_iter().enumerate() {
+        let id = edit.id.trim().to_string();
+        if !claim_entry_id(&id, "artifacts", index, &mut artifacts, diagnostics) {
+            continue;
+        }
+        artifacts.insert(
+            id,
+            AppArtifactV1 {
+                kind: edit.kind,
+                name: edit.name,
+                description: edit.description,
+                source: edit.source,
+            },
+        );
+    }
+    artifacts
+}
+
+pub(crate) fn collect_targets(
+    edits: Vec<AppTargetEdit>,
+    diagnostics: &mut Vec<DraftDiagnostic>,
+) -> IndexMap<String, AppTargetV1> {
+    let mut targets = IndexMap::new();
+    for (index, edit) in edits.into_iter().enumerate() {
+        let id = edit.id.trim().to_string();
+        if !claim_entry_id(&id, "targets", index, &mut targets, diagnostics) {
+            continue;
+        }
+        targets.insert(
+            id,
+            AppTargetV1 {
+                kind: edit.kind,
+                location: edit.location,
+                path: edit.path,
+            },
+        );
+    }
+    targets
+}
+
+/// Claim one generated row identity, reporting empty and duplicate ids.
+fn claim_entry_id<T>(
+    id: &str,
+    field: &str,
+    index: usize,
+    entries: &IndexMap<String, T>,
+    diagnostics: &mut Vec<DraftDiagnostic>,
+) -> bool {
+    if id.is_empty() {
+        diagnostics.push(error(
+            "mapping_entry_id_invalid",
+            "Every generated app definition row requires a non-empty id.",
+            &format!("{field}[{index}].id"),
+        ));
+        return false;
+    }
+    if entries.contains_key(id) {
+        diagnostics.push(error(
+            "mapping_entry_id_duplicate",
+            "Generated app definition row ids must be unique.",
+            &format!("{field}[{index}].id"),
+        ));
+        return false;
+    }
+    true
+}
+
+pub(crate) fn parse_mapping(
     field: &str,
     source: &str,
     diagnostics: &mut Vec<DraftDiagnostic>,
@@ -787,20 +1041,6 @@ fn parse_mapping(
             None
         }
     }
-}
-
-fn parse_mapping_list(
-    field: &str,
-    sources: Vec<String>,
-    diagnostics: &mut Vec<DraftDiagnostic>,
-) -> Vec<OrderedValueMap> {
-    sources
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, source)| {
-            parse_mapping(&format!("{field}[{index}]"), &source, diagnostics)
-        })
-        .collect()
 }
 
 fn app_diagnostics(app: &AppDefinitionV1) -> Vec<DraftDiagnostic> {
@@ -853,10 +1093,10 @@ fn evidence(
 ) -> Vec<FieldEvidence> {
     vec![
         field_evidence(
-            "package.primary",
+            "package_id",
             state(facts.package_name.is_some(), EvidenceState::Verified),
             "apk_manifest",
-            current.package.primary != proposed.package.primary,
+            current.package_id != proposed.package_id,
         ),
         field_evidence(
             "name",
@@ -875,18 +1115,6 @@ fn evidence(
             EvidenceState::Missing,
             "author_required",
             current.category != proposed.category,
-        ),
-        field_evidence(
-            "install_source",
-            EvidenceState::Suggested,
-            "local_apk_strategy",
-            current.install_source != proposed.install_source,
-        ),
-        field_evidence(
-            "tracking_source",
-            EvidenceState::Suggested,
-            "local_apk_strategy",
-            current.tracking_source != proposed.tracking_source,
         ),
         field_evidence(
             "artifacts",
@@ -945,9 +1173,18 @@ fn present(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn error(code: &str, message: &str, field: &str) -> DraftDiagnostic {
+pub(crate) fn error(code: &str, message: &str, field: &str) -> DraftDiagnostic {
     DraftDiagnostic {
         severity: DraftSeverity::Error,
+        code: code.to_string(),
+        message: message.to_string(),
+        field: field.to_string(),
+    }
+}
+
+pub(crate) fn warning(code: &str, message: &str, field: &str) -> DraftDiagnostic {
+    DraftDiagnostic {
+        severity: DraftSeverity::Warning,
         code: code.to_string(),
         message: message.to_string(),
         field: field.to_string(),
@@ -1102,7 +1339,7 @@ mod tests {
     #[test]
     fn valid_category_generates_existing_model_recipe_and_no_native_path() {
         let mut app = proposed_app(&facts());
-        app.category = "utility".to_string();
+        app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
             facts: facts(),
             app: Some(app),
@@ -1126,7 +1363,7 @@ mod tests {
     #[test]
     fn launch_requires_verified_component_and_adds_one_step_when_selected() {
         let mut app = proposed_app(&facts());
-        app.category = "utility".to_string();
+        app.category = Some("utility".to_string());
         let mut edits = proposed_recipe_edits(&app);
         edits.launch_enabled = true;
         edits.launcher_activity = Some("com.example.player/.MainActivity".to_string());
@@ -1142,12 +1379,16 @@ mod tests {
             .recipe_canonical_yaml
             .unwrap()
             .contains("type: launch_app"));
+        assert_eq!(
+            draft.app.launcher_activity.as_deref(),
+            Some("com.example.player.MainActivity")
+        );
     }
 
     #[test]
     fn local_permission_automation_is_rejected_without_emitting_a_step() {
         let mut app = proposed_app(&facts());
-        app.category = "utility".to_string();
+        app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
             facts: facts(),
             app: Some(app),
@@ -1170,8 +1411,10 @@ mod tests {
             diagnostic.code == "apk_permission_automation_strategy_unsupported"
         }));
         assert!(!draft.recipe.to_string().contains("grant_permissions"));
+        assert!(draft.app.permission_sets.is_none());
+        assert!(!draft.app.metadata.contains_key("apk_inspection"));
         assert_eq!(
-            draft.app.metadata["apk_inspection"]["selected_runtime_permissions"],
+            draft.apk_inspection.as_ref().unwrap()["selected_runtime_permissions"],
             json!([])
         );
     }
@@ -1353,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_metadata_replaces_reserved_input_and_preserves_unrelated_order() {
+    fn generated_apk_inspection_evidence_is_transient_and_never_saved() {
         let mut inspection = facts();
         inspection.calculated_sha256 = "ab".repeat(32);
         inspection.version_code = Some("42".to_string());
@@ -1366,32 +1609,17 @@ mod tests {
             reviewed_permission("android.permission.INTERNET"),
         ];
         let mut app = proposed_app(&inspection);
-        app.category = "utility".to_string();
+        app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
             facts: inspection,
             app: Some(app),
             recipe: None,
-            mappings: Some(AppMappingEdits {
-                install_source_options: "{}".to_string(),
-                tracking_source_fields: "{}".to_string(),
-                metadata: r#"{"first":1,"apk_inspection":"frontend","last":2}"#.to_string(),
-                inputs: Vec::new(),
-                config_targets: Vec::new(),
-            }),
+            mappings: None,
             permission_automation: None,
             regenerate_identifiers: false,
         });
-        assert!(!draft.blocking);
-        assert_eq!(
-            draft
-                .app
-                .metadata
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["first", "last", "apk_inspection"]
-        );
-        let metadata = &draft.app.metadata["apk_inspection"];
+        assert!(!draft.blocking, "{:?}", draft.diagnostics);
+        let metadata = draft.apk_inspection.as_ref().unwrap();
         assert_eq!(metadata["package_name"], "com.example.player");
         assert_eq!(metadata["calculated_sha256"], "AB".repeat(32));
         assert_eq!(metadata["checksum_status"], "not_compared");
@@ -1407,9 +1635,139 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["android.permission.CAMERA", "android.permission.INTERNET"]
         );
-        let yaml = draft.app_canonical_yaml.unwrap();
-        let round_trip = crate::authored_models::parse_app_definition_yaml(&yaml).unwrap();
-        assert_eq!(round_trip.metadata, draft.app.metadata);
+        assert!(draft.app.metadata.is_empty());
+        let yaml = draft.app_canonical_yaml.as_deref().unwrap();
+        assert!(!yaml.contains("apk_inspection"));
+    }
+
+    #[test]
+    fn structured_mapping_rows_replace_artifacts_and_targets_and_preserve_metadata_order() {
+        let app = proposed_app(&facts());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![
+                    AppArtifactEdit {
+                        id: "apk".to_string(),
+                        kind: AppArtifactKind::Apk,
+                        name: Some("Player APK".to_string()),
+                        description: None,
+                        source: AppArtifactSource::UserProvided,
+                    },
+                    AppArtifactEdit {
+                        id: "assets".to_string(),
+                        kind: AppArtifactKind::File,
+                        name: None,
+                        description: Some("Optional asset bundle".to_string()),
+                        source: AppArtifactSource::DirectUrl {
+                            url: "https://downloads.example.com/assets.zip".to_string(),
+                            sha256: None,
+                        },
+                    },
+                ],
+                targets: vec![AppTargetEdit {
+                    id: "config".to_string(),
+                    kind: AppTargetKind::File,
+                    location: AppTargetLocation::ExternalAppData,
+                    path: "files/player.cfg".to_string(),
+                }],
+                metadata: r#"{"first":1,"last":2}"#.to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:?}", draft.diagnostics);
+        assert_eq!(
+            draft.app.artifacts.keys().collect::<Vec<_>>(),
+            vec!["apk", "assets"]
+        );
+        assert_eq!(draft.app.targets.keys().collect::<Vec<_>>(), vec!["config"]);
+        assert_eq!(
+            draft
+                .app
+                .metadata
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["first", "last"]
+        );
+        let yaml = draft.app_canonical_yaml.as_deref().unwrap();
+        let round_trip = crate::authored_models::parse_app_definition_yaml(yaml).unwrap();
+        assert_eq!(round_trip, draft.app);
+    }
+
+    #[test]
+    fn mapping_rows_reject_empty_and_duplicate_ids() {
+        let app = proposed_app(&facts());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![
+                    AppArtifactEdit {
+                        id: " ".to_string(),
+                        kind: AppArtifactKind::Apk,
+                        name: None,
+                        description: None,
+                        source: AppArtifactSource::UserProvided,
+                    },
+                    AppArtifactEdit {
+                        id: "apk".to_string(),
+                        kind: AppArtifactKind::Apk,
+                        name: None,
+                        description: None,
+                        source: AppArtifactSource::UserProvided,
+                    },
+                    AppArtifactEdit {
+                        id: "apk".to_string(),
+                        kind: AppArtifactKind::Apk,
+                        name: None,
+                        description: None,
+                        source: AppArtifactSource::UserProvided,
+                    },
+                ],
+                targets: Vec::new(),
+                metadata: "{}".to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "mapping_entry_id_invalid"));
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "mapping_entry_id_duplicate"));
+        assert_eq!(draft.app.artifacts.keys().collect::<Vec<_>>(), vec!["apk"]);
+    }
+
+    #[test]
+    fn authored_metadata_rejects_the_reserved_inspection_key() {
+        let app = proposed_app(&facts());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: Vec::new(),
+                targets: Vec::new(),
+                metadata: r#"{"apk_inspection":{"package_name":"com.example.player"}}"#.to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft.app_canonical_yaml.is_none());
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "metadata_reserved_key"));
     }
 
     #[test]
@@ -1418,7 +1776,7 @@ mod tests {
         inspection.calculated_sha256 = "publisher-value".to_string();
         inspection.checksum_status = "verified".to_string();
         let mut app = proposed_app(&inspection);
-        app.category = "utility".to_string();
+        app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
             facts: inspection,
             app: Some(app),
@@ -1462,7 +1820,7 @@ mod tests {
             }),
         }];
         let mut app = proposed_app(&inspection);
-        app.category = "utility".to_string();
+        app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
             facts: inspection,
             app: Some(app),
@@ -1488,5 +1846,137 @@ mod tests {
             );
         }
         assert!(!draft.app.metadata.contains_key("apk_inspection"));
+    }
+
+    #[test]
+    fn local_mapping_edits_must_keep_the_user_provided_apk_artifact() {
+        // Removing the local APK artifact leaves the generated recipe
+        // installing a file the app definition no longer owns.
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(proposed_app(&facts())),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![],
+                targets: Vec::new(),
+                metadata: "{}".to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "local_artifact_missing"));
+
+        // Retyping the artifact as a generic file contradicts the APK input.
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(proposed_app(&facts())),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![AppArtifactEdit {
+                    id: "apk".to_string(),
+                    kind: AppArtifactKind::File,
+                    name: None,
+                    description: None,
+                    source: AppArtifactSource::UserProvided,
+                }],
+                targets: Vec::new(),
+                metadata: "{}".to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "local_artifact_missing"));
+
+        // Swapping in a remote source contradicts the user-provided input.
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(proposed_app(&facts())),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![AppArtifactEdit {
+                    id: "apk".to_string(),
+                    kind: AppArtifactKind::Apk,
+                    name: None,
+                    description: None,
+                    source: AppArtifactSource::DirectUrl {
+                        url: "https://downloads.example.com/player.apk".to_string(),
+                        sha256: None,
+                    },
+                }],
+                targets: Vec::new(),
+                metadata: "{}".to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "local_artifact_missing"));
+
+        // Renaming the artifact keeps one candidate, so generation still pairs
+        // the recipe input with it.
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(proposed_app(&facts())),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![AppArtifactEdit {
+                    id: "player_apk".to_string(),
+                    kind: AppArtifactKind::Apk,
+                    name: None,
+                    description: None,
+                    source: AppArtifactSource::UserProvided,
+                }],
+                targets: Vec::new(),
+                metadata: "{}".to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+
+        // Two renamed candidates leave the installed artifact ambiguous.
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(proposed_app(&facts())),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                artifacts: vec![
+                    AppArtifactEdit {
+                        id: "one_apk".to_string(),
+                        kind: AppArtifactKind::Apk,
+                        name: None,
+                        description: None,
+                        source: AppArtifactSource::UserProvided,
+                    },
+                    AppArtifactEdit {
+                        id: "two_apk".to_string(),
+                        kind: AppArtifactKind::Apk,
+                        name: None,
+                        description: None,
+                        source: AppArtifactSource::UserProvided,
+                    },
+                ],
+                targets: Vec::new(),
+                metadata: "{}".to_string(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "local_artifact_ambiguous"));
     }
 }

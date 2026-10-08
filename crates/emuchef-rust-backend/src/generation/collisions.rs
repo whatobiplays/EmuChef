@@ -10,7 +10,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::authored_models::{
-    load_app_definition, load_device_profile, AppDefinitionV1, DeviceProfileV1,
+    load_app_definition, load_device_profile, AppArtifactSource, AppDefinitionV1, DeviceProfileV1,
+    ReleaseProvider,
 };
 use crate::model::{ParamValue, Recipe, Step};
 use crate::validation::normalize_expected_sha256;
@@ -112,37 +113,19 @@ fn scan_apps(
                 Some(existing.id.clone()),
                 relative_path.clone(),
             ));
-        } else if existing.package.primary == request.app.package.primary {
-            collisions.push(app_collision(
-                CollisionSeverity::Warning,
-                "app_package_overlap",
-                "An app definition with a different id uses the same primary package.",
-                Some(existing.id.clone()),
-                relative_path.clone(),
-            ));
-        }
-        let proposed_repository = source_string(&request.app, "repository");
-        let existing_repository = source_string(&existing, "repository");
-        let proposed_release_tag = source_string(&request.app, "release_tag");
-        let existing_release_tag = source_string(&existing, "release_tag");
-        let proposed_latest_policy = latest_policy_fingerprint(&request.app);
-        let existing_latest_policy = latest_policy_fingerprint(&existing);
-        if existing.id != request.app.id
-            && proposed_latest_policy.is_some()
-            && proposed_latest_policy == existing_latest_policy
-        {
+        } else if existing.package_id == request.app.package_id {
             collisions.push(app_collision(
                 CollisionSeverity::Blocking,
-                "app_latest_policy_conflict",
-                "An app definition with a different id uses the same latest-release policy.",
+                "app_package_id_conflict",
+                "An app definition with a different id uses the same package identity.",
                 Some(existing.id.clone()),
                 relative_path.clone(),
             ));
         }
-        if existing.id != request.app.id
-            && proposed_repository.is_some()
-            && proposed_repository == existing_repository
-        {
+        if existing.id == request.app.id {
+            continue;
+        }
+        if shared_latest_repository(&request.app, &existing).is_some() {
             collisions.push(app_collision(
                 CollisionSeverity::Warning,
                 "app_source_repository_overlap",
@@ -151,48 +134,20 @@ fn scan_apps(
                 relative_path.clone(),
             ));
         }
-        if existing.id != request.app.id
-            && proposed_repository.is_some()
-            && proposed_repository == existing_repository
-            && proposed_release_tag.is_some()
-            && proposed_release_tag == existing_release_tag
-        {
-            collisions.push(app_collision(
-                CollisionSeverity::Warning,
-                "app_source_release_overlap",
-                "An app definition with a different id tracks the same release-provider release.",
-                Some(existing.id.clone()),
-                relative_path.clone(),
-            ));
-        }
-        let proposed_url = source_string(&request.app, "url");
-        let existing_url = source_string(&existing, "url");
-        if existing.id != request.app.id && proposed_url.is_some() && proposed_url == existing_url {
-            let provider_release = request.app.tracking_source.type_name == "provider_release"
-                || request.app.tracking_source.type_name == "github_release";
+        if shared_direct_url(&request.app, &existing).is_some() {
             collisions.push(app_collision(
                 CollisionSeverity::Warning,
                 "app_source_url_overlap",
-                if provider_release {
-                    "An app definition with a different id uses the same release-provider APK asset."
-                } else {
-                    "An app definition with a different id uses the same remote APK URL."
-                },
+                "An app definition with a different id uses the same artifact download address.",
                 Some(existing.id.clone()),
                 relative_path.clone(),
             ));
         }
-        let comparable_source = !request.app.install_source.options.is_empty()
-            || !request.app.tracking_source.fields.is_empty();
-        if existing.id != request.app.id
-            && comparable_source
-            && existing.install_source == request.app.install_source
-            && existing.tracking_source == request.app.tracking_source
-        {
+        if shared_latest_policy(&request.app, &existing) {
             collisions.push(app_collision(
                 CollisionSeverity::Warning,
-                "app_source_overlap",
-                "An app definition with a different id uses matching non-empty source metadata.",
+                "app_latest_policy_conflict",
+                "An app definition with a different id uses the same latest-release policy.",
                 Some(existing.id),
                 relative_path,
             ));
@@ -200,34 +155,77 @@ fn scan_apps(
     }
 }
 
-fn source_string<'a>(app: &'a AppDefinitionV1, key: &str) -> Option<&'a str> {
-    app.install_source
-        .options
-        .get(key)
-        .or_else(|| app.tracking_source.fields.get(key))
-        .and_then(Value::as_str)
+/// Release-provider repositories referenced by latest-release artifact sources.
+fn latest_release_repositories(app: &AppDefinitionV1) -> BTreeSet<&str> {
+    app.artifacts
+        .values()
+        .filter_map(|artifact| match &artifact.source {
+            AppArtifactSource::LatestRelease { repository, .. } => Some(repository.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
-fn latest_policy_fingerprint(app: &AppDefinitionV1) -> Option<String> {
-    if !matches!(
-        app.install_source.resolver.as_str(),
-        "github_latest_release" | "provider_latest_release"
-    ) {
-        return None;
-    }
-    let provider = source_string(app, "provider").unwrap_or("github");
-    let base_url = source_string(app, "base_url").unwrap_or("https://github.com");
-    let repository = source_string(app, "repository")?;
-    let pattern = source_string(app, "asset_pattern")?;
-    let include_prereleases = app
-        .install_source
-        .options
-        .get("include_prereleases")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    Some(format!(
-        "provider_latest_release\nprovider={provider}\nbase_url={base_url}\nrepository={repository}\nasset_pattern={pattern}\ninclude_prereleases={include_prereleases}"
-    ))
+/// Direct download addresses referenced by direct-URL artifact sources.
+fn direct_url_addresses(app: &AppDefinitionV1) -> BTreeSet<&str> {
+    app.artifacts
+        .values()
+        .filter_map(|artifact| match &artifact.source {
+            AppArtifactSource::DirectUrl { url, .. } => Some(url.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn shared_latest_repository<'a>(
+    left: &'a AppDefinitionV1,
+    right: &'a AppDefinitionV1,
+) -> Option<&'a str> {
+    let left = latest_release_repositories(left);
+    let right = latest_release_repositories(right);
+    left.intersection(&right).next().copied()
+}
+
+fn shared_direct_url<'a>(left: &'a AppDefinitionV1, right: &'a AppDefinitionV1) -> Option<&'a str> {
+    let left = direct_url_addresses(left);
+    let right = direct_url_addresses(right);
+    left.intersection(&right).next().copied()
+}
+
+/// Deterministic fingerprints for every latest-release artifact of an app.
+fn latest_policy_fingerprints(app: &AppDefinitionV1) -> BTreeSet<String> {
+    app.artifacts
+        .values()
+        .filter_map(|artifact| match &artifact.source {
+            AppArtifactSource::LatestRelease {
+                provider,
+                base_url,
+                repository,
+                asset_pattern,
+                invert_asset_pattern,
+                prerelease,
+            } => Some(format!(
+                "provider={}\nbase_url={}\nrepository={}\nasset_pattern={}\ninvert_asset_pattern={}\nprerelease={}",
+                match provider {
+                    ReleaseProvider::Github => "github",
+                    ReleaseProvider::Gitlab => "gitlab",
+                    ReleaseProvider::Forgejo => "forgejo",
+                },
+                base_url,
+                repository,
+                asset_pattern.as_deref().unwrap_or_default(),
+                invert_asset_pattern.map(|value| value.to_string()).unwrap_or_default(),
+                prerelease
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn shared_latest_policy(left: &AppDefinitionV1, right: &AppDefinitionV1) -> bool {
+    let left = latest_policy_fingerprints(left);
+    let right = latest_policy_fingerprints(right);
+    !left.is_empty() && left.intersection(&right).next().is_some()
 }
 
 fn scan_recipes(
@@ -962,39 +960,54 @@ mod tests {
         }
     }
 
+    fn app_yaml(id: &str, package: &str) -> String {
+        format!(
+            "schema_version: 1\nkind: app_definition\nid: {id}\nname: Example\ncategory: utility\npackage_id: {package}\n"
+        )
+    }
+
     fn app(id: &str, package: &str) -> AppDefinitionV1 {
+        crate::authored_models::parse_app_definition_yaml(&app_yaml(id, package)).unwrap()
+    }
+
+    /// Render an APK artifact map from artifact-id and source-block pairs.
+    ///
+    /// Each source block must be indented to sit under the artifact source key,
+    /// which is to say six leading spaces.
+    fn artifact_block(entries: &[(&str, &str)]) -> String {
+        let mut block = String::from("artifacts:\n");
+        for (name, source) in entries {
+            block.push_str(&format!("  {name}:\n    kind: apk\n    source:\n{source}"));
+        }
+        block
+    }
+
+    fn direct_url_source(url: &str) -> String {
+        format!("      strategy: direct_url\n      url: {url}\n")
+    }
+
+    fn latest_release_source(
+        provider: &str,
+        base_url: &str,
+        repository: &str,
+        asset_pattern: Option<&str>,
+        prerelease: bool,
+    ) -> String {
+        let mut source = format!(
+            "      strategy: latest_release\n      provider: {provider}\n      base_url: {base_url}\n      repository: {repository}\n"
+        );
+        if let Some(pattern) = asset_pattern {
+            source.push_str(&format!("      asset_pattern: '{pattern}'\n"));
+        }
+        source.push_str(&format!("      prerelease: {prerelease}\n"));
+        source
+    }
+
+    fn app_with_artifacts(id: &str, package: &str, entries: &[(&str, &str)]) -> AppDefinitionV1 {
         crate::authored_models::parse_app_definition_yaml(&format!(
-            r#"schema_version: 1
-kind: app_definition
-id: {id}
-name: Example
-category: utility
-package:
-  primary: {package}
-  aliases: []
-install_source:
-  type: user_provided_apk
-  resolver: none
-  options: {{}}
-tracking_source:
-  type: local_apk
-artifacts:
-  apk:
-    required: false
-  shared_storage_config:
-    supported: false
-  app_data_config:
-    supported: false
-  byo_apk:
-    required: true
-provisioning:
-  launch_once_recommended: false
-  shared_storage_paths: []
-  app_data_paths: []
-  config_targets: []
-inputs: []
-metadata: {{}}
-"#
+            "{}{}",
+            app_yaml(id, package),
+            artifact_block(entries)
         ))
         .unwrap()
     }
@@ -1161,7 +1174,7 @@ steps:
     }
 
     #[test]
-    fn app_and_recipe_collisions_block_ids_and_destinations_and_warn_for_package_overlap() {
+    fn app_and_recipe_collisions_block_ids_destinations_and_package_identity() {
         let root = app_recipe_root("app-recipe-collisions");
         let existing = app("existing", "com.example.app");
         fs::write(
@@ -1192,8 +1205,12 @@ steps:
             .collisions
             .iter()
             .any(|item| item.code == "recipe_id_conflict"));
+        assert!(exact
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_destination_conflict"));
 
-        let overlap = check_app_recipe_collisions(
+        let shared_package = check_app_recipe_collisions(
             &root,
             &AppRecipeCollisionRequest {
                 app: app("different", "com.example.app"),
@@ -1201,42 +1218,67 @@ steps:
                 recipe: None,
             },
         );
-        assert!(!overlap.blocking);
-        assert_eq!(overlap.collisions[0].code, "app_package_overlap");
+        assert!(shared_package.blocking);
+        assert!(shared_package
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_package_id_conflict"));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn remote_source_collisions_distinguish_repository_release_and_download_url() {
+    fn remote_source_repository_and_url_overlaps_warn_without_blocking() {
         let root = app_recipe_root("remote-source-collisions");
-        let mut existing = app("remote.example", "com.example.remote");
-        existing.install_source.type_name = "remote_apk".to_string();
-        existing.install_source.resolver = "direct_url".to_string();
-        existing.install_source.options.insert(
-            "url".to_string(),
-            Value::String(
-                "https://github.com/example/project/releases/download/v1/app.apk".to_string(),
-            ),
+        let existing = app_with_artifacts(
+            "remote.example",
+            "com.example.remote",
+            &[
+                (
+                    "apk",
+                    &direct_url_source(
+                        "https://github.com/example/project/releases/download/v1/app.apk",
+                    ),
+                ),
+                (
+                    "release",
+                    &latest_release_source(
+                        "github",
+                        "https://github.com",
+                        "example/project",
+                        None,
+                        false,
+                    ),
+                ),
+            ],
         );
-        existing.install_source.options.insert(
-            "repository".to_string(),
-            Value::String("example/project".to_string()),
-        );
-        existing
-            .install_source
-            .options
-            .insert("release_tag".to_string(), Value::String("v1".to_string()));
-        existing.tracking_source.type_name = "github_release".to_string();
-        existing.tracking_source.fields = existing.install_source.options.clone();
         fs::write(
             root.join("apps/remote.example.yaml"),
             crate::authored_models::emit_app_definition_yaml(&existing).unwrap(),
         )
         .unwrap();
 
-        let mut proposed = app("remote.other", "com.example.other");
-        proposed.install_source = existing.install_source.clone();
-        proposed.tracking_source = existing.tracking_source.clone();
+        let proposed = app_with_artifacts(
+            "remote.other",
+            "com.example.other",
+            &[
+                (
+                    "apk",
+                    &direct_url_source(
+                        "https://github.com/example/project/releases/download/v1/app.apk",
+                    ),
+                ),
+                (
+                    "release",
+                    &latest_release_source(
+                        "github",
+                        "https://github.com",
+                        "example/project",
+                        Some("^other\\.apk$"),
+                        true,
+                    ),
+                ),
+            ],
+        );
         let result = check_app_recipe_collisions(
             &root,
             &AppRecipeCollisionRequest {
@@ -1253,36 +1295,30 @@ steps:
         assert!(result
             .collisions
             .iter()
-            .any(|item| item.code == "app_source_release_overlap"));
-        assert!(result
+            .any(|item| item.code == "app_source_url_overlap"));
+        assert!(!result
             .collisions
             .iter()
-            .any(|item| item.code == "app_source_url_overlap"));
+            .any(|item| item.code == "app_latest_policy_conflict"));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn identical_latest_release_policies_are_blocking() {
+    fn identical_latest_release_policies_warn_without_blocking() {
         let root = app_recipe_root("latest-policy-collisions");
-        let mut existing = app("latest.example", "com.example.latest");
-        existing.install_source.type_name = "remote_release".to_string();
-        existing.install_source.resolver = "github_latest_release".to_string();
-        existing.install_source.options.insert(
-            "repository".to_string(),
-            Value::String("example/project".to_string()),
-        );
-        existing.install_source.options.insert(
-            "asset_pattern".to_string(),
-            Value::String("^app-v.*-arm64\\.apk$".to_string()),
-        );
-        existing
-            .install_source
-            .options
-            .insert("include_prereleases".to_string(), Value::Bool(false));
-        existing.tracking_source.type_name = "github_release".to_string();
-        existing.tracking_source.fields.insert(
-            "repository".to_string(),
-            Value::String("example/project".to_string()),
+        let existing = app_with_artifacts(
+            "latest.example",
+            "com.example.latest",
+            &[(
+                "release",
+                &latest_release_source(
+                    "github",
+                    "https://github.com",
+                    "example/project",
+                    Some("^app-v.*-arm64\\.apk$"),
+                    false,
+                ),
+            )],
         );
         fs::write(
             root.join("apps/latest.example.yaml"),
@@ -1292,7 +1328,7 @@ steps:
 
         let mut proposed = existing.clone();
         proposed.id = "latest.other".to_string();
-        proposed.package.primary = "com.example.other".to_string();
+        proposed.package_id = "com.example.other".to_string();
         let result = check_app_recipe_collisions(
             &root,
             &AppRecipeCollisionRequest {
@@ -1301,7 +1337,7 @@ steps:
                 recipe: None,
             },
         );
-        assert!(result.blocking);
+        assert!(!result.blocking);
         assert!(result
             .collisions
             .iter()
@@ -1312,42 +1348,40 @@ steps:
     #[test]
     fn latest_policy_fingerprint_separates_provider_and_base_url() {
         let root = app_recipe_root("provider-aware-latest-policy");
-        let mut existing = app("latest.gitlab", "com.example.gitlab");
-        existing.install_source.type_name = "remote_release".to_string();
-        existing.install_source.resolver = "provider_latest_release".to_string();
-        for (key, value) in [
-            ("provider", Value::String("gitlab".to_string())),
-            ("base_url", Value::String("https://gitlab.com".to_string())),
-            ("repository", Value::String("example/project".to_string())),
-            ("asset_pattern", Value::String("^app-.*\\.apk$".to_string())),
-            ("include_prereleases", Value::Bool(false)),
-        ] {
-            existing
-                .install_source
-                .options
-                .insert(key.to_string(), value);
-        }
-        existing.tracking_source.type_name = "provider_release".to_string();
-        existing.tracking_source.fields = existing.install_source.options.clone();
+        let existing = app_with_artifacts(
+            "latest.gitlab",
+            "com.example.gitlab",
+            &[(
+                "release",
+                &latest_release_source(
+                    "gitlab",
+                    "https://gitlab.com",
+                    "example/project",
+                    Some("^app-.*\\.apk$"),
+                    false,
+                ),
+            )],
+        );
         fs::write(
             root.join("apps/latest.gitlab.yaml"),
             crate::authored_models::emit_app_definition_yaml(&existing).unwrap(),
         )
         .unwrap();
 
-        let mut different_provider = existing.clone();
-        different_provider.id = "latest.forgejo".to_string();
-        different_provider.package.primary = "com.example.forgejo".to_string();
-        different_provider
-            .install_source
-            .options
-            .insert("provider".to_string(), Value::String("forgejo".to_string()));
-        different_provider.install_source.options.insert(
-            "base_url".to_string(),
-            Value::String("https://codeberg.org".to_string()),
+        let different_provider = app_with_artifacts(
+            "latest.forgejo",
+            "com.example.forgejo",
+            &[(
+                "release",
+                &latest_release_source(
+                    "forgejo",
+                    "https://codeberg.org",
+                    "example/project",
+                    Some("^app-.*\\.apk$"),
+                    false,
+                ),
+            )],
         );
-        different_provider.tracking_source.fields =
-            different_provider.install_source.options.clone();
         let result = check_app_recipe_collisions(
             &root,
             &AppRecipeCollisionRequest {
@@ -1360,6 +1394,10 @@ steps:
             .collisions
             .iter()
             .any(|item| item.code == "app_latest_policy_conflict"));
+        assert!(result
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_source_repository_overlap"));
         fs::remove_dir_all(root).unwrap();
     }
 

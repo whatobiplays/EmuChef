@@ -1929,12 +1929,6 @@ fn trusted_remote_source_payload(
                 "Latest compatible release currently requires a GitHub repository source.",
             )));
         }
-        let Some(_pattern) = asset_pattern.filter(|value| !value.trim().is_empty()) else {
-            return Ok(Err(remote_source_error(
-                "latest_release_asset_pattern_invalid",
-                "Enter an APK filename pattern for latest-release resolution.",
-            )));
-        };
         let Some(releases) = source.release_analysis.as_ref() else {
             return Ok(Err(remote_source_error(
                 "latest_release_analysis_missing",
@@ -3259,6 +3253,34 @@ mod tests {
                 api_error_code(&error),
                 Some("latest_release_analysis_invalid")
             );
+        }
+
+        for pattern in [None, Some("   ")] {
+            let (state, session, asset) =
+                trusted_remote_test_state(Some(vec![TrustedRemoteRelease {
+                    tag: "v1".to_string(),
+                    prerelease: false,
+                    asset_file_names: vec!["app.apk".to_string()],
+                }]));
+            let blank_pattern = trusted_remote_source_payload(
+                &state,
+                &session,
+                &asset,
+                "latest_compatible_release",
+                pattern,
+                false,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(blank_pattern.release_analysis.is_some());
+            match pattern {
+                None => assert_eq!(blank_pattern.source["assetPattern"], Value::Null),
+                Some(value) => assert_eq!(
+                    blank_pattern.source["assetPattern"],
+                    Value::String(value.to_string())
+                ),
+            }
         }
 
         let (state, session, _) = trusted_remote_test_state(Some(Vec::new()));

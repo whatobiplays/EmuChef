@@ -4,34 +4,80 @@ id: retroarch
 name: RetroArch (AArch64)
 description: Multi-system emulator frontend.
 category: emulator
-package:
-  primary: com.retroarch
-  aliases: []
-install_source:
-  type: local_placeholder
-  resolver: none
-  options:
-    path: sample_artifacts/RetroArch_aarch64.apk
-tracking_source:
-  type: obtainium_config_snapshot
-  config_snapshot: vendor/obtainium/apps/retroarch.json
-  app_id: retroarch
+package_id: com.retroarch.aarch64
 artifacts:
   apk:
-    required: true
-  shared_storage_config:
-    supported: false
-  app_data_config:
-    supported: false
-  byo_apk:
-    required: false
-provisioning:
-  launch_once_recommended: true
-  shared_storage_paths:
-    - /sdcard/RetroArch/
-  app_data_paths: []
-  config_targets: []
-inputs: []
+    kind: apk
+    name: RetroArch APK
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
+permission_sets:
+  baseline:
+    runtime:
+    - permission: android.permission.POST_NOTIFICATIONS
+      android_api_min: 33
+    - permission: android.permission.READ_EXTERNAL_STORAGE
+      android_api_min: 33
+    - permission: android.permission.READ_MEDIA_IMAGES
+      android_api_min: 33
+    - permission: android.permission.READ_MEDIA_AUDIO
+      android_api_min: 33
+    - permission: android.permission.READ_MEDIA_VIDEO
+      android_api_min: 33
+    - permission: android.permission.WRITE_EXTERNAL_STORAGE
+      android_api_min: 33
+    - permission: android.permission.ACCESS_MEDIA_LOCATION
+      android_api_min: 33
+  elevated:
+    app_ops:
+    - op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+targets:
+  storage_root:
+    kind: directory
+    location: shared_storage
+    path: RetroArch
+  system:
+    kind: directory
+    location: shared_storage
+    path: RetroArch/system
+  cheats:
+    kind: directory
+    location: shared_storage
+    path: RetroArch/cheats
+  assets:
+    kind: directory
+    location: app_data
+    path: assets
+  autoconfig:
+    kind: directory
+    location: app_data
+    path: autoconfig
+  cores:
+    kind: directory
+    location: app_data
+    path: cores
+  database_rdb:
+    kind: directory
+    location: app_data
+    path: database/rdb
+  info:
+    kind: directory
+    location: app_data
+    path: info
+  overlays:
+    kind: directory
+    location: app_data
+    path: overlays
+  shaders_glsl:
+    kind: directory
+    location: app_data
+    path: shaders/shaders_glsl
+  config:
+    kind: file
+    location: external_app_data
+    path: files/retroarch.cfg
 metadata:
   homepage: https://www.retroarch.com/
   tags:

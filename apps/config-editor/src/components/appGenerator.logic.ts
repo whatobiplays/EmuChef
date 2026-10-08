@@ -3,6 +3,11 @@ import type {
   ApkPermissionApplicabilityDto,
   ApkPermissionReviewDto,
   ApkPermissionWarningDto,
+  AppArtifactEditDto,
+  AppArtifactKindDto,
+  AppArtifactSourceDto,
+  AppArtifactStrategyDto,
+  AppArtifactV1Dto,
   AppDefinitionV1Dto,
   AppMappingEditsDto,
   AppRecipeCollisionResult,
@@ -12,6 +17,11 @@ import type {
   AppGeneratorDiagnosticDto,
   AppGeneratorInstallStrategy,
   AppGeneratorSourceMode,
+  AppReleaseProviderDto,
+  AppTargetEditDto,
+  AppTargetKindDto,
+  AppTargetLocationDto,
+  AppTargetV1Dto,
   PermissionSelectionRequestDto,
   ReleasePatternPreviewResult,
   RemoteAssetDto,
@@ -196,13 +206,173 @@ export type AppGeneratorPhase =
   | "saving"
   | "saved";
 
+/**
+ * One editable App Artifact row.
+ *
+ * Every value is a plain string or boolean so the row can be rendered by
+ * controlled inputs. Canonical omission of blank optional values happens when
+ * the row is converted into the artifact payload submitted to Rust.
+ */
+export interface AppArtifactRowEdits {
+  id: string;
+  kind: AppArtifactKindDto;
+  name: string;
+  description: string;
+  strategy: AppArtifactStrategyDto;
+  url: string;
+  sha256: string;
+  provider: AppReleaseProviderDto;
+  baseUrl: string;
+  repository: string;
+  assetPattern: string;
+  invertAssetPattern: boolean;
+  prerelease: boolean;
+}
+
+/** One editable App Target row. */
+export interface AppTargetRowEdits {
+  id: string;
+  kind: AppTargetKindDto;
+  location: AppTargetLocationDto;
+  path: string;
+}
+
+/** Structured mapping rows edited in the form and submitted to the native layer. */
+export interface AppMappingRowEdits {
+  artifacts: AppArtifactRowEdits[];
+  targets: AppTargetRowEdits[];
+  metadata: string;
+}
+
 export interface AppGeneratorFormState {
   app: AppDefinitionV1Dto;
   recipe: AppRecipeEditsDto;
-  mappings: AppMappingEditsDto;
-  aliases: string[];
-  sharedStoragePaths: string[];
-  appDataPaths: string[];
+  mappings: AppMappingRowEdits;
+}
+
+/** Create one empty artifact row. */
+export function emptyArtifactRow(id = ""): AppArtifactRowEdits {
+  return {
+    id,
+    kind: "apk",
+    name: "",
+    description: "",
+    strategy: "user_provided",
+    url: "",
+    sha256: "",
+    provider: "github",
+    baseUrl: "",
+    repository: "",
+    assetPattern: "",
+    invertAssetPattern: false,
+    prerelease: false,
+  };
+}
+
+/** Create one empty App Target row. */
+export function emptyTargetRow(id = ""): AppTargetRowEdits {
+  return { id, kind: "file", location: "app_data", path: "" };
+}
+
+/**
+ * Build the canonical artifact source for one row.
+ *
+ * Blank optional values are omitted, so a saved definition never stores an
+ * empty pattern, an empty checksum, or a disabled inversion flag. The pattern
+ * itself is optional: an absent pattern selects the only eligible APK asset of
+ * the resolved release by artifact kind alone.
+ */
+export function artifactSourceForRow(row: AppArtifactRowEdits): AppArtifactSourceDto {
+  switch (row.strategy) {
+    case "direct_url": {
+      const sha256 = row.sha256.trim().toLowerCase();
+      return sha256
+        ? { strategy: "direct_url", url: row.url.trim(), sha256 }
+        : { strategy: "direct_url", url: row.url.trim() };
+    }
+    case "latest_release": {
+      const pattern = row.assetPattern.trim();
+      return {
+        strategy: "latest_release",
+        provider: row.provider,
+        base_url: row.baseUrl.trim(),
+        repository: row.repository.trim(),
+        ...(pattern
+          ? {
+              asset_pattern: pattern,
+              ...(row.invertAssetPattern ? { invert_asset_pattern: true } : {}),
+            }
+          : {}),
+        prerelease: row.prerelease,
+      };
+    }
+    default:
+      return { strategy: "user_provided" };
+  }
+}
+
+/** Convert one form artifact row into the artifact payload submitted to Rust. */
+export function artifactEditForRow(row: AppArtifactRowEdits): AppArtifactEditDto {
+  const edit: AppArtifactEditDto = {
+    id: row.id.trim(),
+    kind: row.kind,
+    source: artifactSourceForRow(row),
+  };
+  const name = row.name.trim();
+  const description = row.description.trim();
+  if (name) edit.name = name;
+  if (description) edit.description = description;
+  return edit;
+}
+
+/** Convert one form target row into the App Target payload submitted to Rust. */
+export function targetEditForRow(row: AppTargetRowEdits): AppTargetEditDto {
+  return {
+    id: row.id.trim(),
+    kind: row.kind,
+    location: row.location,
+    path: row.path.trim(),
+  };
+}
+
+/** Convert the structured mapping rows into the payload the native layer parses. */
+export function mappingEditsFromRows(rows: AppMappingRowEdits): AppMappingEditsDto {
+  return {
+    artifacts: rows.artifacts.map(artifactEditForRow),
+    targets: rows.targets.map(targetEditForRow),
+    metadata: rows.metadata,
+  };
+}
+
+/** Build the editable row for one canonical artifact definition. */
+export function artifactRowForDefinition(
+  id: string,
+  artifact: AppArtifactV1Dto,
+): AppArtifactRowEdits {
+  const row = emptyArtifactRow(id);
+  row.kind = artifact.kind;
+  row.name = artifact.name ?? "";
+  row.description = artifact.description ?? "";
+  const source = artifact.source;
+  if (source.strategy === "direct_url") {
+    row.strategy = "direct_url";
+    row.url = source.url;
+    row.sha256 = source.sha256 ?? "";
+  } else if (source.strategy === "latest_release") {
+    row.strategy = "latest_release";
+    row.provider = source.provider;
+    row.baseUrl = source.base_url;
+    row.repository = source.repository;
+    row.assetPattern = source.asset_pattern ?? "";
+    row.invertAssetPattern = source.invert_asset_pattern ?? false;
+    row.prerelease = source.prerelease;
+  }
+  return row;
+}
+
+/** Build the editable row for one canonical App Target definition. */
+export function targetRowForDefinition(id: string, target: AppTargetV1Dto): AppTargetRowEdits {
+  return { id, kind: target.kind, location: target.location, path: target.path };
 }
 
 export interface AppGeneratorState {
@@ -284,6 +454,237 @@ export const initialAppGeneratorState: AppGeneratorState = {
   error: null,
 };
 
+/**
+ * Artifact id native generation proposes for a remote artifact source.
+ *
+ * The backend always builds its proposal with this artifact id, so an artifact
+ * the author keeps under it is the one a generated recipe installs.
+ */
+const PROPOSED_REMOTE_ARTIFACT_ID = "apk";
+
+/** Return the artifact source strategy one remote source strategy requires. */
+function artifactStrategyForRemoteSource(
+  remoteSource: RemoteSourceDescriptorDto,
+): AppArtifactStrategyDto | null {
+  switch (remoteSource.strategy) {
+    case "pinned_remote_asset":
+      return "direct_url";
+    case "latest_compatible_release":
+      return "latest_release";
+    case "user_provided_apk":
+      return "user_provided";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Return the artifact row native generation pairs with the reviewed source.
+ *
+ * The backend pairs the artifact its proposal names, which is the artifact id
+ * it always proposes for a remote source, and otherwise accepts a sole artifact
+ * with the expected source strategy. Several matching artifacts leave the
+ * pairing unresolved, and a generated recipe blocks that catalog instead of
+ * choosing one, so this rule never picks an artifact the recipe would not use.
+ */
+function pairedRemoteArtifactRow(
+  form: AppGeneratorFormState | null,
+  remoteSource: RemoteSourceDescriptorDto | null,
+): AppArtifactRowEdits | null {
+  if (!form || !remoteSource) return null;
+  // Native generation pairs an APK artifact only, because the generated recipe
+  // installs an APK, and its proposed artifact id wins over a retained row that
+  // records another repository or URL.
+  const expected = artifactStrategyForRemoteSource(remoteSource);
+  const matching = form.mappings.artifacts.filter(
+    (row) => row.kind === "apk" && row.strategy === expected,
+  );
+  // The submitted payload trims artifact ids, so the pairing trims them too.
+  const proposed = matching.find((row) => row.id.trim() === PROPOSED_REMOTE_ARTIFACT_ID);
+  if (proposed) return proposed;
+  return matching.length === 1 ? matching[0]! : null;
+}
+
+/** Compare publisher checksum text the way artifact rows store it. */
+function normalizedSha256Text(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * Apply one source-step edit to the artifact rows of the selected remote
+ * source. Rows the author customized are left untouched, so the editable form
+ * and the source step cannot drift apart without the author saying so.
+ */
+function mapSelectedRemoteArtifactRows(
+  form: AppGeneratorFormState | null,
+  remoteSource: RemoteSourceDescriptorDto | null,
+  update: (row: AppArtifactRowEdits) => AppArtifactRowEdits,
+): AppGeneratorFormState | null {
+  if (!form) return null;
+  // Native generation pairs the reviewed source with one artifact and blocks a
+  // pairing it cannot resolve, so one source-step edit may rewrite only that
+  // artifact. Rewriting every row that merely shares the source identity would
+  // silently overwrite independent authored artifact policies.
+  const paired = pairedRemoteArtifactRow(form, remoteSource);
+  if (!paired) return form;
+  const next = update(paired);
+  if (next === paired) return form;
+  const artifacts = form.mappings.artifacts.map((row) => (row === paired ? next : row));
+  return { ...form, mappings: { ...form.mappings, artifacts } };
+}
+
+/**
+ * Mirror one source-step checksum edit into the selected artifact row when the
+ * row still carries the previous checksum.
+ */
+function mapSelectedChecksumRows(
+  state: AppGeneratorState,
+  update: (row: AppArtifactRowEdits) => AppArtifactRowEdits,
+): AppGeneratorFormState | null {
+  const previous = normalizedSha256Text(state.trustedSha256);
+  return mapSelectedRemoteArtifactRows(
+    state.form,
+    state.remoteSource,
+    (row) =>
+    normalizedSha256Text(row.sha256) === previous ? update(row) : row,
+  );
+}
+
+/**
+ * Return the artifact row that represents the selected remote source, or null
+ * when no row represents the selection.
+ */
+function selectedRemoteArtifactRow(
+  form: AppGeneratorFormState | null,
+  remoteSource: RemoteSourceDescriptorDto | null,
+): AppArtifactRowEdits | null {
+  return pairedRemoteArtifactRow(form, remoteSource);
+}
+
+/**
+ * Return the checksum carried by the artifact row that represents the selected
+ * remote source, or null when no row represents the selection.
+ */
+function selectedRemoteArtifactSha256(
+  form: AppGeneratorFormState | null,
+  remoteSource: RemoteSourceDescriptorDto | null,
+): string | null {
+  const row = selectedRemoteArtifactRow(form, remoteSource);
+  return row ? row.sha256 : null;
+}
+
+/**
+ * Keep the source-step filename pattern and the selected artifact row showing
+ * one value. Once a draft exists the reviewed artifact is authoritative for
+ * the latest-release policy, so the source step mirrors the row instead of
+ * drifting from it while the author edits either control.
+ */
+function mirroredReleaseAssetPattern(
+  state: AppGeneratorState,
+  form: AppGeneratorFormState | null,
+): string {
+  const row = selectedRemoteArtifactRow(form, state.remoteSource);
+  return row && reviewedSourceCarriesReleasePolicy(state.remoteSource)
+    ? row.assetPattern
+    : state.assetPattern;
+}
+
+/**
+ * Keep the source-step prerelease toggle and the selected artifact row showing
+ * one value. The reviewed artifact row is authoritative the same way its
+ * filename pattern is.
+ */
+function mirroredIncludePrereleases(
+  state: AppGeneratorState,
+  form: AppGeneratorFormState | null,
+): boolean {
+  const row = selectedRemoteArtifactRow(form, state.remoteSource);
+  return row && reviewedSourceCarriesReleasePolicy(state.remoteSource)
+    ? row.prerelease
+    : state.includePrereleases;
+}
+
+/**
+ * Return whether the reviewed source carries a release policy.
+ *
+ * Only a latest-release source selects assets by filename pattern and
+ * prerelease policy, so a pinned artifact row neither supplies nor mirrors
+ * those two source-step controls.
+ */
+function reviewedSourceCarriesReleasePolicy(
+  remoteSource: RemoteSourceDescriptorDto | null,
+): boolean {
+  return remoteSource?.strategy === "latest_compatible_release";
+}
+
+/**
+ * Keep the source-step checksum field and the selected artifact row showing
+ * one value. Once a draft exists the reviewed artifact is authoritative, so
+ * the field mirrors the row instead of drifting from it while the author edits
+ * either control.
+ */
+export function mirroredTrustedSha256(
+  state: AppGeneratorState,
+  form: AppGeneratorFormState | null,
+): string {
+  return (
+    selectedRemoteArtifactSha256(form, state.remoteSource) ??
+    state.trustedSha256
+  );
+}
+
+/** Return whether one authored row resolves from the analyzed GitHub repository. */
+function rowDescribesAnalyzedGithub(row: AppArtifactRowEdits, fullName: string): boolean {
+  return (
+    row.provider === "github"
+    && normalizeServiceOrigin(row.baseUrl) === "https://github.com"
+    && row.repository.trim().toLowerCase() === fullName.trim().toLowerCase()
+  );
+}
+
+/** Compare service origins without trailing slashes or letter case. */
+function normalizeServiceOrigin(value: string): string {
+  return value.trim().replace(/\/+$/u, "").toLowerCase();
+}
+
+/** Compare repository names the way the analyzed-repository check does. */
+function normalizeRepositoryName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * Return whether the retained source analysis still describes every
+ * latest-release artifact the generated documents resolve with.
+ *
+ * Editing an authored latest-release artifact's provider, service origin, or
+ * repository leaves the analysis describing a different source, so its releases cannot
+ * confirm or block the authored filename policy. Rust reports the same
+ * retargeting as the nonblocking latest-release stale-analysis warning, so the
+ * browser preview stops gating instead of blocking on stale evidence.
+ */
+export function releaseAnalysisDescribesReviewedPolicy(state: AppGeneratorState): boolean {
+  const analysis = state.sourceAnalysis;
+  if (!analysis || !analysis.repository) return false;
+  const fullName = analysis.repository.fullName;
+  // Native generation validates the retained analysis against the artifact it
+  // pairs with the reviewed source, so an unrelated latest-release artifact
+  // cannot invalidate a policy the analysis still confirms.
+  const row = pairedRemoteArtifactRow(state.form, state.remoteSource);
+  if (row) {
+    return rowDescribesAnalyzedGithub(row, fullName);
+  }
+  // Before a draft exists no artifact row can contradict the analysis, and
+  // editing the source input discards it, so it still describes the selection
+  // the author is choosing and the preview may follow it.
+  const source = state.remoteSource;
+  if (!source) return true;
+  return (
+    source.provider === "github"
+    && normalizeServiceOrigin(source.baseUrl ?? "") === "https://github.com"
+    && (source.repository ?? "").trim().toLowerCase() === fullName.trim().toLowerCase()
+  );
+}
+
 export function reduceAppGenerator(
   state: AppGeneratorState,
   action: AppGeneratorAction,
@@ -346,6 +747,16 @@ export function reduceAppGenerator(
         const selectedAssetRemainsEligible =
           selectedAsset !== undefined
           && (action.value || !selectedAsset.prerelease);
+        const form = selectedAssetRemainsEligible
+          ? mapSelectedRemoteArtifactRows(
+              mapSelectedChecksumRows(state, (row) => ({ ...row, sha256: "" })),
+              state.remoteSource,
+              (row) =>
+                row.prerelease === state.includePrereleases
+                  ? { ...row, prerelease: action.value }
+                  : row,
+            )
+          : null;
         return {
           ...state,
           includePrereleases: action.value,
@@ -359,7 +770,7 @@ export function reduceAppGenerator(
           apkLabel: selectedAssetRemainsEligible ? state.apkLabel : null,
           inspection: selectedAssetRemainsEligible ? state.inspection : null,
           draft: null,
-          form: selectedAssetRemainsEligible ? state.form : null,
+          form,
           collisions: null,
           saved: null,
           error: null,
@@ -383,7 +794,13 @@ export function reduceAppGenerator(
       };
     }
     case "source-analyzing":
-      return { ...state, phase: "inspecting", trustedSha256: "", error: null };
+      return {
+        ...state,
+        phase: "inspecting",
+        trustedSha256: "",
+        form: mapSelectedChecksumRows(state, (row) => ({ ...row, sha256: "" })),
+        error: null,
+      };
     case "source-analyzed":
       return {
         ...state,
@@ -425,6 +842,18 @@ export function reduceAppGenerator(
       return {
         ...state,
         assetPattern: action.value,
+        form: mapSelectedRemoteArtifactRows(
+          state.form,
+          state.remoteSource,
+          (row) =>
+          // The row still mirrors the source step when it carries either the
+          // previous source-step pattern or the pattern the selected source was
+          // resolved with; anything else is an author customization.
+          row.assetPattern === state.assetPattern
+          || row.assetPattern === (state.remoteSource?.assetPattern ?? "")
+            ? { ...row, assetPattern: action.value }
+            : row,
+        ),
         draft: null,
         collisions: null,
         saved: null,
@@ -434,6 +863,7 @@ export function reduceAppGenerator(
       return {
         ...state,
         trustedSha256: action.value,
+        form: mapSelectedChecksumRows(state, (row) => ({ ...row, sha256: action.value })),
         draft: null,
         collisions: null,
         saved: null,
@@ -485,7 +915,17 @@ export function reduceAppGenerator(
         error: null,
       };
     case "inspecting":
-      return { ...state, phase: "inspecting", trustedSha256: "", error: null };
+      // Without a reviewed remote artifact the checksum is a one-shot source
+      // input, so a new inspection discards it. Once the row exists it stays
+      // authoritative, and the source step keeps showing the same value.
+      return {
+        ...state,
+        phase: "inspecting",
+        trustedSha256:
+          selectedRemoteArtifactSha256(state.form, state.remoteSource) ??
+          "",
+        error: null,
+      };
     case "inspected":
       return { ...state, phase: "editing", inspection: action.inspection, error: null };
     case "runtime-candidate-selected":
@@ -520,17 +960,34 @@ export function reduceAppGenerator(
         saved: null,
         error: null,
       };
-    case "drafted":
+    case "drafted": {
+      const form = draftToForm(action.draft);
       return {
         ...state,
         phase: "editing",
         draft: action.draft,
-        form: draftToForm(action.draft),
+        form,
+        assetPattern: mirroredReleaseAssetPattern(state, form),
+        includePrereleases: mirroredIncludePrereleases(state, form),
+        trustedSha256: mirroredTrustedSha256(state, form),
         collisions: null,
         error: null,
       };
+    }
     case "form":
-      return { ...state, form: action.form, draft: null, collisions: null, error: null };
+      return {
+        ...state,
+        form: action.form,
+        assetPattern: mirroredReleaseAssetPattern(state, action.form),
+        includePrereleases: mirroredIncludePrereleases(
+          state,
+          action.form,
+        ),
+        trustedSha256: mirroredTrustedSha256(state, action.form),
+        draft: null,
+        collisions: null,
+        error: null,
+      };
     case "root-selected":
       return {
         ...state,
@@ -539,21 +996,26 @@ export function reduceAppGenerator(
         collisions: null,
         error: null,
       };
-    case "reviewed":
+    case "reviewed": {
+      const form = state.form
+        ? {
+            ...state.form,
+            app: structuredClone(action.draft.app),
+            recipe: structuredClone(action.draft.recipeEdits),
+          }
+        : draftToForm(action.draft);
       return {
         ...state,
         phase: "reviewing",
         draft: action.draft,
-        form: state.form
-          ? {
-              ...state.form,
-              app: structuredClone(action.draft.app),
-              recipe: structuredClone(action.draft.recipeEdits),
-            }
-          : draftToForm(action.draft),
+        form,
+        assetPattern: mirroredReleaseAssetPattern(state, form),
+        includePrereleases: mirroredIncludePrereleases(state, form),
+        trustedSha256: mirroredTrustedSha256(state, form),
         collisions: action.collisions,
         error: null,
       };
+    }
     case "saving":
       return { ...state, phase: "saving", error: null };
     case "saved":
@@ -564,13 +1026,11 @@ export function reduceAppGenerator(
 }
 
 export function draftToForm(draft: AppRecipeDraftResult): AppGeneratorFormState {
-  const { type: trackingType, ...trackingFields } = draft.app.tracking_source;
-  void trackingType;
   const app = structuredClone(draft.app);
   const recipe = structuredClone(draft.recipeEdits);
-  if (app.name === app.package.primary) {
+  if (app.name === app.package_id) {
     const originalName = app.name;
-    const readableName = readableNameFromPackage(app.package.primary);
+    const readableName = readableNameFromPackage(app.package_id);
     app.name = readableName;
     recipe.name = recipe.name.replace(originalName, readableName);
     recipe.description = recipe.description.replace(originalName, readableName);
@@ -581,17 +1041,14 @@ export function draftToForm(draft: AppRecipeDraftResult): AppGeneratorFormState 
     app,
     recipe,
     mappings: {
-      installSourceOptions: JSON.stringify(draft.app.install_source.options, null, 2),
-      trackingSourceFields: JSON.stringify(trackingFields, null, 2),
-      metadata: JSON.stringify(draft.app.metadata, null, 2),
-      inputs: draft.app.inputs.map((value) => JSON.stringify(value, null, 2)),
-      configTargets: draft.app.provisioning.config_targets.map((value) =>
-        JSON.stringify(value, null, 2),
+      artifacts: Object.entries(app.artifacts ?? {}).map(([id, artifact]) =>
+        artifactRowForDefinition(id, artifact),
       ),
+      targets: Object.entries(app.targets ?? {}).map(([id, target]) =>
+        targetRowForDefinition(id, target),
+      ),
+      metadata: JSON.stringify(app.metadata ?? {}, null, 2),
     },
-    aliases: [...draft.app.package.aliases],
-    sharedStoragePaths: [...draft.app.provisioning.shared_storage_paths],
-    appDataPaths: [...draft.app.provisioning.app_data_paths],
   };
 }
 
@@ -631,29 +1088,15 @@ export type FormRequestResult =
   | { ok: false; message: string };
 
 export function formToRequest(form: AppGeneratorFormState): FormRequestResult {
-  for (const [label, source] of [
-    ["Install-source options", form.mappings.installSourceOptions],
-    ["Tracking-source fields", form.mappings.trackingSourceFields],
-    ["Metadata", form.mappings.metadata],
-    ...form.mappings.inputs.map((source, index) => [`Input metadata ${index + 1}`, source]),
-    ...form.mappings.configTargets.map((source, index) => [`Config target ${index + 1}`, source]),
-  ] as Array<[string, string]>) {
-    const parsed = parseMetadataObject(source);
-    if (!parsed.ok) {
-      return { ok: false, message: `${label}: ${parsed.message}` };
-    }
+  const metadata = parseMetadataObject(form.mappings.metadata);
+  if (!metadata.ok) {
+    return { ok: false, message: `Metadata: ${metadata.message}` };
   }
-  const normalizeList = (values: string[]) =>
-    values.map((item) => item.trim()).filter((item) => item.length > 0);
-  const app = structuredClone(form.app);
-  app.package.aliases = normalizeList(form.aliases);
-  app.provisioning.shared_storage_paths = normalizeList(form.sharedStoragePaths);
-  app.provisioning.app_data_paths = normalizeList(form.appDataPaths);
   return {
     ok: true,
-    app,
+    app: structuredClone(form.app),
     recipe: structuredClone(form.recipe),
-    mappings: structuredClone(form.mappings),
+    mappings: mappingEditsFromRows(form.mappings),
   };
 }
 
@@ -682,6 +1125,10 @@ function compareFileNames(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function isApkFileName(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith(".apk");
+}
+
 /**
  * Build an immediate browser preview from the retained GitHub analysis.
  *
@@ -697,31 +1144,30 @@ export function buildReleasePatternPreview(
   const eligibleReleases = analysis.releases.filter(
     (release) => includePrereleases || !release.prerelease,
   );
-  if (!pattern.trim()) {
-    return blockingPatternPreview(
-      eligibleReleases.length,
-      "Enter an APK filename pattern.",
-    );
-  }
-  let expression: RegExp;
-  try {
-    expression = new RegExp(pattern, "u");
-  } catch {
-    return blockingPatternPreview(
-      eligibleReleases.length,
-      "Enter a valid regular expression. Rust performs final validation before generation.",
-    );
-  }
   if (eligibleReleases.length === 0) {
     return blockingPatternPreview(
       0,
       "No analyzed releases are eligible for this prerelease policy.",
     );
   }
+  const trimmed = pattern.trim();
+  let expression: RegExp | null = null;
+  if (trimmed) {
+    try {
+      expression = new RegExp(trimmed, "u");
+    } catch {
+      return blockingPatternPreview(
+        eligibleReleases.length,
+        "Enter a valid regular expression. Rust performs final validation before generation.",
+      );
+    }
+  }
   const releases = eligibleReleases.map((release) => {
     const matchingNames = release.assets
       .map((asset) => asset.fileName)
-      .filter((fileName) => expression.test(fileName))
+      .filter((fileName) =>
+        expression === null ? isApkFileName(fileName) : expression.test(fileName),
+      )
       .sort(compareFileNames);
     return {
       releaseTag: release.tag,
@@ -738,10 +1184,11 @@ export function buildReleasePatternPreview(
   const noMatchCount = releases.filter((release) => release.outcome === "no_match").length;
   const multipleMatchesCount = releases.length - uniqueMatchCount - noMatchCount;
   const newest = releases[0];
+  const qualifier = expression === null ? "eligible APK" : "matching APK";
   const blockingMessage = newest?.outcome === "no_match"
-    ? `The newest eligible analyzed release (${newest.releaseTag}) has no matching APK.`
+    ? `The newest eligible analyzed release (${newest.releaseTag}) has no ${qualifier}.`
     : newest?.outcome === "multiple_matches"
-      ? `The newest eligible analyzed release (${newest.releaseTag}) has multiple matching APKs.`
+      ? `The newest eligible analyzed release (${newest.releaseTag}) has multiple ${qualifier}s.`
       : null;
   return {
     releases,
@@ -792,7 +1239,17 @@ function eligiblePreselectedAssetHandle(assets: RemoteAssetDto[]): string | null
 }
 
 export function assetPatternError(pattern: string, fileNames: string[]): string | null {
-  if (!pattern.trim()) return "Enter an APK filename pattern.";
+  const trimmed = pattern.trim();
+  if (!trimmed) {
+    const eligible = fileNames.filter(isApkFileName);
+    if (eligible.length === 0) {
+      return "The selected release has no eligible APK asset.";
+    }
+    if (eligible.length > 1) {
+      return "The selected release has multiple eligible APK assets. Add an APK filename pattern to select one.";
+    }
+    return null;
+  }
   try {
     const expression = new RegExp(pattern, "u");
     const matches = fileNames.filter((fileName) => expression.test(fileName));
