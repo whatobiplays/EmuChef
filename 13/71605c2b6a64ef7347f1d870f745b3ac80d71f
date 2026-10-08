@@ -1,0 +1,24 @@
+Makefile
+  s_b4dcecbc7eae13::t_075e2a1af44cd8 105-114,117-118,120
+  s_b4dcecbc7eae13::t_65b9b45c6854b0 27-33,38,115-116,119
+  s_b4dcecbc7eae13::t_a06fcd31133995 25-26
+  s_b4dcecbc7eae13::t_4c2e2943213c18 14-15,23-24,34-37,39-42,52
+CONTEXT.md
+  s_b4dcecbc7eae13::t_d5cee254e61ac3 736-754
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1371605c2b6a64ef7347f1d870f745b3ac80d71f",
+  "prompts": {},
+  "sessions": {
+    "s_b4dcecbc7eae13": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1191a-38c0-78c0-9a8b-cdbacbc8dbf3",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": null
+    }
+  }
+}
