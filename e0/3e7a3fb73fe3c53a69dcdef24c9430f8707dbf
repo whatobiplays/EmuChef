@@ -1,0 +1,23 @@
+Makefile
+  s_b4dcecbc7eae13::t_4c2e2943213c18 14-15,23-24,27-38,48
+  s_b4dcecbc7eae13::t_a06fcd31133995 25-26
+  s_b4dcecbc7eae13::t_075e2a1af44cd8 101-117
+CONTEXT.md
+  s_b4dcecbc7eae13::t_0930cbeabd988e 736-752
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e03e7a3fb73fe3c53a69dcdef24c9430f8707dbf",
+  "prompts": {},
+  "sessions": {
+    "s_b4dcecbc7eae13": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1191a-38c0-78c0-9a8b-cdbacbc8dbf3",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
