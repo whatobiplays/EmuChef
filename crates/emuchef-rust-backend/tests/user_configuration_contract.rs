@@ -50,6 +50,39 @@ fn write_authored_root(temp: &TempDir, sensitive: bool) -> PathBuf {
     root
 }
 
+fn write_test_app_definition(
+    authored_root: &Path,
+    id: &str,
+    package_id: &str,
+    display_name: &str,
+    source_policy: &str,
+) {
+    let source = match source_policy {
+        "user_provided" => "strategy: user_provided".to_string(),
+        "latest_release" => {
+            "strategy: latest_release\n      provider: github\n      base_url: https://github.com\n      repository: example/test\n      prerelease: false".to_string()
+        }
+        other => panic!("unsupported test source policy {other}"),
+    };
+    fs::write(
+        authored_root.join(format!("apps/{id}.yaml")),
+        format!(
+            "schema_version: 1\nkind: app_definition\nid: {id}\nname: {display_name}\ncategory: emulator\npackage_id: {package_id}\nartifacts:\n  apk:\n    kind: apk\n    source:\n      {source}\n"
+        ),
+    )
+    .expect("App Definition should be written");
+}
+
+fn write_app_authority_recipe(authored_root: &Path, step_app: &str, cache: &str) {
+    fs::write(
+        authored_root.join("recipes/feature.test.yaml"),
+        format!(
+            "schema_version: 1\nkind: recipe\nid: feature.test\nname: Feature test\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {{}}\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: test.app\n    artifact: apk\n    cache: {cache}\nsteps:\n  - id: install\n    type: install_apk\n    name: Install\n    user_toggleable: false\n    app_ref: {step_app}\n    params:\n      app:\n        ref: artifacts.installer.local_path\n"
+        ),
+    )
+    .expect("App authority Recipe should be written");
+}
+
 #[test]
 fn structural_loading_requires_device_plan_and_strict_binding_entries() {
     let cases = [
@@ -494,6 +527,13 @@ fn authored_contract_fingerprints_ignore_labels_and_resolved_values() {
             .replace("name: Test plan", "name: New display label"),
     )
     .unwrap();
+    write_test_app_definition(
+        &authored_root,
+        "unused.app",
+        "com.example.unused",
+        "Unused app",
+        "user_provided",
+    );
     let second = build_compatibility_baseline(&first_configuration, &path, &authored_root).unwrap();
 
     assert_eq!(
@@ -509,6 +549,90 @@ fn authored_contract_fingerprints_ignore_labels_and_resolved_values() {
     assert_eq!(
         compatibility_baseline_state(&first_configuration, &second),
         CompatibilityBaselineState::Unchanged
+    );
+}
+
+#[test]
+fn authored_app_authority_and_recipe_cache_policy_change_compatibility_fingerprint() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let authored_root = write_authored_root(&temp, false);
+    let path = write_configuration(&temp, valid_yaml());
+    let configuration = load_user_configuration(&path).unwrap();
+
+    write_test_app_definition(
+        &authored_root,
+        "test.app",
+        "com.example.test",
+        "Test app",
+        "user_provided",
+    );
+    write_test_app_definition(
+        &authored_root,
+        "other.app",
+        "com.example.other",
+        "Other app",
+        "user_provided",
+    );
+    write_app_authority_recipe(&authored_root, "test.app", "default");
+    let original = build_compatibility_baseline(&configuration, &path, &authored_root).unwrap();
+
+    write_app_authority_recipe(&authored_root, "test.app", "none");
+    let cache_changed =
+        build_compatibility_baseline(&configuration, &path, &authored_root).unwrap();
+    assert_ne!(
+        original.recipes[0].fingerprint,
+        cache_changed.recipes[0].fingerprint
+    );
+
+    write_app_authority_recipe(&authored_root, "other.app", "default");
+    let step_app_changed =
+        build_compatibility_baseline(&configuration, &path, &authored_root).unwrap();
+    assert_ne!(
+        original.recipes[0].fingerprint,
+        step_app_changed.recipes[0].fingerprint
+    );
+
+    write_app_authority_recipe(&authored_root, "test.app", "default");
+    write_test_app_definition(
+        &authored_root,
+        "test.app",
+        "com.example.changed",
+        "Test app",
+        "user_provided",
+    );
+    let package_changed =
+        build_compatibility_baseline(&configuration, &path, &authored_root).unwrap();
+    assert_ne!(
+        original.recipes[0].fingerprint,
+        package_changed.recipes[0].fingerprint
+    );
+
+    write_test_app_definition(
+        &authored_root,
+        "test.app",
+        "com.example.test",
+        "Renamed presentation",
+        "user_provided",
+    );
+    let presentation_changed =
+        build_compatibility_baseline(&configuration, &path, &authored_root).unwrap();
+    assert_eq!(
+        original.recipes[0].fingerprint,
+        presentation_changed.recipes[0].fingerprint
+    );
+
+    write_test_app_definition(
+        &authored_root,
+        "test.app",
+        "com.example.test",
+        "Renamed presentation",
+        "latest_release",
+    );
+    let source_changed =
+        build_compatibility_baseline(&configuration, &path, &authored_root).unwrap();
+    assert_ne!(
+        original.recipes[0].fingerprint,
+        source_changed.recipes[0].fingerprint
     );
 }
 

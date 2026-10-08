@@ -15,10 +15,11 @@ use crate::executor::{
 };
 use crate::model::OrderedMap;
 use crate::planner::{
-    DeviceContext, ExecutionArtifact, ExecutionInputValue, ExecutionParamValue, ExecutionPlan,
-    ExecutionPlanSource, ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepCondition,
-    ExecutionStepConstraints, PlanningResult, PlanningStatus, RuntimeCapabilities,
-    RuntimeValue as PlanRuntimeValue, TargetDeviceBinding,
+    DeviceContext, ExecutionAppSnapshot, ExecutionArtifact, ExecutionArtifactSource,
+    ExecutionInputValue, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource,
+    ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
+    PlanningResult, PlanningStatus, RuntimeCapabilities, RuntimeValue as PlanRuntimeValue,
+    TargetDeviceBinding,
 };
 use crate::planner_runtime::{plan_with_adb_runner, ExplicitDeviceContext, PlanningRequest};
 use crate::{validation, yaml, ProcessOutput};
@@ -609,7 +610,10 @@ fn apply_workspace(plan_path: &Path, plan: &ExecutionPlan) -> ApplyWorkspace {
     read_only_roots.extend(
         plan.artifacts
             .iter()
-            .filter_map(|artifact| file_url_to_path(&artifact.url)),
+            .filter_map(|artifact| match &artifact.source {
+                ExecutionArtifactSource::RemoteFile { url } => file_url_to_path(url),
+                ExecutionArtifactSource::RemoteRelease { .. } => None,
+            }),
     );
     ApplyWorkspace {
         runtime_root,
@@ -945,6 +949,7 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
     let runtime_capabilities = mapping_value(data, "runtime_capabilities")?;
     let steps = parse_steps(data)?;
     let recipes = parse_recipe_snapshots(data, &steps)?;
+    let apps = parse_apps(data)?;
     Ok(ExecutionPlan {
         id: required_string(data, "id")?,
         source: ExecutionPlanSource {
@@ -958,6 +963,7 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
                 .transpose()?,
         },
         recipes,
+        apps,
         target_device: data
             .get(yaml_key("target_device"))
             .map(parse_target_device)
@@ -1081,11 +1087,66 @@ fn parse_artifacts(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionArtifact>,
         .iter()
         .map(|item| {
             let mapping = as_mapping(item, "execution artifact must be a mapping")?;
+            let source = match optional_mapping_value(mapping, "source")? {
+                Some(source) => match required_string(source, "kind")?.as_str() {
+                    "remote_file" => ExecutionArtifactSource::RemoteFile {
+                        url: required_string(source, "url")?,
+                    },
+                    "remote_release" => ExecutionArtifactSource::RemoteRelease {
+                        provider: required_string(source, "provider")?,
+                        service_origin: required_string(source, "service_origin")?,
+                        repository: required_string(source, "repository")?,
+                        include_prereleases: required_bool(source, "include_prereleases")?,
+                        asset_pattern: required_string(source, "asset_pattern")?,
+                    },
+                    _ => {
+                        return Err(CliError::Message(
+                            "execution artifact source kind is unsupported".to_string(),
+                        ));
+                    }
+                },
+                None => ExecutionArtifactSource::RemoteFile {
+                    url: required_string(mapping, "url")?,
+                },
+            };
+            let app_provenance = optional_mapping_value(mapping, "app_provenance")?
+                .map(|provenance| {
+                    Ok(crate::planner::ExecutionArtifactAppProvenance {
+                        app_id: required_string(provenance, "app_id")?,
+                        artifact_id: required_string(provenance, "artifact_id")?,
+                        kind: required_string(provenance, "kind")?,
+                    })
+                })
+                .transpose()?;
             Ok(ExecutionArtifact {
                 id: required_string(mapping, "id")?,
                 type_name: required_string(mapping, "type")?,
-                url: required_string(mapping, "url")?,
+                source,
                 cache: required_string(mapping, "cache")?,
+                app_provenance,
+            })
+        })
+        .collect()
+}
+
+fn parse_apps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionAppSnapshot>, CliError> {
+    let Some(value) = data.get(yaml_key("apps")) else {
+        return Ok(Vec::new());
+    };
+    let YamlValue::Sequence(apps) = value else {
+        return Err(CliError::Message(
+            "execution plan apps must be a list".to_string(),
+        ));
+    };
+    apps.iter()
+        .map(|item| {
+            let app = as_mapping(item, "execution app must be a mapping")?;
+            Ok(ExecutionAppSnapshot {
+                id: required_string(app, "id")?,
+                name: required_string(app, "name")?,
+                description: optional_string_value(app, "description"),
+                category: optional_string_value(app, "category"),
+                package_id: required_string(app, "package_id")?,
             })
         })
         .collect()
@@ -1103,6 +1164,7 @@ fn parse_steps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionStep>, CliErro
             Ok(ExecutionStep {
                 id: id.clone(),
                 recipe_ref: required_string(mapping, "recipe_ref")?,
+                app_id: optional_string_value(mapping, "app_id"),
                 type_name: type_name.clone(),
                 name: name.clone(),
                 note: crate::planner::normalized_plan_step_note(
@@ -1189,6 +1251,7 @@ fn parse_conditions(
             }
             Ok(ExecutionStepCondition {
                 type_name: required_string(condition, "type")?,
+                app_id: optional_string_value(condition, "app_id"),
                 params,
             })
         })

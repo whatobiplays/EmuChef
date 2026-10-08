@@ -936,7 +936,7 @@ function ObjectStringField({
 function artifactOptions(artifacts: Record<string, ArtifactDto>): StringIdOption[] {
   return Object.entries(artifacts).map(([id, artifact]) => ({
     id,
-    secondary: `${artifact.type} · ${artifact.cache}`,
+    secondary: artifact.cache ? `${artifact.type} · ${artifact.cache}` : artifact.type,
   }));
 }
 

@@ -80,6 +80,7 @@ fn plan_with_artifacts(
             catalog: None,
         },
         recipes: Vec::new(),
+        apps: Vec::new(),
         target_device: None,
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
@@ -89,6 +90,69 @@ fn plan_with_artifacts(
         schema_version: 1,
         kind: "execution_plan",
     }
+}
+
+fn app_context_install_plan(
+    url: String,
+    package_id: &str,
+    app_provenance: Option<crate::planner::ExecutionArtifactAppProvenance>,
+) -> ExecutionPlan {
+    let artifact_id = "example.recipe/app";
+    let artifact = ExecutionArtifact {
+        id: artifact_id.to_string(),
+        type_name: "remote_file".to_string(),
+        source: crate::planner::ExecutionArtifactSource::RemoteFile { url },
+        cache: "default".to_string(),
+        app_provenance,
+    };
+    let mut resolve_params = OrderedMap::new();
+    resolve_params.insert("artifacts".to_string(), literal(json!([artifact_id])));
+    let resolve = ExecutionStep {
+        id: "example.recipe/resolve".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "resolve_artifacts".to_string(),
+        name: "Resolve app APK".to_string(),
+        note: "Resolve app APK".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params: resolve_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let mut install_params = OrderedMap::new();
+    install_params.insert(
+        "app".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "artifacts.example.recipe/app.local_path".to_string(),
+        },
+    );
+    let install = ExecutionStep {
+        id: "example.recipe/install".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: Some("example-app".to_string()),
+        type_name: "install_apk".to_string(),
+        name: "Install app".to_string(),
+        note: "Install app".to_string(),
+        dependencies: vec!["example.recipe/resolve".to_string()],
+        constraints: constraints(),
+        params: install_params,
+        skip_if: Vec::new(),
+        verify: vec![ExecutionStepCondition {
+            type_name: "package_installed".to_string(),
+            app_id: Some("example-app".to_string()),
+            params: OrderedMap::new(),
+        }],
+    };
+    let mut plan = plan_with_artifacts(vec![artifact], vec![resolve, install]);
+    plan.apps = vec![crate::planner::ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: package_id.to_string(),
+    }];
+    plan
 }
 
 fn plan_for_reviewed_target(mut execution_plan: ExecutionPlan) -> ExecutionPlan {
@@ -122,6 +186,7 @@ fn download_remote_file_step(
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "download_remote_file".to_string(),
         name: "Download Remote File".to_string(),
         note: "Download Remote File".to_string(),
@@ -167,12 +232,45 @@ fn spawn_executor_http_server(
     (format!("http://{address}"), requests, server)
 }
 
+fn spawn_executor_http_server_with_body(
+    body: Vec<u8>,
+) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("local HTTP server should bind");
+    let address = listener
+        .local_addr()
+        .expect("local HTTP server address should be available");
+    let requests = Arc::new(AtomicUsize::new(0));
+    let thread_requests = Arc::clone(&requests);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("executor should connect to local HTTP server");
+        let mut request = [0u8; 4096];
+        let _ = stream
+            .read(&mut request)
+            .expect("HTTP request should be readable");
+        thread_requests.fetch_add(1, Ordering::Relaxed);
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .expect("HTTP response header should be writable");
+        stream
+            .write_all(&body)
+            .expect("HTTP response body should be writable");
+    });
+    (format!("http://{address}"), requests, server)
+}
+
 fn wait_step(id: &str, name: &str, duration_ms: i64) -> ExecutionStep {
     let mut params = OrderedMap::new();
     params.insert("duration_ms".to_string(), literal(json!(duration_ms)));
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "wait".to_string(),
         name: name.to_string(),
         note: name.to_string(),
@@ -194,6 +292,7 @@ fn condition(type_name: &str, params: Value) -> ExecutionStepCondition {
     }
     ExecutionStepCondition {
         type_name: type_name.to_string(),
+        app_id: None,
         params: condition_params,
     }
 }
@@ -278,6 +377,7 @@ fn reviewed_root_authorization_classifies_input_bound_copy_destinations() {
     let copy_step = |dest| ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -482,6 +582,7 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
     let step = ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -983,6 +1084,7 @@ fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "extract_archive".to_string(),
         name: "Extract Archive".to_string(),
         note: "Extract Archive".to_string(),
@@ -1010,6 +1112,7 @@ fn install_apk_step(id: &str, apk_path: &Path, replace_existing: bool) -> Execut
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "install_apk".to_string(),
         name: "Install APK".to_string(),
         note: "Install APK".to_string(),
@@ -1080,6 +1183,7 @@ fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> Exec
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "launch_app".to_string(),
         name: "Launch App".to_string(),
         note: "Launch App".to_string(),
@@ -1097,6 +1201,7 @@ fn force_stop_app_step(id: &str, package_name: &str) -> ExecutionStep {
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "force_stop_app".to_string(),
         name: "Force Stop App".to_string(),
         note: "Force Stop App".to_string(),
@@ -1248,6 +1353,7 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
     let mut grant_step = ExecutionStep {
         id: "example.recipe/grant".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Grant".to_string(),
         note: "Grant".to_string(),
@@ -1294,6 +1400,7 @@ fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_bl
         ExecutionStep {
             id: "example.recipe/grant_fail".to_string(),
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "Grant Fail".to_string(),
             note: "Grant Fail".to_string(),
@@ -1342,6 +1449,7 @@ fn real_device_timeout_fails_current_step_and_leaves_later_steps_unscheduled() {
         ExecutionStep {
             id: "example.recipe/timeout".to_string(),
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "Timeout".to_string(),
             note: "Timeout".to_string(),
@@ -1394,6 +1502,7 @@ fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_step
         ExecutionStep {
             id: "example.recipe/first".to_string(),
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "First".to_string(),
             note: "First".to_string(),
@@ -1406,6 +1515,7 @@ fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_step
         ExecutionStep {
             id: "example.recipe/transport".to_string(),
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "Transport".to_string(),
             note: "Transport".to_string(),
@@ -1477,6 +1587,7 @@ fn real_device_storage_failure_stops_after_prior_evidence_and_keeps_later_steps_
         ExecutionStep {
             id: "example.recipe/first-storage".to_string(),
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "First".to_string(),
             note: "First".to_string(),
@@ -1489,6 +1600,7 @@ fn real_device_storage_failure_stops_after_prior_evidence_and_keeps_later_steps_
         ExecutionStep {
             id: "example.recipe/storage".to_string(),
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "Storage".to_string(),
             note: "Storage".to_string(),
@@ -1588,6 +1700,7 @@ fn transport_failure_during_verification_preserves_completed_operation_outputs()
     let mut step = ExecutionStep {
         id: "example.recipe/verify_transport".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Verify transport".to_string(),
         note: "Verify transport".to_string(),
@@ -1640,6 +1753,7 @@ fn optional_permission_transport_failure_cannot_be_downgraded_or_followed() {
     let result = runner.run(&plan(vec![ExecutionStep {
         id: "example.recipe/optional".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Optional".to_string(),
         note: "Optional".to_string(),
@@ -1781,6 +1895,7 @@ fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_e
     let first = ExecutionStep {
         id: "example.recipe/first".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "First".to_string(),
         note: "First".to_string(),
@@ -1802,6 +1917,7 @@ fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_e
     let second = ExecutionStep {
         id: "example.recipe/second".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Second".to_string(),
         note: "Second".to_string(),
@@ -1900,6 +2016,7 @@ fn optional_permission_command_failure_is_reported_without_failing_the_step() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/grant_optional".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Grant Optional".to_string(),
         note: "Grant Optional".to_string(),
@@ -1954,6 +2071,7 @@ fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/grant_require_all".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Grant Require All".to_string(),
         note: "Grant Require All".to_string(),
@@ -2362,6 +2480,7 @@ fn install_apk_validation_stays_at_compatibility_executor_layer_with_compatibili
     let invalid_runtime_plan = plan(vec![ExecutionStep {
         id: "example.recipe/invalid_runtime".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "install_apk".to_string(),
         name: "Invalid Runtime".to_string(),
         note: "Invalid Runtime".to_string(),
@@ -2546,6 +2665,7 @@ fn permission_required_failure_preserves_partial_permission_results_like_compati
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/grant_partial".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Grant Partial".to_string(),
         note: "Grant Partial".to_string(),
@@ -2630,6 +2750,7 @@ fn permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/grant_matrix".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Grant Matrix".to_string(),
         note: "Grant Matrix".to_string(),
@@ -3233,6 +3354,7 @@ fn executor_can_use_explicit_real_adb_device_for_selected_handlers() {
     let grant_step = ExecutionStep {
         id: "example.recipe/grant".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "grant_permissions".to_string(),
         name: "Grant".to_string(),
         note: "Grant".to_string(),
@@ -3603,6 +3725,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
     let mut extract = ExecutionStep {
         id: "example.recipe/extract".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "extract_artifacts".to_string(),
         name: "Extract".to_string(),
         note: "Extract".to_string(),
@@ -3615,6 +3738,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
     let mut copy = ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -3640,20 +3764,27 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
             ExecutionArtifact {
                 id: "example.recipe/a_zip".to_string(),
                 type_name: "remote_file".to_string(),
-                url: format!("file://{}", zip_a.canonicalize().unwrap().to_string_lossy()),
+                source: crate::planner::ExecutionArtifactSource::RemoteFile {
+                    url: format!("file://{}", zip_a.canonicalize().unwrap().to_string_lossy()),
+                },
                 cache: "none".to_string(),
+                app_provenance: None,
             },
             ExecutionArtifact {
                 id: "example.recipe/b_zip".to_string(),
                 type_name: "remote_file".to_string(),
-                url: format!("file://{}", zip_b.canonicalize().unwrap().to_string_lossy()),
+                source: crate::planner::ExecutionArtifactSource::RemoteFile {
+                    url: format!("file://{}", zip_b.canonicalize().unwrap().to_string_lossy()),
+                },
                 cache: "none".to_string(),
+                app_provenance: None,
             },
         ],
         vec![
             ExecutionStep {
                 id: "example.recipe/resolve".to_string(),
                 recipe_ref: "example.recipe".to_string(),
+                app_id: None,
                 type_name: "resolve_artifacts".to_string(),
                 name: "Resolve".to_string(),
                 note: "Resolve".to_string(),
@@ -3752,13 +3883,17 @@ fn unsupported_artifact_scheme_fails_without_network_download_attempt() {
         vec![ExecutionArtifact {
             id: "example.recipe/archive".to_string(),
             type_name: "remote_file".to_string(),
-            url: "ftp://example.invalid/archive.zip".to_string(),
+            source: crate::planner::ExecutionArtifactSource::RemoteFile {
+                url: "ftp://example.invalid/archive.zip".to_string(),
+            },
             cache: "none".to_string(),
+            app_provenance: None,
         }],
         vec![
             ExecutionStep {
                 id: "example.recipe/resolve".to_string(),
                 recipe_ref: "example.recipe".to_string(),
+                app_id: None,
                 type_name: "resolve_artifacts".to_string(),
                 name: "Resolve".to_string(),
                 note: "Resolve".to_string(),
@@ -3815,13 +3950,15 @@ fn http_status_failure_blocks_dependents_allows_unrelated_steps_and_cleans_parti
         vec![ExecutionArtifact {
             id: "example.recipe/archive".to_string(),
             type_name: "remote_file".to_string(),
-            url,
+            source: crate::planner::ExecutionArtifactSource::RemoteFile { url },
             cache: "default".to_string(),
+            app_provenance: None,
         }],
         vec![
             ExecutionStep {
                 id: "example.recipe/resolve".to_string(),
                 recipe_ref: "example.recipe".to_string(),
+                app_id: None,
                 type_name: "resolve_artifacts".to_string(),
                 name: "Resolve".to_string(),
                 note: "Resolve".to_string(),
@@ -4253,6 +4390,7 @@ fn copy_replace_deletes_only_inside_fake_device_root() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -4309,6 +4447,7 @@ fn copy_sync_removes_destination_only_files_from_directory_source() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -4361,6 +4500,7 @@ fn copy_rejects_destination_traversal_before_writing() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -4417,6 +4557,7 @@ fn copy_rejects_fake_device_symlink_escape() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -4472,6 +4613,7 @@ fn copy_rejects_symlinked_fake_device_root_before_writing() {
     let execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
         note: "Copy".to_string(),
@@ -4598,6 +4740,7 @@ fn downloaded_local_path_ref_installs_the_host_apk() {
     let install = ExecutionStep {
         id: "install".to_string(),
         recipe_ref: "example.recipe".to_string(),
+        app_id: None,
         type_name: "install_apk".to_string(),
         name: "Install Downloaded APK".to_string(),
         note: "Install Downloaded APK".to_string(),
@@ -4634,4 +4777,114 @@ fn downloaded_local_path_ref_installs_the_host_apk() {
         installed_path.extension().and_then(|value| value.to_str()),
         Some("apk")
     );
+}
+
+#[test]
+fn app_context_package_mismatch_blocks_install_after_canonical_artifact_resolution() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let (base_url, requests, server) = spawn_executor_http_server_with_body(
+        fs::read(&apk).expect("fixture APK should be readable"),
+    );
+    let provenance = crate::planner::ExecutionArtifactAppProvenance {
+        app_id: "example-app".to_string(),
+        artifact_id: "apk".to_string(),
+        kind: "apk".to_string(),
+    };
+    let execution_plan = app_context_install_plan(
+        format!("{base_url}/app.apk"),
+        "com.example.expected",
+        Some(provenance),
+    );
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+    server.join().expect("local HTTP server should finish");
+
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(actual["steps"][1]["status"], "failed");
+    assert!(actual["steps"][1]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("apk_package_mismatch:"));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn app_context_install_rejects_missing_apk_provenance_before_device_install() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let (base_url, requests, server) = spawn_executor_http_server_with_body(
+        fs::read(&apk).expect("fixture APK should be readable"),
+    );
+    let execution_plan =
+        app_context_install_plan(format!("{base_url}/app.apk"), "com.example.qualified", None);
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+    server.join().expect("local HTTP server should finish");
+
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert_eq!(actual["success"], false);
+    assert_eq!(
+        actual["steps"][1]["message"],
+        "app_install_artifact_provenance_invalid: Reviewed APK artifact provenance is unavailable."
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn app_context_install_with_matching_package_uses_the_reviewed_package_condition() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let (base_url, requests, server) = spawn_executor_http_server_with_body(
+        fs::read(&apk).expect("fixture APK should be readable"),
+    );
+    let provenance = crate::planner::ExecutionArtifactAppProvenance {
+        app_id: "example-app".to_string(),
+        artifact_id: "apk".to_string(),
+        kind: "apk".to_string(),
+    };
+    let execution_plan = app_context_install_plan(
+        format!("{base_url}/app.apk"),
+        "com.example.qualified",
+        Some(provenance),
+    );
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+    server.join().expect("local HTTP server should finish");
+
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert_eq!(actual["success"], true, "{actual:#}");
+    assert_eq!(actual["steps"][1]["status"], "executed");
+    assert!(runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .any(|command| command.first().is_some_and(|value| value == "install_apk")));
 }

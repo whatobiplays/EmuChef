@@ -773,6 +773,11 @@ pub fn build_compatibility_baseline(
             "The selected device setup cannot establish a compatibility baseline: {error}"
         ))
     })?;
+    let app_definitions = catalog::load_app_definition_catalog(&normalized_root)
+        .entries
+        .into_iter()
+        .map(|(_, app)| (app.id.clone(), app))
+        .collect::<HashMap<_, _>>();
 
     let device_plan_value = json!({
         "id": parts.device_plan_ref,
@@ -822,7 +827,7 @@ pub fn build_compatibility_baseline(
             id: recipe.id.clone(),
             label: recipe.name.clone(),
             selected: selected.contains(recipe.id.as_str()),
-            fingerprint: fingerprint_value(&recipe_contract_value(recipe)),
+            fingerprint: fingerprint_value(&recipe_contract_value(recipe, &app_definitions)),
             inputs,
         });
     }
@@ -927,7 +932,10 @@ fn expanded_recipe_contracts(
     Ok(expanded)
 }
 
-fn recipe_contract_value(recipe: &Recipe) -> JsonValue {
+fn recipe_contract_value(
+    recipe: &Recipe,
+    app_definitions: &HashMap<String, crate::authored_models::AppDefinitionV1>,
+) -> JsonValue {
     let inputs = recipe
         .inputs
         .iter()
@@ -937,14 +945,20 @@ fn recipe_contract_value(recipe: &Recipe) -> JsonValue {
         .artifacts
         .iter()
         .map(|(id, artifact)| {
-            (
-                id.clone(),
-                json!({
-                    "type": artifact.type_name,
+            let value = match artifact {
+                crate::model::RecipeArtifact::RemoteFile(artifact) => json!({
+                    "type": "remote_file",
                     "url": artifact.url,
                     "cache": artifact.cache,
                 }),
-            )
+                crate::model::RecipeArtifact::AppArtifact(reference) => json!({
+                    "type": "app_artifact",
+                    "app_ref": reference.app_ref,
+                    "artifact": reference.artifact,
+                    "cache": reference.cache,
+                }),
+            };
+            (id.clone(), value)
         })
         .collect::<JsonMap<_, _>>();
     let artifact_groups = recipe
@@ -952,7 +966,7 @@ fn recipe_contract_value(recipe: &Recipe) -> JsonValue {
         .iter()
         .map(|(id, members)| (id.clone(), json!(sorted_strings(members.clone()))))
         .collect::<JsonMap<_, _>>();
-    json!({
+    let mut value = json!({
         "id": recipe.id,
         "dependencies": sorted_strings(recipe.recipe_dependencies.clone()),
         "provides": sorted_strings(recipe.provides.features.clone()),
@@ -960,7 +974,67 @@ fn recipe_contract_value(recipe: &Recipe) -> JsonValue {
         "artifacts": artifacts,
         "artifactGroups": artifact_groups,
         "steps": recipe.steps.iter().map(step_contract_value).collect::<Vec<_>>(),
-    })
+    });
+    let mut referenced_app_ids = recipe
+        .steps
+        .iter()
+        .filter_map(|step| step.app_ref.clone())
+        .chain(
+            recipe
+                .artifacts
+                .values()
+                .filter_map(|artifact| match artifact {
+                    crate::model::RecipeArtifact::AppArtifact(reference) => {
+                        Some(reference.app_ref.clone())
+                    }
+                    crate::model::RecipeArtifact::RemoteFile(_) => None,
+                }),
+        )
+        .collect::<Vec<_>>();
+    referenced_app_ids.sort();
+    referenced_app_ids.dedup();
+    if !referenced_app_ids.is_empty() {
+        let app_contracts = referenced_app_ids
+            .into_iter()
+            .map(|app_id| {
+                let contract = app_definitions.get(&app_id).map(|app| {
+                    let artifacts = recipe
+                        .artifacts
+                        .values()
+                        .filter_map(|reference| match reference {
+                            crate::model::RecipeArtifact::AppArtifact(reference)
+                                if reference.app_ref == app_id =>
+                            {
+                                app.artifacts.get(&reference.artifact).map(|artifact| {
+                                    (
+                                        reference.artifact.clone(),
+                                        json!({
+                                            "kind": artifact.kind,
+                                            "source": artifact.source,
+                                        }),
+                                    )
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect::<JsonMap<_, _>>();
+                    json!({
+                        "package_id": app.package_id,
+                        "artifacts": artifacts,
+                    })
+                });
+                (app_id, contract.unwrap_or(JsonValue::Null))
+            })
+            .collect::<JsonMap<_, _>>();
+        value
+            .as_object_mut()
+            .expect("Recipe contract values are JSON objects")
+            .insert(
+                "appAuthorities".to_string(),
+                JsonValue::Object(app_contracts),
+            );
+    }
+    value
 }
 
 fn input_contract_value(id: &str, input: &InputDeclaration) -> JsonValue {
@@ -984,7 +1058,7 @@ fn input_contract_value(id: &str, input: &InputDeclaration) -> JsonValue {
 }
 
 fn step_contract_value(step: &crate::model::Step) -> JsonValue {
-    json!({
+    let mut value = json!({
         "id": step.id,
         "type": step.type_name,
         "userToggleable": step.user_toggleable,
@@ -1002,7 +1076,14 @@ fn step_contract_value(step: &crate::model::Step) -> JsonValue {
             (key.clone(), value)
         }).collect::<JsonMap<_, _>>(),
         "verify": step.verify.iter().map(condition_contract_value).collect::<Vec<_>>(),
-    })
+    });
+    if let Some(app_ref) = &step.app_ref {
+        value
+            .as_object_mut()
+            .expect("Step contract values are JSON objects")
+            .insert("app_ref".to_string(), json!(app_ref));
+    }
+    value
 }
 
 fn condition_contract_value(condition: &StepCondition) -> JsonValue {

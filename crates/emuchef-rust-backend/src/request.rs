@@ -694,6 +694,8 @@ struct CollisionStepDto {
     name: String,
     description: String,
     #[serde(default)]
+    app_ref: Option<String>,
+    #[serde(default)]
     progress_note: Option<String>,
     user_toggleable: bool,
     dependencies: Vec<String>,
@@ -801,6 +803,9 @@ impl CollisionStepDto {
             "params": Value::Object(self.params),
             "verify": self.verify.into_iter().map(CollisionStepConditionDto::into_authored_value).collect::<Vec<_>>(),
         });
+        if let (Some(app_ref), Some(object)) = (self.app_ref, value.as_object_mut()) {
+            object.insert("app_ref".to_string(), Value::String(app_ref));
+        }
         if let (Some(progress_note), Some(object)) = (self.progress_note, value.as_object_mut()) {
             object.insert("progress_note".to_string(), Value::String(progress_note));
         }

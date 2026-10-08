@@ -302,7 +302,10 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
         .expect("Obtainium APK artifact should be emitted");
     assert_eq!(plan.artifacts.len(), 1);
     assert_eq!(artifact.type_name, contract.artifact.type_name);
-    assert_eq!(artifact.url, contract.artifact.url);
+    assert_eq!(
+        artifact.remote_file_url(),
+        Some(contract.artifact.url.as_str())
+    );
     assert_eq!(artifact.cache, contract.artifact.cache);
 
     let resolve = generated_step(plan, "resolve_artifacts");
@@ -385,7 +388,9 @@ impl QualificationWorkspace {
 fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact) -> PathBuf {
     cache_root.join(artifact_local_filename(
         &artifact.id,
-        &artifact.url,
+        artifact
+            .remote_file_url()
+            .expect("legacy artifact has a direct URL"),
         &artifact.cache,
     ))
 }
@@ -402,7 +407,10 @@ fn seed_artifact_cache(
             .id
             .ends_with(&format!("/{}", contract.artifact.id_suffix)));
         assert_eq!(artifact.type_name, contract.artifact.type_name);
-        assert_eq!(artifact.url, contract.artifact.url);
+        assert_eq!(
+            artifact.remote_file_url(),
+            Some(contract.artifact.url.as_str())
+        );
         assert_eq!(artifact.cache, "default");
         fs::write(
             artifact_cache_path(cache_root, artifact),

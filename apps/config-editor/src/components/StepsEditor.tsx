@@ -315,6 +315,7 @@ function StepDetailPanel({
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadonlyText label="ID" value={step.id} />
         <ReadonlyText label="Type" value={step.type} />
+        {step.appRef ? <ReadonlyText label="App Definition context" value={step.appRef} /> : null}
         <EditableTextField
           label="Display Name"
           readOnly={readOnly}

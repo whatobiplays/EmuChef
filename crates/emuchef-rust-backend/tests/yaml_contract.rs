@@ -57,6 +57,78 @@ fn emit_request(path: &str) -> Value {
     })
 }
 
+#[test]
+fn armsx1_recipe_uses_the_app_definition_artifact_and_step_context() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../authored/recipes/app.armsx1.install.yaml")
+        .to_string_lossy()
+        .into_owned();
+    let response = one_shot_response(emit_request(&path));
+
+    assert_eq!(response["ok"], true);
+    let yaml = response["result"]["yaml"].as_str().unwrap();
+    let recipe: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(recipe["artifacts"]["installer"]["type"], "app_artifact");
+    assert_eq!(recipe["artifacts"]["installer"]["app_ref"], "armsx1");
+    assert_eq!(recipe["artifacts"]["installer"]["artifact"], "apk");
+    assert_eq!(recipe["steps"][0]["type"], "resolve_artifacts");
+    assert_eq!(recipe["steps"][0]["params"]["artifacts"][0], "installer");
+    assert_eq!(recipe["steps"][1]["app_ref"], "armsx1");
+    assert_eq!(recipe["steps"][1]["type"], "install_apk");
+    assert!(recipe["steps"][1]["params"]
+        .get("expected_package_name")
+        .is_none());
+    assert!(recipe["steps"][1]["params"].get("url").is_none());
+    assert!(recipe["steps"].as_sequence().unwrap().iter().all(|step| {
+        !matches!(
+            step["type"].as_str(),
+            Some("resolve_github_release" | "resolve_remote_release" | "download_remote_file")
+        )
+    }));
+}
+
+#[test]
+fn config_editor_validation_rejects_app_artifact_authority_overrides() {
+    let temporary = tempfile::tempdir().expect("validation directory should be created");
+    let path = temporary.path().join("invalid_app_artifact.yaml");
+    std::fs::write(
+        &path,
+        "schema_version: 1\nkind: recipe\nid: test.recipe\nname: Test\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: armsx1\n    artifact: apk\n    package_id: com.example.other\nsteps: []\n",
+    )
+    .expect("invalid Recipe fixture should be writable");
+
+    let response = one_shot_response(validate_request(&path.to_string_lossy()));
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("validation diagnostics should be returned");
+    assert_eq!(response["ok"], true);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["severity"] == "error"
+            && diagnostic["code"] == "authored_data_invalid"
+            && diagnostic["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("package_id")
+    }));
+}
+
+#[test]
+fn config_editor_validation_keeps_legacy_form_recipes_valid() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../authored/recipes/app.obtainium.install.yaml")
+        .to_string_lossy()
+        .into_owned();
+    let response = one_shot_response(validate_request(&path));
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("validation diagnostics should be returned");
+
+    assert_eq!(response["ok"], true);
+    assert!(!diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic["severity"] == "error"));
+}
+
 fn validate_request(path: &str) -> Value {
     json!({
         "type": "validateRecipePath",

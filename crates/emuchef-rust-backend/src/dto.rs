@@ -7,7 +7,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::document::RecipeDocument;
-use crate::model::{InputDeclaration, ParamValue, Recipe, RemoteFileArtifact, Step, StepCondition};
+use crate::model::{InputDeclaration, ParamValue, Recipe, RecipeArtifact, Step, StepCondition};
 use crate::ref_index;
 
 pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
@@ -72,13 +72,22 @@ pub(crate) fn input_to_dto(recipe_id: &str, input_id: &str, input: &InputDeclara
     })
 }
 
-fn artifact_to_dto(artifact_id: &str, artifact: &RemoteFileArtifact) -> Value {
-    json!({
-        "id": artifact_id,
-        "type": artifact.type_name,
-        "url": artifact.url,
-        "cache": artifact.cache,
-    })
+fn artifact_to_dto(artifact_id: &str, artifact: &RecipeArtifact) -> Value {
+    match artifact {
+        RecipeArtifact::RemoteFile(artifact) => json!({
+            "id": artifact_id,
+            "type": "remote_file",
+            "url": artifact.url,
+            "cache": artifact.cache,
+        }),
+        RecipeArtifact::AppArtifact(artifact) => json!({
+            "id": artifact_id,
+            "type": "app_artifact",
+            "appRef": artifact.app_ref,
+            "artifact": artifact.artifact,
+            "cache": artifact.cache,
+        }),
+    }
 }
 
 fn step_to_dto(step: &Step) -> Value {
@@ -97,6 +106,9 @@ fn step_to_dto(step: &Step) -> Value {
         "params": map_values(step.params.iter().map(|(key, value)| (key, param_to_dto(value)))),
         "verify": step.verify.iter().map(condition_to_dto).collect::<Vec<_>>(),
     });
+    if let (Some(app_ref), Some(object)) = (&step.app_ref, dto.as_object_mut()) {
+        object.insert("appRef".to_string(), json!(app_ref));
+    }
     if let (Some(progress_note), Some(object)) = (&step.progress_note, dto.as_object_mut()) {
         object.insert("progressNote".to_string(), json!(progress_note));
     }
@@ -123,4 +135,39 @@ fn map_values<'a>(values: impl IntoIterator<Item = (&'a String, Value)>) -> Valu
         object.insert(key.clone(), value);
     }
     Value::Object(object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_to_dto;
+    use crate::model::{OrderedMap, Step, StepConstraints};
+
+    fn step(app_ref: Option<&str>) -> Step {
+        Step {
+            id: "install".to_string(),
+            type_name: "install_apk".to_string(),
+            name: "Install app".to_string(),
+            description: None,
+            progress_note: None,
+            user_toggleable: false,
+            app_ref: app_ref.map(str::to_string),
+            dependencies: Vec::new(),
+            constraints: StepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params: OrderedMap::new(),
+            verify: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn step_dto_preserves_legacy_shape_and_includes_app_context_when_present() {
+        let legacy = step_to_dto(&step(None));
+        assert!(legacy.get("appRef").is_none());
+
+        let migrated = step_to_dto(&step(Some("armsx1")));
+        assert_eq!(migrated["appRef"], "armsx1");
+    }
 }

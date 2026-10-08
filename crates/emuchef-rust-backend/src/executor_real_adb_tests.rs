@@ -469,6 +469,7 @@ fn run_executor_plan(
             catalog: None,
         },
         recipes: Vec::new(),
+        apps: Vec::new(),
         target_device: None,
         device_context: DeviceContext {
             manufacturer: "Qualification fixture".to_string(),
@@ -508,6 +509,7 @@ fn executor_step(id: &str, type_name: &str) -> ExecutionStep {
     ExecutionStep {
         id: id.to_string(),
         recipe_ref: "fixture.non_root".to_string(),
+        app_id: None,
         type_name: type_name.to_string(),
         name: id.to_string(),
         note: id.to_string(),
@@ -553,6 +555,7 @@ fn condition(type_name: &str, params: Value) -> ExecutionStepCondition {
     }
     ExecutionStepCondition {
         type_name: type_name.to_string(),
+        app_id: None,
         params: condition_params,
     }
 }

@@ -13,7 +13,7 @@ use crate::device_probe::{
     AdbDeviceProbe, AdbProbeConfig, CommandRunner, DeviceProbe, DeviceProbeError,
 };
 use crate::model::OrderedMap;
-use crate::planner::{plan_execution, DeviceContext, PlanningResult, TargetDeviceBinding};
+use crate::planner::{DeviceContext, PlanningResult, TargetDeviceBinding};
 use crate::planner_device_plan::{
     add_detected_profile_mismatch_warning, load_device_plan_profile_match_criteria,
 };
@@ -100,14 +100,17 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
             &prepared.effective_device_plan,
         )
         .map_err(planner_load_error_output)?;
-        let mut result = plan_execution(input);
+        let mut result = runtime_configuration::plan_prepared_input(&prepared.catalog, input);
         add_detected_profile_mismatch_warning(&mut result, &detected_facts, &profile_match);
         apply_explicit_device_context_to_result(&mut result, &explicit_context);
         return Ok(result);
     }
 
     apply_explicit_device_context(&mut input.device_context, &explicit_context);
-    Ok(plan_execution(input))
+    Ok(runtime_configuration::plan_prepared_input(
+        &prepared.catalog,
+        input,
+    ))
 }
 
 fn configuration_context_error_output(
@@ -227,6 +230,37 @@ mod tests {
         }
     }
 
+    fn armsx1_request(adb_probe: Option<AdbProbeConfig>) -> PlanningRequest {
+        PlanningRequest {
+            selected_recipes: Some(vec!["app.armsx1.install".to_string()]),
+            ..request(adb_probe)
+        }
+    }
+
+    fn assert_armsx1_authority(plan: &crate::planner::ExecutionPlan) {
+        assert_eq!(plan.apps.len(), 1);
+        assert_eq!(plan.apps[0].id, "armsx1");
+        assert_eq!(plan.apps[0].package_id, "com.nanodata.armsx");
+        let artifact = plan
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "app.armsx1.install/installer")
+            .expect("ARMSX1 installer artifact should be in the plan");
+        assert_eq!(artifact.app_provenance.as_ref().unwrap().app_id, "armsx1");
+        assert_eq!(artifact.app_provenance.as_ref().unwrap().artifact_id, "apk");
+        assert_eq!(
+            serde_json::to_value(artifact).unwrap()["source"],
+            json!({
+                "kind": "remote_release",
+                "provider": "github",
+                "service_origin": "https://github.com",
+                "repository": "ARMSX2/ARMSX1",
+                "include_prereleases": false,
+                "asset_pattern": "^ARMSX1-release-[0-9]{8}-arm64-v8a\\.apk$",
+            })
+        );
+    }
+
     fn getprop(manufacturer: &str, model: &str, release: i64, api: i64) -> String {
         format!(
             "[ro.product.manufacturer]: [{manufacturer}]\n[ro.product.brand]: [{manufacturer}]\n[ro.product.model]: [{model}]\n[ro.build.version.release]: [{release}]\n[ro.build.version.sdk]: [{api}]\n"
@@ -285,6 +319,80 @@ mod tests {
             ]]
         );
         assert_eq!(result.warnings, Vec::new());
+    }
+
+    #[test]
+    fn cli_planning_without_probe_resolves_armsx1_app_authority() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            result: Err(DeviceProbeError::Unavailable {
+                message: "runner must not be called".to_string(),
+            }),
+        };
+
+        let result = plan_with_adb_runner(armsx1_request(None), &runner)
+            .expect("ARMSX1 planning should resolve the App Definition");
+
+        assert_armsx1_authority(
+            result
+                .execution_plan
+                .as_ref()
+                .expect("execution plan should exist"),
+        );
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn cli_planning_with_probe_resolves_the_same_armsx1_app_authority() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            result: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: getprop("AYANEO", "AYANEO Pocket S mini", 13, 33),
+                stderr: String::new(),
+            }),
+        };
+
+        let result = plan_with_adb_runner(
+            armsx1_request(Some(AdbProbeConfig {
+                adb_path: "/opt/android/adb".to_string(),
+                serial: Some("SERIAL123".to_string()),
+            })),
+            &runner,
+        )
+        .expect("ARMSX1 planning should resolve the App Definition");
+
+        assert_armsx1_authority(
+            result
+                .execution_plan
+                .as_ref()
+                .expect("execution plan should exist"),
+        );
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn end_user_configuration_planning_resolves_the_same_armsx1_app_authority() {
+        let root = authored_root();
+        let catalog = CatalogSnapshot::legacy_local(&root).expect("catalog should load");
+        let result = runtime_configuration::plan_configuration(ConfigurationContextRequest {
+            catalog,
+            configuration_root: None,
+            user_configuration: None,
+            device_plan: Some("ayaneo.pocket_s_mini.base".to_string()),
+            selected_recipes: Some(vec!["app.armsx1.install".to_string()]),
+            explicit_bindings: OrderedMap::new(),
+            device_context: None,
+            target_device: None,
+            runtime_capability_availability: None,
+        })
+        .expect("configuration planning should complete");
+
+        assert!(result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != "error"));
+        assert_armsx1_authority(result.plan.as_ref().expect("execution plan should exist"));
     }
 
     #[test]

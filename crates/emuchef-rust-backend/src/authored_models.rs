@@ -1271,7 +1271,7 @@ fn validate_ordered_map_keys(
     }
 }
 
-fn is_valid_identifier(value: &str) -> bool {
+pub(crate) fn is_valid_identifier(value: &str) -> bool {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
         .expect("the authored identifier regex is valid")
         .is_match(value)
@@ -2187,7 +2187,6 @@ targets:
             "app_definition_yaml_invalid"
         );
     }
-
 
     #[test]
     fn null_valued_cross_strategy_fields_are_rejected() {

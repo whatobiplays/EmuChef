@@ -12,8 +12,8 @@ use crate::authored_models::{
     APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
 };
 use crate::model::{
-    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides,
-    RemoteFileArtifact, Step, StepCondition, StepConstraints,
+    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeArtifact,
+    RecipeProvides, RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
 use crate::validation::normalize_expected_sha256;
 use indexmap::IndexMap;
@@ -963,11 +963,10 @@ fn build_recipe(
     if pinned {
         artifacts.insert(
             ids.artifact_id.clone(),
-            RemoteFileArtifact {
-                type_name: "remote_file".to_string(),
+            RecipeArtifact::RemoteFile(RemoteFileArtifact {
                 url: source.download_url.clone(),
                 cache: "default".to_string(),
-            },
+            }),
         );
         let mut resolve_params = OrderedMap::new();
         resolve_params.insert(
@@ -981,6 +980,7 @@ fn build_recipe(
             description: None,
             progress_note: Some(format!("Downloading {}", app.name)),
             user_toggleable: false,
+            app_ref: None,
             dependencies: Vec::new(),
             constraints: StepConstraints {
                 capabilities: Vec::new(),
@@ -1026,6 +1026,7 @@ fn build_recipe(
             ),
             progress_note: Some(format!("Resolving latest {} release", app.name)),
             user_toggleable: false,
+            app_ref: None,
             dependencies: Vec::new(),
             constraints: StepConstraints {
                 capabilities: Vec::new(),
@@ -1054,6 +1055,7 @@ fn build_recipe(
             description: None,
             progress_note: Some(format!("Downloading latest {} APK", app.name)),
             user_toggleable: false,
+            app_ref: None,
             dependencies: vec![ids.latest_resolve_step_id.clone()],
             constraints: StepConstraints {
                 capabilities: Vec::new(),
@@ -1136,6 +1138,7 @@ fn build_recipe(
         description: None,
         progress_note: Some(format!("Installing {} on the selected device", app.name)),
         user_toggleable: false,
+        app_ref: None,
         dependencies: install_dependencies,
         constraints: StepConstraints {
             capabilities: vec!["apk_install".to_string()],
@@ -1200,6 +1203,7 @@ fn build_recipe(
                 description: Some("Launch the app once after installation.".to_string()),
                 progress_note: Some(format!("Launching {} once", app.name)),
                 user_toggleable: false,
+                app_ref: None,
                 dependencies: vec![permission_step_id
                     .clone()
                     .unwrap_or_else(|| ids.install_step_id.clone())],

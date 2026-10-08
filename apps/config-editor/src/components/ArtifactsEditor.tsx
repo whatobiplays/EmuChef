@@ -169,6 +169,8 @@ interface ArtifactDetailProps {
 }
 
 function ArtifactDetail({ artifact, artifactId, readOnly, onRename, onDelete, onDuplicate, onUpdateField }: ArtifactDetailProps) {
+  const isRemoteFile = artifact.type === "remote_file";
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -176,29 +178,43 @@ function ArtifactDetail({ artifact, artifactId, readOnly, onRename, onDelete, on
           <h2 className="truncate text-xl font-semibold text-slate-950">{artifactId}</h2>
           <p className="text-sm text-slate-500">Artifact id is changed with Rename only.</p>
         </div>
-        <div className="flex gap-2">
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onRename}>
-            Rename
-          </button>
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onDuplicate}>
-            Duplicate
-          </button>
-          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 disabled:opacity-40" disabled={readOnly} type="button" onClick={onDelete}>
-            Delete
-          </button>
-        </div>
+        {isRemoteFile ? (
+          <div className="flex gap-2">
+            <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onRename}>
+              Rename
+            </button>
+            <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onDuplicate}>
+              Duplicate
+            </button>
+            <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 disabled:opacity-40" disabled={readOnly} type="button" onClick={onDelete}>
+              Delete
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadonlyText label="ID" value={artifact.id} />
         <ReadonlyText label="Type" value={artifact.type} />
-        <EditableTextField label="URL" readOnly={readOnly} value={artifact.url} onCommit={(value) => onUpdateField("url", value)} />
+        {isRemoteFile ? (
+          <>
+            <EditableTextField label="URL" readOnly={readOnly} value={artifact.url ?? ""} onCommit={(value) => onUpdateField("url", value)} />
+          </>
+        ) : (
+          <>
+            <ReadonlyText label="App Definition" value={artifact.appRef ?? "Unavailable"} />
+            <ReadonlyText label="App artifact" value={artifact.artifact ?? "Unavailable"} />
+            <p className="text-sm text-slate-600">
+              Source and package identity come from the App Definition. The Recipe owns cache behavior.
+            </p>
+          </>
+        )}
         <label className="grid gap-1">
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Cache</span>
           <select
             className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
             disabled={readOnly}
-            value={artifact.cache}
+            value={artifact.cache ?? "default"}
             onChange={(event) => {
               const value = event.target.value;
               if (value !== artifact.cache) {

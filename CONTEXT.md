@@ -77,10 +77,14 @@ and canonical YAML previews rather than new persistent editor-session types.
 Schema-v1 App Definitions own intrinsic app identity and reusable app policy:
 one package identity, app-owned artifacts and their source strategies, optional
 baseline and elevated permission sets, App Targets, launcher activity, and
-optional presentation metadata. Recipes remain the selection, planning, review,
-and execution authority until later authority-migration tickets land, so an
-app's intrinsic facts temporarily exist in both its App Definition and its
-generated Recipe.
+optional presentation metadata. A Recipe may bind a named App Definition
+artifact with an `app_artifact` reference and attach app context to individual
+steps with `app_ref`. Planning copies the referenced app's identity and
+presentation into the execution plan and records late-bound release policy
+there, so review and execution use the reviewed plan without reopening the app
+catalog. Existing Recipes that have not migrated retain their current
+form-based artifact, install, and package-condition behavior until their own
+migration.
 
 Android package facts come from APK inspection rather than filenames. The
 APK-inspection contract uses a separately configured user-supplied
@@ -712,10 +716,15 @@ configuration identity, presentation name, one authored device-plan reference,
 selected recipe IDs, explicitly nonsensitive user bindings, safe additive
 extensions, and authored-contract compatibility fingerprints. Fingerprints use
 canonical device-plan, recipe dependency/capability/artifact/step/constraint,
-input-contract, authored override, and profile-capability semantics. They do
-not use presentation labels or prose, resolved values or artifacts, generated
-plans, catalog load order, host paths, device facts, runtime state, review, or
-execution state. Configuration identity changes do not change fingerprints.
+input-contract, authored override, profile-capability, and App Definition
+authority semantics. App authority semantics include authored step app
+references, Recipe-owned App Artifact cache policy, and the package identity
+and static source policy of referenced App Definitions and artifacts. They do
+not use app presentation fields, resolved release selections, downloaded
+bytes, resolved values or artifacts, generated plans, catalog load order, host
+paths, device facts, runtime state, review, or execution state. Recipes with
+no authored app authority retain their existing fingerprint semantics.
+Configuration identity changes do not change fingerprints.
 
 Schema V1 remains readable through an in-memory migration. Because V1 has no
 historical contract fingerprints, inspection can establish only whether the

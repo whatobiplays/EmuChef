@@ -24,10 +24,12 @@ use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::model::OrderedMap;
 use crate::owned_process::ProcessCleanup;
 use crate::planner::{
-    ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
-    TargetDeviceBinding,
+    ExecutionArtifactAppProvenance, ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan,
+    ExecutionStep, ExecutionStepCondition, RuntimeValue, TargetDeviceBinding,
 };
-use crate::remote_release_resolver::{resolve_github_latest, resolve_remote_latest};
+use crate::remote_release_resolver::{
+    resolve_github_latest, resolve_remote_latest, ResolvedRemoteRelease,
+};
 use crate::validation::normalize_expected_sha256;
 
 const APK_HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -39,6 +41,108 @@ pub struct ExecutionRunResult {
     pub cancelled: bool,
     pub total_steps: usize,
     pub steps: Vec<StepRunRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_releases: Vec<ExecutionResolvedRelease>,
+}
+
+/// Actual release identity selected while materializing an App-owned APK.
+/// The download URL is deliberately excluded from the execution result.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionResolvedRelease {
+    pub app_id: String,
+    pub artifact_id: String,
+    pub release_tag: String,
+    pub asset_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+fn app_apk_release_details(
+    provenance: Option<&ExecutionArtifactAppProvenance>,
+    release: &ResolvedRemoteRelease,
+) -> Option<ExecutionResolvedRelease> {
+    let provenance = provenance.filter(|provenance| provenance.kind == "apk")?;
+    Some(ExecutionResolvedRelease {
+        app_id: provenance.app_id.clone(),
+        artifact_id: provenance.artifact_id.clone(),
+        release_tag: release.release_tag.clone(),
+        asset_name: release.asset_name.clone(),
+        published_at: release.published_at.clone(),
+        size: release.size,
+    })
+}
+
+#[cfg(test)]
+mod resolved_release_result_tests {
+    use super::*;
+
+    #[test]
+    fn execution_result_reports_selected_app_release_without_download_url() {
+        let provenance = ExecutionArtifactAppProvenance {
+            app_id: "armsx1".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        };
+        let release = ResolvedRemoteRelease {
+            download_url: "https://example.invalid/private-download.apk".to_string(),
+            asset_name: "ARMSX1-release-20261008-arm64-v8a.apk".to_string(),
+            release_tag: "v20261008".to_string(),
+            published_at: Some("2026-10-08T10:00:00Z".to_string()),
+            size: Some(42),
+        };
+
+        let details = app_apk_release_details(Some(&provenance), &release).unwrap();
+        let result = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 0,
+            steps: Vec::new(),
+            resolved_releases: vec![details],
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+        let selected = &value["resolved_releases"][0];
+        assert_eq!(selected["appId"], "armsx1");
+        assert_eq!(selected["artifactId"], "apk");
+        assert_eq!(selected["releaseTag"], "v20261008");
+        assert_eq!(
+            selected["assetName"],
+            "ARMSX1-release-20261008-arm64-v8a.apk"
+        );
+        assert_eq!(selected["publishedAt"], "2026-10-08T10:00:00Z");
+        assert_eq!(selected["size"], 42);
+        assert!(selected.get("downloadUrl").is_none());
+    }
+
+    #[test]
+    fn execution_result_omits_empty_release_metadata_and_non_apk_provenance() {
+        let provenance = ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "data".to_string(),
+            kind: "file".to_string(),
+        };
+        let release = ResolvedRemoteRelease {
+            download_url: "https://example.invalid/file".to_string(),
+            asset_name: "data.zip".to_string(),
+            release_tag: "v1".to_string(),
+            published_at: None,
+            size: None,
+        };
+        assert!(app_apk_release_details(Some(&provenance), &release).is_none());
+
+        let result = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 0,
+            steps: Vec::new(),
+            resolved_releases: Vec::new(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+        assert!(value.get("resolved_releases").is_none());
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -592,7 +696,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 continue;
             }
 
-            match self.skip_if_matched(step) {
+            match self.skip_if_matched(plan, step) {
                 Ok(true) => {
                     state.steps.insert(
                         step.id.clone(),
@@ -685,10 +789,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         let failed_verify = step
                             .verify
                             .iter()
-                            .filter_map(|condition| match self.evaluate_condition(condition) {
-                                Ok(true) => None,
-                                Ok(false) => Some(Ok(condition.type_name.clone())),
-                                Err(error) => Some(Err(error)),
+                            .filter_map(|condition| {
+                                match self.evaluate_condition(plan, condition) {
+                                    Ok(true) => None,
+                                    Ok(false) => Some(Ok(condition.type_name.clone())),
+                                    Err(error) => Some(Err(error)),
+                                }
                             })
                             .collect::<Result<Vec<_>, _>>();
                         match failed_verify {
@@ -795,15 +901,29 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             cancelled,
             total_steps,
             steps: records,
+            resolved_releases: plan
+                .artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    state
+                        .artifacts
+                        .get(&artifact.id)
+                        .and_then(|artifact| artifact.resolved_release.clone())
+                })
+                .collect(),
         }
     }
 
-    fn skip_if_matched(&mut self, step: &ExecutionStep) -> Result<bool, StepFailure> {
+    fn skip_if_matched(
+        &mut self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
+    ) -> Result<bool, StepFailure> {
         step.skip_if.iter().try_fold(false, |matched, condition| {
             if matched {
                 Ok(true)
             } else {
-                self.evaluate_condition(condition)
+                self.evaluate_condition(plan, condition)
             }
         })
     }
@@ -850,7 +970,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
             "copy_files" => self.execute_copy_files(plan, step, &resolved_params),
-            "install_apk" => self.execute_install_apk(step, &resolved_params),
+            "install_apk" => self.execute_install_apk(plan, state, step, &resolved_params),
             "launch_app" => self.execute_launch_app(&resolved_params),
             "force_stop_app" => self.execute_force_stop_app(&resolved_params),
             other => Err(StepFailure::new(format!(
@@ -1118,31 +1238,58 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     "unknown_artifact_ref: Unknown artifact ref: 'artifacts.{artifact_id}'."
                 )));
             };
-            let result = resolver
-                .resolve(ArtifactResolveRequest {
+            let mut resolved_release = None;
+            let result = (|| {
+                let resolved_url = match &artifact.source {
+                    ExecutionArtifactSource::RemoteFile { url } => url.clone(),
+                    ExecutionArtifactSource::RemoteRelease {
+                        provider,
+                        service_origin,
+                        repository,
+                        include_prereleases,
+                        asset_pattern,
+                    } => {
+                        if provider != "github" || service_origin != "https://github.com" {
+                            return Err(StepFailure::new(
+                                "remote_release_policy_unsupported: Only stable GitHub release artifacts are supported by this plan.".to_string(),
+                            ));
+                        }
+                        crate::remote_release_resolver::validate_github_stable_release_policy(
+                            repository,
+                            *include_prereleases,
+                            asset_pattern,
+                        )
+                        .map_err(StepFailure::new)?;
+                        let release =
+                            resolve_github_latest(repository, *include_prereleases, asset_pattern)
+                                .map_err(StepFailure::new)?;
+                        resolved_release =
+                            app_apk_release_details(artifact.app_provenance.as_ref(), &release);
+                        release.download_url
+                    }
+                };
+                let request = ArtifactResolveRequest {
                     artifact_id: &artifact.id,
                     type_name: &artifact.type_name,
-                    url: &artifact.url,
+                    url: &resolved_url,
                     cache_mode: &artifact.cache,
-                })
-                .map_err(|error| {
-                    StepFailure::new(error.executor_message(ArtifactResolveRequest {
-                        artifact_id: &artifact.id,
-                        type_name: &artifact.type_name,
-                        url: &artifact.url,
-                        cache_mode: &artifact.cache,
-                    }))
-                });
+                };
+                let resolved = resolver
+                    .resolve(request)
+                    .map_err(|error| StepFailure::new(error.executor_message(request)))?;
+                Ok((resolved_url, resolved))
+            })();
             let artifact_state = state
                 .artifacts
                 .get_mut(&artifact.id)
                 .expect("artifact runtime state should be initialized from plan");
+            artifact_state.resolved_release = resolved_release;
             match result {
-                Ok(resolved) => {
+                Ok((resolved_url, resolved)) => {
                     artifact_state.status = ArtifactRuntimeStatus::Resolved;
                     artifact_state.local_path =
                         Some(resolved.local_path.to_string_lossy().into_owned());
-                    artifact_state.resolved_url = Some(artifact.url.clone());
+                    artifact_state.resolved_url = Some(resolved_url);
                     artifact_state.filename = Some(resolved.filename);
                     artifact_state.cache_hit = resolved.cache_hit;
                     artifact_state.error = None;
@@ -1439,6 +1586,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
     fn execute_install_apk(
         &mut self,
+        plan: &ExecutionPlan,
+        state: &ExecutionState,
         step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
@@ -1466,16 +1615,69 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 apk_path.display()
             )));
         }
-        if let Some(expected_package_name) = resolved_params.get("expected_package_name") {
-            let expected_package_name = expected_package_name
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
+        let app_context_package = if let Some(app_id) = step.app_id.as_deref() {
+            let app = plan
+                .apps
+                .iter()
+                .find(|app| app.id == app_id)
                 .ok_or_else(|| {
                     StepFailure::new(
-                        "install_apk expected_package_name must be a non-empty string literal."
+                        "app_context_invalid: Reviewed App Definition data is unavailable."
                             .to_string(),
                     )
                 })?;
+            let path = apk_path.to_string_lossy();
+            let provenance = plan.artifacts.iter().find(|artifact| {
+                artifact.app_provenance.as_ref().is_some_and(|provenance| {
+                    provenance.app_id == app_id && provenance.kind == "apk"
+                }) && artifact.type_name == "remote_file"
+                    && state
+                        .artifacts
+                        .get(&artifact.id)
+                        .and_then(|artifact| artifact.local_path.as_deref())
+                        == Some(path.as_ref())
+            });
+            let Some(provenance) = provenance else {
+                return Err(StepFailure::new(
+                    "app_install_artifact_provenance_invalid: Reviewed APK artifact provenance is unavailable.".to_string(),
+                ));
+            };
+            let _ = provenance;
+            if resolved_params.contains_key("expected_package_name") {
+                return Err(StepFailure::new(
+                    "app_context_invalid: App-context APK installs derive package identity from the reviewed App Definition.".to_string(),
+                ));
+            }
+            Some(app.package_id.clone())
+        } else {
+            None
+        };
+        let legacy_expected_package = if step.app_id.is_none() {
+            resolved_params
+                .get("expected_package_name")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| {
+                            StepFailure::new(
+                                "install_apk expected_package_name must be a non-empty string literal."
+                                    .to_string(),
+                            )
+                        })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let expected_package_name = app_context_package.as_deref().or(legacy_expected_package);
+        if let Some(expected_package_name) = expected_package_name {
+            if expected_package_name.trim().is_empty() {
+                return Err(StepFailure::new(
+                    "install_apk expected package name must be a non-empty string literal."
+                        .to_string(),
+                ));
+            }
             let manifest = inspect_apk_manifest(&apk_path).map_err(|error| {
                 StepFailure::new(format!(
                     "apk_package_inspection_failed: manifest inspection failed with reason '{}'.",
@@ -1517,7 +1719,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         self.adapters
             .device
             .install_apk(&apk_path, replace_existing)?;
-        if let Some(package_name) = Self::inferred_installed_package(step, resolved_params) {
+        if let Some(package_name) =
+            app_context_package.or_else(|| Self::inferred_installed_package(step, resolved_params))
+        {
             self.adapters.device.record_installed_package(&package_name);
         }
         Ok(OrderedMap::new())
@@ -1560,12 +1764,30 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
     fn evaluate_condition(
         &mut self,
+        plan: &ExecutionPlan,
         condition: &ExecutionStepCondition,
     ) -> Result<bool, StepFailure> {
         match condition.type_name.as_str() {
             "package_installed" => {
-                let package_name =
-                    required_string_param(condition, "package_name").map_err(StepFailure::new)?;
+                let package_name = if let Some(app_id) = condition.app_id.as_deref() {
+                    if condition.params.contains_key("package_name") {
+                        return Err(StepFailure::new(
+                            "app_condition_package_parameter_forbidden: App-context package_installed conditions inherit the reviewed package.".to_string(),
+                        ));
+                    }
+                    plan.apps
+                        .iter()
+                        .find(|app| app.id == app_id)
+                        .map(|app| app.package_id.clone())
+                        .ok_or_else(|| {
+                            StepFailure::new(
+                                "app_context_invalid: Reviewed App Definition data is unavailable."
+                                    .to_string(),
+                            )
+                        })?
+                } else {
+                    required_string_param(condition, "package_name").map_err(StepFailure::new)?
+                };
                 self.adapters
                     .device
                     .package_installed(&package_name)
@@ -3016,6 +3238,7 @@ impl ExecutionState {
                             filename: None,
                             cache_hit: false,
                             error: None,
+                            resolved_release: None,
                         },
                     )
                 })
@@ -3063,6 +3286,7 @@ struct ArtifactRuntimeState {
     filename: Option<String>,
     cache_hit: bool,
     error: Option<String>,
+    resolved_release: Option<ExecutionResolvedRelease>,
 }
 
 #[derive(Clone, Debug)]
@@ -4001,6 +4225,7 @@ mod phase_5b10_tests {
         let step = ExecutionStep {
             id: "phase5b10.permissions/mixed".to_string(),
             recipe_ref: "phase5b10.permissions".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: "Grant mixed permissions".to_string(),
             note: "Grant mixed permissions".to_string(),
@@ -4023,6 +4248,7 @@ mod phase_5b10_tests {
                 catalog: None,
             },
             recipes: Vec::new(),
+            apps: Vec::new(),
             target_device: None,
             device_context: DeviceContext {
                 manufacturer: "Example".to_string(),
@@ -4233,6 +4459,7 @@ mod runtime_ref_projection_tests {
                 filename: Some("app.apk".to_string()),
                 cache_hit: true,
                 error: None,
+                resolved_release: None,
             },
         );
 

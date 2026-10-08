@@ -446,7 +446,9 @@ impl CombinedQualificationWorkspace {
 fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact) -> PathBuf {
     cache_root.join(artifact_local_filename(
         &artifact.id,
-        &artifact.url,
+        artifact
+            .remote_file_url()
+            .expect("legacy artifact has a direct URL"),
         &artifact.cache,
     ))
 }

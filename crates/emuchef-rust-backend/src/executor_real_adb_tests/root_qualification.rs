@@ -593,6 +593,7 @@ fn run_root_executor_plan<E: AdbCommandExecutor>(
             catalog: None,
         },
         recipes: Vec::new(),
+        apps: Vec::new(),
         target_device: None,
         device_context: DeviceContext {
             manufacturer: "Qualification fixture".to_string(),

@@ -5,15 +5,17 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::authored_models::{load_app_definition, AppArtifactKind, AppArtifactSource};
 use crate::device_probe::{DetectedDeviceFacts, DeviceProbe, FakeDeviceProbe};
 use crate::device_profile_match::build_detected_device_profile_mismatch_warning;
 use crate::model::{
-    OrderedMap, ParamValue, Recipe, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
-    StepConstraints,
+    OrderedMap, ParamValue, Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step,
+    StepCondition, StepConstraints,
 };
 use crate::planner::{
-    build_permission_intent, normalized_plan_step_note, plan_execution, resolve_runtime_bindings,
-    BindingSource, DeviceContext, PlannerInput, RuntimeCapabilities,
+    build_permission_intent, normalized_plan_step_note, plan_execution,
+    plan_execution_with_app_definitions, resolve_runtime_bindings, BindingSource, DeviceContext,
+    PlannerInput, PlanningStatus, RuntimeCapabilities,
 };
 use crate::runtime_configuration::input_reuse_diagnostics;
 
@@ -866,7 +868,10 @@ fn permission_intent_validation_rejects_obvious_malformed_step_local_inputs() {
                 "manual",
                 "grant_permissions",
                 vec![],
-                ref_params(vec![("manual", ParamValue::Literal(json!([])))]),
+                ref_params(vec![
+                    ("manual", ParamValue::Literal(json!([]))),
+                    ("runtime", ParamValue::Literal(json!([]))),
+                ]),
             ),
             "manual",
             "manual",
@@ -5010,11 +5015,10 @@ fn artifact_selection_input(
                 .map(|(id, url)| {
                     (
                         id.to_string(),
-                        RemoteFileArtifact {
-                            type_name: "remote_file".to_string(),
+                        RecipeArtifact::RemoteFile(RemoteFileArtifact {
                             url: url.to_string(),
                             cache: "default".to_string(),
-                        },
+                        }),
                     )
                 })
                 .collect(),
@@ -5038,6 +5042,7 @@ fn artifact_selection_input(
                 description: None,
                 progress_note: None,
                 user_toggleable: false,
+                app_ref: None,
                 dependencies: Vec::new(),
                 constraints: StepConstraints {
                     capabilities: Vec::new(),
@@ -5084,11 +5089,10 @@ fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
             inputs: OrderedMap::new(),
             artifacts: vec![(
                 "app_apk".to_string(),
-                RemoteFileArtifact {
-                    type_name: "remote_file".to_string(),
+                RecipeArtifact::RemoteFile(RemoteFileArtifact {
                     url: "https://example.com/app.apk".to_string(),
                     cache: "default".to_string(),
-                },
+                }),
             )]
             .into_iter()
             .collect(),
@@ -5139,6 +5143,7 @@ fn ref_validation_step(
         description: None,
         progress_note: None,
         user_toggleable: false,
+        app_ref: None,
         dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
         constraints: StepConstraints {
             capabilities: if id == "unavailable_extract" {
@@ -5224,6 +5229,7 @@ fn dependency_step_with_capabilities(
         description: None,
         progress_note: None,
         user_toggleable: false,
+        app_ref: None,
         dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
         constraints: StepConstraints {
             capabilities: capabilities.into_iter().map(ToString::to_string).collect(),
@@ -5305,6 +5311,7 @@ fn recipe_expansion_wait_step() -> Step {
         description: None,
         progress_note: None,
         user_toggleable: false,
+        app_ref: None,
         dependencies: Vec::new(),
         constraints: StepConstraints {
             capabilities: Vec::new(),
@@ -5360,19 +5367,17 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
             artifacts: vec![
                 (
                     "app_apk".to_string(),
-                    RemoteFileArtifact {
-                        type_name: "remote_file".to_string(),
+                    RecipeArtifact::RemoteFile(RemoteFileArtifact {
                         url: "https://example.com/app.apk".to_string(),
                         cache: "default".to_string(),
-                    },
+                    }),
                 ),
                 (
                     "archive_zip".to_string(),
-                    RemoteFileArtifact {
-                        type_name: "remote_file".to_string(),
+                    RecipeArtifact::RemoteFile(RemoteFileArtifact {
                         url: "https://example.com/archive.zip".to_string(),
                         cache: "default".to_string(),
-                    },
+                    }),
                 ),
             ]
             .into_iter()
@@ -5409,6 +5414,7 @@ fn param_contract_step(
         description: None,
         progress_note: None,
         user_toggleable: false,
+        app_ref: None,
         dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
         constraints: StepConstraints {
             capabilities: Vec::new(),
@@ -6137,4 +6143,375 @@ fn collect_file_snapshot(root: &Path, current: &Path, snapshot: &mut BTreeMap<St
         let contents = fs::read_to_string(&path).expect("fixture file should be UTF-8");
         snapshot.insert(relative, contents);
     }
+}
+
+fn armsx1_app_definition() -> crate::authored_models::AppDefinitionV1 {
+    load_app_definition(repo_authored_root().join("apps/armsx1.yaml"))
+        .expect("ARMSX1 App Definition should load")
+}
+
+fn armsx1_recipe_planner_input() -> PlannerInput {
+    authored_corpus_planner_input(&["app.armsx1.install"])
+}
+
+fn assert_app_planning_error(
+    input: PlannerInput,
+    apps: &[crate::authored_models::AppDefinitionV1],
+    expected_code: &str,
+) {
+    let result = plan_execution_with_app_definitions(input, apps);
+    assert_eq!(result.status, PlanningStatus::Error);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.code == expected_code),
+        "expected planner error {expected_code}, got {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn armsx1_plan_contains_app_identity_and_late_bound_release_policy() {
+    let mut input = armsx1_recipe_planner_input();
+    input.target_device = Some(crate::planner::TargetDeviceBinding {
+        serial: "device-1".to_string(),
+        manufacturer: Some("Example".to_string()),
+        model: Some("Example".to_string()),
+        android_api_level: Some(33),
+    });
+    let result = plan_execution_with_app_definitions(input, &[armsx1_app_definition()]);
+
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result
+        .execution_plan
+        .expect("ARMSX1 plan should be emitted");
+    assert_eq!(plan.apps.len(), 1);
+    assert_eq!(plan.apps[0].id, "armsx1");
+    assert_eq!(plan.apps[0].name, "ARMSX1");
+    assert_eq!(plan.apps[0].category.as_deref(), Some("emulator"));
+    assert_eq!(plan.apps[0].package_id, "com.nanodata.armsx");
+    assert_eq!(plan.artifacts.len(), 1);
+    assert_eq!(
+        plan.artifacts[0].app_provenance.as_ref().unwrap().app_id,
+        "armsx1"
+    );
+    assert_eq!(
+        plan.artifacts[0].app_provenance.as_ref().unwrap().kind,
+        "apk"
+    );
+    assert!(matches!(
+        &plan.artifacts[0].source,
+        crate::planner::ExecutionArtifactSource::RemoteRelease {
+            provider,
+            service_origin,
+            repository,
+            include_prereleases: false,
+            asset_pattern,
+        } if provider == "github"
+            && service_origin == "https://github.com"
+            && repository == "ARMSX2/ARMSX1"
+            && asset_pattern == r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$"
+    ));
+    let install = plan
+        .steps
+        .iter()
+        .find(|step| step.type_name == "install_apk")
+        .expect("ARMSX1 install step should be planned");
+    assert_eq!(install.app_id.as_deref(), Some("armsx1"));
+    assert_eq!(install.verify[0].app_id.as_deref(), Some("armsx1"));
+    assert!(install.verify[0].params.is_empty());
+
+    let serialized = serde_json::to_value(&plan).expect("execution plan should serialize");
+    assert_eq!(serialized["apps"][0]["category"], "emulator");
+    assert_eq!(serialized["apps"][0]["package_id"], "com.nanodata.armsx");
+    assert_eq!(
+        serialized["artifacts"][0]["source"]["kind"],
+        "remote_release"
+    );
+    assert!(serialized["artifacts"][0].get("url").is_none());
+    let parsed = crate::cli::parse_execution_plan_json(&serialized)
+        .expect("serialized app-authority plan should parse for execution");
+    assert_eq!(parsed, plan);
+}
+
+#[test]
+fn app_authority_requires_context_for_a_recipe_app_artifact_install() {
+    let mut input = armsx1_recipe_planner_input();
+    let install = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .steps
+        .iter_mut()
+        .find(|step| step.type_name == "install_apk")
+        .unwrap();
+    install.app_ref = None;
+
+    assert_app_planning_error(input, &[armsx1_app_definition()], "app_context_required");
+}
+
+#[test]
+fn app_authority_rejects_unknown_step_app_reference() {
+    let mut input = armsx1_recipe_planner_input();
+    let install = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .steps
+        .iter_mut()
+        .find(|step| step.type_name == "install_apk")
+        .unwrap();
+    install.app_ref = Some("missing-app".to_string());
+
+    assert_app_planning_error(input, &[armsx1_app_definition()], "app_definition_unknown");
+
+    let mut input = armsx1_recipe_planner_input();
+    let artifact = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .artifacts
+        .get_mut("installer")
+        .unwrap();
+    let RecipeArtifact::AppArtifact(reference) = artifact else {
+        panic!("ARMSX1 Recipe should refer to an App Definition artifact");
+    };
+    reference.app_ref = "missing-app".to_string();
+    assert_app_planning_error(input, &[armsx1_app_definition()], "app_definition_unknown");
+}
+
+#[test]
+fn app_authority_rejects_an_apk_artifact_owned_by_a_different_app() {
+    let mut input = armsx1_recipe_planner_input();
+    let install = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .steps
+        .iter_mut()
+        .find(|step| step.type_name == "install_apk")
+        .unwrap();
+    install.app_ref = Some("other-app".to_string());
+    let mut other_app = armsx1_app_definition();
+    other_app.id = "other-app".to_string();
+    other_app.name = "Other App".to_string();
+    other_app.package_id = "com.example.other".to_string();
+
+    assert_app_planning_error(
+        input,
+        &[armsx1_app_definition(), other_app],
+        "app_install_artifact_provenance_invalid",
+    );
+}
+
+#[test]
+fn app_install_accepts_any_dependency_ancestor_resolver_match() {
+    let mut input = armsx1_recipe_planner_input();
+    let recipe = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap();
+    recipe
+        .artifact_groups
+        .insert("installer_group".to_string(), vec!["installer".to_string()]);
+    let resolver_index = recipe
+        .steps
+        .iter()
+        .position(|step| step.type_name == "resolve_artifacts")
+        .expect("ARMSX1 Recipe should have a resolver");
+    let mut earlier_resolver = recipe.steps[resolver_index].clone();
+    earlier_resolver.id = "earlier_unrelated_resolver".to_string();
+    earlier_resolver.dependencies.clear();
+    earlier_resolver.params.shift_remove("artifact_groups");
+    earlier_resolver.params.insert(
+        "artifacts".to_string(),
+        crate::model::ParamValue::Literal(json!(["installer"])),
+    );
+
+    let dependency_resolver = &mut recipe.steps[resolver_index];
+    dependency_resolver.params.shift_remove("artifacts");
+    dependency_resolver.params.insert(
+        "artifact_groups".to_string(),
+        crate::model::ParamValue::Literal(json!(["installer_group"])),
+    );
+    recipe.steps.insert(0, earlier_resolver);
+
+    let result = plan_execution_with_app_definitions(input, &[armsx1_app_definition()]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "a later matching resolver is a valid dependency ancestor: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn planner_validates_referenced_app_definition_and_named_artifact() {
+    let mut invalid_app = armsx1_app_definition();
+    invalid_app.package_id = "not a package".to_string();
+    assert_app_planning_error(
+        armsx1_recipe_planner_input(),
+        &[invalid_app],
+        "app_definition_invalid",
+    );
+
+    let mut unknown_artifact = armsx1_recipe_planner_input();
+    let recipe_artifact = unknown_artifact
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .artifacts
+        .get_mut("installer")
+        .unwrap();
+    let RecipeArtifact::AppArtifact(reference) = recipe_artifact else {
+        panic!("ARMSX1 Recipe should refer to an App Definition artifact");
+    };
+    reference.artifact = "missing-apk".to_string();
+    assert_app_planning_error(
+        unknown_artifact,
+        &[armsx1_app_definition()],
+        "app_artifact_unknown",
+    );
+
+    let mut direct_url_app = armsx1_app_definition();
+    direct_url_app.artifacts.get_mut("apk").unwrap().source = AppArtifactSource::DirectUrl {
+        url: "https://example.com/app.apk".to_string(),
+        sha256: None,
+    };
+    assert_app_planning_error(
+        armsx1_recipe_planner_input(),
+        &[direct_url_app],
+        "app_artifact_source_unsupported",
+    );
+}
+
+#[test]
+fn app_authority_rejects_non_apk_artifacts_and_missing_resolution_dependencies() {
+    let mut input = armsx1_recipe_planner_input();
+    let mut app = armsx1_app_definition();
+    app.artifacts.get_mut("apk").unwrap().kind = AppArtifactKind::File;
+    assert_app_planning_error(input, &[app], "app_install_artifact_provenance_invalid");
+
+    input = armsx1_recipe_planner_input();
+    let install = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .steps
+        .iter_mut()
+        .find(|step| step.type_name == "install_apk")
+        .unwrap();
+    install.dependencies.clear();
+    assert_app_planning_error(
+        input,
+        &[armsx1_app_definition()],
+        "app_install_resolution_dependency_missing",
+    );
+}
+
+#[test]
+fn app_authority_accepts_transitive_resolver_ancestor_selected_by_artifact_group() {
+    let mut input = armsx1_recipe_planner_input();
+    let recipe = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap();
+    recipe
+        .artifact_groups
+        .insert("apk_assets".to_string(), vec!["installer".to_string()]);
+
+    let resolver_index = recipe
+        .steps
+        .iter()
+        .position(|step| step.type_name == "resolve_artifacts")
+        .unwrap();
+    let resolver_id = recipe.steps[resolver_index].id.clone();
+    let resolver = &mut recipe.steps[resolver_index];
+    resolver.params.shift_remove("artifacts");
+    resolver.params.insert(
+        "artifact_groups".to_string(),
+        ParamValue::Literal(json!(["apk_assets"])),
+    );
+
+    let install_index = recipe
+        .steps
+        .iter()
+        .position(|step| step.type_name == "install_apk")
+        .unwrap();
+    let intermediary_id = "prepare_armsx1_install".to_string();
+    recipe.steps[install_index].dependencies = vec![intermediary_id.clone()];
+    recipe.steps.insert(
+        install_index,
+        Step {
+            id: intermediary_id,
+            type_name: "force_stop_app".to_string(),
+            name: "Prepare ARMSX1 installation".to_string(),
+            description: None,
+            progress_note: None,
+            user_toggleable: false,
+            app_ref: Some("armsx1".to_string()),
+            dependencies: vec![resolver_id],
+            constraints: StepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params: OrderedMap::new(),
+            verify: Vec::new(),
+        },
+    );
+
+    let result = plan_execution_with_app_definitions(input, &[armsx1_app_definition()]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "transitive resolver ancestry should be accepted: {:?}",
+        result.errors
+    );
+    let plan = result
+        .execution_plan
+        .expect("ARMSX1 plan should be emitted");
+    assert_eq!(plan.artifacts.len(), 1);
+    assert_eq!(
+        plan.artifacts[0].app_provenance.as_ref().unwrap().app_id,
+        "armsx1"
+    );
+}
+
+#[test]
+fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
+    let result = plan_execution(authored_corpus_planner_input(&["app.obtainium.install"]));
+
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.unwrap();
+    let install = plan
+        .steps
+        .iter()
+        .find(|step| step.type_name == "install_apk")
+        .unwrap();
+    assert!(install.app_id.is_none());
+    assert_eq!(install.skip_if[0].app_id, None);
+    assert_eq!(
+        install.skip_if[0].params.get("package_name"),
+        Some(&json!("dev.imranr.obtainium"))
+    );
 }

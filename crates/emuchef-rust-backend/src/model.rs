@@ -19,7 +19,7 @@ pub struct Recipe {
     pub recipe_dependencies: Vec<String>,
     pub provides: RecipeProvides,
     pub inputs: OrderedMap<InputDeclaration>,
-    pub artifacts: OrderedMap<RemoteFileArtifact>,
+    pub artifacts: OrderedMap<RecipeArtifact>,
     pub artifact_groups: OrderedMap<Vec<String>>,
     pub steps: Vec<Step>,
 }
@@ -101,8 +101,26 @@ pub struct InputValidation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteFileArtifact {
-    pub type_name: String,
     pub url: String,
+    pub cache: String,
+}
+
+/// An artifact declared by a recipe, either as a direct remote file or as a
+/// reference to an artifact owned by an App Definition.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecipeArtifact {
+    RemoteFile(RemoteFileArtifact),
+    AppArtifact(AppArtifactReference),
+}
+
+/// Identifies an App Definition and one of its named artifacts.
+///
+/// Source and package authority remain with the App Definition. Cache behavior
+/// is a Recipe-owned materialization choice copied into the execution plan.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppArtifactReference {
+    pub app_ref: String,
+    pub artifact: String,
     pub cache: String,
 }
 
@@ -115,6 +133,11 @@ pub struct Step {
     /// Optional user-facing action text shown while the step runs.
     pub progress_note: Option<String>,
     pub user_toggleable: bool,
+    /// App Definition identity that supplies app-specific step behavior.
+    ///
+    /// This field is absent on transitional Recipes that still use their
+    /// existing form-based parameters and package conditions.
+    pub app_ref: Option<String>,
     pub dependencies: Vec<String>,
     pub constraints: StepConstraints,
     pub skip_if: Vec<StepCondition>,
