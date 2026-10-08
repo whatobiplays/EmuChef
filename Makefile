@@ -11,6 +11,8 @@ CONFIG_EDITOR_DEPS_STAMP := $(CONFIG_EDITOR_PREFIX)/node_modules/.emuchef-deps-s
 BACKEND_MANIFEST := crates/emuchef-rust-backend/Cargo.toml
 # Rust workspace boundary: the EmuChef Tauri application's workspace.
 EMUCHEF_TAURI_MANIFEST := apps/emuchef-app/src-tauri/Cargo.toml
+# Rust workspace boundary: the Config Editor Tauri application's workspace.
+CONFIG_EDITOR_TAURI_MANIFEST := apps/config-editor/src-tauri/Cargo.toml
 
 # Backend Cargo test freshness gate: the stamp records a content digest of the
 # backend crate's build inputs so `make test` never reuses a stale test binary.
@@ -18,7 +20,26 @@ BACKEND_DIR := $(dir $(BACKEND_MANIFEST))
 BACKEND_TEST_STAMP := $(BACKEND_DIR)target/.emuchef-cargo-test-source.sha256
 BACKEND_TEST_PENDING := $(BACKEND_TEST_STAMP).pending
 
-.PHONY: help install ensure-deps build test device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev
+# `make clean` scope: repository-local generated state that a later `make build`
+# or `make test` rebuilds from source, regenerates, or re-downloads. Cargo keeps
+# each workspace's build directory beside its manifest, so a workspace built
+# through an external `CARGO_TARGET_DIR` is outside this scope.
+#
+# Two generated paths stay outside the scope as well. `make test` compiles the
+# EmuChef Tauri crate, whose build script fails when
+# `src-tauri/binaries/emuchef-<target-triple>` is absent and whose
+# `generate_context!()` macro panics when the configured `frontendDist` path is
+# absent. `make build` restores `apps/*/dist`, but only a Tauri dev or build run
+# restores the sidecar executables.
+CLEAN_RUST_TARGET_DIRS := \
+	$(BACKEND_DIR)target \
+	$(dir $(EMUCHEF_TAURI_MANIFEST))target \
+	$(dir $(CONFIG_EDITOR_TAURI_MANIFEST))target
+# Tauri regenerates these from `tauri.conf.json` and the capability files.
+CLEAN_TAURI_GENERATED_DIRS := $(EMUCHEF_APP_PREFIX)/src-tauri/gen $(CONFIG_EDITOR_PREFIX)/src-tauri/gen
+CLEAN_RUNTIME_SCRATCH_DIRS := .emuchef_cache .emuchef_runtime/executions
+
+.PHONY: help install ensure-deps build test clean device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev
 
 help:
 	@printf '%s\n' \
@@ -28,6 +49,7 @@ help:
 		'  ensure-deps   Install missing or stale frontend dependencies' \
 		'  build         Build the Rust backend and both frontend applications' \
 		'  test          Run Rust, application, security, typecheck, and lint tests' \
+		'  clean         Remove generated build output and reconstructable caches' \
 		'  device-qualification-check    Validate device qualification definitions, evidence, and matrix' \
 		'  emuchef-app   Launch the EmuChef app in development mode' \
 		'  config-editor Launch the Config Editor app in development mode' \
@@ -79,6 +101,22 @@ backend-test-fresh:
 		cargo clean --manifest-path $(BACKEND_MANIFEST) -p emuchef-rust-backend; \
 		rm -f $(BACKEND_TEST_PENDING); \
 	fi
+
+# Reclaims generated state that the next `make build` or `make test` rebuilds
+# from source, regenerates, or re-downloads. Installed dependency trees, device
+# qualification candidates captured from real hardware, git worktrees, and
+# editor and agent tool indexes are preserved.
+#
+# Do not run it while `make dev` sessions have executions in flight: the
+# simulated device state it removes is live working state for those runs.
+clean:
+	@echo 'clean: removing Rust build directories'
+	rm -rf $(CLEAN_RUST_TARGET_DIRS)
+	@echo 'clean: removing Tauri generated schemas'
+	rm -rf $(CLEAN_TAURI_GENERATED_DIRS)
+	@echo 'clean: removing cached artifact downloads and simulated-execution scratch state'
+	rm -rf $(CLEAN_RUNTIME_SCRATCH_DIRS)
+	@echo 'clean: done; prepared sidecars, frontend bundles, dependencies, qualification candidates, and editor indexes preserved'
 
 # Ordinary app development is simulation-only; real execution requires its separate guarded command.
 emuchef-app: ensure-deps
