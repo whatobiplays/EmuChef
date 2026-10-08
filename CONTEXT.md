@@ -733,6 +733,25 @@ Config Editor, and `make dev` launches both apps concurrently. These Makefile
 targets use ordinary simulation-only development commands; they intentionally
 do not use the separate real-device `tauri:dev:real` command.
 
+`make clean` reclaims repository-local generated state that the next `make
+build` or `make test` rebuilds from source, regenerates, or re-downloads: the
+Cargo build directory of each Rust workspace, the Tauri-generated
+`apps/*/src-tauri/gen` schemas, the `.emuchef_cache` artifact download cache,
+and the `.emuchef_runtime/executions` simulated-execution working directories.
+It preserves the installed dependency trees (`node_modules`, `.venv`), the
+`.emuchef_runtime/qualification-candidates` entries captured from real devices,
+the `.worktrees` checkouts, and the editor and agent tool indexes, so the
+target never forces a dependency reinstall or a device re-capture. It also
+preserves the prepared `apps/*/src-tauri/binaries/emuchef-<target-triple>`
+sidecar executables and the `apps/*/dist` frontend bundles, because compiling
+the EmuChef Tauri crate fails when either path is absent and only a Tauri dev
+or build run recreates the sidecar executables. Deleting the Cargo build
+directories also deletes the backend Cargo test freshness stamp stored inside
+them; the freshness gate recreates that stamp on the next `make test`. `make
+clean` must not run while a `make dev` session has executions in flight,
+because the simulated device state it deletes is live working state for those
+runs.
+
 The checked-in `EmuChef execution feature matrix` GitHub Actions workflow is the
 continuous compile-policy authority for Phase 6A. It runs `cargo check` and
 `cargo test` for the Tauri crate with `--no-default-features` and with
