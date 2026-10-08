@@ -341,17 +341,14 @@ fn retroarch_manage_external_storage_is_required_without_root() {
     let plan = result.plan.expect("plan should be generated");
     let step = generated_step_for_authored_id(&plan, "grant_retroarch_permissions");
     let appops = match step.params.get("appops") {
-        Some(ExecutionParamValue::Literal { value: Value::Array(actions) }) => actions,
+        Some(ExecutionParamValue::Literal {
+            value: Value::Array(actions),
+        }) => actions,
         other => panic!("expected literal appops array, got {other:?}"),
     };
     let manage_external_storage = appops
         .iter()
-        .find(|action| {
-            action
-                .get("op")
-                .and_then(Value::as_str)
-                == Some("MANAGE_EXTERNAL_STORAGE")
-        })
+        .find(|action| action.get("op").and_then(Value::as_str) == Some("MANAGE_EXTERNAL_STORAGE"))
         .expect("RetroArch must declare MANAGE_EXTERNAL_STORAGE app-op automation");
 
     assert_eq!(
@@ -538,7 +535,9 @@ impl QualificationWorkspace {
 fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact) -> PathBuf {
     cache_root.join(artifact_local_filename(
         &artifact.id,
-        &artifact.url,
+        artifact
+            .remote_file_url()
+            .expect("legacy artifact has a direct URL"),
         &artifact.cache,
     ))
 }

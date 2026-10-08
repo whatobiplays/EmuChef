@@ -73,6 +73,16 @@ fn validate_path_request(path: &str) -> Value {
     })
 }
 
+fn validate_path_request_with_root(path: &str, authored_root: &Path) -> Value {
+    json!({
+        "type": "validateRecipePath",
+        "payload": {
+            "path": path,
+            "authoredRoot": authored_root.to_string_lossy(),
+        }
+    })
+}
+
 fn open_request(id: &str, path: &str) -> Value {
     json!({
         "id": id,
@@ -305,6 +315,73 @@ fn stepspec_required_param_diagnostics_match_compatibility_fields() {
         "phase6k.missing_required_param",
         Some("steps[0].params.duration_ms"),
     );
+}
+
+#[test]
+fn catalog_backed_recipe_validation_checks_app_context_for_every_authored_step() {
+    let temporary = tempfile::tempdir().expect("validation directory should be created");
+    let authored_root = temporary.path().join("authored");
+    let recipes = authored_root.join("recipes");
+    let apps = authored_root.join("apps");
+    fs::create_dir_all(&recipes).expect("recipes directory should be created");
+    fs::create_dir_all(&apps).expect("apps directory should be created");
+    for (id, package_id) in [
+        ("test.app", "com.example.test"),
+        ("other.app", "com.example.other"),
+    ] {
+        fs::write(
+            apps.join(format!("{id}.yaml")),
+            format!(
+                "schema_version: 1\nkind: app_definition\nid: {id}\nname: Test app\npackage_id: {package_id}\nartifacts:\n  apk:\n    kind: apk\n    source:\n      strategy: user_provided\n"
+            ),
+        )
+        .expect("App Definition should be written");
+    }
+    let recipe_path = recipes.join("app_context.yaml");
+    fs::write(
+        &recipe_path,
+        "schema_version: 1\nkind: recipe\nid: test.app_context\nname: App context\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: test.app\n    artifact: apk\n  other_installer:\n    type: app_artifact\n    app_ref: other.app\n    artifact: apk\nsteps:\n  - id: resolve\n    type: resolve_artifacts\n    name: Resolve artifacts\n    user_toggleable: false\n    params:\n      artifacts: [installer, other_installer]\n  - id: missing_context\n    type: install_apk\n    name: Missing context\n    user_toggleable: false\n    dependencies: [resolve]\n    params:\n      app:\n        ref: artifacts.installer.local_path\n  - id: unknown_context\n    type: launch_app\n    name: Unknown context\n    user_toggleable: false\n    constraints:\n      capabilities: [root_shell]\n    app_ref: missing.app\n    params:\n      package_name: com.example.test\n  - id: inapplicable_context\n    type: resolve_artifacts\n    name: Inapplicable context\n    user_toggleable: false\n    app_ref: test.app\n    params:\n      artifacts: [installer]\n  - id: incoherent_context\n    type: install_apk\n    name: Incoherent context\n    user_toggleable: false\n    app_ref: test.app\n    dependencies: [resolve]\n    params:\n      app:\n        ref: artifacts.other_installer.local_path\n",
+    )
+    .expect("Recipe should be written");
+
+    let path = recipe_path.to_string_lossy();
+    let response = one_shot_response(validate_path_request_with_root(&path, &authored_root));
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("catalog-backed validation diagnostics should be returned");
+    for expected in [
+        "app_context_required",
+        "app_definition_unknown",
+        "app_context_inapplicable",
+        "app_install_artifact_provenance_invalid",
+    ] {
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == expected),
+            "expected {expected} in {diagnostics:#?}"
+        );
+    }
+
+    let context_free = one_shot_response(validate_path_request(&path));
+    let context_free_diagnostics = context_free["result"]["diagnostics"]
+        .as_array()
+        .expect("context-free validation diagnostics should be returned");
+    assert_eq!(
+        context_free_diagnostics[0]["code"],
+        "validation_context_limited"
+    );
+    assert!(!context_free_diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic["code"].as_str(),
+            Some(
+                "app_context_required"
+                    | "app_definition_unknown"
+                    | "app_context_inapplicable"
+                    | "app_install_artifact_provenance_invalid"
+            )
+        )
+    }));
 }
 
 #[test]

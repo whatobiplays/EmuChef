@@ -22,6 +22,8 @@ pub struct StepSpecDto {
     pub type_name: String,
     pub label: String,
     pub supported: bool,
+    #[serde(rename = "appContext")]
+    pub app_context: AppContextRequirement,
     #[serde(rename = "primaryOutputName")]
     pub primary_output_name: Option<String>,
     pub outputs: Vec<StepOutputDto>,
@@ -29,6 +31,15 @@ pub struct StepSpecDto {
     pub param_order: Vec<String>,
     pub params: BTreeMap<String, StepParamDto>,
     pub defaults: BTreeMap<String, Value>,
+}
+
+/// Whether a step type can use an App Definition as its execution context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppContextRequirement {
+    None,
+    Optional,
+    Required,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -480,6 +491,13 @@ fn spec(
         type_name: type_name.to_string(),
         label: label.to_string(),
         supported: true,
+        app_context: match type_name {
+            "install_apk" | "grant_permissions" | "launch_app" | "force_stop_app" => {
+                AppContextRequirement::Required
+            }
+            "copy_files" | "package_installed" => AppContextRequirement::Optional,
+            _ => AppContextRequirement::None,
+        },
         primary_output_name: primary_output_name.map(str::to_string),
         outputs,
         param_order: param_order.into_iter().map(str::to_string).collect(),
@@ -611,4 +629,46 @@ fn policy_shape() -> Value {
         "ordered": false,
         "unique": false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_context_requirement_is_typed_and_exposed_in_step_specs() {
+        assert_eq!(
+            serde_json::to_value(AppContextRequirement::None).unwrap(),
+            json!("none")
+        );
+        assert_eq!(
+            serde_json::to_value(AppContextRequirement::Optional).unwrap(),
+            json!("optional")
+        );
+        assert_eq!(
+            serde_json::to_value(AppContextRequirement::Required).unwrap(),
+            json!("required")
+        );
+
+        for step_type in [
+            "install_apk",
+            "grant_permissions",
+            "launch_app",
+            "force_stop_app",
+        ] {
+            assert_eq!(
+                step_spec_for(step_type).unwrap().app_context,
+                AppContextRequirement::Required,
+                "{step_type} uses app context in the App Definition form"
+            );
+        }
+        assert_eq!(
+            step_spec_for("copy_files").unwrap().app_context,
+            AppContextRequirement::Optional
+        );
+        assert_eq!(
+            step_spec_for("wait").unwrap().app_context,
+            AppContextRequirement::None
+        );
+    }
 }

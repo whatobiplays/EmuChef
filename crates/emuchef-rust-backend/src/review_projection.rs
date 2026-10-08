@@ -11,7 +11,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::model::{InputDeclaration, Recipe};
-use crate::planner::{ExecutionParamValue, ExecutionPlan, ExecutionStep, ResolvedInputBinding};
+use crate::planner::{
+    ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, ExecutionStep,
+    ResolvedInputBinding,
+};
 use crate::runtime_configuration::{PreparedConfiguration, RuntimeConfigurationDiagnostic};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -145,7 +148,7 @@ pub(crate) fn project_review(
                     .iter()
                     .filter_map(|step| {
                         let action_kind = action_section(step)?;
-                        (action_kind == kind).then(|| project_action(step, action_kind))
+                        (action_kind == kind).then(|| project_action(plan, step, action_kind))
                     })
                     .collect::<Vec<_>>();
                 if !actions.is_empty() {
@@ -241,14 +244,50 @@ fn action_section(step: &ExecutionStep) -> Option<&'static str> {
     }
 }
 
-fn project_action(step: &ExecutionStep, section: &str) -> ReviewAction {
-    let title = non_blank(&step.name)
-        .or_else(|| non_blank(&step.note))
-        .unwrap_or_else(|| neutral_action_title(section))
-        .to_string();
-    let description = non_blank(&step.note)
-        .filter(|note| *note != title)
-        .map(str::to_string);
+fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> ReviewAction {
+    let app = step
+        .app_id
+        .as_deref()
+        .and_then(|app_id| plan.apps.iter().find(|app| app.id == app_id));
+    let app_artifact = app.and_then(|app| {
+        plan.artifacts.iter().find(|artifact| {
+            artifact
+                .app_provenance
+                .as_ref()
+                .is_some_and(|provenance| provenance.app_id == app.id && provenance.kind == "apk")
+        })
+    });
+    let late_bound_github_release = app_artifact.is_some_and(|artifact| {
+        matches!(
+            &artifact.source,
+            ExecutionArtifactSource::RemoteRelease {
+                provider,
+                service_origin,
+                include_prereleases: false,
+                ..
+            } if provider == "github" && service_origin == "https://github.com"
+        )
+    });
+    let title = if step.type_name == "install_apk" {
+        app.map(|app| format!("Install {}", app.name))
+    } else {
+        None
+    }
+    .or_else(|| non_blank(&step.name).map(str::to_string))
+    .or_else(|| non_blank(&step.note).map(str::to_string))
+    .unwrap_or_else(|| neutral_action_title(section).to_string());
+    let description = if late_bound_github_release {
+        app.map(|app| {
+            format!(
+                "The latest eligible stable GitHub APK for {} is resolved during execution.",
+                app.name
+            )
+        })
+    } else {
+        non_blank(&step.note)
+            .filter(|note| *note != title)
+            .map(str::to_string)
+    };
     ReviewAction {
         title,
         description,
@@ -450,6 +489,97 @@ mod tests {
         assert_eq!(
             input_summary(&declaration, &Value::String("raw".into())),
             "Friendly choice"
+        );
+    }
+
+    #[test]
+    fn app_install_review_uses_only_the_plan_snapshot_and_late_bound_release_policy() {
+        use crate::planner::{
+            DeviceContext, ExecutionAppSnapshot, ExecutionArtifact, ExecutionArtifactAppProvenance,
+            ExecutionArtifactSource, ExecutionPlanSource, ExecutionStepConstraints,
+            RuntimeCapabilities,
+        };
+
+        let step = ExecutionStep {
+            id: "app.armsx1.install/install".to_string(),
+            recipe_ref: "app.armsx1.install".to_string(),
+            app_id: Some("armsx1".to_string()),
+            type_name: "install_apk".to_string(),
+            name: "Install or update ARMSX1".to_string(),
+            note: "Installing ARMSX1".to_string(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            params: OrderedMap::new(),
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        let plan = ExecutionPlan {
+            id: "plan.review".to_string(),
+            source: ExecutionPlanSource {
+                device_profile_ref: "profile.example".to_string(),
+                device_plan_ref: "plan.example".to_string(),
+                selected_recipe_refs: vec![step.recipe_ref.clone()],
+                expanded_recipe_refs: vec![step.recipe_ref.clone()],
+                catalog: None,
+            },
+            recipes: Vec::new(),
+            apps: vec![ExecutionAppSnapshot {
+                id: "armsx1".to_string(),
+                name: "ARMSX1".to_string(),
+                description: Some("Android emulator".to_string()),
+                category: None,
+                package_id: "com.nanodata.armsx".to_string(),
+            }],
+            target_device: None,
+            device_context: DeviceContext {
+                manufacturer: "Example".to_string(),
+                model: "Example".to_string(),
+                android_version: 14,
+                android_api_level: Some(35),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: true,
+                shared_storage_write: false,
+                app_launch: false,
+                shell_command: false,
+                package_remove_for_user: false,
+                root_shell: false,
+                app_data_write: false,
+            },
+            inputs: Vec::new(),
+            artifacts: vec![ExecutionArtifact {
+                id: "app.armsx1.install/installer".to_string(),
+                type_name: "remote_file".to_string(),
+                source: ExecutionArtifactSource::RemoteRelease {
+                    provider: "github".to_string(),
+                    service_origin: "https://github.com".to_string(),
+                    repository: "ARMSX2/ARMSX1".to_string(),
+                    include_prereleases: false,
+                    asset_pattern: "^ARMSX1-release-[0-9]{8}-arm64-v8a\\.apk$".to_string(),
+                },
+                cache: "default".to_string(),
+                app_provenance: Some(ExecutionArtifactAppProvenance {
+                    app_id: "armsx1".to_string(),
+                    artifact_id: "apk".to_string(),
+                    kind: "apk".to_string(),
+                }),
+            }],
+            steps: vec![step.clone()],
+            schema_version: 1,
+            kind: "execution_plan",
+        };
+
+        let action = project_action(&plan, &step, "installs");
+
+        assert_eq!(action.title, "Install ARMSX1");
+        assert_eq!(
+            action.description.as_deref(),
+            Some("The latest eligible stable GitHub APK for ARMSX1 is resolved during execution.")
         );
     }
 }

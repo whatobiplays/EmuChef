@@ -73,8 +73,10 @@ export interface InputDto {
 export interface ArtifactDto {
   id: string;
   type: string;
-  url: string;
-  cache: string;
+  url?: string;
+  cache?: string;
+  appRef?: string;
+  artifact?: string;
 }
 
 export interface StepConditionDto {
@@ -86,6 +88,7 @@ export interface StepDto {
   id: string;
   type: string;
   name: string;
+  appRef?: string | null;
   description: string;
   userToggleable: boolean;
   dependencies: string[];
@@ -131,6 +134,7 @@ export interface StepSpecDto {
   type: string;
   label: string;
   supported: boolean;
+  appContext?: "none" | "optional" | "required";
   primaryOutputName: string | null;
   outputs: Array<{
     name: string;

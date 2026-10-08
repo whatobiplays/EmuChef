@@ -23,6 +23,24 @@ pub(crate) struct ResolvedRemoteRelease {
     pub size: Option<u64>,
 }
 
+/// Validate the supported stable GitHub APK-release policy without making a
+/// provider request. Execution-start admission uses this before any execution
+/// state is allocated.
+pub(crate) fn validate_github_stable_release_policy(
+    repository: &str,
+    include_prereleases: bool,
+    asset_pattern: &str,
+) -> Result<(), String> {
+    validate_repository(repository)?;
+    if include_prereleases {
+        return Err("remote_release_policy_unsupported: Stable releases only are supported".into());
+    }
+    if Regex::new(asset_pattern).is_err() {
+        return Err("remote_asset_pattern_invalid: APK filename pattern is invalid".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_github_latest(
     repository: &str,
     include_prereleases: bool,
@@ -41,6 +59,14 @@ pub(crate) fn resolve_github_latest(
         })?;
     let endpoint = format!("https://api.github.com/repos/{repository}/releases?per_page=30");
     let releases = get_json_bounded(&client, &endpoint)?;
+    select_github_release_asset(&releases, include_prereleases, &matcher)
+}
+
+fn select_github_release_asset(
+    releases: &Value,
+    include_prereleases: bool,
+    matcher: &Regex,
+) -> Result<ResolvedRemoteRelease, String> {
     let mut candidates = releases
         .as_array()
         .into_iter()
@@ -90,17 +116,7 @@ pub(crate) fn resolve_github_latest(
             })
         })
         .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [single] => Ok(single.clone()),
-        [] => Err(
-            "remote_asset_no_match: Latest release contains no APK matching the saved pattern"
-                .to_string(),
-        ),
-        _ => Err(
-            "remote_asset_ambiguous: Latest release contains multiple APKs matching the saved pattern"
-                .to_string(),
-        ),
-    }
+    require_single_match(matches)
 }
 
 pub(crate) fn resolve_remote_latest(
@@ -438,11 +454,133 @@ fn get_json_bounded(client: &Client, url: &str) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn repository_validation_is_strict() {
         assert!(validate_repository("owner/project").is_ok());
         assert!(validate_repository("owner/nested/project").is_err());
         assert!(validate_repository("owner/project extra").is_err());
+    }
+
+    #[test]
+    fn github_release_selection_rejects_zero_matching_apks() {
+        let releases = json!([
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v1",
+                "published_at": "2026-01-01T00:00:00Z",
+                "assets": [{
+                    "name": "wanted-1.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-1.apk"
+                }]
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v2",
+                "published_at": "2026-01-02T00:00:00Z",
+                "assets": [{
+                    "name": "other.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v2/other.apk"
+                }]
+            }
+        ]);
+        let matcher = Regex::new("^wanted-[0-9]+\\.apk$").unwrap();
+
+        let error = select_github_release_asset(&releases, false, &matcher).unwrap_err();
+
+        assert_eq!(
+            error,
+            "remote_asset_no_match: Latest release contains no APK matching the saved pattern"
+        );
+    }
+
+    #[test]
+    fn github_release_selection_rejects_multiple_matching_apks() {
+        let releases = json!([{
+            "draft": false,
+            "prerelease": false,
+            "tag_name": "v1",
+            "published_at": "2026-01-01T00:00:00Z",
+            "assets": [
+                {
+                    "name": "wanted-1.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-1.apk"
+                },
+                {
+                    "name": "wanted-2.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-2.apk"
+                }
+            ]
+        }]);
+        let matcher = Regex::new("^wanted-[0-9]+\\.apk$").unwrap();
+
+        let error = select_github_release_asset(&releases, false, &matcher).unwrap_err();
+
+        assert_eq!(
+            error,
+            "remote_asset_ambiguous: Latest release contains multiple APKs matching the saved pattern"
+        );
+    }
+
+    #[test]
+    fn github_release_selection_chooses_one_matching_asset_from_latest_stable_release() {
+        let releases = json!([
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v1",
+                "published_at": "2025-12-31T00:00:00Z",
+                "assets": [{
+                    "name": "wanted-1.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-1.apk",
+                    "size": 12
+                }]
+            },
+            {
+                "draft": false,
+                "prerelease": true,
+                "tag_name": "v2-rc1",
+                "published_at": "2026-02-01T00:00:00Z",
+                "assets": [{
+                    "name": "wanted-2.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v2/wanted-2.apk"
+                }]
+            },
+            {
+                "draft": true,
+                "prerelease": false,
+                "tag_name": "v3",
+                "published_at": "2026-03-01T00:00:00Z",
+                "assets": [{
+                    "name": "wanted-3.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v3/wanted-3.apk"
+                }]
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v4",
+                "published_at": "2026-01-31T00:00:00Z",
+                "assets": [{
+                    "name": "wanted-4.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v4/wanted-4.apk",
+                    "size": 34
+                }]
+            }
+        ]);
+        let matcher = Regex::new("^wanted-[0-9]+\\.apk$").unwrap();
+
+        let selected = select_github_release_asset(&releases, false, &matcher).unwrap();
+
+        assert_eq!(selected.asset_name, "wanted-4.apk");
+        assert_eq!(selected.release_tag, "v4");
+        assert_eq!(selected.size, Some(34));
+        assert_eq!(
+            selected.download_url,
+            "https://github.com/example/app/releases/download/v4/wanted-4.apk"
+        );
     }
 }

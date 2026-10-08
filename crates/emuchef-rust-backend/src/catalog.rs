@@ -28,6 +28,7 @@ pub const AUTHORED_CATALOG_GLOBS: &[&str] = &[
 struct ValidationCatalog {
     recipes: HashMap<String, Recipe>,
     recipe_files: HashMap<String, Vec<PathBuf>>,
+    app_definitions: Vec<crate::authored_models::AppDefinitionV1>,
     authored_model_diagnostics: Vec<Value>,
 }
 
@@ -175,6 +176,12 @@ pub fn load_app_definition_catalog(authored_root: &Path) -> AppDefinitionCatalog
 /// not expose machine-specific paths.
 pub fn validate_authored_catalog_models(authored_root: &Path) -> Vec<Value> {
     let mut diagnostics = load_app_definition_catalog(authored_root).diagnostics;
+    diagnostics.extend(validate_device_profile_models(authored_root));
+    diagnostics
+}
+
+fn validate_device_profile_models(authored_root: &Path) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
     for path in top_level_yaml_files(&authored_root.join("device_profiles")).unwrap_or_default() {
         diagnostics.extend(validate_device_profile_path(authored_root, &path));
     }
@@ -199,8 +206,16 @@ fn resolved_path(path: impl AsRef<Path>) -> PathBuf {
 
 impl ValidationCatalog {
     fn collect(authored_root: &Path) -> Self {
+        let AppDefinitionCatalog {
+            entries,
+            diagnostics,
+        } = load_app_definition_catalog(authored_root);
+        let app_definitions = entries.into_iter().map(|(_, app)| app).collect::<Vec<_>>();
+        let mut authored_model_diagnostics = diagnostics;
+        authored_model_diagnostics.extend(validate_device_profile_models(authored_root));
         let mut catalog = Self {
-            authored_model_diagnostics: validate_authored_catalog_models(authored_root),
+            app_definitions,
+            authored_model_diagnostics,
             ..Self::default()
         };
         for path in top_level_yaml_files(&authored_root.join("recipes")).unwrap_or_default() {
@@ -267,6 +282,12 @@ impl ValidationCatalog {
 
         recipes.insert(recipe.id.clone(), recipe.clone());
 
+        errors.extend(
+            crate::planner::validate_recipe_app_authority(recipe, &self.app_definitions)
+                .iter()
+                .map(|message| app_authority_diagnostic(file, recipe, message)),
+        );
+
         for (index, dependency_ref) in recipe.recipe_dependencies.iter().enumerate() {
             if !recipes.contains_key(dependency_ref) {
                 errors.push(diagnostic(
@@ -301,6 +322,44 @@ impl ValidationCatalog {
 
         errors
     }
+}
+
+fn app_authority_diagnostic(
+    file: &str,
+    recipe: &Recipe,
+    message: &crate::planner::PlannerMessage,
+) -> Value {
+    if let Some(step_id) = message.details.get("step_id").and_then(Value::as_str) {
+        return diagnostic(
+            "error",
+            &message.code,
+            &message.message,
+            file,
+            Some("step"),
+            Some(step_id),
+            Some("app_ref"),
+        );
+    }
+    if let Some(artifact_id) = message.details.get("artifact_id").and_then(Value::as_str) {
+        return diagnostic(
+            "error",
+            &message.code,
+            &message.message,
+            file,
+            Some("artifact"),
+            Some(artifact_id),
+            Some("app_ref"),
+        );
+    }
+    diagnostic(
+        "error",
+        &message.code,
+        &message.message,
+        file,
+        Some("recipe"),
+        Some(&recipe.id),
+        Some("steps"),
+    )
 }
 
 fn validate_device_profile_path(authored_root: &Path, path: &Path) -> Vec<Value> {

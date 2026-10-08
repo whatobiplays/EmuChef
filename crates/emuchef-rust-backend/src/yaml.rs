@@ -11,8 +11,9 @@ use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::model::{
-    InputDeclaration, InputOption, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides,
-    RemoteFileArtifact, Step, StepCondition, StepConstraints,
+    AppArtifactReference, InputDeclaration, InputOption, InputValidation, OrderedMap, ParamValue,
+    Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
+    StepConstraints,
 };
 use crate::step_specs;
 
@@ -432,7 +433,7 @@ fn optional_strict_bool(mapping: &Mapping, key: &str, default: bool) -> Result<b
     }
 }
 
-fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RemoteFileArtifact>, String> {
+fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RecipeArtifact>, String> {
     let mut artifacts = OrderedMap::new();
     let Some(value) = value else {
         return Ok(artifacts);
@@ -452,23 +453,71 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RemoteFileArt
             ));
         };
         let type_name = required_scalar_string(artifact_map, "type")?;
-        if type_name != "remote_file" {
-            return Err(format!(
-                "Unsupported artifact type: {}",
-                single_quote(&type_name)
-            ));
-        }
-        artifacts.insert(
-            artifact_id,
-            RemoteFileArtifact {
-                type_name,
+        let artifact = match type_name.as_str() {
+            "remote_file" => RecipeArtifact::RemoteFile(RemoteFileArtifact {
                 url: required_scalar_string(artifact_map, "url")?,
                 cache: get_scalar_string(artifact_map, "cache")
                     .unwrap_or_else(|| "default".to_string()),
-            },
-        );
+            }),
+            "app_artifact" => {
+                reject_unknown_artifact_fields(
+                    artifact_map,
+                    &["type", "app_ref", "artifact", "cache"],
+                    "app_artifact",
+                )?;
+                let app_ref = required_yaml_string(artifact_map, "app_ref")?;
+                if !crate::authored_models::is_valid_identifier(&app_ref) {
+                    return Err("app_artifact app_ref must use authored identifier syntax".into());
+                }
+                let artifact_name = required_yaml_string(artifact_map, "artifact")?;
+                if !crate::authored_models::is_valid_identifier(&artifact_name) {
+                    return Err("app_artifact artifact must use authored identifier syntax".into());
+                }
+                let cache = match get_yaml(artifact_map, "cache") {
+                    None => "default".to_string(),
+                    Some(YamlValue::String(value))
+                        if matches!(value.as_str(), "default" | "none") =>
+                    {
+                        value.clone()
+                    }
+                    Some(YamlValue::String(_)) => {
+                        return Err("app_artifact cache must be 'default' or 'none'".into());
+                    }
+                    Some(_) => return Err("app_artifact cache must be a string".into()),
+                };
+                RecipeArtifact::AppArtifact(AppArtifactReference {
+                    app_ref,
+                    artifact: artifact_name,
+                    cache,
+                })
+            }
+            _ => {
+                return Err(format!(
+                    "Unsupported artifact type: {}",
+                    single_quote(&type_name)
+                ));
+            }
+        };
+        artifacts.insert(artifact_id, artifact);
     }
     Ok(artifacts)
+}
+
+fn reject_unknown_artifact_fields(
+    mapping: &Mapping,
+    allowed_fields: &[&str],
+    artifact_type: &str,
+) -> Result<(), String> {
+    for key in mapping.keys() {
+        let key = yaml_key_to_string(key);
+        if !allowed_fields.contains(&key.as_str()) {
+            return Err(format!(
+                "{artifact_type} artifact field '{}' is not supported",
+                single_quote(&key)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_artifact_groups(value: Option<&YamlValue>) -> Result<OrderedMap<Vec<String>>, String> {
@@ -522,6 +571,7 @@ fn parse_step(value: &YamlValue) -> Result<Step, String> {
         progress_note: optional_string(get_yaml(mapping, "progress_note")),
         user_toggleable: get_bool(mapping, "user_toggleable")
             .ok_or_else(|| "'user_toggleable'".to_string())?,
+        app_ref: optional_yaml_string(mapping, "app_ref")?,
         dependencies: parse_string_vec(get_yaml(mapping, "dependencies"))?,
         constraints: parse_constraints(get_yaml(mapping, "constraints"))?,
         skip_if: parse_conditions(get_yaml(mapping, "skip_if"))?,
@@ -804,21 +854,47 @@ fn inputs_to_yaml(inputs: &OrderedMap<InputDeclaration>) -> YamlValue {
     YamlValue::Mapping(mapping)
 }
 
-fn artifacts_to_yaml(artifacts: &OrderedMap<RemoteFileArtifact>) -> YamlValue {
+fn artifacts_to_yaml(artifacts: &OrderedMap<RecipeArtifact>) -> YamlValue {
     let mut mapping = Mapping::new();
     for (id, artifact) in artifacts {
         let mut payload = Mapping::new();
-        insert(
-            &mut payload,
-            "type",
-            YamlValue::String(artifact.type_name.clone()),
-        );
-        insert(&mut payload, "url", YamlValue::String(artifact.url.clone()));
-        insert(
-            &mut payload,
-            "cache",
-            YamlValue::String(artifact.cache.clone()),
-        );
+        match artifact {
+            RecipeArtifact::RemoteFile(artifact) => {
+                insert(
+                    &mut payload,
+                    "type",
+                    YamlValue::String("remote_file".to_string()),
+                );
+                insert(&mut payload, "url", YamlValue::String(artifact.url.clone()));
+                insert(
+                    &mut payload,
+                    "cache",
+                    YamlValue::String(artifact.cache.clone()),
+                );
+            }
+            RecipeArtifact::AppArtifact(artifact) => {
+                insert(
+                    &mut payload,
+                    "type",
+                    YamlValue::String("app_artifact".to_string()),
+                );
+                insert(
+                    &mut payload,
+                    "app_ref",
+                    YamlValue::String(artifact.app_ref.clone()),
+                );
+                insert(
+                    &mut payload,
+                    "artifact",
+                    YamlValue::String(artifact.artifact.clone()),
+                );
+                insert(
+                    &mut payload,
+                    "cache",
+                    YamlValue::String(artifact.cache.clone()),
+                );
+            }
+        }
         insert(&mut mapping, id, YamlValue::Mapping(payload));
     }
     YamlValue::Mapping(mapping)
@@ -841,6 +917,9 @@ fn step_to_yaml(step: &Step) -> YamlValue {
         YamlValue::String(step.type_name.clone()),
     );
     insert(&mut mapping, "name", YamlValue::String(step.name.clone()));
+    if let Some(app_ref) = &step.app_ref {
+        insert(&mut mapping, "app_ref", YamlValue::String(app_ref.clone()));
+    }
     if let Some(description) = &step.description {
         insert(
             &mut mapping,
@@ -1053,6 +1132,22 @@ fn required_scalar_string(mapping: &Mapping, key: &str) -> Result<String, String
     get_scalar_string(mapping, key).ok_or_else(|| format!("'{key}'"))
 }
 
+fn optional_yaml_string(mapping: &Mapping, key: &str) -> Result<Option<String>, String> {
+    match get_yaml(mapping, key) {
+        None => Ok(None),
+        Some(YamlValue::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!("'{key}' must be a string")),
+    }
+}
+
+fn required_yaml_string(mapping: &Mapping, key: &str) -> Result<String, String> {
+    match get_yaml(mapping, key) {
+        None => Err(format!("'{key}'")),
+        Some(YamlValue::String(value)) => Ok(value.clone()),
+        Some(_) => Err(format!("'{key}' must be a string")),
+    }
+}
+
 fn optional_string(value: Option<&YamlValue>) -> Option<String> {
     match value {
         None | Some(YamlValue::Null) => None,
@@ -1133,6 +1228,26 @@ mod tests {
         serde_yaml::from_str(text).expect("test YAML value should parse")
     }
 
+    fn parse_test_recipe(artifact_fields: &str) -> Result<Recipe, RecipeLoadError> {
+        let raw = yaml_value(&format!(
+            "schema_version: 1\nkind: recipe\nid: test.recipe\nname: Test\nrecipe_dependencies: []\nprovides:\n  features: []\nartifacts:\n  installer:\n    type: app_artifact\n{artifact_fields}\nsteps: []\n"
+        ));
+        parse_recipe_mapping(
+            raw.as_mapping().expect("recipe YAML should be a mapping"),
+            Path::new("test.recipe.yaml"),
+        )
+    }
+
+    fn parse_test_recipe_with_step_app_ref(app_ref_yaml: &str) -> Result<Recipe, RecipeLoadError> {
+        let raw = yaml_value(&format!(
+            "schema_version: 1\nkind: recipe\nid: test.recipe\nname: Test\nrecipe_dependencies: []\nprovides:\n  features: []\nartifacts: {{}}\nsteps:\n  - id: launch\n    type: launch_app\n    name: Launch\n    user_toggleable: false\n    app_ref: {app_ref_yaml}\n    params:\n      package_name: com.example.test\n"
+        ));
+        parse_recipe_mapping(
+            raw.as_mapping().expect("recipe YAML should be a mapping"),
+            Path::new("test.recipe.yaml"),
+        )
+    }
+
     #[test]
     fn exact_single_key_ref_mapping_becomes_ref_param() {
         assert_eq!(
@@ -1149,5 +1264,107 @@ mod tests {
             parse_param_value(&yaml_value("wrapper:\n  ref: steps.extract")).unwrap(),
             ParamValue::Literal(json!({"wrapper": {"ref": "steps.extract"}}))
         );
+    }
+
+    #[test]
+    fn app_artifact_round_trips_recipe_owned_cache_policy_canonically() {
+        let recipe = parse_test_recipe("    app_ref: armsx1\n    artifact: apk\n    cache: none")
+            .expect("known app artifact fields should parse");
+        let canonical = emit_recipe_yaml(&recipe).expect("recipe YAML should emit");
+        assert!(canonical.contains("    cache: none"));
+        let reparsed = parse_recipe_mapping(
+            yaml_value(&canonical)
+                .as_mapping()
+                .expect("canonical recipe should be a mapping"),
+            Path::new("test.recipe.yaml"),
+        )
+        .expect("canonical recipe YAML should parse again");
+        assert_eq!(reparsed, recipe);
+
+        let defaulted = parse_test_recipe("    app_ref: armsx1\n    artifact: apk")
+            .expect("omitted cache policy should use the default");
+        let RecipeArtifact::AppArtifact(reference) = &defaulted.artifacts["installer"] else {
+            panic!("fixture should contain an App Artifact reference");
+        };
+        assert_eq!(reference.cache, "default");
+    }
+
+    #[test]
+    fn app_artifact_rejects_unknown_and_app_definition_owned_fields() {
+        for field in [
+            "package_id: com.example.app",
+            "source: {strategy: latest_release}",
+            "url: https://example.test/app.apk",
+            "expected_package_name: com.example.app",
+            "expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "unexpected: value",
+        ] {
+            let yaml = format!("    app_ref: armsx1\n    artifact: apk\n    {field}");
+            let error = parse_test_recipe(&yaml).expect_err("unsupported field must be rejected");
+            let message = error
+                .issue
+                .as_deref()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or(&error.message);
+            assert!(message.contains("not supported"), "{field}: {message}");
+        }
+    }
+
+    #[test]
+    fn app_artifact_rejects_malformed_references_and_cache_policies() {
+        for (fields, expected) in [
+            ("    app_ref: 'not an id'\n    artifact: apk", "app_ref"),
+            ("    app_ref: []\n    artifact: apk", "app_ref"),
+            (
+                "    app_ref: armsx1\n    artifact: apk\n    cache: always",
+                "cache",
+            ),
+            (
+                "    app_ref: armsx1\n    artifact: apk\n    cache: []",
+                "cache",
+            ),
+        ] {
+            let error = parse_test_recipe(fields).expect_err("malformed field must be rejected");
+            let message = error
+                .issue
+                .as_deref()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or(&error.message);
+            assert!(message.contains(expected), "{fields}: {message}");
+        }
+    }
+
+    #[test]
+    fn app_authority_references_require_yaml_strings() {
+        for value in ["123", "true", "null", "[]", "{}"] {
+            let app_ref_error =
+                parse_test_recipe(&format!("    app_ref: {value}\n    artifact: apk"))
+                    .expect_err("App Artifact app_ref must be authored as a YAML string");
+            let message = app_ref_error
+                .issue
+                .as_deref()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or(&app_ref_error.message);
+            assert!(message.contains("app_ref"), "{value}: {message}");
+
+            let artifact_error =
+                parse_test_recipe(&format!("    app_ref: armsx1\n    artifact: {value}"))
+                    .expect_err("App Artifact artifact must be authored as a YAML string");
+            let message = artifact_error
+                .issue
+                .as_deref()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or(&artifact_error.message);
+            assert!(message.contains("artifact"), "{value}: {message}");
+
+            let step_app_ref_error = parse_test_recipe_with_step_app_ref(value)
+                .expect_err("step app_ref must be authored as a YAML string");
+            let message = step_app_ref_error
+                .issue
+                .as_deref()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or(&step_app_ref_error.message);
+            assert!(message.contains("app_ref"), "{value}: {message}");
+        }
     }
 }

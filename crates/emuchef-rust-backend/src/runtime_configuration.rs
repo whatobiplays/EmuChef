@@ -354,7 +354,7 @@ pub(crate) fn plan_configuration(
             diagnostics: prepared.diagnostics,
         });
     };
-    let result = crate::planner::plan_execution(input);
+    let result = plan_prepared_input(&prepared.catalog, input);
     let mut diagnostics = prepared.diagnostics.clone();
     diagnostics.extend(
         result
@@ -391,6 +391,21 @@ pub(crate) fn plan_configuration(
         resolved_inputs,
         diagnostics,
     })
+}
+
+/// Plan against the App Definitions owned by the same catalog snapshot as the
+/// prepared Recipe input. Planning copies the referenced app facts into the
+/// immutable execution plan; review and execution do not reopen the catalog.
+pub(crate) fn plan_prepared_input(
+    catalog: &CatalogSnapshot,
+    input: crate::planner::PlannerInput,
+) -> crate::planner::PlanningResult {
+    let app_definitions = crate::catalog::load_app_definition_catalog(catalog.root())
+        .entries
+        .into_iter()
+        .map(|(_, app)| app)
+        .collect::<Vec<_>>();
+    crate::planner::plan_execution_with_app_definitions(input, &app_definitions)
 }
 
 /// Warn when two active, user-supplied file inputs resolve to one filesystem

@@ -13,8 +13,8 @@ use serde_json::Value;
 use crate::catalog;
 use crate::commands::{ArtifactField, InputField, OverviewField, OverviewValue, RecipeCommand};
 use crate::model::{
-    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RemoteFileArtifact, Step,
-    StepCondition, StepConstraints,
+    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeArtifact,
+    RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
 use crate::step_specs;
 use crate::validation;
@@ -485,11 +485,10 @@ impl RecipeDocument {
         }
         recipe.artifacts.insert(
             artifact_id,
-            RemoteFileArtifact {
-                type_name: "remote_file".to_string(),
+            RecipeArtifact::RemoteFile(RemoteFileArtifact {
                 url: required_text(&Value::String(url), "artifact url")?,
                 cache: "default".to_string(),
-            },
+            }),
         );
         Ok(recipe)
     }
@@ -545,9 +544,21 @@ impl RecipeDocument {
             .artifacts
             .get_mut(&artifact_id)
             .ok_or_else(|| format!("Unknown artifact id {artifact_id:?}."))?;
-        match field {
-            ArtifactField::Url => artifact.url = required_text(&value, "artifact url")?,
-            ArtifactField::Cache => artifact.cache = coerce_artifact_cache(&value)?,
+        match (artifact, field) {
+            (RecipeArtifact::RemoteFile(artifact), ArtifactField::Url) => {
+                artifact.url = required_text(&value, "artifact url")?;
+            }
+            (RecipeArtifact::RemoteFile(artifact), ArtifactField::Cache) => {
+                artifact.cache = coerce_artifact_cache(&value)?;
+            }
+            (RecipeArtifact::AppArtifact(artifact), ArtifactField::Cache) => {
+                artifact.cache = coerce_artifact_cache(&value)?;
+            }
+            (RecipeArtifact::AppArtifact(_), ArtifactField::Url) => {
+                return Err(
+                    "App Definition artifact source policy is owned by the App Definition.".into(),
+                );
+            }
         }
         Ok(recipe)
     }
@@ -763,6 +774,7 @@ impl RecipeDocument {
                 description: None,
                 progress_note: None,
                 user_toggleable: false,
+                app_ref: None,
                 dependencies: Vec::new(),
                 constraints: StepConstraints {
                     capabilities: Vec::new(),

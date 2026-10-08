@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use serde_json::{json, Value};
 
+use crate::authored_models::AppDefinitionV1;
 use crate::catalog_source::CatalogIdentity;
-use crate::model::{OrderedMap, ParamValue, Recipe, Step, StepCondition, StepConstraints};
+use crate::model::{OrderedMap, ParamValue, Recipe, RecipeArtifact, Step, StepConstraints};
 #[cfg(test)]
 use crate::planner_device_plan;
 use crate::runtime_refs::{
@@ -22,6 +23,10 @@ use crate::runtime_refs::{
 use crate::step_specs;
 use crate::validation::normalize_expected_sha256;
 use crate::yaml;
+
+mod app_authority;
+
+pub(crate) use app_authority::validate_recipe_app_authority;
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -56,6 +61,9 @@ pub struct ExecutionPlan {
     pub source: ExecutionPlanSource,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recipes: Vec<ExecutionRecipeSnapshot>,
+    /// App identity and presentation needed after catalog planning completes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<ExecutionAppSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_device: Option<TargetDeviceBinding>,
     pub device_context: DeviceContext,
@@ -65,6 +73,18 @@ pub struct ExecutionPlan {
     pub steps: Vec<ExecutionStep>,
     pub schema_version: i64,
     pub kind: &'static str,
+}
+
+/// App identity and presentation copied into a reviewed execution plan.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExecutionAppSnapshot {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub package_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -133,19 +153,84 @@ pub struct RuntimeValue {
     pub location: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExecutionArtifact {
     pub id: String,
-    #[serde(rename = "type")]
     pub type_name: String,
-    pub url: String,
+    pub source: ExecutionArtifactSource,
     pub cache: String,
+    pub app_provenance: Option<ExecutionArtifactAppProvenance>,
+}
+
+impl ExecutionArtifact {
+    /// Return the concrete URL for legacy direct-file artifacts.
+    pub fn remote_file_url(&self) -> Option<&str> {
+        match &self.source {
+            ExecutionArtifactSource::RemoteFile { url } => Some(url),
+            ExecutionArtifactSource::RemoteRelease { .. } => None,
+        }
+    }
+}
+
+impl Serialize for ExecutionArtifact {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let fields = 4 + usize::from(self.app_provenance.is_some());
+        let mut artifact = serializer.serialize_struct("ExecutionArtifact", fields)?;
+        artifact.serialize_field("id", &self.id)?;
+        artifact.serialize_field("type", &self.type_name)?;
+        match &self.source {
+            ExecutionArtifactSource::RemoteFile { url } => artifact.serialize_field("url", url)?,
+            ExecutionArtifactSource::RemoteRelease { .. } => {
+                artifact.serialize_field("source", &self.source)?
+            }
+        }
+        artifact.serialize_field("cache", &self.cache)?;
+        if let Some(provenance) = &self.app_provenance {
+            artifact.serialize_field("app_provenance", provenance)?;
+        }
+        artifact.end()
+    }
+}
+
+/// A concrete remote file or a policy that resolves to one during execution.
+///
+/// Late-bound policies deliberately contain no placeholder URL. Their resolved
+/// URL must pass through the ordinary artifact admission and download path.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutionArtifactSource {
+    RemoteFile {
+        url: String,
+    },
+    RemoteRelease {
+        provider: String,
+        service_origin: String,
+        repository: String,
+        include_prereleases: bool,
+        asset_pattern: String,
+    },
+}
+
+/// App Definition artifact identity retained beside its runtime source.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExecutionArtifactAppProvenance {
+    pub app_id: String,
+    pub artifact_id: String,
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExecutionStep {
     pub id: String,
     pub recipe_ref: String,
+    /// App snapshot identity used by this step and its app-context conditions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
     #[serde(rename = "type")]
     pub type_name: String,
     pub name: String,
@@ -168,6 +253,9 @@ pub struct ExecutionStepConstraints {
 pub struct ExecutionStepCondition {
     #[serde(rename = "type")]
     pub type_name: String,
+    /// App snapshot whose package identity this condition should check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
     pub params: OrderedMap<Value>,
 }
 
@@ -391,7 +479,33 @@ impl std::fmt::Display for PlannerLoadError {
 
 impl std::error::Error for PlannerLoadError {}
 
+#[cfg(test)]
 pub fn plan_execution(input: PlannerInput) -> PlanningResult {
+    plan_execution_with_app_definitions(input, &[])
+}
+
+/// Build a plan with the App Definitions that own referenced app artifacts.
+///
+/// App Definitions are copied into the resulting plan as immutable snapshots;
+/// review and execution use those snapshots without reopening the catalog.
+pub fn plan_execution_with_app_definitions(
+    input: PlannerInput,
+    app_definitions: &[AppDefinitionV1],
+) -> PlanningResult {
+    let mut app_definitions_by_id = HashMap::new();
+    for app in app_definitions {
+        if app_definitions_by_id
+            .insert(app.id.clone(), app.clone())
+            .is_some()
+        {
+            return error_result(vec![app_authority::app_authority_error(
+                "app_definition_ambiguous",
+                "More than one App Definition has the same identity.",
+                json!({ "app_id": app.id }),
+            )]);
+        }
+    }
+    let app_definitions = app_definitions_by_id;
     let recipes = input
         .recipes
         .iter()
@@ -443,6 +557,15 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     let selected_input_ids =
         selected_input_ids(&recipes, &expanded_recipe_refs, &selected_step_ids);
     let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
+    let app_authority_errors = app_authority::validate_app_authority(
+        &recipes,
+        &expanded_recipe_refs,
+        &authored_steps,
+        &app_definitions,
+    );
+    if !app_authority_errors.is_empty() {
+        return error_result(app_authority_errors);
+    }
     let step_param_errors = validate_step_param_contracts(&recipes, &authored_steps);
     if !step_param_errors.is_empty() {
         return error_result(step_param_errors);
@@ -494,11 +617,17 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
         } else {
             Vec::new()
         },
+        apps: app_authority::execution_app_snapshots(
+            &recipes,
+            &expanded_recipe_refs,
+            &ordered_steps,
+            &app_definitions,
+        ),
         target_device: input.target_device,
         device_context: input.device_context,
         runtime_capabilities: input.runtime_capabilities,
         inputs: emit_execution_inputs(&recipes, &selected_input_ids, &effective_input_bindings),
-        artifacts: emit_execution_artifacts(&recipes, &expanded_recipe_refs),
+        artifacts: emit_execution_artifacts(&recipes, &expanded_recipe_refs, &app_definitions),
         steps: ordered_steps
             .into_iter()
             .filter_map(|(step_id, recipe_id, step)| {
@@ -506,6 +635,11 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
                 Some(ExecutionStep {
                     id: step_id,
                     recipe_ref: recipe_id,
+                    app_id: step
+                        .app_ref
+                        .as_ref()
+                        .map(|app_ref| app_definitions.get(app_ref).map(|app| app.id.clone()))
+                        .flatten(),
                     type_name: step.type_name.clone(),
                     name: step.name.clone(),
                     note: if emit_product_contract {
@@ -520,8 +654,28 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
                         .collect(),
                     constraints: execution_constraints(&step.constraints, &recipe.id),
                     params: normalize_step_params_for_execution(recipe, &step),
-                    skip_if: step.skip_if.iter().map(execution_condition).collect(),
-                    verify: step.verify.iter().map(execution_condition).collect(),
+                    skip_if: step
+                        .skip_if
+                        .iter()
+                        .map(|condition| {
+                            app_authority::execution_condition(
+                                condition,
+                                step.app_ref.as_deref(),
+                                &app_definitions,
+                            )
+                        })
+                        .collect(),
+                    verify: step
+                        .verify
+                        .iter()
+                        .map(|condition| {
+                            app_authority::execution_condition(
+                                condition,
+                                step.app_ref.as_deref(),
+                                &app_definitions,
+                            )
+                        })
+                        .collect(),
                 })
             })
             .collect(),
@@ -1735,9 +1889,29 @@ fn binding_to_runtime_value(
     }
 }
 
+fn has_dependency_ancestor(
+    step: &Step,
+    ancestor_id: &str,
+    steps_by_id: &HashMap<&str, &Step>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    step.dependencies.iter().any(|dependency| {
+        if dependency == ancestor_id {
+            return true;
+        }
+        if !visited.insert(dependency.clone()) {
+            return false;
+        }
+        steps_by_id.get(dependency.as_str()).is_some_and(|parent| {
+            has_dependency_ancestor(parent, ancestor_id, steps_by_id, visited)
+        })
+    })
+}
+
 fn emit_execution_artifacts(
     recipes: &HashMap<String, Recipe>,
     expanded_recipe_refs: &[String],
+    app_definitions: &HashMap<String, AppDefinitionV1>,
 ) -> Vec<ExecutionArtifact> {
     let mut artifacts = Vec::new();
     for recipe_id in expanded_recipe_refs {
@@ -1745,11 +1919,32 @@ fn emit_execution_artifacts(
             continue;
         };
         for (artifact_id, artifact) in &recipe.artifacts {
+            let (source, app_provenance, cache) = match artifact {
+                RecipeArtifact::RemoteFile(artifact) => (
+                    ExecutionArtifactSource::RemoteFile {
+                        url: artifact.url.clone(),
+                    },
+                    None,
+                    artifact.cache.clone(),
+                ),
+                RecipeArtifact::AppArtifact(reference) => {
+                    let Some((source, app_provenance)) =
+                        app_authority::execution_app_artifact_projection(
+                            reference,
+                            app_definitions,
+                        )
+                    else {
+                        continue;
+                    };
+                    (source, Some(app_provenance), reference.cache.clone())
+                }
+            };
             artifacts.push(ExecutionArtifact {
                 id: make_execution_artifact_id(recipe_id, artifact_id),
-                type_name: artifact.type_name.clone(),
-                url: artifact.url.clone(),
-                cache: artifact.cache.clone(),
+                type_name: "remote_file".to_string(),
+                source,
+                cache,
+                app_provenance,
             });
         }
     }
@@ -1767,13 +1962,6 @@ fn execution_constraints(
             .iter()
             .map(|conflict_id| make_execution_step_id(recipe_id, conflict_id))
             .collect(),
-    }
-}
-
-fn execution_condition(condition: &StepCondition) -> ExecutionStepCondition {
-    ExecutionStepCondition {
-        type_name: condition.type_name.clone(),
-        params: condition.params.clone(),
     }
 }
 

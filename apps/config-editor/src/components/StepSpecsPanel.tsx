@@ -19,6 +19,9 @@ export function StepSpecsPanel({ stepSpecs }: StepSpecsPanelProps) {
               <div className="mt-2 text-xs text-slate-600">
                 Primary output: {spec.primaryOutputName ?? "none"}
               </div>
+              <div className="mt-1 text-xs text-slate-600">
+                App context: {spec.appContext ?? "not provided"}
+              </div>
             </div>
           ))}
         </div>

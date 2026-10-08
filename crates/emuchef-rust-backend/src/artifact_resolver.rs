@@ -246,6 +246,43 @@ impl<'a> ArtifactResolver<'a> {
         })
     }
 
+    /// Check artifact policy and the selected local storage root for a source
+    /// whose URL will be discovered only after execution begins.
+    ///
+    /// This check intentionally performs no network request, destination
+    /// creation, or placeholder-URL validation. The discovered URL is passed
+    /// through `resolve` later, where the ordinary URL and sandbox admission
+    /// checks run before any download or publication work.
+    pub(crate) fn admit_late_bound(
+        &self,
+        type_name: &str,
+        cache_mode: &str,
+    ) -> Result<(), ArtifactResolveError> {
+        if type_name != "remote_file" {
+            return Err(ArtifactResolveError::TypeUnsupported);
+        }
+        if !matches!(cache_mode, "default" | "none") {
+            return Err(ArtifactResolveError::CacheModeUnsupported);
+        }
+        let storage_root = if cache_mode == "default" {
+            &self.sandbox.cache_root
+        } else {
+            &self.sandbox.runtime_root
+        };
+        self.sandbox
+            .ensure_runtime_or_cache_write(storage_root)
+            .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+        match fs::symlink_metadata(storage_root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err(ArtifactResolveError::SandboxRejected)
+            }
+            Ok(metadata) if metadata.is_dir() => Ok(()),
+            Ok(_) => Err(ArtifactResolveError::CachePublishFailed),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(ArtifactResolveError::CachePublishFailed),
+        }
+    }
+
     pub(crate) fn resolve(
         &mut self,
         request: ArtifactResolveRequest<'_>,
@@ -867,6 +904,39 @@ mod tests {
         assert_eq!(rejected.code(), "artifact_sandbox_rejected");
         assert!(!roots.runtime_root.exists());
         assert!(!roots.cache_root.exists());
+    }
+
+    #[test]
+    fn late_bound_admission_checks_source_type_cache_and_storage_root_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let resolver = ArtifactResolver::new(&roots);
+
+        resolver.admit_late_bound("remote_file", "default").unwrap();
+        assert!(matches!(
+            resolver.admit_late_bound("app_artifact", "default"),
+            Err(ArtifactResolveError::TypeUnsupported)
+        ));
+        assert!(matches!(
+            resolver.admit_late_bound("remote_file", "invalid"),
+            Err(ArtifactResolveError::CacheModeUnsupported)
+        ));
+        assert!(!roots.runtime_root.exists());
+        assert!(!roots.cache_root.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let outside = temp.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            symlink(&outside, &roots.cache_root).unwrap();
+            assert!(matches!(
+                resolver.admit_late_bound("remote_file", "default"),
+                Err(ArtifactResolveError::SandboxRejected)
+            ));
+            assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        }
     }
 
     #[test]

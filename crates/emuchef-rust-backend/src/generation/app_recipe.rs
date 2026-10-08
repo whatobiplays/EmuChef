@@ -271,6 +271,7 @@ pub(crate) fn build_permission_step(
         ),
         progress_note: Some(format!("Applying selected permissions for {app_name}")),
         user_toggleable: false,
+        app_ref: None,
         dependencies: vec![install_step_id],
         constraints: StepConstraints {
             capabilities: vec!["shell_command".to_string()],
@@ -856,6 +857,7 @@ fn build_recipe(
         description: None,
         progress_note: Some(format!("Installing {} on the selected device", app.name)),
         user_toggleable: false,
+        app_ref: None,
         dependencies: Vec::new(),
         constraints: StepConstraints {
             capabilities: vec!["apk_install".to_string()],
@@ -904,6 +906,7 @@ fn build_recipe(
                 description: Some("Launch the app once after installation.".to_string()),
                 progress_note: Some(format!("Launching {} once", app.name)),
                 user_toggleable: false,
+                app_ref: None,
                 dependencies: vec![ids.install_step_id.clone()],
                 constraints: StepConstraints {
                     capabilities: vec!["app_launch".to_string()],
@@ -1444,6 +1447,7 @@ mod tests {
         let step = ExecutionStep {
             id: generated.id,
             recipe_ref: "example.recipe".to_string(),
+            app_id: None,
             type_name: generated.type_name,
             name: generated.name,
             note: generated.progress_note.unwrap_or_default(),
@@ -1466,6 +1470,7 @@ mod tests {
                 catalog: None,
             },
             recipes: Vec::new(),
+            apps: Vec::new(),
             target_device: None,
             device_context: DeviceContext {
                 manufacturer: "Example".to_string(),

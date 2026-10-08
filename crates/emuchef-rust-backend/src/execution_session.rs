@@ -22,11 +22,14 @@ use crate::errors::{ApiError, ApiErrorCode};
 use crate::executor::adb::FakeAdbCommandExecutor;
 use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
-    ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorDevice, ExecutorRunner,
-    FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots, StepFailureKind, StepRunStatus,
+    ExecutionProgressEvent, ExecutionResolvedRelease, ExecutionRunResult, ExecutorAdapters,
+    ExecutorDevice, ExecutorRunner, FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots,
+    StepFailureKind, StepRunStatus,
 };
 use crate::model::OrderedMap;
-use crate::planner::{ExecutionParamValue, ExecutionPlan, RuntimeValue, TargetDeviceBinding};
+use crate::planner::{
+    ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, RuntimeValue, TargetDeviceBinding,
+};
 
 /// Filesystem and executable policy fixed when the sidecar starts.
 #[derive(Clone, Debug)]
@@ -155,6 +158,8 @@ pub struct ExecutionReport {
     pub finished_at: Option<String>,
     pub latest_sequence: u64,
     pub recipes: Vec<ExecutionRecipeReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_releases: Vec<ExecutionResolvedRelease>,
     pub warnings: Vec<ExecutionIssue>,
     pub errors: Vec<ExecutionIssue>,
 }
@@ -593,24 +598,54 @@ fn eligible_launch_candidate(
 }
 
 /// Admit every retained artifact while the caller holds the execution-state
-/// lock. This helper performs only bounded local metadata/readability checks and
-/// URL parsing; it must never acquire execution state or perform network or
-/// filesystem mutation.
+/// lock. This helper performs only bounded local metadata/readability checks,
+/// direct-URL parsing, and static release-policy validation; it must never
+/// acquire execution state or perform network or filesystem mutation.
 fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(), ApiError> {
     let resolver = ArtifactResolver::new(&sandbox);
     for artifact in &plan.artifacts {
-        if let Err(error) = resolver.admit(ArtifactResolveRequest {
-            artifact_id: &artifact.id,
-            type_name: &artifact.type_name,
-            url: &artifact.url,
-            cache_mode: &artifact.cache,
-        }) {
+        let admission_error = match &artifact.source {
+            ExecutionArtifactSource::RemoteFile { url } => resolver
+                .admit(ArtifactResolveRequest {
+                    artifact_id: &artifact.id,
+                    type_name: &artifact.type_name,
+                    url,
+                    cache_mode: &artifact.cache,
+                })
+                .err()
+                .map(|error| error.code()),
+            ExecutionArtifactSource::RemoteRelease {
+                provider,
+                service_origin,
+                repository,
+                include_prereleases,
+                asset_pattern,
+            } => {
+                if provider != "github" || service_origin != "https://github.com" {
+                    Some("remote_release_policy_unsupported")
+                } else if crate::remote_release_resolver::validate_github_stable_release_policy(
+                    repository,
+                    *include_prereleases,
+                    asset_pattern,
+                )
+                .is_err()
+                {
+                    Some("remote_release_policy_invalid")
+                } else {
+                    resolver
+                        .admit_late_bound(&artifact.type_name, &artifact.cache)
+                        .err()
+                        .map(|error| error.code())
+                }
+            }
+        };
+        if let Some(artifact_code) = admission_error {
             return Err(ApiError::new(
                 ApiErrorCode::ExecutionStartFailed,
                 "Execution artifacts are not ready.",
                 json!({
                     "code": "artifact_not_ready",
-                    "artifactCode": error.code(),
+                    "artifactCode": artifact_code,
                 }),
             ));
         }
@@ -750,6 +785,7 @@ fn initial_report(
         finished_at: None,
         latest_sequence: 0,
         recipes,
+        resolved_releases: Vec::new(),
         warnings: Vec::new(),
         errors: Vec::new(),
     }
@@ -938,6 +974,7 @@ fn finish_attempt(
     let Some(record) = state.records.get_mut(execution_id) else {
         return;
     };
+    record.report.resolved_releases = result.resolved_releases.clone();
     for step_record in &result.steps {
         let recipe_id = record
             .report
@@ -1258,10 +1295,12 @@ fn read_only_roots(plan: &ExecutionPlan) -> Vec<PathBuf> {
         }
     }
     roots.extend(plan.artifacts.iter().filter_map(|artifact| {
-        artifact
-            .url
-            .strip_prefix("file://")
-            .map(|path| Path::new(path).to_path_buf())
+        match &artifact.source {
+            ExecutionArtifactSource::RemoteFile { url } => url
+                .strip_prefix("file://")
+                .map(|path| Path::new(path).to_path_buf()),
+            ExecutionArtifactSource::RemoteRelease { .. } => None,
+        }
     }));
     roots
 }
@@ -1379,6 +1418,7 @@ mod tests {
             cancelled: false,
             total_steps: 0,
             steps: Vec::new(),
+            resolved_releases: Vec::new(),
         };
         assert_eq!(overall_status(&result, false), ExecutionStatus::Succeeded);
         assert_eq!(
@@ -1389,6 +1429,54 @@ mod tests {
         assert_eq!(overall_status(&result, false), ExecutionStatus::Failed);
         result.cancelled = true;
         assert_eq!(overall_status(&result, false), ExecutionStatus::Cancelled);
+    }
+
+    #[test]
+    fn terminal_report_records_the_selected_app_release_without_its_download_url() {
+        let execution_id = "execution-release".to_string();
+        let plan = test_plan("plan.release");
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let report = initial_report(&execution_id, &plan, &digest, ExecutionMode::DryRun, None);
+        let mut state = ExecutionState::default();
+        state.records.insert(
+            execution_id.clone(),
+            ExecutionRecord {
+                report,
+                events: Vec::new(),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let state = Arc::new(Mutex::new(state));
+        let result = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 0,
+            steps: Vec::new(),
+            resolved_releases: vec![ExecutionResolvedRelease {
+                app_id: "armsx1".to_string(),
+                artifact_id: "apk".to_string(),
+                release_tag: "v20261008".to_string(),
+                asset_name: "ARMSX1-release-20261008-arm64-v8a.apk".to_string(),
+                published_at: Some("2026-10-08T10:00:00Z".to_string()),
+                size: Some(42),
+            }],
+        };
+
+        finish_attempt(&state, &execution_id, result);
+
+        let report =
+            serde_json::to_value(&lock(&state).records.get(&execution_id).unwrap().report).unwrap();
+        let selected = &report["resolvedReleases"][0];
+        assert_eq!(selected["appId"], "armsx1");
+        assert_eq!(selected["artifactId"], "apk");
+        assert_eq!(selected["releaseTag"], "v20261008");
+        assert_eq!(
+            selected["assetName"],
+            "ARMSX1-release-20261008-arm64-v8a.apk"
+        );
+        assert_eq!(selected["publishedAt"], "2026-10-08T10:00:00Z");
+        assert_eq!(selected["size"], 42);
+        assert!(selected.get("downloadUrl").is_none());
     }
 
     #[test]
@@ -1576,6 +1664,7 @@ mod tests {
         let grant = |id: &str, name: &str, params: OrderedMap<ExecutionParamValue>| ExecutionStep {
             id: id.to_string(),
             recipe_ref: "recipe.example".to_string(),
+            app_id: None,
             type_name: "grant_permissions".to_string(),
             name: name.to_string(),
             note: name.to_string(),
@@ -1594,6 +1683,7 @@ mod tests {
             ExecutionStep {
                 id: "recipe.example/unrelated".to_string(),
                 recipe_ref: "recipe.example".to_string(),
+                app_id: None,
                 type_name: "wait".to_string(),
                 name: "Unrelated".to_string(),
                 note: "Unrelated".to_string(),
@@ -1712,6 +1802,67 @@ mod tests {
         );
         let report = wait_for_terminal(&manager, "execution-1");
         assert_eq!(report["status"], "succeeded");
+    }
+
+    #[test]
+    fn late_bound_release_admission_checks_policy_without_network_or_filesystem_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut plan = test_plan("plan.late-bound-release");
+        plan.artifacts.push(crate::planner::ExecutionArtifact {
+            id: "recipe.example/installer".to_string(),
+            type_name: "remote_file".to_string(),
+            source: ExecutionArtifactSource::RemoteRelease {
+                provider: "github".to_string(),
+                service_origin: "https://github.com".to_string(),
+                repository: "ARMSX2/ARMSX1".to_string(),
+                include_prereleases: false,
+                asset_pattern: r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string(),
+            },
+            cache: "default".to_string(),
+            app_provenance: None,
+        });
+        let sandbox = SandboxRoots {
+            runtime_root: temp.path().join("runtime"),
+            cache_root: temp.path().join("cache"),
+            fake_device_root: temp.path().join("fake-device"),
+            read_only_roots: Vec::new(),
+        };
+
+        assert!(admit_plan_artifacts(&plan, sandbox.clone()).is_ok());
+        assert!(!sandbox.runtime_root.exists());
+        assert!(!sandbox.cache_root.exists());
+        assert!(!sandbox.fake_device_root.exists());
+
+        plan.artifacts[0].source = ExecutionArtifactSource::RemoteRelease {
+            provider: "github".to_string(),
+            service_origin: "https://github.com".to_string(),
+            repository: "ARMSX2/ARMSX1".to_string(),
+            include_prereleases: true,
+            asset_pattern: r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string(),
+        };
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "remote_release_policy_invalid"
+        );
+        assert!(!sandbox.runtime_root.exists());
+        assert!(!sandbox.cache_root.exists());
+
+        plan.artifacts[0].source = ExecutionArtifactSource::RemoteRelease {
+            provider: "github".to_string(),
+            service_origin: "https://github.com".to_string(),
+            repository: "ARMSX2/ARMSX1".to_string(),
+            include_prereleases: false,
+            asset_pattern: r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string(),
+        };
+        plan.artifacts[0].cache = "unknown".to_string();
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "artifact_cache_mode_unsupported"
+        );
+        assert!(!sandbox.runtime_root.exists());
+        assert!(!sandbox.cache_root.exists());
     }
 
     #[cfg(unix)]
@@ -2090,6 +2241,7 @@ mod tests {
                 name: "Example Recipe".to_string(),
                 description: Some("Example description".to_string()),
             }],
+            apps: Vec::new(),
             target_device: None,
             device_context: DeviceContext {
                 manufacturer: "Example".to_string(),
@@ -2113,6 +2265,7 @@ mod tests {
             steps: vec![ExecutionStep {
                 id: "recipe.example/wait".to_string(),
                 recipe_ref: "recipe.example".to_string(),
+                app_id: None,
                 type_name: "wait".to_string(),
                 name: "Wait".to_string(),
                 note: "Waiting briefly".to_string(),
@@ -2135,8 +2288,11 @@ mod tests {
         plan.artifacts.push(ExecutionArtifact {
             id: "recipe.example/artifact".to_string(),
             type_name: "remote_file".to_string(),
-            url: url.to_string(),
+            source: ExecutionArtifactSource::RemoteFile {
+                url: url.to_string(),
+            },
             cache: cache.to_string(),
+            app_provenance: None,
         });
         plan
     }

@@ -2621,6 +2621,7 @@ fn reviewed_plan(
             catalog: None,
         },
         recipes: Vec::new(),
+        apps: Vec::new(),
         target_device: Some(TargetDeviceBinding {
             serial: facts.serial.clone(),
             manufacturer: Some(facts.manufacturer.clone()),
@@ -6548,12 +6549,14 @@ mod tests {
             cancelled: false,
             total_steps: 2,
             steps: vec![step(StepRunStatus::Executed), step(StepRunStatus::Executed)],
+            resolved_releases: Vec::new(),
         };
         let failed = ExecutionRunResult {
             success: false,
             cancelled: false,
             total_steps: 2,
             steps: vec![step(StepRunStatus::Executed), step(StepRunStatus::Failed)],
+            resolved_releases: Vec::new(),
         };
         assert!(!partial_changes_possible(&successful));
         assert!(partial_changes_possible(&failed));
@@ -7245,6 +7248,7 @@ mod tests {
                 failure_kind: failure,
                 cleanup: Some(ProcessCleanup::Confirmed),
             }],
+            resolved_releases: Vec::new(),
         }
     }
 
@@ -7922,6 +7926,7 @@ mod tests {
                 failure_kind: Some(StepFailureKind::OperationTimedOut),
                 cleanup: Some(ProcessCleanup::Confirmed),
             }],
+            resolved_releases: Vec::new(),
         };
         assert!(
             host_sleep_evidence(
@@ -7945,6 +7950,7 @@ mod tests {
                 failure_kind: None,
                 cleanup: Some(ProcessCleanup::Confirmed),
             }],
+            resolved_releases: Vec::new(),
         };
         assert!(
             host_sleep_evidence(
@@ -8576,6 +8582,7 @@ mod tests {
                 catalog: None,
             },
             recipes: Vec::new(),
+            apps: Vec::new(),
             target_device: None,
             device_context: DeviceContext {
                 manufacturer: "Physical-style".to_string(),
