@@ -70,18 +70,28 @@ external tools, exact ADB serials, native save destinations, final collision
 revalidation, and trusted writes. React owns presentation and explicit author
 choices.
 
-Generation produces reviewable drafts and performs no authored-data writes until explicit save. The generated recipe opens through the existing recipe document session. App definitions and device profiles initially use dedicated draft forms and canonical YAML previews rather than new persistent editor-session types. App definitions remain catalog and tracking metadata; generated recipes remain execution authority.
+Generation produces reviewable drafts and performs no authored-data writes until
+explicit save. The generated recipe opens through the existing recipe document
+session. App definitions and device profiles initially use dedicated draft forms
+and canonical YAML previews rather than new persistent editor-session types.
+Schema-v1 App Definitions own intrinsic app identity and reusable app policy:
+one package identity, app-owned artifacts and their source strategies, optional
+baseline and elevated permission sets, App Targets, launcher activity, and
+optional presentation metadata. Recipes remain the selection, planning, review,
+and execution authority until later authority-migration tickets land, so an
+app's intrinsic facts temporarily exist in both its App Definition and its
+generated Recipe.
 
 Android package facts come from APK inspection rather than filenames. The
 APK-inspection contract uses a separately configured user-supplied
 `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools.
-Local APK generation uses a required user-provided APK recipe input. Generated
-app definitions use `user_provided_apk` install-source metadata with resolver
-`none`, `local_apk` tracking metadata, `artifacts.apk.required: false`, and
-`artifacts.byo_apk.required: true`. The selected APK path is session-only. The
-last validated analyzer executable and authored root are persisted by the
-trusted Tauri layer so later generator sessions can restore them. Verified APK
-facts remain review evidence unless the author explicitly enters metadata.
+Local APK generation uses a required user-provided APK recipe input, and its
+generated App Definition declares a named `apk` artifact whose source strategy
+is `user_provided`. The selected APK path is session-only. The last validated
+analyzer executable and authored root are persisted by the trusted Tauri layer
+so later generator sessions can restore them. Verified APK inspection facts are
+transient draft review evidence and are never written into the saved App
+Definition.
 
 The local APK wizard accepts regular `.apk` files no larger than 2 GiB and a
 regular executable whose basename matches the selected analyzer adapter.
@@ -102,13 +112,48 @@ a generator-session temporary directory and are removed when that session is
 cancelled, completed, restarted, or dropped.
 
 Remote sources may generate either a pinned-download recipe or the same
-user-provided APK recipe shape used by local generation. Pinned recipes declare
-a `remote_file` artifact, resolve it, and install its `local_path`; their app
-metadata records normalized GitHub repository/release/asset identity or the
-direct HTTPS APK URL. The user-provided strategy retains the Phase 3
-`user_provided_apk` plus `local_apk` source shape and does not persist remote
-identity. Credentials, temporary paths, response bodies, and inspected APK
-facts are not persisted.
+user-provided APK recipe shape used by local generation. The generated App
+Definition records the app's durable source: `direct_url` with the normalized
+public HTTPS APK URL for a pinned release asset, plus the lowercase trusted
+publisher SHA-256 when the author supplied one; or `latest_release` with
+provider, service origin, repository, optional asset filename pattern, and
+prerelease policy for latest-compatible mode. Pinned recipes still declare a
+`remote_file` artifact, resolve it, and install its `local_path`, and the
+user-provided strategy still retains the `user_provided_apk` recipe input
+shape. Credentials, temporary paths, response bodies, and inspected APK facts
+are not persisted. The reviewed App Definition artifact is the authority for
+the download policy the duplicate Recipe copies, so the filename pattern and
+prerelease toggle in the source step mirror that row while a draft exists and
+the release preview, review gate, and save gate follow it. Only a
+latest-release source carries that policy, so a pinned artifact never resets
+either control. Generation blocks
+when that artifact is removed or replaced, and when several artifacts share
+the reviewed source strategy without the generated artifact id. Only an `apk`
+artifact can represent the reviewed source, so retyping it as a generic
+`file` blocks generation, and remote user-provided generation blocks the same
+way when its user-provided APK artifact is missing or ambiguous. A source-step
+edit rewrites only the artifact paired with the reviewed source, which is the
+artifact the backend proposes for that source, named `apk`, while it is still
+an APK whose source strategy matches the reviewed source, even after the
+author retargets its URL or repository and even when it records another
+service origin, and a single matching artifact otherwise, so an unresolvable
+pairing leaves every authored row untouched. A prerelease toggle
+that keeps the selected asset eligible keeps the rows it is derived from.
+Starting a new
+remote download clears the source-step publisher checksum, because the freshly
+downloaded artifact has no author-supplied publisher checksum, and only the
+paired artifact receives source-step edits. Release
+analysis retained from an earlier source is presented only while it still
+describes the repository the paired artifact resolves from; a retargeted
+source stops using that
+preview, the review and save gates do not treat it as authoritative, and
+Rust reports a non-blocking `latest_release_analysis_stale` warning. Local
+generation blocks the other way around: structured mapping edits must leave
+exactly one user-provided APK artifact for the recipe's user-provided input.
+Because the runtime release resolver resolves GitHub and GitLab releases from
+their official service origin, generated drafts accept only
+`https://github.com` for `github` and `https://gitlab.com` for `gitlab`;
+`forgejo` drafts resolve from the authored origin.
 
 App-generator sessions retain local and downloaded APKs, remote source and
 asset selections, analyzer paths, temporary workspaces, and authored-root
@@ -155,13 +200,36 @@ synced temporary sibling with atomic create-new/no-clobber semantics. Extended
 shared-storage, package-manager, activity-manager, root, APK, or other capability
 checks are not implemented.
 
-Typed schema-v1 `AppDefinitionV1` and `DeviceProfileV1` models are the shared authority for generator output, structural parsing, canonical emission, save validation, catalog loading, and future dedicated editors. Proposed values retain verified, derived, suggested, or missing evidence in draft DTOs; author edits do not replace that provenance, and final YAML contains only reviewed authored values. The complete approved plan is documented in `docs/product/config-editor-authored-generation.md`.
+Typed schema-v1 `AppDefinitionV1` and `DeviceProfileV1` models are the shared
+authority for generator output, structural parsing, canonical emission, save
+validation, catalog loading, and future dedicated editors. App Definition v1
+requires `id`, `name`, and `package_id`; allows optional `description`,
+`category`, `launcher_activity`, and `metadata`; and models artifacts as named
+`apk` or `file` entries whose sources use exactly the `user_provided`,
+`direct_url`, or `latest_release` strategies. Retired fields such as package
+aliases, install or tracking sources, provisioning flags, and persisted
+`metadata.apk_inspection` are rejected instead of migrated by a compatibility
+reader. The `artifacts` and `targets` registries reject a repeated entry id
+while parsing, because YAML would otherwise keep only the last definition. An
+artifact source that supplies a key belonging to a different strategy is
+rejected, and an explicit `null` for such a key counts as supplied rather
+than absent, while `null` for an optional key of the selected strategy is
+equivalent to omitting it.
+Catalog loading validates every App Definition and enforces a globally
+unique App Definition ID and `package_id`; the product `describeCatalog` result
+includes an `apps` projection carrying only id, name, description, category,
+and package id, and an App Definition catalog that violates per-file or
+catalog-global App Definition invariants fails product catalog loading.
+Proposed values retain verified, derived, suggested, or missing evidence in
+draft DTOs; author edits do not replace that provenance, and final YAML
+contains only reviewed authored values. The complete approved plan is
+documented in `docs/product/config-editor-authored-generation.md`.
 
 ## Authored Data and Planning
 
 Authored source lives under `authored/`:
 
-- `apps/` defines app selections;
+- `apps/` defines App Definitions that own intrinsic app identity and policy;
 - `recipes/` defines inputs, artifacts, groups, and ordered steps;
 - `device_profiles/` defines match criteria and capability defaults;
 - `device_plans/` selects profiles and recipes.

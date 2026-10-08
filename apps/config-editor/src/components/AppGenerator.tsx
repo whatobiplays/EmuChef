@@ -19,36 +19,45 @@ import type {
   ApkInspectionResult,
   ApkPermissionClassification,
   ApkPermissionReviewDto,
+  AppArtifactKindDto,
+  AppArtifactStrategyDto,
   AppDefinitionV1Dto,
-  AppMappingEditsDto,
   AppRecipeCollisionResult,
   AppRecipeDraftResult,
   AppRecipeEditsDto,
   AppRecipeSaveResult,
   AppGeneratorSourceMode,
+  AppReleaseProviderDto,
+  AppTargetKindDto,
+  AppTargetLocationDto,
   RemoteSourceDescriptorDto,
-} from "../api/types";
-import {
+} from "../api/types";import {
   analysisForPrereleasePolicy,
   assetPatternError,
   buildReleasePatternPreview,
   diagnosticDisplayTitle,
   eligibleApkAssets,
+  emptyArtifactRow,
+  emptyTargetRow,
   formToRequest,
   globalInspectionWarnings,
   initialAppGeneratorState,
   matchingAssetNames,
+  mirroredTrustedSha256,
   otherRequestedPermissions,
   parseTrustedSha256,
   permissionApplicabilityLabel,
   permissionApplicabilityReasonLabel,
   permissionAutomationEligible,
+  releaseAnalysisDescribesReviewedPolicy,
   permissionSelectionForInspection,
   reduceAppGenerator,
   visibleDraftDiagnostics,
+  type AppArtifactRowEdits,
   type AppGeneratorFormState,
+  type AppMappingRowEdits,
+  type AppTargetRowEdits,
 } from "./appGenerator.logic";
-
 interface AppGeneratorProps {
   initialAuthoredRoot: string | null;
   onAuthoredRootSelected: (path: string) => void | Promise<void>;
@@ -158,18 +167,26 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       label: downloaded.result.label,
       source,
     });
-    await inspectApkHandle(downloaded.result.apkHandle, state.selectedAssetHandle, source);
+    // A freshly downloaded artifact carries no author-supplied publisher
+    // checksum: the previous artifact's input was cleared with the source.
+    await inspectApkHandle(downloaded.result.apkHandle, state.selectedAssetHandle, source, "");
   }
 
   async function inspectApk() {
     if (!state.apkHandle) return;
-    await inspectApkHandle(state.apkHandle, state.selectedAssetHandle, state.remoteSource);
+    await inspectApkHandle(
+      state.apkHandle,
+      state.selectedAssetHandle,
+      state.remoteSource,
+      mirroredTrustedSha256(state, state.form),
+    );
   }
 
   async function inspectApkHandle(
     apkHandle: string,
     assetHandle: string | null,
     remoteSource: RemoteSourceDescriptorDto | null,
+    trustedSha256Text: string,
   ) {
     if (!state.sessionHandle) return;
     dispatch({ type: "inspecting" });
@@ -179,6 +196,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       return;
     }
     dispatch({ type: "inspected", inspection: inspected.result });
+    const trustedSha256 = parseTrustedSha256(trustedSha256Text);
     const drafted = remoteSource && assetHandle
       ? await generateRemoteAppRecipeDraft(
           state.sessionHandle,
@@ -187,7 +205,9 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           remoteSource.strategy,
           remoteSource.assetPattern,
           remoteSource.includePrereleases,
-          null,
+          remoteSource.strategy === "pinned_remote_asset" && trustedSha256.ok
+            ? trustedSha256.value
+            : null,
           null,
           null,
           null,
@@ -378,7 +398,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     });
   }
 
-  function changeMapping(update: Partial<AppMappingEditsDto>) {
+  function changeMapping(update: Partial<AppMappingRowEdits>) {
     updateForm((form) => {
       form.mappings = { ...form.mappings, ...update };
     });
@@ -391,8 +411,9 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     state.sourceAnalysis,
     selectedAsset?.releaseTag,
   ).map((asset) => asset.fileName);
+  const releaseAnalysisCurrent = releaseAnalysisDescribesReviewedPolicy(state);
   const latestPatternError =
-    state.installStrategy === "latest_compatible_release"
+    state.installStrategy === "latest_compatible_release" && releaseAnalysisCurrent
       ? assetPatternError(state.assetPattern, selectedReleaseFileNames)
       : null;
   const latestPatternMatches = matchingAssetNames(
@@ -406,6 +427,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     state.sourceMode === "github_repository"
     && state.installStrategy === "latest_compatible_release"
     && state.sourceAnalysis
+    && releaseAnalysisCurrent
       ? buildReleasePatternPreview(
           state.sourceAnalysis,
           state.assetPattern,
@@ -502,7 +524,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                   ) : state.installStrategy === "latest_compatible_release" ? (
                     <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
                       <label>
-                        <HelpLabel label="APK filename pattern" help="This regular expression is derived from the selected APK and used to identify exactly one APK in future releases." />
+                        <HelpLabel label="APK filename pattern (optional)" help="Leave this blank to accept the only eligible APK of each release. A regular expression narrows which APK asset is eligible." />
                         <input
                           className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"
                           disabled={busy}
@@ -512,19 +534,24 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                       </label>
                       {latestPatternError ? (
                         <p className="mt-2 text-red-700">{latestPatternError}</p>
-                      ) : (
+                      ) : releaseAnalysisCurrent ? (
                         <div className="mt-2 text-slate-600">
                           <p>Current release match:</p>
                           <ul className="mt-1 list-disc pl-5">
                             {latestPatternMatches.map((fileName) => <li key={fileName}>{fileName}</li>)}
                           </ul>
                         </div>
+                      ) : (
+                        <p className="mt-2 text-slate-600">
+                          The analyzed releases describe a different source, so they cannot confirm this
+                          pattern. Rust reports the retargeted source as a nonblocking stale-analysis warning.
+                        </p>
                       )}
-                      <p className="mt-2 text-xs text-amber-700">Future releases are resolved when provisioning runs. Resolution fails safely if the rule matches zero or multiple APKs.</p>
+                      <p className="mt-2 text-xs text-amber-700">Future releases are resolved when provisioning runs. Resolution fails safely when a release has no eligible APK or more than one.</p>
                     </section>
                   ) : null}
                   <label className="text-sm">
-                    <HelpLabel label="APK resolution" help="Pinned installs this exact APK. Latest compatible release resolves a future release using the saved filename rule. User-provided APK creates a local file input." />
+                    <HelpLabel label="APK resolution" help="Pinned installs this exact APK. Latest compatible release resolves the newest eligible release by selecting its only eligible APK, optionally narrowed by a filename pattern. User-provided APK creates a local file input." />
                     <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={busy} value={state.installStrategy} onChange={(event) => dispatch({ type: "install-strategy", strategy: event.target.value as import("../api/types").AppGeneratorInstallStrategy })}>
                       <option value="pinned_remote_asset">Pinned release</option>
                       {state.sourceAnalysis?.capabilities.latestRelease ? <option value="latest_compatible_release">Latest compatible release</option> : null}
@@ -554,7 +581,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                     <label className="text-sm md:col-span-3">
                       <HelpLabel
                         label="Trusted publisher SHA-256 (optional)"
-                        help="Enter only a checksum obtained from a trusted publisher source for this exact APK."
+                        help="Optional checksum copied from a trusted publisher source for this exact APK. EmuChef never fills this field from APK inspection."
                       />
                       <input
                         className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"
@@ -564,7 +591,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                       />
                       {trustedSha256Error ? <p className="mt-1 text-xs text-red-700">{trustedSha256Error}</p> : null}
                       <p className="mt-1 text-xs text-slate-500">
-                        EmuChef does not copy the locally calculated inspection hash into this field. Inspection remains not compared; this trusted value is used only by the generated runtime recipe.
+                        The locally calculated inspection hash is review evidence only and is never promoted to a trusted value. A checksum you enter here is stored in the generated app definition as the trusted checksum of its direct download source, and during this transitional state it is also written into the generated Recipe until the Recipe authority migration removes that duplication.
                       </p>
                     </label>
                   ) : null}
@@ -632,7 +659,7 @@ function ReleasePatternPreview({ busy, pattern, preview, onPatternChange }: {
   return (
     <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
       <label>
-        <HelpLabel label="APK filename pattern" help="This raw regular expression is previewed against analyzed releases. Rust performs authoritative validation before generation." />
+        <HelpLabel label="APK filename pattern (optional)" help="Leave this blank to select by APK file type alone. A raw regular expression is previewed against the analyzed releases. Rust performs authoritative validation before generation." />
         <input
           className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"
           disabled={busy}
@@ -648,7 +675,7 @@ function ReleasePatternPreview({ busy, pattern, preview, onPatternChange }: {
       ) : (
         <>
           <p className={`mt-2 ${preview.blocking ? "text-red-700" : "text-slate-700"}`}>
-            {preview.blockingMessage ?? "The newest eligible analyzed release has exactly one matching APK."}
+            {preview.blockingMessage ?? "The newest eligible analyzed release has exactly one eligible APK."}
           </p>
           <p className="mt-2 text-xs text-slate-600">
             {preview.eligibleReleaseCount} eligible release{preview.eligibleReleaseCount === 1 ? "" : "s"}: {preview.uniqueMatchCount} unique, {preview.noMatchCount} no match, {preview.multipleMatchesCount} multiple matches.
@@ -702,9 +729,9 @@ function releasePatternOutcomeLabel(
   outcome: import("../api/types").ReleasePatternOutcome,
 ): string {
   switch (outcome) {
-    case "unique_match": return "Unique match";
-    case "no_match": return "No match";
-    case "multiple_matches": return "Multiple matches";
+    case "unique_match": return "Unique selection";
+    case "no_match": return "No eligible APK";
+    case "multiple_matches": return "Multiple eligible APKs";
   }
 }
 
@@ -865,9 +892,15 @@ function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, ch
   disabled: boolean;
   updateForm: (update: (form: AppGeneratorFormState) => void) => void;
   changeApp: (update: Partial<AppDefinitionV1Dto>) => void;
-  changeMapping: (update: Partial<AppMappingEditsDto>) => void;
+  changeMapping: (update: Partial<AppMappingRowEdits>) => void;
 }) {
   const app = form.app;
+  const baselineCount =
+    (app.permission_sets?.baseline?.runtime?.length ?? 0)
+    + (app.permission_sets?.baseline?.app_ops?.length ?? 0);
+  const elevatedCount =
+    (app.permission_sets?.elevated?.runtime?.length ?? 0)
+    + (app.permission_sets?.elevated?.app_ops?.length ?? 0);
   return (
     <section className="mt-4 rounded border border-slate-200 p-4">
       <h2 className="font-semibold">App definition</h2>
@@ -875,43 +908,31 @@ function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, ch
         <Fixed label="Schema / kind" value="1 / app_definition" />
         <Field label="App ID" help="Stable authored identifier used in filenames and references. Use lowercase letters, numbers, periods, underscores, or hyphens." value={app.id} disabled={disabled} onChange={(id) => changeApp({ id })} />
         <Field label="Name" help="Human-readable app name shown in EmuChef." value={app.name} disabled={disabled} onChange={(name) => changeApp({ name })} />
-        <CategoryField value={app.category} disabled={disabled} onChange={(category) => changeApp({ category: category.toLowerCase() })} />
+        <CategoryField value={app.category ?? ""} disabled={disabled} onChange={(category) => changeApp({ category: category || undefined })} />
         <Field label="Description" help="Optional short description of the app." value={app.description ?? ""} disabled={disabled} onChange={(description) => changeApp({ description: description || undefined })} />
-        <Field label="Primary package" help="Android application ID extracted from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package.primary} disabled={disabled} onChange={(primary) => updateForm((next) => { next.app.package.primary = primary; })} />
-        <PackageAliasList values={form.aliases} disabled={disabled} onChange={(aliases) => updateForm((next) => { next.aliases = aliases; })} />
+        <Field label="Package ID" help="Android application ID extracted from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package_id} disabled={disabled} onChange={(packageId) => changeApp({ package_id: packageId })} />
         <Fixed label="Installation method" help="Controls whether the recipe pins an APK, resolves the latest compatible release, or asks for a local file." value={installStrategy === "pinned_remote_asset" ? "Pinned release" : installStrategy === "latest_compatible_release" ? "Latest compatible release" : "User-provided APK"} />
-        <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : installStrategy === "latest_compatible_release" ? "Latest provider release" : "None required"} />
-        <Fixed label="Update tracking" help="Describes the source identity retained for future catalog review." value={installStrategy === "user_provided_apk" ? "Local APK" : sourceMode.endsWith("_repository") || sourceMode.endsWith("_release") ? "Provider release" : sourceMode === "direct_apk" ? "Direct APK URL" : "Local APK"} />
-        <Area label="Install-source options (strict JSON object)" value={form.mappings.installSourceOptions} disabled={disabled} onChange={(installSourceOptions) => changeMapping({ installSourceOptions })} />
-        <Area label="Tracking-source fields (strict JSON object)" value={form.mappings.trackingSourceFields} disabled={disabled} onChange={(trackingSourceFields) => changeMapping({ trackingSourceFields })} />
+        <Fixed label="Artifact source strategy" help="Describes how the generated App Definition identifies where its files come from." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : installStrategy === "latest_compatible_release" ? "Latest provider release" : "User-provided file binding"} />
+        <Fixed label="Permission sets" help="Verified selections are partitioned by the trusted native layer: baseline actions run without root, and elevated actions require root." value={baselineCount === 0 && elevatedCount === 0 ? "None selected" : "Baseline " + baselineCount + " · Elevated " + elevatedCount} />
         <Area label="Metadata (strict JSON object)" value={form.mappings.metadata} disabled={disabled} onChange={(metadata) => changeMapping({ metadata })} />
-        <StringListField label="Shared-storage paths" help="Shared-storage locations associated with the app, such as folders under Android shared storage." addLabel="Add path" emptyLabel="No shared-storage paths." values={form.sharedStoragePaths} disabled={disabled} onChange={(sharedStoragePaths) => updateForm((next) => { next.sharedStoragePaths = sharedStoragePaths; })} />
-        <StringListField label="App-data paths" help="App-private or package-specific data locations associated with the app." addLabel="Add path" emptyLabel="No app-data paths." values={form.appDataPaths} disabled={disabled} onChange={(appDataPaths) => updateForm((next) => { next.appDataPaths = appDataPaths; })} />
       </div>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <MappingList
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <ArtifactList
           disabled={disabled}
-          label="Input metadata objects"
-          values={form.mappings.inputs}
-          onChange={(inputs) => changeMapping({ inputs })}
+          values={form.mappings.artifacts}
+          onChange={(artifacts) => changeMapping({ artifacts })}
         />
-        <MappingList
+        <TargetList
           disabled={disabled}
-          label="Provisioning config-target objects"
-          values={form.mappings.configTargets}
-          onChange={(configTargets) => changeMapping({ configTargets })}
+          values={form.mappings.targets}
+          onChange={(targets) => changeMapping({ targets })}
         />
       </div>
-      <section className="mt-5 rounded border border-slate-200 bg-slate-50 p-3">
-        <h3 className="text-sm font-semibold text-slate-700">App capabilities</h3>
-        <p className="mt-1 text-xs text-slate-500">Choose which files and configuration types this app definition supports.</p>
-        <div className="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-          <Check label="APK required" checked={app.artifacts.apk.required} disabled={disabled} onChange={(required) => updateForm((next) => { next.app.artifacts.apk.required = required; })} />
-          <Check label="BYO APK required" checked={app.artifacts.byo_apk.required} disabled={disabled} onChange={(required) => updateForm((next) => { next.app.artifacts.byo_apk.required = required; })} />
-          <Check label="Shared config" checked={app.artifacts.shared_storage_config.supported} disabled={disabled} onChange={(supported) => updateForm((next) => { next.app.artifacts.shared_storage_config.supported = supported; })} />
-          <Check label="App-data config" checked={app.artifacts.app_data_config.supported} disabled={disabled} onChange={(supported) => updateForm((next) => { next.app.artifacts.app_data_config.supported = supported; })} />
-        </div>
-      </section>
+      <p className="mt-3 text-xs text-slate-500">
+        {sourceMode === "local_apk"
+          ? "This app definition was generated from a local APK, so artifacts default to a user-provided file binding."
+          : "Artifact sources describe where each file comes from when provisioning runs."}
+      </p>
     </section>
   );
 }
@@ -960,8 +981,12 @@ function Review({ draft, collisions, hasSelectedRoot }: { draft: AppRecipeDraftR
         </div>
       ) : <Diagnostics label="File checks" items={validationItems} />}
       <Diagnostics label="Existing catalog check" emptyMessage="No conflicting files or IDs found." items={(collisions?.collisions ?? []).map((item) => ({ ...item, severity: item.severity === "blocking" ? "error" : "warning" }))} />
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Yaml title={appPath} value={draft.appCanonicalYaml} />
+      <p className="mt-3 text-xs text-slate-500">
+        {draft.apkInspection
+          ? "APK inspection evidence belongs to this review only. It is never written into the app definition."
+          : "APK inspection evidence is incomplete for this draft, so nothing about it is written into the app definition."}
+      </p>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">        <Yaml title={appPath} value={draft.appCanonicalYaml} />
         <Yaml title={recipePath} value={draft.recipeCanonicalYaml} />
       </div>
     </section>
@@ -981,15 +1006,114 @@ function HelpLabel({ label, help }: { label: string; help?: string }) {
 }
 
 function CategoryField({ value, disabled, onChange }: { value: string; disabled: boolean; onChange: (value: string) => void }) {
-  return <label className="text-sm"><HelpLabel label="Category (required)" help="Groups similar apps. Select a common category or type a new lowercase category." /><input className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} list="app-category-options" value={value} onChange={(event) => onChange(event.target.value)} /><datalist id="app-category-options"><option value="emulator" /><option value="frontend" /><option value="launcher" /><option value="tool" /><option value="utility" /></datalist></label>;
+  return <label className="text-sm"><HelpLabel label="Category (optional)" help="Optional free-form label that groups similar apps. Suggestions are common labels; any text is accepted." /><input className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} list="app-category-options" value={value} onChange={(event) => onChange(event.target.value)} /><datalist id="app-category-options"><option value="emulator" /><option value="frontend" /><option value="launcher" /><option value="tool" /><option value="utility" /></datalist></label>;
 }
 
-function PackageAliasList({ values, disabled, onChange }: { values: string[]; disabled: boolean; onChange: (values: string[]) => void }) {
-  return <div className="text-sm"><div className="flex items-center justify-between"><HelpLabel label="Package aliases" help="Older or alternate Android package IDs that should be treated as this app." /><button className="rounded border border-slate-300 px-2 py-1 text-xs" disabled={disabled} type="button" onClick={() => onChange([...values, ""])}>Add alias</button></div><div className="mt-1 space-y-2">{values.map((alias, index) => <div className="grid grid-cols-[1fr_auto] gap-2" key={index}><input aria-label={`Package alias ${index + 1}`} className="rounded border border-slate-300 px-3 py-2" disabled={disabled} value={alias} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /><button className="rounded border border-red-300 px-2 text-xs text-red-700" disabled={disabled} type="button" onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></div>)}{values.length === 0 ? <p className="text-xs text-slate-500">No package aliases.</p> : null}</div></div>;
+function ArtifactList({ values, disabled, onChange }: { values: AppArtifactRowEdits[]; disabled: boolean; onChange: (values: AppArtifactRowEdits[]) => void }) {
+  const update = (index: number, patch: Partial<AppArtifactRowEdits>) =>
+    onChange(values.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  return (
+    <div className="text-sm">
+      <div className="flex items-center justify-between">
+        <HelpLabel label="App artifacts" help="Files this app owns. Each artifact selects a user-provided file binding, a durable direct HTTPS download, or a latest provider release." />
+        <button className="rounded border border-slate-300 px-2 py-1 text-xs" disabled={disabled} type="button" onClick={() => onChange([...values, emptyArtifactRow()])}>Add artifact</button>
+      </div>
+      <div className="mt-1 space-y-3">
+        {values.map((row, index) => (
+          <div className="rounded border border-slate-200 p-3" key={index}>
+            <div className="grid gap-2 md:grid-cols-2">
+              <Field label="Artifact ID" value={row.id} disabled={disabled} onChange={(id) => update(index, { id })} />
+              <label className="text-sm">
+                <HelpLabel label="Kind" />
+                <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} value={row.kind} onChange={(event) => update(index, { kind: event.target.value as AppArtifactKindDto })}>
+                  <option value="apk">APK</option>
+                  <option value="file">File</option>
+                </select>
+              </label>
+              <Field label="Display name (optional)" value={row.name} disabled={disabled} onChange={(name) => update(index, { name })} />
+              <Field label="Description (optional)" value={row.description} disabled={disabled} onChange={(description) => update(index, { description })} />
+              <label className="text-sm">
+                <HelpLabel label="Source strategy" />
+                <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} value={row.strategy} onChange={(event) => update(index, { strategy: event.target.value as AppArtifactStrategyDto })}>
+                  <option value="user_provided">User-provided file</option>
+                  <option value="direct_url">Direct HTTPS URL</option>
+                  <option value="latest_release">Latest provider release</option>
+                </select>
+              </label>
+              <div className="flex items-end">
+                <button className="w-full rounded border border-red-300 px-2 py-2 text-xs text-red-700" disabled={disabled} type="button" onClick={() => onChange(values.filter((_, rowIndex) => rowIndex !== index))}>Remove artifact</button>
+              </div>
+            </div>
+            {row.strategy === "direct_url" ? (
+              <div className="mt-2 grid gap-2 md:grid-cols-2">
+                <Field label="HTTPS URL" value={row.url} disabled={disabled} onChange={(url) => update(index, { url })} />
+                <Field label="Publisher SHA-256 (optional)" help="Lowercase 64-character hexadecimal checksum copied from a trusted publisher source." value={row.sha256} disabled={disabled} onChange={(sha256) => update(index, { sha256 })} />
+              </div>
+            ) : null}
+            {row.strategy === "latest_release" ? (
+              <div className="mt-2 grid gap-2 md:grid-cols-2">
+                <label className="text-sm">
+                  <HelpLabel label="Provider" />
+                  <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} value={row.provider} onChange={(event) => update(index, { provider: event.target.value as AppReleaseProviderDto })}>
+                    <option value="github">GitHub</option>
+                    <option value="gitlab">GitLab</option>
+                    <option value="forgejo">Forgejo</option>
+                  </select>
+                </label>
+                <Field label="Service origin" value={row.baseUrl} disabled={disabled} onChange={(baseUrl) => update(index, { baseUrl })} />
+                <Field label="Repository" help="GitHub and Forgejo use owner/repository. GitLab accepts nested namespaces such as group/subgroup/project." value={row.repository} disabled={disabled} onChange={(repository) => update(index, { repository })} />
+                <Field label="APK filename pattern (optional)" help="Leave blank to accept the only eligible APK asset of the resolved release, whatever its file name is." value={row.assetPattern} disabled={disabled} onChange={(assetPattern) => update(index, { assetPattern })} />
+                <Check label="Invert the filename pattern" checked={row.invertAssetPattern} disabled={disabled || row.assetPattern.trim().length === 0} onChange={(invertAssetPattern) => update(index, { invertAssetPattern })} />
+                <Check label="Allow prereleases" checked={row.prerelease} disabled={disabled} onChange={(prerelease) => update(index, { prerelease })} />
+              </div>
+            ) : null}
+          </div>
+        ))}
+        {values.length === 0 ? <p className="text-xs text-slate-500">No app artifacts.</p> : null}
+      </div>
+    </div>
+  );
 }
 
-function StringListField({ label, help, addLabel, emptyLabel, values, disabled, onChange }: { label: string; help?: string; addLabel: string; emptyLabel: string; values: string[]; disabled: boolean; onChange: (values: string[]) => void }) {
-  return <div className="text-sm"><div className="flex items-center justify-between"><HelpLabel label={label} help={help} /><button className="rounded border border-slate-300 px-2 py-1 text-xs" disabled={disabled} type="button" onClick={() => onChange([...values, ""])}>{addLabel}</button></div><div className="mt-1 space-y-2">{values.map((value, index) => <div className="grid grid-cols-[1fr_auto] gap-2" key={index}><input aria-label={`${label} ${index + 1}`} className="rounded border border-slate-300 px-3 py-2" disabled={disabled} value={value} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /><button className="rounded border border-red-300 px-2 text-xs text-red-700" disabled={disabled} type="button" onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></div>)}{values.length === 0 ? <p className="text-xs text-slate-500">{emptyLabel}</p> : null}</div></div>;
+function TargetList({ values, disabled, onChange }: { values: AppTargetRowEdits[]; disabled: boolean; onChange: (values: AppTargetRowEdits[]) => void }) {
+  const update = (index: number, patch: Partial<AppTargetRowEdits>) =>
+    onChange(values.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  return (
+    <div className="text-sm">
+      <div className="flex items-center justify-between">
+        <HelpLabel label="App targets" help="Files and directories this app owns or uses. Paths are literal and relative to the chosen location." />
+        <button className="rounded border border-slate-300 px-2 py-1 text-xs" disabled={disabled} type="button" onClick={() => onChange([...values, emptyTargetRow()])}>Add target</button>
+      </div>
+      <div className="mt-1 space-y-2">
+        {values.map((row, index) => (
+          <div className="grid gap-2 md:grid-cols-2" key={index}>
+            <Field label="Target ID" value={row.id} disabled={disabled} onChange={(id) => update(index, { id })} />
+            <label className="text-sm">
+              <HelpLabel label="Kind" />
+              <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} value={row.kind} onChange={(event) => update(index, { kind: event.target.value as AppTargetKindDto })}>
+                <option value="file">File</option>
+                <option value="directory">Directory</option>
+              </select>
+            </label>
+            <label className="text-sm">
+              <HelpLabel label="Location" />
+              <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} value={row.location} onChange={(event) => update(index, { location: event.target.value as AppTargetLocationDto })}>
+                <option value="app_data">App data</option>
+                <option value="external_app_data">External app data</option>
+                <option value="shared_storage">Shared storage</option>
+                <option value="absolute_device_path">Absolute device path</option>
+              </select>
+            </label>
+            <Field label="Path" value={row.path} disabled={disabled} onChange={(path) => update(index, { path })} />
+            <div className="flex items-end">
+              <button className="rounded border border-red-300 px-2 py-2 text-xs text-red-700" disabled={disabled} type="button" onClick={() => onChange(values.filter((_, rowIndex) => rowIndex !== index))}>Remove target</button>
+            </div>
+          </div>
+        ))}
+        {values.length === 0 ? <p className="text-xs text-slate-500">No app targets.</p> : null}
+      </div>
+    </div>
+  );
 }
 
 function Field({ label, help, value, disabled, onChange }: { label: string; help?: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
@@ -1016,32 +1140,6 @@ function Check({ label, checked, disabled, onChange }: { label: string; checked:
       />
       {label}
     </label>
-  );
-}
-
-function MappingList({ label, values, disabled, onChange }: { label: string; values: string[]; disabled: boolean; onChange: (values: string[]) => void }) {
-  return (
-    <div>
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-medium">{label}</p>
-        <button className="rounded border border-slate-300 px-2 py-1 text-xs" disabled={disabled} onClick={() => onChange([...values, "{}"])}>Add object</button>
-      </div>
-      <div className="mt-2 space-y-2">
-        {values.map((value, index) => (
-          <div className="grid grid-cols-[1fr_auto] gap-2" key={index}>
-            <textarea
-              aria-label={`${label} ${index + 1}`}
-              className="min-h-24 rounded border border-slate-300 px-3 py-2 font-mono text-xs"
-              disabled={disabled}
-              value={value}
-              onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
-            />
-            <button className="self-start rounded border border-red-300 px-2 py-1 text-xs text-red-700" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
-          </div>
-        ))}
-        {values.length === 0 ? <p className="text-xs text-slate-500">No objects.</p> : null}
-      </div>
-    </div>
   );
 }
 

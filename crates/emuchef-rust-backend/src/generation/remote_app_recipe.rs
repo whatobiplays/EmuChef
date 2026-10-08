@@ -1,28 +1,30 @@
 //! Side-effect-free app-definition and recipe generation for inspected remote APK sources.
 
 use std::collections::HashSet;
-use std::fmt;
 use std::path::Path;
 
-use serde::de::{MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::authored_models::{
-    emit_app_definition_yaml, validate_app_definition, AppArtifactSupport, AppDefinitionV1,
-    AppInstallSource, AppPackage, AppProvisioning, AppTrackingSource, ConfigArtifactSupport,
-    OrderedValueMap, RequiredArtifactSupport, APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
+    emit_app_definition_yaml, validate_app_definition, AppArtifactKind, AppArtifactSource,
+    AppArtifactV1, AppDefinitionV1, AppPermissionSets, OrderedValueMap, ReleaseProvider,
+    APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
 };
 use crate::model::{
     InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides,
     RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
 use crate::validation::normalize_expected_sha256;
+use indexmap::IndexMap;
 
 use super::apk::ApkInspectionFacts;
 use super::app_recipe::{
-    build_permission_step, generated_apk_inspection_metadata, PermissionAutomationIssue,
-    PermissionAutomationSelection,
+    app_permission_sets, build_permission_step, collect_artifacts, collect_targets, error,
+    generated_apk_inspection_metadata, pair_reviewed_artifact, parse_mapping,
+    verified_launcher_activity, warning, AppArtifactEdit, AppTargetEdit, DraftDiagnostic,
+    DraftSeverity, PermissionAutomationIssue, PermissionAutomationSelection,
+    ReviewedArtifactPairing,
 };
 use super::identifiers::{normalize_identifier_component, recipe_local_token};
 
@@ -114,29 +116,9 @@ pub(crate) struct RemoteRecipeEdits {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct RemoteMappingEdits {
-    install_source_options: String,
-    tracking_source_fields: String,
+    artifacts: Vec<AppArtifactEdit>,
+    targets: Vec<AppTargetEdit>,
     metadata: String,
-    #[serde(default)]
-    inputs: Vec<String>,
-    #[serde(default)]
-    config_targets: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-enum DraftSeverity {
-    Error,
-    Warning,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct DraftDiagnostic {
-    severity: DraftSeverity,
-    code: String,
-    message: String,
-    field: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -144,7 +126,6 @@ struct DraftDiagnostic {
 enum EvidenceState {
     Verified,
     Derived,
-    Suggested,
     Missing,
 }
 
@@ -168,6 +149,11 @@ struct ProposedDestination {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RemoteAppRecipeDraft {
     app: AppDefinitionV1,
+    /// Transient APK inspection evidence shown during draft review.
+    ///
+    /// The evidence never becomes part of the saved app definition, so the
+    /// canonical YAML an author reviews matches the YAML that is written.
+    apk_inspection: Option<Value>,
     recipe: Value,
     recipe_edits: RemoteRecipeEdits,
     app_canonical_yaml: Option<String>,
@@ -184,47 +170,127 @@ pub(crate) fn generate_remote_app_recipe_draft(
 ) -> RemoteAppRecipeDraft {
     let proposed = proposed_app(&request.facts, &request.source);
     let mut app = request.app.unwrap_or_else(|| proposed.clone());
-    let mut diagnostics = validate_source(&request.source, request.release_analysis.as_ref());
-    diagnostics.extend(permission_automation_diagnostics(
-        request.permission_automation.as_ref(),
-        &request.facts,
-        &request.source,
-    ));
+    let mut diagnostics = Vec::new();
     if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
     }
-    app.metadata.shift_remove("apk_inspection");
+    // The reviewed App Definition artifact is the authority for the download
+    // policy duplicated below; the source selection only supplies the facts
+    // that artifact leaves blank.
+    let pairing = pair_reviewed_artifact(&app, &proposed, |artifact| {
+        // The generated Recipe installs an APK, so only an APK artifact can
+        // represent the reviewed source: a generic file with the same source
+        // strategy must not pair, or it would satisfy the presence check while
+        // the App Definition declares no artifact the Recipe installs.
+        artifact.kind == AppArtifactKind::Apk
+            && artifact_strategy_name(&request.source.strategy)
+                .is_some_and(|expected| app_artifact_strategy_name(&artifact.source) == expected)
+    });
+    let source = match &pairing {
+        ReviewedArtifactPairing::Paired(id) => {
+            reconcile_remote_source(&mut app, id, &request.source)
+        }
+        ReviewedArtifactPairing::Missing | ReviewedArtifactPairing::Ambiguous => {
+            request.source.clone()
+        }
+    };
+    match &pairing {
+        ReviewedArtifactPairing::Paired(id) => {
+            if artifact_inversion(&app, id) == Some(true) {
+                // The duplicated Recipe resolves a filename pattern by positive
+                // match, so an inverted policy would install the assets its author
+                // excluded instead of the ones they selected.
+                diagnostics.push(error(
+                    "latest_release_invert_unsupported",
+                    "The generated recipe resolves filename patterns by positive match, so it cannot duplicate an inverted pattern yet. Clear the inversion to generate a matching App Definition and Recipe pair.",
+                    "source.assetPattern",
+                ));
+            }
+        }
+        ReviewedArtifactPairing::Missing => {
+            if matches!(
+                request.source.strategy.as_str(),
+                "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
+            ) {
+                // Replacing or removing the reviewed artifact would otherwise save
+                // an App Definition without the remote download while the
+                // duplicated Recipe still resolves and installs the selected
+                // download address.
+                diagnostics.push(error(
+                    "remote_source_artifact_missing",
+                    "The reviewed app definition no longer declares the remote artifact this source installs. Keep the remote artifact, or start a new draft for a user-provided APK.",
+                    "source.strategy",
+                ));
+            }
+        }
+        ReviewedArtifactPairing::Ambiguous => {
+            if matches!(
+                request.source.strategy.as_str(),
+                "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
+            ) {
+                // Several artifacts share the reviewed source strategy and none
+                // of them is the artifact the draft proposed, so neither the
+                // duplicated Recipe nor the App Definition can be attributed to
+                // one reviewed artifact.
+                diagnostics.push(error(
+                    "remote_source_artifact_ambiguous",
+                    "The reviewed app definition declares more than one artifact for this installation method, so the reviewed artifact is ambiguous. Keep exactly one artifact that represents this source.",
+                    "source.strategy",
+                ));
+            }
+        }
+    }
+    diagnostics.extend(validate_source(
+        &source,
+        &request.source,
+        request.release_analysis.as_ref(),
+    ));
+    diagnostics.extend(permission_automation_diagnostics(
+        request.permission_automation.as_ref(),
+        &request.facts,
+        &source,
+    ));
     let automation_eligible = matches!(
         request.source.strategy.as_str(),
         "pinned_remote_asset" | "latest_compatible_release"
     );
-    match generated_apk_inspection_metadata(
+    let apk_inspection = match generated_apk_inspection_metadata(
         &request.facts,
         request.permission_automation.as_ref(),
         automation_eligible,
     ) {
-        Ok(metadata) => {
-            app.metadata.insert("apk_inspection".to_string(), metadata);
+        Ok(metadata) => Some(metadata),
+        Err(issues) => {
+            diagnostics.extend(
+                issues
+                    .into_iter()
+                    .map(|issue| error(issue.code, issue.message, &issue.field)),
+            );
+            None
         }
-        Err(issues) => diagnostics.extend(
-            issues
-                .into_iter()
-                .map(|issue| error(issue.code, issue.message, &issue.field)),
-        ),
-    }
+    };
+    app.permission_sets = verified_permission_sets(
+        request.permission_automation.as_ref(),
+        &request.facts,
+        automation_eligible,
+    );
     let mut recipe_edits = request
         .recipe
-        .unwrap_or_else(|| proposed_recipe_edits(&app, &request.source));
+        .unwrap_or_else(|| proposed_recipe_edits(&app, &source));
     if recipe_edits.ids.is_none() || request.regenerate_identifiers {
         recipe_edits.ids = Some(generated_ids(&app.id));
     }
-    fill_empty_recipe_text(&mut recipe_edits, &app, &request.source);
-    app.provisioning.launch_once_recommended = recipe_edits.launch_enabled;
+    fill_empty_recipe_text(&mut recipe_edits, &app, &source);
+    app.launcher_activity = verified_launcher_activity(
+        &request.facts,
+        recipe_edits.launch_enabled,
+        recipe_edits.launcher_activity.as_deref(),
+    );
     diagnostics.extend(app_diagnostics(&app));
     let recipe = build_recipe(
         &app,
         &request.facts,
-        &request.source,
+        &source,
         &recipe_edits,
         request.permission_automation.as_ref(),
         &mut diagnostics,
@@ -263,11 +329,13 @@ pub(crate) fn generate_remote_app_recipe_draft(
         diagnostics,
         blocking,
         app,
+        apk_inspection,
     }
 }
 
 fn validate_source(
     source: &RemoteSource,
+    selection: &RemoteSource,
     release_analysis: Option<&TrustedReleaseAnalysis>,
 ) -> Vec<DraftDiagnostic> {
     let mut diagnostics = Vec::new();
@@ -309,18 +377,56 @@ fn validate_source(
                 "source.strategy",
             ));
         }
-        if source.mode == "github_repository" {
-            diagnostics.extend(release_pattern_diagnostics(source, release_analysis));
-        } else if source
-            .asset_pattern
-            .as_deref()
-            .is_none_or(|pattern| regex::Regex::new(pattern).is_err())
+        if !matches!(
+            source.provider.as_deref(),
+            Some("github" | "gitlab" | "forgejo")
+        ) {
+            diagnostics.push(error(
+                "latest_release_provider_unsupported",
+                "Latest compatible release requires a supported release provider.",
+                "source.provider",
+            ));
+        }
+        // The runtime release resolver resolves GitHub and GitLab releases
+        // from their official service origin, so an authored self-hosted
+        // origin would save a Recipe that downloads from a different server.
+        if let Some(origin) = canonical_provider_origin(source.provider.as_deref()) {
+            if source
+                .base_url
+                .as_deref()
+                .is_some_and(|value| !is_canonical_service_origin(value, origin))
+            {
+                diagnostics.push(error(
+                    "latest_release_base_url_unsupported",
+                    "The runtime release resolver resolves GitHub and GitLab releases from the provider official service origin, so a self-hosted origin cannot generate a matching recipe yet. Use the official origin, or a Forgejo source for a self-hosted server.",
+                    "source.baseUrl",
+                ));
+            }
+        }
+        if normalize_asset_pattern(source.asset_pattern.as_deref())
+            .is_some_and(|pattern| regex::Regex::new(&pattern).is_err())
         {
             diagnostics.push(error(
                 "latest_release_asset_pattern_invalid",
-                "Latest compatible release requires a valid APK filename pattern.",
+                "Rust rejected the APK filename pattern. Use syntax supported by the runtime regex engine.",
                 "source.assetPattern",
             ));
+        }
+        if source.mode == "github_repository" {
+            if release_analysis.is_some() && !release_evidence_matches_selection(source, selection)
+            {
+                // The author retargeted the repository, provider, or service
+                // origin of the reviewed artifact, so the trusted release
+                // analysis belongs to a different source and cannot confirm
+                // this filename policy.
+                diagnostics.push(warning(
+                    "latest_release_analysis_stale",
+                    "The edited release source no longer matches the analyzed GitHub repository, so its releases could not confirm the filename policy. Analyze the edited source to check it.",
+                    "source.assetPattern",
+                ));
+            } else {
+                diagnostics.extend(release_pattern_diagnostics(source, release_analysis));
+            }
         }
     }
     if let Some(trusted_sha256) = source.trusted_sha256.as_deref().filter(|value| {
@@ -360,37 +466,43 @@ fn validate_source(
     diagnostics
 }
 
+/// Return whether a latest-release source still describes the analyzed GitHub
+/// source that its trusted release analysis belongs to. An author may retarget
+/// the provider, service origin, or repository of the reviewed artifact, which
+/// leaves the session's release analysis describing a different source.
+fn release_evidence_matches_selection(source: &RemoteSource, selection: &RemoteSource) -> bool {
+    source.provider == selection.provider
+        && source.base_url == selection.base_url
+        && source.repository == selection.repository
+}
+
 fn release_pattern_diagnostics(
     source: &RemoteSource,
     release_analysis: Option<&TrustedReleaseAnalysis>,
 ) -> Vec<DraftDiagnostic> {
-    let Some(pattern) = source
-        .asset_pattern
-        .as_deref()
-        .filter(|pattern| !pattern.trim().is_empty())
-    else {
-        return vec![error(
-            "latest_release_asset_pattern_invalid",
-            "Latest compatible release requires a valid APK filename pattern.",
-            "source.assetPattern",
-        )];
+    let pattern = normalize_asset_pattern(source.asset_pattern.as_deref());
+    let expression = match pattern {
+        Some(pattern) => match regex::Regex::new(&pattern) {
+            Ok(expression) => Some(expression),
+            Err(_) => {
+                return vec![error(
+                    "latest_release_asset_pattern_invalid",
+                    "Rust rejected the APK filename pattern. Use syntax supported by the runtime regex engine.",
+                    "source.assetPattern",
+                )]
+            }
+        },
+        None => None,
     };
-    let expression = match regex::Regex::new(pattern) {
-        Ok(expression) => expression,
-        Err(_) => {
+    let analysis = match release_analysis {
+        Some(analysis) => analysis,
+        None => {
             return vec![error(
-                "latest_release_asset_pattern_invalid",
-                "Rust rejected the APK filename pattern. Use syntax supported by the runtime regex engine.",
+                "latest_release_analysis_missing",
+                "Trusted GitHub release analysis is required before latest-compatible generation.",
                 "source.assetPattern",
             )]
         }
-    };
-    let Some(analysis) = release_analysis else {
-        return vec![error(
-            "latest_release_analysis_missing",
-            "Trusted GitHub release analysis is required before latest-compatible generation.",
-            "source.assetPattern",
-        )];
     };
     if analysis.releases.is_empty() {
         return vec![error(
@@ -424,16 +536,25 @@ fn release_pattern_diagnostics(
         let mut matching_names = release
             .asset_file_names
             .iter()
-            .filter(|file_name| expression.is_match(file_name))
+            .filter(|file_name| {
+                expression
+                    .as_ref()
+                    .is_none_or(|expression| expression.is_match(file_name))
+            })
             .cloned()
             .collect::<Vec<_>>();
         matching_names.sort();
+        let qualifier = if expression.is_some() {
+            "matching the pattern"
+        } else {
+            "eligible"
+        };
         match (index, matching_names.len()) {
             (0, 0) => diagnostics.push(error(
                 "latest_release_current_no_match",
                 &format!(
-                    "The current release '{}' has no APK filename matching the pattern.",
-                    release.release_tag
+                    "The current release '{}' has no {qualifier} APK asset.",
+                    release.release_tag,
                 ),
                 "source.assetPattern",
             )),
@@ -441,7 +562,7 @@ fn release_pattern_diagnostics(
             (0, count) => diagnostics.push(error(
                 "latest_release_current_multiple_matches",
                 &format!(
-                    "The current release '{}' has {count} APK filenames matching the pattern: {}.",
+                    "The current release '{}' has {count} {qualifier} APK assets: {}.",
                     release.release_tag,
                     matching_names.join(", ")
                 ),
@@ -450,8 +571,8 @@ fn release_pattern_diagnostics(
             (_, 0) => diagnostics.push(warning(
                 "latest_release_historical_no_match",
                 &format!(
-                    "Older release '{}' has no APK filename matching the pattern.",
-                    release.release_tag
+                    "Older release '{}' has no {qualifier} APK asset.",
+                    release.release_tag,
                 ),
                 "source.assetPattern",
             )),
@@ -459,7 +580,7 @@ fn release_pattern_diagnostics(
             (_, count) => diagnostics.push(warning(
                 "latest_release_historical_multiple_matches",
                 &format!(
-                    "Older release '{}' has {count} APK filenames matching the pattern: {}.",
+                    "Older release '{}' has {count} {qualifier} APK assets: {}.",
                     release.release_tag,
                     matching_names.join(", ")
                 ),
@@ -523,126 +644,240 @@ fn permission_automation_issue(issue: PermissionAutomationIssue) -> DraftDiagnos
     error(issue.code, issue.message, &issue.field)
 }
 
+/// Partition verified permission selections into the canonical app permission sets.
+///
+/// A selection contributes to the generated app definition only when its
+/// strategy supports permission automation, its actions pass validation, and
+/// its package identity matches the inspected APK manifest.
+fn verified_permission_sets(
+    selection: Option<&PermissionAutomationSelection>,
+    facts: &ApkInspectionFacts,
+    automation_eligible: bool,
+) -> Option<AppPermissionSets> {
+    let selection = selection.filter(|selection| automation_eligible && !selection.is_empty())?;
+    if !selection.validation_issues().is_empty()
+        || facts.package_name.as_deref() != Some(selection.package_name.as_str())
+    {
+        return None;
+    }
+    app_permission_sets(selection)
+}
+
 fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinitionV1 {
     let id_source = facts
         .application_label
         .as_deref()
         .or(facts.package_name.as_deref())
         .unwrap_or_default();
-    let pinned = source.strategy == "pinned_remote_asset";
-    let latest = source.strategy == "latest_compatible_release";
-    let mut options = OrderedValueMap::new();
-    options.insert(
-        "url".to_string(),
-        Value::String(source.download_url.clone()),
-    );
-    if let Some(repository) = &source.repository {
-        options.insert("repository".to_string(), Value::String(repository.clone()));
-    }
-    if let Some(provider) = &source.provider {
-        options.insert("provider".to_string(), Value::String(provider.clone()));
-    }
-    if let Some(base_url) = &source.base_url {
-        options.insert("base_url".to_string(), Value::String(base_url.clone()));
-    }
-    if let Some(tag) = &source.release_tag {
-        options.insert("release_tag".to_string(), Value::String(tag.clone()));
-    }
-    if let Some(asset) = &source.asset_name {
-        options.insert("asset_name".to_string(), Value::String(asset.clone()));
-    }
-    if let Some(pattern) = &source.asset_pattern {
-        options.insert("asset_pattern".to_string(), Value::String(pattern.clone()));
-    }
-    if latest {
-        options.insert(
-            "include_prereleases".to_string(),
-            Value::Bool(source.include_prereleases),
-        );
-    }
-    let mut tracking = OrderedValueMap::new();
-    if let Some(repository) = &source.repository {
-        tracking.insert("repository".to_string(), Value::String(repository.clone()));
-    }
-    if let Some(provider) = &source.provider {
-        tracking.insert("provider".to_string(), Value::String(provider.clone()));
-    }
-    if let Some(base_url) = &source.base_url {
-        tracking.insert("base_url".to_string(), Value::String(base_url.clone()));
-    }
-    if let Some(tag) = &source.release_tag {
-        tracking.insert("release_tag".to_string(), Value::String(tag.clone()));
-    }
-    tracking.insert(
-        "url".to_string(),
-        Value::String(source.download_url.clone()),
+    let name = facts
+        .application_label
+        .clone()
+        .or_else(|| facts.package_name.clone())
+        .unwrap_or_default();
+    let mut artifacts = IndexMap::new();
+    artifacts.insert(
+        "apk".to_string(),
+        AppArtifactV1 {
+            kind: AppArtifactKind::Apk,
+            name: (!name.trim().is_empty()).then(|| format!("{name} APK")),
+            description: None,
+            source: proposed_artifact_source(source),
+        },
     );
     AppDefinitionV1 {
         schema_version: SCHEMA_VERSION_V1,
         kind: APP_DEFINITION_KIND.to_string(),
         id: normalize_identifier_component(id_source),
-        name: facts
-            .application_label
-            .clone()
-            .or_else(|| facts.package_name.clone())
-            .unwrap_or_default(),
+        name,
         description: None,
-        category: String::new(),
-        package: AppPackage {
-            primary: facts.package_name.clone().unwrap_or_default(),
-            aliases: Vec::new(),
-        },
-        install_source: AppInstallSource {
-            type_name: if pinned {
-                "remote_apk"
-            } else if latest {
-                "remote_release"
-            } else {
-                "user_provided_apk"
-            }
-            .to_string(),
-            resolver: if pinned {
-                "direct_url"
-            } else if latest {
-                "provider_latest_release"
-            } else {
-                "none"
-            }
-            .to_string(),
-            options: if pinned || latest {
-                options
-            } else {
-                OrderedValueMap::new()
-            },
-        },
-        tracking_source: AppTrackingSource {
-            type_name: if !pinned && !latest {
-                "local_apk"
-            } else if source.mode.ends_with("_repository") || source.mode.ends_with("_release") {
-                "provider_release"
-            } else {
-                "remote_apk"
-            }
-            .to_string(),
-            fields: if pinned || latest {
-                tracking
-            } else {
-                OrderedValueMap::new()
-            },
-        },
-        artifacts: AppArtifactSupport {
-            apk: RequiredArtifactSupport {
-                required: pinned || latest,
-            },
-            shared_storage_config: ConfigArtifactSupport { supported: false },
-            app_data_config: ConfigArtifactSupport { supported: false },
-            byo_apk: RequiredArtifactSupport {
-                required: !pinned && !latest,
-            },
-        },
-        provisioning: AppProvisioning::default(),
-        inputs: Vec::new(),
+        category: None,
+        package_id: facts.package_name.clone().unwrap_or_default(),
+        artifacts,
+        permission_sets: None,
+        targets: IndexMap::new(),
+        launcher_activity: None,
         metadata: OrderedValueMap::new(),
+    }
+}
+
+/// The artifact source proposed for the selected remote source strategy.
+///
+/// Unsupported or incomplete selections fall back to the user-provided
+/// strategy; a blocking source diagnostic prevents such a draft from being
+/// emitted, so the fallback never reaches a saved document.
+fn proposed_artifact_source(source: &RemoteSource) -> AppArtifactSource {
+    match source.strategy.as_str() {
+        "pinned_remote_asset" => AppArtifactSource::DirectUrl {
+            url: source.download_url.clone(),
+            sha256: source
+                .trusted_sha256
+                .as_deref()
+                .and_then(normalize_expected_sha256)
+                .map(|value| value.to_ascii_lowercase()),
+        },
+        "latest_compatible_release" => match release_provider(source.provider.as_deref()) {
+            Some(provider) => AppArtifactSource::LatestRelease {
+                provider,
+                base_url: source.base_url.clone().unwrap_or_default(),
+                repository: source.repository.clone().unwrap_or_default(),
+                asset_pattern: normalize_asset_pattern(source.asset_pattern.as_deref()),
+                invert_asset_pattern: None,
+                prerelease: source.include_prereleases,
+            },
+            None => AppArtifactSource::UserProvided,
+        },
+        _ => AppArtifactSource::UserProvided,
+    }
+}
+
+/// Normalize an authored APK filename pattern. Surrounding whitespace carries
+/// no meaning, and a blank pattern means the release resolves by artifact kind
+/// alone.
+fn normalize_asset_pattern(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(str::to_string)
+}
+
+/// Release provider family name as stored in an App Definition.
+fn release_provider_name(provider: &ReleaseProvider) -> &'static str {
+    match provider {
+        ReleaseProvider::Github => "github",
+        ReleaseProvider::Gitlab => "gitlab",
+        ReleaseProvider::Forgejo => "forgejo",
+    }
+}
+
+/// App Definition artifact source strategy that represents one remote-source
+/// strategy.
+fn artifact_strategy_name(strategy: &str) -> Option<&'static str> {
+    match strategy {
+        "pinned_remote_asset" => Some("direct_url"),
+        "latest_compatible_release" => Some("latest_release"),
+        "user_provided_apk" => Some("user_provided"),
+        _ => None,
+    }
+}
+
+/// Artifact source strategy name as stored in one App Definition artifact.
+fn app_artifact_strategy_name(source: &AppArtifactSource) -> &'static str {
+    match source {
+        AppArtifactSource::UserProvided => "user_provided",
+        AppArtifactSource::DirectUrl { .. } => "direct_url",
+        AppArtifactSource::LatestRelease { .. } => "latest_release",
+    }
+}
+
+/// Return the filename-pattern inversion declared by one App Definition
+/// artifact.
+fn artifact_inversion(app: &AppDefinitionV1, id: &str) -> Option<bool> {
+    match app.artifacts.get(id).map(|artifact| &artifact.source) {
+        Some(AppArtifactSource::LatestRelease {
+            invert_asset_pattern,
+            ..
+        }) => *invert_asset_pattern,
+        _ => None,
+    }
+}
+
+/// Reconcile the App Definition artifact that represents the selected remote
+/// source with the source selection, and return the effective download policy
+/// the generated Recipe duplicates.
+///
+/// The reviewed artifact is authoritative: facts edited there win, so the
+/// Recipe duplicates the saved App Definition rather than the source step.
+/// Blank artifact fields are filled from the source selection, so an
+/// author-supplied checksum or filename pattern is retained no matter which
+/// input produced it and the two generated documents cannot disagree.
+fn reconcile_remote_source(
+    app: &mut AppDefinitionV1,
+    artifact_id: &str,
+    source: &RemoteSource,
+) -> RemoteSource {
+    let Some(artifact) = app.artifacts.get_mut(artifact_id) else {
+        return source.clone();
+    };
+    let mut effective = source.clone();
+    match (&mut artifact.source, source.strategy.as_str()) {
+        (AppArtifactSource::DirectUrl { url, sha256 }, "pinned_remote_asset") => {
+            if url.trim() == source.download_url.trim() && sha256.is_none() {
+                *sha256 = source
+                    .trusted_sha256
+                    .as_deref()
+                    .and_then(normalize_expected_sha256)
+                    .map(|value| value.to_ascii_lowercase());
+            }
+            effective.download_url = url.clone();
+            if sha256.is_some() {
+                effective.trusted_sha256 = sha256.clone();
+            } else if url.trim() != source.download_url.trim() {
+                // A retargeted artifact never inherits the checksum of the
+                // selection it replaced.
+                effective.trusted_sha256 = None;
+            }
+        }
+        (
+            AppArtifactSource::LatestRelease {
+                provider,
+                base_url,
+                repository,
+                asset_pattern,
+                prerelease,
+                ..
+            },
+            "latest_compatible_release",
+        ) => {
+            if repository.trim().is_empty() {
+                if let Some(selection) = source.repository.as_deref() {
+                    *repository = selection.to_string();
+                }
+            }
+            if base_url.trim().is_empty() {
+                if let Some(selection) = source.base_url.as_deref() {
+                    *base_url = selection.to_string();
+                }
+            }
+            // A blank pattern means kind-only resolution, so clearing the
+            // artifact pattern must not restore the selection's old pattern.
+            *asset_pattern = normalize_asset_pattern(asset_pattern.as_deref());
+            effective.provider = Some(release_provider_name(provider).to_string());
+            effective.base_url = Some(base_url.clone());
+            effective.repository = Some(repository.clone());
+            effective.asset_pattern = asset_pattern.clone();
+            effective.include_prereleases = *prerelease;
+        }
+        _ => {}
+    }
+    effective
+}
+
+/// Return the service origin the runtime release resolver honors for one
+/// provider family, or None for providers that resolve from the authored
+/// origin.
+fn canonical_provider_origin(provider: Option<&str>) -> Option<&'static str> {
+    match provider {
+        Some("github") => Some("https://github.com"),
+        Some("gitlab") => Some("https://gitlab.com"),
+        _ => None,
+    }
+}
+
+/// Return whether an authored service origin names the canonical provider
+/// origin. Trailing slashes and letter case carry no meaning.
+fn is_canonical_service_origin(base_url: &str, origin: &str) -> bool {
+    fn normalized(value: &str) -> String {
+        value.trim().trim_end_matches('/').to_ascii_lowercase()
+    }
+    normalized(base_url) == normalized(origin)
+}
+
+fn release_provider(value: Option<&str>) -> Option<ReleaseProvider> {
+    match value {
+        Some("github") => Some(ReleaseProvider::Github),
+        Some("gitlab") => Some(ReleaseProvider::Gitlab),
+        Some("forgejo") => Some(ReleaseProvider::Forgejo),
+        _ => None,
     }
 }
 
@@ -778,7 +1013,7 @@ fn build_recipe(
         resolve_params.insert(
             "asset_pattern".to_string(),
             ParamValue::Literal(Value::String(
-                source.asset_pattern.clone().unwrap_or_default(),
+                normalize_asset_pattern(source.asset_pattern.as_deref()).unwrap_or_default(),
             )),
         );
         steps.push(Step {
@@ -892,7 +1127,7 @@ fn build_recipe(
     let mut skip_params = OrderedMap::new();
     skip_params.insert(
         "package_name".to_string(),
-        Value::String(app.package.primary.clone()),
+        Value::String(app.package_id.clone()),
     );
     steps.push(Step {
         id: ids.install_step_id.clone(),
@@ -952,7 +1187,7 @@ fn build_recipe(
             let mut params = OrderedMap::new();
             params.insert(
                 "package_name".to_string(),
-                ParamValue::Literal(Value::String(app.package.primary.clone())),
+                ParamValue::Literal(Value::String(app.package_id.clone())),
             );
             params.insert(
                 "activity".to_string(),
@@ -1000,69 +1235,11 @@ fn apply_mapping_edits(
     mappings: RemoteMappingEdits,
     diagnostics: &mut Vec<DraftDiagnostic>,
 ) {
-    if let Some(value) = parse_mapping(
-        "installSource.options",
-        &mappings.install_source_options,
-        diagnostics,
-    ) {
-        app.install_source.options = value;
-    }
-    if let Some(value) = parse_mapping(
-        "trackingSource",
-        &mappings.tracking_source_fields,
-        diagnostics,
-    ) {
-        app.tracking_source.fields = value;
-    }
+    app.artifacts = collect_artifacts(mappings.artifacts, diagnostics);
+    app.targets = collect_targets(mappings.targets, diagnostics);
     if let Some(value) = parse_mapping("metadata", &mappings.metadata, diagnostics) {
         app.metadata = value;
     }
-    app.inputs = parse_mapping_list("inputs", mappings.inputs, diagnostics);
-    app.provisioning.config_targets = parse_mapping_list(
-        "provisioning.configTargets",
-        mappings.config_targets,
-        diagnostics,
-    );
-}
-
-fn parse_mapping(
-    field: &str,
-    source: &str,
-    diagnostics: &mut Vec<DraftDiagnostic>,
-) -> Option<OrderedValueMap> {
-    match serde_json::from_str::<StrictJsonValue>(source) {
-        Ok(StrictJsonValue::Object(entries)) => Some(entries.into_iter().collect()),
-        Ok(_) => {
-            diagnostics.push(error(
-                "mapping_json_not_object",
-                "Mapping fields must use a JSON object.",
-                field,
-            ));
-            None
-        }
-        Err(_) => {
-            diagnostics.push(error(
-                "mapping_json_invalid",
-                "Mapping fields must use valid JSON without duplicate keys.",
-                field,
-            ));
-            None
-        }
-    }
-}
-
-fn parse_mapping_list(
-    field: &str,
-    sources: Vec<String>,
-    diagnostics: &mut Vec<DraftDiagnostic>,
-) -> Vec<OrderedValueMap> {
-    sources
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, source)| {
-            parse_mapping(&format!("{field}[{index}]"), &source, diagnostics)
-        })
-        .collect()
 }
 
 fn app_diagnostics(app: &AppDefinitionV1) -> Vec<DraftDiagnostic> {
@@ -1116,14 +1293,14 @@ fn evidence(
 ) -> Vec<FieldEvidence> {
     vec![
         field_evidence(
-            "package.primary",
+            "package_id",
             if facts.package_name.is_some() {
                 EvidenceState::Verified
             } else {
                 EvidenceState::Missing
             },
             "apk_manifest",
-            current.package.primary != proposed.package.primary,
+            current.package_id != proposed.package_id,
         ),
         field_evidence(
             "name",
@@ -1152,21 +1329,9 @@ fn evidence(
             current.category != proposed.category,
         ),
         field_evidence(
-            "install_source",
-            EvidenceState::Verified,
-            &source.mode,
-            current.install_source != proposed.install_source,
-        ),
-        field_evidence(
-            "tracking_source",
-            EvidenceState::Verified,
-            &source.mode,
-            current.tracking_source != proposed.tracking_source,
-        ),
-        field_evidence(
             "artifacts",
-            EvidenceState::Suggested,
-            "pinned_remote_asset",
+            EvidenceState::Verified,
+            &source.mode,
             current.artifacts != proposed.artifacts,
         ),
         field_evidence(
@@ -1212,124 +1377,10 @@ fn present(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn error(code: &str, message: &str, field: &str) -> DraftDiagnostic {
-    DraftDiagnostic {
-        severity: DraftSeverity::Error,
-        code: code.to_string(),
-        message: message.to_string(),
-        field: field.to_string(),
-    }
-}
-
-fn warning(code: &str, message: &str, field: &str) -> DraftDiagnostic {
-    DraftDiagnostic {
-        severity: DraftSeverity::Warning,
-        code: code.to_string(),
-        message: message.to_string(),
-        field: field.to_string(),
-    }
-}
-
-#[derive(Clone, Debug)]
-enum StrictJsonValue {
-    Null,
-    Bool(bool),
-    Number(serde_json::Number),
-    String(String),
-    Array(Vec<StrictJsonValue>),
-    Object(Vec<(String, Value)>),
-}
-impl StrictJsonValue {
-    fn into_value(self) -> Value {
-        match self {
-            Self::Null => Value::Null,
-            Self::Bool(value) => Value::Bool(value),
-            Self::Number(value) => Value::Number(value),
-            Self::String(value) => Value::String(value),
-            Self::Array(values) => Value::Array(values.into_iter().map(Self::into_value).collect()),
-            Self::Object(entries) => Value::Object(entries.into_iter().collect::<Map<_, _>>()),
-        }
-    }
-}
-impl<'de> Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct StrictVisitor;
-        impl<'de> Visitor<'de> for StrictVisitor {
-            type Value = StrictJsonValue;
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a JSON value without duplicate object keys")
-            }
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue::Null)
-            }
-            fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue::Null)
-            }
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue::Bool(value))
-            }
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(StrictJsonValue::Number(value.into()))
-            }
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(StrictJsonValue::Number(value.into()))
-            }
-            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                serde_json::Number::from_f64(value)
-                    .map(StrictJsonValue::Number)
-                    .ok_or_else(|| E::custom("invalid JSON number"))
-            }
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue::String(value.to_string()))
-            }
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-                Ok(StrictJsonValue::String(value))
-            }
-            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
-                    values.push(value);
-                }
-                Ok(StrictJsonValue::Array(values))
-            }
-            fn visit_map<A>(self, mut mapping: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut seen = HashSet::new();
-                let mut entries = Vec::new();
-                while let Some(key) = mapping.next_key::<String>()? {
-                    if !seen.insert(key.clone()) {
-                        return Err(serde::de::Error::custom(format!("duplicate key {key}")));
-                    }
-                    let value = mapping.next_value::<StrictJsonValue>()?.into_value();
-                    entries.push((key, value));
-                }
-                Ok(StrictJsonValue::Object(entries))
-            }
-        }
-        deserializer.deserialize_any(StrictVisitor)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authored_models::AppOpMode;
     use crate::generation::app_recipe::{AppOpPermissionSelection, RuntimePermissionSelection};
 
     fn facts() -> ApkInspectionFacts {
@@ -1391,13 +1442,21 @@ mod tests {
         include_prereleases: bool,
         release_analysis: Option<TrustedReleaseAnalysis>,
     ) -> RemoteAppRecipeDraft {
+        latest_draft_with_pattern(Some(pattern), include_prereleases, release_analysis)
+    }
+
+    fn latest_draft_with_pattern(
+        pattern: Option<&str>,
+        include_prereleases: bool,
+        release_analysis: Option<TrustedReleaseAnalysis>,
+    ) -> RemoteAppRecipeDraft {
         let mut latest = source();
         latest.mode = "github_repository".to_string();
         latest.strategy = "latest_compatible_release".to_string();
-        latest.asset_pattern = Some(pattern.to_string());
+        latest.asset_pattern = pattern.map(str::to_string);
         latest.include_prereleases = include_prereleases;
         let mut app = proposed_app(&facts(), &latest);
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
         generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
@@ -1445,8 +1504,8 @@ mod tests {
     fn mixed_permission_automation_uses_inspected_package_and_launch_dependency() {
         let source = source();
         let mut app = proposed_app(&facts(), &source);
-        app.category = "emulator".to_string();
-        app.package.primary = "com.example.edited".to_string();
+        app.category = Some("emulator".to_string());
+        app.package_id = "com.example.edited".to_string();
         let mut edits = proposed_recipe_edits(&app, &source);
         edits.launch_enabled = true;
         edits.launcher_activity = Some("com.example.remote/.MainActivity".to_string());
@@ -1545,16 +1604,46 @@ mod tests {
         );
         assert!(!permission_step.to_string().contains("com.example.edited"));
         assert!(!permission_step.to_string().contains("root_shell"));
-        let metadata = &draft.app.metadata["apk_inspection"];
+        let evidence = draft
+            .apk_inspection
+            .as_ref()
+            .expect("draft review keeps transient APK inspection evidence");
+        assert!(!draft.app.metadata.contains_key("apk_inspection"));
+        let permission_sets = draft
+            .app
+            .permission_sets
+            .as_ref()
+            .expect("verified selections produce canonical permission sets");
+        let baseline = permission_sets.baseline.as_ref().unwrap();
+        assert_eq!(baseline.runtime.len(), 1);
         assert_eq!(
-            metadata["selected_runtime_permissions"],
+            baseline.runtime[0].permission,
+            "android.permission.RECORD_AUDIO"
+        );
+        assert_eq!(baseline.runtime[0].android_api_min, Some(23));
+        assert_eq!(baseline.app_ops.len(), 1);
+        assert_eq!(baseline.app_ops[0].op, "ZETA_OP");
+        let elevated = permission_sets.elevated.as_ref().unwrap();
+        assert_eq!(elevated.runtime.len(), 1);
+        assert_eq!(elevated.runtime[0].permission, "android.permission.CAMERA");
+        assert_eq!(elevated.runtime[0].android_api_min, Some(23));
+        assert_eq!(elevated.app_ops.len(), 1);
+        assert_eq!(elevated.app_ops[0].op, "MANAGE_EXTERNAL_STORAGE");
+        assert_eq!(elevated.app_ops[0].mode, AppOpMode::Allow);
+        assert_eq!(elevated.app_ops[0].android_api_min, Some(30));
+        let canonical = draft.app_canonical_yaml.clone().unwrap();
+        assert!(canonical.contains("permission_sets:"));
+        assert!(!canonical.contains("requires_root"));
+        assert!(!canonical.contains("root_shell"));
+        assert_eq!(
+            evidence["selected_runtime_permissions"],
             serde_json::json!([
                 { "permission_name": "android.permission.CAMERA", "requires_root": true },
                 { "permission_name": "android.permission.RECORD_AUDIO", "requires_root": false }
             ])
         );
         assert_eq!(
-            metadata["selected_app_ops"],
+            evidence["selected_app_ops"],
             serde_json::json!([
                 {
                     "permission_name": "android.permission.MANAGE_EXTERNAL_STORAGE",
@@ -1609,7 +1698,7 @@ mod tests {
         ] {
             let source = source();
             let mut app = proposed_app(&facts(), &source);
-            app.category = "emulator".to_string();
+            app.category = Some("emulator".to_string());
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
@@ -1652,7 +1741,7 @@ mod tests {
         source.strategy = "latest_compatible_release".to_string();
         source.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
         let mut app = proposed_app(&facts(), &source);
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
@@ -1687,7 +1776,7 @@ mod tests {
     fn empty_permission_automation_preserves_existing_recipe_shape() {
         let source = source();
         let mut app = proposed_app(&facts(), &source);
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
@@ -1728,7 +1817,7 @@ mod tests {
             ),
         ] {
             let mut app = proposed_app(&facts(), &source);
-            app.category = "emulator".to_string();
+            app.category = Some("emulator".to_string());
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
@@ -1750,8 +1839,8 @@ mod tests {
     #[test]
     fn pinned_source_generates_remote_artifact_and_resolve_step() {
         let mut app = proposed_app(&facts(), &source());
-        app.category = "emulator".to_string();
-        app.package.primary = "com.example.edited".to_string();
+        app.category = Some("emulator".to_string());
+        app.package_id = "com.example.edited".to_string();
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: source(),
@@ -1773,13 +1862,281 @@ mod tests {
     }
 
     #[test]
+    fn blank_selection_pattern_normalizes_to_kind_only_policy() {
+        let draft =
+            latest_draft_with_pattern(Some("  \t "), false, Some(unique_release_analysis()));
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(matches!(
+            &draft.app.artifacts["apk"].source,
+            AppArtifactSource::LatestRelease {
+                asset_pattern: None,
+                ..
+            }
+        ));
+        let resolve = draft.recipe["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["type"] == "resolve_remote_release")
+            .expect("latest release resolve step");
+        assert_eq!(resolve["params"]["asset_pattern"], "");
+    }
+
+    #[test]
+    fn edited_artifact_download_policy_drives_the_duplicated_recipe() {
+        let source = source();
+        let mut app = proposed_app(&facts(), &source);
+        app.artifacts.get_mut("apk").unwrap().source = AppArtifactSource::DirectUrl {
+            url: "https://example.test/edited/app.apk".to_string(),
+            sha256: Some("c".repeat(64)),
+        };
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source,
+            release_analysis: None,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        let recipe_yaml = draft.recipe_canonical_yaml.as_deref().unwrap();
+        assert!(recipe_yaml.contains("https://example.test/edited/app.apk"));
+        assert!(recipe_yaml.contains(&format!("expected_sha256: {}", "C".repeat(64))));
+    }
+
+    #[test]
+    fn edited_artifact_release_policy_drives_the_duplicated_recipe() {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        app.artifacts.get_mut("apk").unwrap().source = AppArtifactSource::LatestRelease {
+            provider: ReleaseProvider::Github,
+            base_url: "https://github.com".to_string(),
+            repository: "example/edited".to_string(),
+            asset_pattern: Some("^app-v1.*\\.apk$".to_string()),
+            invert_asset_pattern: None,
+            prerelease: true,
+        };
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            release_analysis: Some(unique_release_analysis()),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        let resolve = draft.recipe["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["type"] == "resolve_remote_release")
+            .expect("latest release resolve step");
+        assert_eq!(resolve["params"]["repository"], "example/edited");
+        assert_eq!(resolve["params"]["asset_pattern"], "^app-v1.*\\.apk$");
+        assert_eq!(resolve["params"]["include_prereleases"], true);
+        assert!(draft
+            .app_canonical_yaml
+            .as_deref()
+            .unwrap()
+            .contains("repository: example/edited"));
+    }
+
+    #[test]
+    fn retargeted_release_repository_warns_instead_of_using_stale_evidence() {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v1.*\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        // The trusted analysis describes example/project. The reviewed
+        // artifact points at example/other with a pattern that no asset in the
+        // analyzed repository matches, so judging that pattern against the
+        // original analysis would report a false blocking mismatch.
+        app.artifacts.get_mut("apk").unwrap().source = AppArtifactSource::LatestRelease {
+            provider: ReleaseProvider::Github,
+            base_url: "https://github.com".to_string(),
+            repository: "example/other".to_string(),
+            asset_pattern: Some("^unrelated-.*\\.apk$".to_string()),
+            invert_asset_pattern: None,
+            prerelease: false,
+        };
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            release_analysis: Some(unique_release_analysis()),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "latest_release_analysis_stale"));
+        assert!(!draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code.starts_with("latest_release_current_")));
+    }
+
+    #[test]
+    fn clearing_the_reviewed_artifact_pattern_resolves_by_kind_alone() {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        if let AppArtifactSource::LatestRelease { asset_pattern, .. } =
+            &mut app.artifacts.get_mut("apk").unwrap().source
+        {
+            *asset_pattern = None;
+        }
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            release_analysis: Some(unique_release_analysis()),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(matches!(
+            &draft.app.artifacts["apk"].source,
+            AppArtifactSource::LatestRelease {
+                asset_pattern: None,
+                ..
+            }
+        ));
+        let resolve = draft.recipe["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["type"] == "resolve_remote_release")
+            .expect("latest release resolve step");
+        assert_eq!(resolve["params"]["asset_pattern"], "");
+    }
+
+    #[test]
+    fn replacing_the_reviewed_remote_artifact_blocks_generation() {
+        let pinned = source();
+        let mut app = proposed_app(&facts(), &pinned);
+        app.artifacts.get_mut("apk").unwrap().source = AppArtifactSource::UserProvided;
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: pinned,
+            release_analysis: None,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "remote_source_artifact_missing"));
+    }
+
+    #[test]
+    fn inverting_the_reviewed_artifact_pattern_blocks_generation() {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v1.*\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        if let AppArtifactSource::LatestRelease {
+            invert_asset_pattern,
+            ..
+        } = &mut app.artifacts.get_mut("apk").unwrap().source
+        {
+            *invert_asset_pattern = Some(true);
+        }
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            release_analysis: Some(unique_release_analysis()),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "latest_release_invert_unsupported"));
+    }
+
+    #[test]
+    fn selection_checksum_fills_a_blank_artifact_download_source() {
+        let mut selection = source();
+        selection.trusted_sha256 = Some("d".repeat(64).to_ascii_uppercase());
+        let app = proposed_app(&facts(), &source());
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: selection,
+            release_analysis: None,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        let expected = "d".repeat(64);
+        assert!(matches!(
+            &draft.app.artifacts["apk"].source,
+            AppArtifactSource::DirectUrl {
+                sha256: Some(sha256),
+                ..
+            } if sha256 == &expected
+        ));
+        assert!(draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .unwrap()
+            .contains(&format!(
+                "expected_sha256: {}",
+                expected.to_ascii_uppercase()
+            )));
+    }
+
+    #[test]
     fn pinned_source_emits_only_explicit_valid_trusted_sha256() {
         let mut source = source();
         source.trusted_sha256 = Some(
             " \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n".to_string(),
         );
         let mut app = proposed_app(&facts(), &source);
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
 
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
@@ -1796,14 +2153,17 @@ mod tests {
         assert!(draft.recipe_canonical_yaml.unwrap().contains(
             "expected_sha256: 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         ));
-        assert_eq!(
-            draft.app.metadata["apk_inspection"]["calculated_sha256"],
-            "B".repeat(64)
-        );
-        assert_eq!(
-            draft.app.metadata["apk_inspection"]["checksum_status"],
-            "not_compared"
-        );
+        let evidence = draft.apk_inspection.as_ref().unwrap();
+        assert_eq!(evidence["calculated_sha256"], "B".repeat(64));
+        assert_eq!(evidence["checksum_status"], "not_compared");
+        assert!(!draft.app.metadata.contains_key("apk_inspection"));
+        assert!(matches!(
+            &draft.app.artifacts["apk"].source,
+            AppArtifactSource::DirectUrl {
+                sha256: Some(sha256),
+                ..
+            } if sha256 == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
     }
 
     #[test]
@@ -1883,7 +2243,7 @@ mod tests {
                 source.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
             }
             let mut app = proposed_app(&facts(), &source);
-            app.category = "emulator".to_string();
+            app.category = Some("emulator".to_string());
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
@@ -1905,20 +2265,18 @@ mod tests {
     }
 
     #[test]
-    fn user_provided_strategy_preserves_phase_three_source_shape() {
+    fn user_provided_strategy_uses_user_provided_artifact_source() {
         let mut source = source();
         source.strategy = "user_provided_apk".to_string();
         let app = proposed_app(&facts(), &source);
-        assert_eq!(app.install_source.type_name, "user_provided_apk");
-        assert_eq!(app.install_source.resolver, "none");
-        assert!(app.install_source.options.is_empty());
-        assert_eq!(app.tracking_source.type_name, "local_apk");
-        assert!(app.tracking_source.fields.is_empty());
-        assert!(!app.artifacts.apk.required);
-        assert!(app.artifacts.byo_apk.required);
+        assert_eq!(app.package_id, "com.example.remote");
+        assert!(matches!(app.artifacts["apk"].kind, AppArtifactKind::Apk));
+        assert_eq!(app.artifacts["apk"].source, AppArtifactSource::UserProvided);
+        assert!(app.targets.is_empty());
+        assert!(app.permission_sets.is_none());
 
         let mut app = app;
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
@@ -1944,8 +2302,8 @@ mod tests {
         latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
         latest.include_prereleases = true;
         let mut app = proposed_app(&facts(), &latest);
-        app.category = "emulator".to_string();
-        app.package.primary = "com.example.edited".to_string();
+        app.category = Some("emulator".to_string());
+        app.package_id = "com.example.edited".to_string();
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
@@ -1977,7 +2335,7 @@ mod tests {
                 source.asset_pattern = Some("^app\\.apk$".to_string());
             }
             let mut app = proposed_app(&facts(), &source);
-            app.category = "emulator".to_string();
+            app.category = Some("emulator".to_string());
             let mut unavailable_facts = facts();
             unavailable_facts.package_name =
                 (strategy == "latest_compatible_release").then(|| "   ".to_string());
@@ -2014,7 +2372,7 @@ mod tests {
         latest.strategy = "latest_compatible_release".to_string();
         latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
         let mut app = proposed_app(&facts(), &latest);
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
@@ -2026,11 +2384,19 @@ mod tests {
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
-        assert_eq!(draft.app.install_source.resolver, "provider_latest_release");
-        assert_eq!(
-            draft.app.install_source.options["provider"],
-            Value::String("gitlab".to_string())
-        );
+        match &draft.app.artifacts["apk"].source {
+            AppArtifactSource::LatestRelease {
+                provider,
+                base_url,
+                repository,
+                ..
+            } => {
+                assert_eq!(*provider, ReleaseProvider::Gitlab);
+                assert_eq!(base_url, "https://gitlab.com");
+                assert_eq!(repository, "example/group/project");
+            }
+            other => panic!("expected a latest-release artifact source, got {other:?}"),
+        }
         let recipe = draft.recipe_canonical_yaml.unwrap();
         assert!(recipe.contains("provider: gitlab"));
         assert!(recipe.contains("base_url: https://gitlab.com"));
@@ -2048,7 +2414,7 @@ mod tests {
         latest.strategy = "latest_compatible_release".to_string();
         latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
         let mut app = proposed_app(&facts(), &latest);
-        app.category = "emulator".to_string();
+        app.category = Some("emulator".to_string());
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
@@ -2060,10 +2426,19 @@ mod tests {
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
-        assert_eq!(
-            draft.app.install_source.options["base_url"],
-            Value::String("https://codeberg.org".to_string())
-        );
+        match &draft.app.artifacts["apk"].source {
+            AppArtifactSource::LatestRelease {
+                provider,
+                base_url,
+                repository,
+                ..
+            } => {
+                assert_eq!(*provider, ReleaseProvider::Forgejo);
+                assert_eq!(base_url, "https://codeberg.org");
+                assert_eq!(repository, "example/project");
+            }
+            other => panic!("expected a latest-release artifact source, got {other:?}"),
+        }
         let recipe = draft.recipe_canonical_yaml.unwrap();
         assert!(recipe.contains("provider: forgejo"));
         assert!(recipe.contains("base_url: https://codeberg.org"));
@@ -2217,5 +2592,301 @@ mod tests {
             .diagnostics
             .iter()
             .any(|item| item.code == "remote_download_url_invalid"));
+    }
+
+    #[test]
+    fn blank_asset_pattern_filters_latest_release_assets_by_kind_only() {
+        let draft = latest_draft_with_pattern(None, false, Some(unique_release_analysis()));
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        match &draft.app.artifacts["apk"].source {
+            AppArtifactSource::LatestRelease {
+                asset_pattern,
+                invert_asset_pattern,
+                prerelease,
+                ..
+            } => {
+                assert!(asset_pattern.is_none());
+                assert!(invert_asset_pattern.is_none());
+                assert!(!prerelease);
+            }
+            other => panic!("expected a latest-release artifact source, got {other:?}"),
+        }
+        let canonical = draft.app_canonical_yaml.unwrap();
+        assert!(!canonical.contains("asset_pattern"));
+        assert!(!canonical.contains("invert_asset_pattern"));
+
+        let blank = latest_draft_with_pattern(Some("   "), false, Some(unique_release_analysis()));
+        assert!(!blank.blocking, "{:#?}", blank.diagnostics);
+        assert!(matches!(
+            &blank.app.artifacts["apk"].source,
+            AppArtifactSource::LatestRelease {
+                asset_pattern: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn kind_only_latest_release_filtering_still_requires_exactly_one_apk() {
+        let zero = latest_draft_with_pattern(
+            None,
+            false,
+            Some(release_analysis(vec![trusted_release("v1", false, &[])])),
+        );
+        assert!(zero.blocking);
+        assert!(zero
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "latest_release_current_no_match"));
+
+        let multiple = latest_draft_with_pattern(
+            None,
+            false,
+            Some(release_analysis(vec![trusted_release(
+                "v1",
+                false,
+                &["b.apk", "a.apk"],
+            )])),
+        );
+        assert!(multiple.blocking);
+        assert!(multiple.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "latest_release_current_multiple_matches"
+                && diagnostic.message.contains("a.apk, b.apk")
+                && diagnostic.message.contains("eligible")
+        }));
+    }
+
+    #[test]
+    fn latest_release_requires_the_runtime_supported_service_origin() {
+        let mut self_hosted = source();
+        self_hosted.mode = "github_repository".to_string();
+        self_hosted.strategy = "latest_compatible_release".to_string();
+        self_hosted.base_url = Some("https://github.example.com".to_string());
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: self_hosted,
+            release_analysis: Some(unique_release_analysis()),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "latest_release_base_url_unsupported"));
+
+        let mut self_hosted_gitlab = source();
+        self_hosted_gitlab.mode = "gitlab_repository".to_string();
+        self_hosted_gitlab.strategy = "latest_compatible_release".to_string();
+        self_hosted_gitlab.provider = Some("gitlab".to_string());
+        self_hosted_gitlab.base_url = Some("https://gitlab.example.com".to_string());
+        self_hosted_gitlab.repository = Some("group/project".to_string());
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: self_hosted_gitlab,
+            release_analysis: None,
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "latest_release_base_url_unsupported"));
+
+        let mut canonical = source();
+        canonical.mode = "github_repository".to_string();
+        canonical.strategy = "latest_compatible_release".to_string();
+        canonical.base_url = Some("https://GitHub.com/".to_string());
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: canonical,
+            release_analysis: Some(unique_release_analysis()),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(!draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "latest_release_base_url_unsupported"));
+    }
+
+    #[test]
+    fn ambiguous_reviewed_artifact_selection_blocks_generation() {
+        let pinned = source();
+        let mut app = proposed_app(&facts(), &pinned);
+        // The author renamed the generated artifact and added a second
+        // artifact with the same strategy, so the reviewed artifact can no
+        // longer be identified.
+        let renamed = app
+            .artifacts
+            .shift_remove("apk")
+            .expect("proposed artifact");
+        app.artifacts.insert("renamed_apk".to_string(), renamed);
+        app.artifacts.insert(
+            "extra_apk".to_string(),
+            AppArtifactV1 {
+                kind: AppArtifactKind::Apk,
+                name: Some("Extra APK".to_string()),
+                description: None,
+                source: AppArtifactSource::DirectUrl {
+                    url: "https://github.com/example/project/releases/download/v1/extra.apk"
+                        .to_string(),
+                    sha256: None,
+                },
+            },
+        );
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: pinned.clone(),
+            release_analysis: None,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "remote_source_artifact_ambiguous"));
+
+        // A rename that stays unambiguous still pairs with the reviewed source.
+        let mut renamed_only = proposed_app(&facts(), &pinned);
+        let renamed = renamed_only
+            .artifacts
+            .shift_remove("apk")
+            .expect("proposed artifact");
+        renamed_only
+            .artifacts
+            .insert("renamed_apk".to_string(), renamed);
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: pinned,
+            release_analysis: None,
+            app: Some(renamed_only),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(draft.app.artifacts.contains_key("renamed_apk"));
+    }
+
+    #[test]
+    fn an_inverted_pattern_on_an_unrelated_artifact_does_not_block_generation() {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some(r"^app-v1.*\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        app.artifacts.insert(
+            "extra_notes".to_string(),
+            AppArtifactV1 {
+                kind: AppArtifactKind::File,
+                name: Some("Release notes".to_string()),
+                description: None,
+                source: AppArtifactSource::LatestRelease {
+                    provider: ReleaseProvider::Github,
+                    base_url: "https://github.com".to_string(),
+                    repository: "example/project".to_string(),
+                    asset_pattern: Some(r"^app-v1.*\.txt$".to_string()),
+                    invert_asset_pattern: Some(true),
+                    prerelease: false,
+                },
+            },
+        );
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            release_analysis: Some(unique_release_analysis()),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(!draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "latest_release_invert_unsupported"));
+    }
+
+    #[test]
+    fn a_reviewed_artifact_retyped_as_a_file_blocks_generation() {
+        let pinned = source();
+        let mut app = proposed_app(&facts(), &pinned);
+        app.artifacts
+            .get_mut("apk")
+            .expect("proposed artifact")
+            .kind = AppArtifactKind::File;
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: pinned,
+            release_analysis: None,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "remote_source_artifact_missing"));
+    }
+
+    #[test]
+    fn remote_user_provided_generation_requires_the_user_provided_artifact() {
+        let mut user_provided = source();
+        user_provided.mode = "direct_apk".to_string();
+        user_provided.strategy = "user_provided_apk".to_string();
+
+        let mut app = proposed_app(&facts(), &user_provided);
+        app.artifacts.clear();
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: user_provided.clone(),
+            release_analysis: None,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|item| item.code == "remote_source_artifact_missing"));
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: user_provided,
+            release_analysis: None,
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
     }
 }

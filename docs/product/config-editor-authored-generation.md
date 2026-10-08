@@ -5,8 +5,12 @@
 Implemented current-state design. Typed authored foundations, standard
 read-only device-profile generation, local APK generation, and public GitHub,
 GitLab, Forgejo/Codeberg, or direct HTTPS APK source generation are implemented.
-Extended device capability checks and authenticated/private source access remain
-later work.
+App Definitions use the schema-v1 authority contract, and the product catalog
+projects identity from a catalog-validated App Definition set. Recipe, planner,
+review, and executor authority migration remains later work, so generated App
+Definitions and Recipes temporarily duplicate the same app facts. Extended
+device capability checks and authenticated/private source access remain later
+work.
 
 This document defines the Config Editor workflows for generating:
 
@@ -23,7 +27,7 @@ The generated recipe becomes a normal recipe document and uses the existing reci
 
 Generation operations are side-effect free until an explicit save. Network analysis may retrieve bounded metadata and a selected APK into a generator-owned temporary workspace, but it does not install APKs, execute repository content, modify a device, or publish catalog files.
 
-App definitions describe catalog and tracking metadata. They are not execution authority. The generated recipe remains the executable provisioning authority.
+App Definitions are schema-v1 documents that own intrinsic app identity and reusable app policy: package identity, app-owned artifacts and their sources, permission sets, App Targets, launcher activity, and presentation metadata. They are not execution authority yet; the generated recipe remains the executable planning and provisioning authority, so the two documents temporarily duplicate the same app facts.
 
 This scope does not generate device plans, infer configuration-copy behavior
 from README prose, or automatically add unreviewed root, force-stop, app-data,
@@ -85,29 +89,35 @@ The wizard exposes three source-neutral recipe strategies when the selected sour
 This is the default for a selected release asset or direct HTTPS APK. The
 recipe declares a `remote_file` artifact with the exact asset URL, resolves it,
 and installs it. The generated install step enforces the package name extracted
-during inspection. When the author supplies an explicitly trusted publisher
-SHA-256, the generator also emits it as `expected_sha256`; the locally
-calculated inspection digest never supplies that field automatically.
+during inspection. The App Definition records the same source as a `direct_url`
+artifact: the normalized public HTTPS URL plus the trusted publisher SHA-256 in
+lowercase when the author supplied one; the locally calculated inspection
+digest never supplies that field automatically.
 
 #### Latest compatible release
 
-This is available for public GitHub, GitLab, and Forgejo-compatible repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The rule is previewed against the selected release and review is blocked unless it matches exactly one APK.
+This is available for public GitHub, GitLab, and Forgejo-compatible repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The pattern is optional: the author may clear it, and the saved App Definition then selects candidate assets by artifact kind alone. The rule is previewed against the selected release, and review is blocked unless it resolves exactly one eligible APK; zero eligible assets fail as no-match and multiple eligible assets fail as ambiguous.
 
 The generated recipe uses explicit `resolve_remote_release` and
 `download_remote_file` steps. Runtime resolution dispatches by provider,
 excludes drafts or unpublished releases, excludes prereleases unless the author
 enables them, orders releases deterministically, and fails safely when the saved
-rule matches zero or multiple assets. The install step enforces the inspected
-package name against the resolved APK. Latest-compatible generation does not
-persist the authoring-time calculated digest as a trusted expected checksum.
+rule matches zero or multiple assets. An absent pattern is omitted from the
+saved App Definition rather than stored as an empty string, and selection then
+falls back to artifact kind alone, which still requires exactly one eligible
+APK. The install step enforces the inspected package name against the resolved
+APK. Latest-compatible generation does not persist the authoring-time
+calculated digest as a trusted expected checksum.
 
 #### User-provided APK
 
-This is the default for a local APK and is available for any source. The recipe
-declares a required `file` input with role `apk` and installs that input. It
-never persists the developer's local absolute APK path. Because the runtime APK
-may differ from the authoring sample, this strategy omits package/checksum
-enforcement and permission selections derived from that sample.
+This is the default for a local APK and is available from any source. The
+recipe declares a required `file` input with role `apk` and installs the input.
+It never persists the developer's local absolute APK path. The App Definition
+declares a named `apk` artifact whose source strategy is `user_provided`. Because
+the runtime APK may differ from the authoring sample, the strategy omits
+package/checksum enforcement and permission selections derived from that
+sample.
 
 ### Generated recipe
 
@@ -190,26 +200,122 @@ visible once under Other requested permissions.
 
 ### Generated app definition
 
-The app definition preserves schema version 1 and the existing authored shape under `authored/apps`:
+Every generated App Definition is a schema-v1 document under `authored/apps`
+with:
 
-- identity and display metadata;
-- primary package and aliases;
-- free-form install-source metadata;
-- free-form tracking-source metadata;
-- artifact support declarations;
-- provisioning metadata;
-- input metadata; and
-- extensible metadata.
+- required `id`, `name`, and `package_id`;
+- optional `description`, `category`, `launcher_activity`, and `metadata`,
+  omitted canonically when absent; and
+- ordered `artifacts` and `targets` mappings plus optional `permission_sets`,
+  omitted canonically when empty.
 
-`install_source` and `tracking_source` describe source and tracking intent. They do not dynamically resolve recipe artifacts.
+`artifacts` entries are named and their kind is exactly `apk` or `file`; each
+artifact may carry an optional display name and description. Sources use
+exactly one strategy:
 
-Every generated app definition owns the reserved
-`metadata.apk_inspection` record. Generation removes any editable value under
-that key, writes the trusted inspection metadata, and preserves unrelated
-author metadata. Local and user-provided flows store empty selected-action
-arrays. See
-[Phase 5B](phase-5b-apk-verification-and-permission-automation.md) for the exact
-field shape and validation rules.
+- `user_provided` for a file the user supplies at runtime, which is what local
+  and user-provided APK generation produces;
+- `direct_url` for a durable public HTTPS download; embedded credentials,
+  fragments, and non-HTTPS schemes are rejected, query parameters are allowed,
+  and the only optional extra is a lowercase 64-hex trusted publisher SHA-256.
+  The generator stores an author-supplied trusted publisher checksum in
+  lowercase and never copies the locally calculated inspection digest into it;
+  and
+- `latest_release` for a provider release described by `provider` (exactly
+  `github`, `gitlab`, or `forgejo`), required service-origin `base_url`,
+  `repository`, optional `asset_pattern`, and a required `prerelease` policy.
+  GitHub and Forgejo repositories are exactly `owner/repository`; GitLab
+  accepts nested namespaces such as `group/subgroup/project`.
+  The runtime release resolver resolves GitHub and GitLab releases from their
+  official service origin, so generated drafts accept only
+  `https://github.com` for `github` and `https://gitlab.com` for `gitlab`
+  (`latest_release_base_url_unsupported` otherwise) until resolution honors
+  authored origins; `forgejo` resolves from the authored origin.
+
+An absent `asset_pattern` selects candidate assets by artifact kind alone, so
+an `apk` artifact accepts eligible APK assets whatever their file names. The
+resolved release must still contain exactly one eligible asset: zero eligible
+assets is a no-match failure and multiple eligible assets is an ambiguity
+failure. `invert_asset_pattern` is legal only alongside a pattern and is
+omitted canonically when false.
+The generated Recipe resolves a filename pattern by positive match only, so a
+reviewed inversion is blocking until the recipe-authority migration teaches
+release resolution to invert; hand-authored App Definitions outside the
+generator still accept inversion.
+
+Verified permission selections populate the App Definition permission sets.
+Rust partitions every inspection-verified selection by its root requirement:
+actions that run without root form the `baseline` set, actions that require
+root form the `elevated` set, and an empty partition is omitted. A permission
+set that is present but empty is invalid. The generated Recipe permission step
+continues to be produced from those same trusted selections on the current
+execution contract, and permission-set editing beyond those structured
+selections remains a later dedicated-editor concern.
+
+`launcher_activity` is recorded only when inspection verified the exact
+launcher component and the author enabled launch-once generation, converting
+the inspected Android component form (`package/.Activity`) to the equivalent
+fully qualified class name. The current native inspection reports no launcher
+activities, so generated App Definitions normally omit the field. `targets`
+record literal semantic destinations (`app_data`, `external_app_data`,
+`shared_storage`, or `absolute_device_path`) with file or directory kind.
+
+`metadata` stays non-authoritative and JSON-compatible, and direct metadata
+keys may not shadow canonical top-level schema names. APK inspection evidence
+is transient draft and review evidence: it appears in generator review, and it
+is never written into the saved App Definition, including
+`metadata.apk_inspection`.
+
+The generator continues to emit the existing Recipe contract, so an App
+Definition and its Recipe temporarily duplicate the same app facts until later
+authority-migration tickets land.
+The reviewed App Definition artifact is the authority for the download policy
+the duplicate Recipe copies: a retained remote artifact supplies the URL,
+checksum, provider, service origin, repository, filename pattern, and
+prerelease policy, and clearing a field there clears it in the generated
+Recipe. Replacing or removing the remote artifact without changing the source
+selection is blocking, because the Recipe would otherwise keep resolving and
+installing a download the saved App Definition no longer declares.
+Several artifacts that share the reviewed source strategy and none of them
+under the generated artifact id are equally blocking
+(`remote_source_artifact_ambiguous`), because generation cannot tell which
+artifact the reviewed source belongs to. Only an `apk` artifact can represent
+the reviewed source, because the generated Recipe installs an APK; retyping
+the reviewed artifact as a generic `file` leaves no pairing artifact and
+blocks for the same reason. Remote user-provided generation applies
+the same presence rule to its user-provided APK artifact, which blocks as
+missing or ambiguous. The filename pattern and prerelease toggle in the
+source step mirror the reviewed artifact row while a draft exists, so the
+release preview, the review gate, and the save gate all follow the same policy
+the App Definition and Recipe are generated from. Only a latest-release source
+carries that policy, so a pinned artifact never resets the two controls. A
+source-step edit rewrites
+only the artifact native generation pairs with the reviewed source: the
+artifact the backend proposes for that source, named `apk`, while it is still
+an APK whose source strategy matches the reviewed source, even after the
+author retargets its URL or repository and even when it records another
+service origin, otherwise a single matching artifact, and no row when the
+pairing is unresolvable. A prerelease toggle that keeps the
+selected asset eligible keeps the rows the pairing is derived from. Starting a
+new remote download
+clears the source-step publisher checksum, because the freshly downloaded
+artifact has no author-supplied publisher checksum. Only the paired artifact
+receives source-step edits, so every other authored row keeps its own policy.
+Release analysis retained from an earlier source is presented only while it
+still describes the repository the paired artifact resolves from; after the
+author retargets the source, the step
+stops using that match preview, the review and save gates do not block on it,
+and Rust reports a non-blocking `latest_release_analysis_stale` warning so the
+author can analyze the edited source.
+
+Local generation keeps the same coherence rule in the other direction: the
+generated Recipe declares a user-provided APK input, so structured mapping
+edits must leave exactly one user-provided APK artifact in the App Definition.
+Removing it, retyping it as a generic `file`, or replacing its source with a
+remote strategy is blocking (`local_artifact_missing`), and leaving several
+user-provided APK artifacts without the generated one is blocking
+(`local_artifact_ambiguous`). A renamed artifact that stays user-provided and
+is the only candidate still pairs with the recipe input.
 
 ### Evidence
 
@@ -226,24 +332,27 @@ The draft response includes provenance and warnings. Final YAML contains authore
 
 Before saving, Rust scans the selected authored root for:
 
-- duplicate app ID;
-- duplicate primary package;
+- duplicate App Definition ID;
+- duplicate App Definition `package_id`;
 - duplicate recipe ID;
 - duplicate destination path;
-- existing repository metadata;
-- existing pinned asset URL; and
-- an identical latest-release policy fingerprint composed of provider, base URL, repository, asset pattern, and prerelease policy; and
+- an App Definition whose latest-release policy fingerprint (provider, base
+  URL, repository, asset pattern, inversion, and prerelease policy) matches
+  another App Definition;
+- an App Definition source repository or direct download address also used by
+  another App Definition; and
 - overlapping package/checksum enforcement or an identical APK
   security-and-permission fingerprint under another recipe ID.
 
-ID, path, identical latest-policy, and identical APK security-automation
-fingerprint conflicts are blocking. Other package, checksum, or repository
-overlap is a warning requiring review. Rust derives the security fingerprint
-from the complete generated recipe returned by the trusted generation request;
-React cannot supply the recipe or a fingerprint. Legacy collision requests
-without a complete recipe retain their earlier checks. See
-[Phase 5B](phase-5b-apk-verification-and-permission-automation.md) for exact
-comparability and fingerprint semantics.
+App Definition ID, App Definition `package_id`, recipe ID, destination path,
+and identical APK security-automation fingerprint conflicts are blocking. App
+Definition source repository, direct URL, and latest-policy overlaps, plus
+other package or checksum overlaps, are warnings requiring review. Rust derives
+the security fingerprint from the complete generated recipe returned by the
+trusted generation request; React cannot supply the recipe or the fingerprint.
+Collision requests without a complete recipe retain the earlier recipe checks.
+See [Phase 5B](phase-5b-apk-verification-and-permission-automation.md) for
+exact comparability and fingerprint semantics.
 
 ## Device profile generator
 
@@ -331,28 +440,35 @@ The implementation reuses existing `device_probe`, `end_user_runtime`, `model`, 
 
 ## Typed authored models
 
-Before generation ships, Rust owns typed schema-v1 models for app definitions and device profiles. These models provide:
+Rust owns typed schema-v1 models for app definitions and device profiles. These
+models provide:
 
 - structural parsing;
 - canonical YAML emission;
 - stable validation;
 - regex and Android-range validation for device profiles;
-- package and source-shape validation for app definitions; and
-- the common authority used by generator output, save validation, catalog loading, and future dedicated editors.
+- package, artifact-source, permission-set, target, and launcher validation for
+  app definitions; and
+- common authority used by generator output, save validation, catalog loading,
+  and future dedicated editors.
 
 Generated YAML is never treated as an unvalidated `serde_json::Value` blob.
 
 Schema-v1 parsing rejects unknown fields in fixed top-level and nested
-structures. Extensibility is limited to `install_source.options`, fields after
-`tracking_source.type`, and `metadata`; these mappings retain nested
+structures and rejects retired App Definition fields instead of migrating
+them. Extensibility is limited to `metadata`, which retains nested
 JSON-compatible values and insertion order without silently discarding data.
 Authored IDs use lowercase alphanumeric segments separated by `.`, `_`, or
-`-`.
+`-`. App Definition `artifacts` and `targets` registries reject a repeated id
+while parsing, because YAML would otherwise keep only the last definition and
+canonical emission would drop the earlier authored policy without a
+diagnostic.
 
-Canonical YAML emits fixed fields in schema order and emits empty collection
-fields explicitly. Optional scalar values and optional Android range bounds are
-omitted when absent. Re-emitting canonical YAML is byte-stable, while ordered
-extension mappings retain their authored order.
+Canonical YAML emits fixed fields in schema order. Optional scalar values,
+optional Android range bounds, and empty optional App Definition sections are
+omitted when absent; device-profile collection fields are emitted explicitly
+even when empty, and ordered mappings retain authored order. Re-emitting
+canonical YAML is byte-stable.
 
 ## Sidecar protocol
 
@@ -468,12 +584,11 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 - dual-document validation and save; and
 - opening the generated recipe.
 
-The implemented local workflow uses explicit BYO metadata:
-`install_source.type` is `user_provided_apk`, its resolver is `none`,
-`tracking_source.type` is `local_apk`, direct APK support is not required, and
-BYO APK support is required. Native APK facts are review evidence and are
-persisted under the generator-owned `metadata.apk_inspection` key; local flows
-persist no selected permission actions.
+The implemented local workflow generates an App Definition whose `apk`
+artifact uses the `user_provided` source strategy. Native APK inspection facts
+are transient draft and review evidence and are never written into the saved
+App Definition; local flows record no permission sets. The recipe keeps its
+required user-provided APK input.
 
 Native selection accepts regular APK files up to 2 GiB. The backend reads one
 root `AndroidManifest.xml` through its bounded ZIP and binary-XML parser and
@@ -511,49 +626,64 @@ reports a bounded advisory retry indication when GitHub supplies valid numeric
 retry or reset metadata; the indication does not guarantee that a later request
 will succeed. GitHub authentication remains future refinement work.
 
-Pinned generation stores normalized source identity and emits a `remote_file`
-artifact plus resolve/install steps. Authors may instead choose the existing
-user-provided APK strategy, which preserves the Phase 3 `user_provided_apk`
-and `local_apk` source shape without remote tracking fields. Authentication,
-private repositories, arbitrary-site scraping, background refresh, and
-split-package formats remain excluded.
+Pinned generation records the durable source in the App Definition as a
+`direct_url` artifact (the normalized public HTTPS APK URL plus the lowercase
+trusted publisher SHA-256 when the author supplied one) and emits the
+`remote_file` artifact plus resolve/install steps in the recipe. Until the Recipe
+authority migration lands, that trusted checksum is also written into the
+generated Recipe, so the value temporarily exists in both documents. Authors
+may instead choose the user-provided APK strategy, which records a `user_provided`
+artifact source and preserves the Phase 3 `user_provided_apk` recipe input
+shape without remote identity. Authentication, private repositories,
+arbitrary-site scraping, background refresh, and split-package formats remain
+excluded.
 
 ### Phase 5: GitHub release-pattern testing
 
 GitHub repository sources using the latest-compatible strategy expose an
 immediate filename-pattern preview after source analysis. GitHub analysis
-requests at most 30 releases. The trusted session retains every non-draft
+requests the most 30 releases. The trusted session retains every non-draft
 release in provider response order, including prereleases and releases with no
-eligible APK assets. The Include prereleases selection filters this retained
-set locally and does not make another network request.
+eligible APK assets. The Include prereleases selection filters the retained set
+locally and does not make another network request.
 
-The preview applies the unmodified author-entered regular expression to each
-release's eligible APK filenames using substring-search semantics unless the
-expression itself supplies anchors. It reports `unique_match`, `no_match`, or
-`multiple_matches` for each eligible analyzed release and sorts displayed
-matching filenames deterministically. Summary counts cover the complete
-eligible retained set. The UI displays at most the first 10 rows in provider
-response order.
+The preview applies the author-entered regular expression to each release's
+eligible APK filenames using substring-search semantics unless the expression
+itself supplies anchors. The pattern is optional: when it is blank, the preview
+treats every eligible APK filename as a candidate and reports the same
+outcomes. It reports `unique_match`, `no_match`, or `multiple_matches` for each
+eligible analyzed release and sorts displayed matching filenames
+deterministically. Summary counts cover the complete eligible retained set.
+The UI displays at most the first 10 rows in provider response order.
 
-For this check, the current release is the first retained release after draft
-exclusion and prerelease filtering. This is provider response order; the
+For the check, the current release is the first retained release after draft
+exclusion and prerelease filtering. This follows provider response order; the
 workflow does not claim that GitHub guarantees chronological ordering and does
 not reorder releases by tag, semantic version, filename, or parsed timestamp.
-The current release must contain exactly one match. No trusted analysis, an
-empty analysis, no releases after prerelease filtering, zero current-release
-matches, multiple current-release matches, and invalid Rust regex syntax are
-blocking. Older zero-match and multiple-match results remain visible warnings
-when the current release has one match.
+The current release must contain exactly one match, which for a blank pattern
+means exactly one eligible APK asset. No trusted analysis, empty analysis, no
+releases after prerelease filtering, zero current-release matches, multiple
+current-release matches, and invalid Rust regex syntax are blocking. Older
+zero-match and multiple-match results remain visible warnings when the current
+release has one match.
+
+The trusted release snapshot belongs to the analyzed source. When the reviewed
+artifact retargets its provider, service origin, or repository, that evidence
+no longer describes the edited source, so pattern checks are reported as a
+non-blocking `latest_release_analysis_stale` warning instead of being judged
+against releases from a different repository.
 
 The browser preview uses JavaScript regular-expression behavior for immediate
 feedback and is not final validation. Tauri ignores browser-computed ordering,
 counts, outcomes, and release contents. It constructs a minimal ordered
-snapshot from session-owned analysis containing only release tags, prerelease
-flags, and eligible APK filenames. Rust evaluates the raw pattern again with
-the production `regex` engine before draft generation and saving. A pattern
-accepted by JavaScript but rejected by Rust is blocking. Pinned remote assets,
-direct APK sources, and user-provided APK strategies do not require or consume
-release-pattern results and retain their existing generated recipe shapes.
+snapshot from session-owned analysis containing only release tags, flags, and
+eligible APK filenames. Rust evaluates the raw pattern again with the
+production `regex` engine before draft generation and saving; a blank pattern
+is omitted from the saved App Definition rather than stored as an empty string,
+and a pattern accepted by JavaScript but rejected by Rust is blocking. Pinned
+remote assets, direct APK sources, and user-provided APK strategies do not
+require or consume release-pattern results and retain their existing generated
+recipe shapes.
 
 ### Later refinement
 

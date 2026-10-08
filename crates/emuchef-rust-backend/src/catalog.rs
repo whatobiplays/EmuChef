@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::authored_models::{self, AuthoredModelDiagnostic};
+use crate::authored_models::{self, AppDefinitionV1, AuthoredModelDiagnostic};
 use crate::model::Recipe;
 use crate::yaml;
 
@@ -59,17 +59,123 @@ pub fn validate_recipe_with_catalog(
     catalog.validate_recipe(file, recipe, recipe_path, authored_root)
 }
 
+/// Every successfully loaded app definition plus catalog-validation diagnostics.
+///
+/// Callers that only need validation read the diagnostics. Callers that also
+/// project app identity read the typed entries, and must treat a non-empty
+/// diagnostic list as an invalid catalog.
+pub struct AppDefinitionCatalog {
+    pub entries: Vec<(PathBuf, AppDefinitionV1)>,
+    pub diagnostics: Vec<Value>,
+}
+
+/// Load and validate every top-level app definition in one authored root.
+///
+/// Validation covers each file's semantic validity plus the catalog-global
+/// invariants that app definition IDs and package IDs are unique within the
+/// catalog. Diagnostics are ordered by file name and semantic field order, and
+/// file fields are relative to the authored root so messages do not expose
+/// machine-specific paths.
+pub fn load_app_definition_catalog(authored_root: &Path) -> AppDefinitionCatalog {
+    let mut entries = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut ids: HashMap<String, String> = HashMap::new();
+    let mut packages: HashMap<String, String> = HashMap::new();
+    let apps_directory = authored_root.join("apps");
+    let app_files = match top_level_yaml_files(&apps_directory) {
+        Ok(paths) => paths,
+        Err(error) => {
+            // An unreadable directory must not look like an empty catalog,
+            // because callers treat a diagnostic-free result as complete.
+            diagnostics.push(diagnostic(
+                "error",
+                "app_definition_catalog_unreadable",
+                &format!("The App Definitions directory could not be read: {error}."),
+                "apps",
+                Some("app_definition"),
+                None,
+                None,
+            ));
+            return AppDefinitionCatalog {
+                entries,
+                diagnostics,
+            };
+        }
+    };
+    for path in app_files {
+        let file = authored_relative_path(authored_root, &path);
+        let value = match authored_models::load_app_definition(&path) {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics.push(diagnostic(
+                    "error",
+                    error.code(),
+                    error.message(),
+                    &file,
+                    Some("app_definition"),
+                    None,
+                    None,
+                ));
+                continue;
+            }
+        };
+        diagnostics.extend(model_diagnostics(
+            authored_root,
+            &path,
+            "app_definition",
+            Some(&value.id),
+            authored_models::validate_app_definition(&value),
+        ));
+        if let Some(first_file) = ids.get(&value.id) {
+            diagnostics.push(diagnostic(
+                "error",
+                "app_definition_id_conflict",
+                &format!(
+                    "Duplicate app definition id {}; already defined in {}.",
+                    single_quote(&value.id),
+                    first_file
+                ),
+                &file,
+                Some("app_definition"),
+                Some(&value.id),
+                Some("id"),
+            ));
+        } else {
+            ids.insert(value.id.clone(), file.clone());
+        }
+        if let Some(first_file) = packages.get(&value.package_id) {
+            diagnostics.push(diagnostic(
+                "error",
+                "app_package_id_conflict",
+                &format!(
+                    "Duplicate app package id {}; already defined in {}.",
+                    single_quote(&value.package_id),
+                    first_file
+                ),
+                &file,
+                Some("app_definition"),
+                Some(&value.id),
+                Some("package_id"),
+            ));
+        } else {
+            packages.insert(value.package_id.clone(), file.clone());
+        }
+        entries.push((path, value));
+    }
+    AppDefinitionCatalog {
+        entries,
+        diagnostics,
+    }
+}
+
 /// Validate every top-level schema-v1 app definition and device profile.
 ///
 /// Diagnostics are ordered by authored directory, file name, and semantic
 /// field order. File fields are relative to the authored root so messages do
 /// not expose machine-specific paths.
 pub fn validate_authored_catalog_models(authored_root: &Path) -> Vec<Value> {
-    let mut diagnostics = Vec::new();
-    for path in top_level_yaml_files(&authored_root.join("apps")) {
-        diagnostics.extend(validate_app_definition_path(authored_root, &path));
-    }
-    for path in top_level_yaml_files(&authored_root.join("device_profiles")) {
+    let mut diagnostics = load_app_definition_catalog(authored_root).diagnostics;
+    for path in top_level_yaml_files(&authored_root.join("device_profiles")).unwrap_or_default() {
         diagnostics.extend(validate_device_profile_path(authored_root, &path));
     }
     diagnostics
@@ -97,7 +203,7 @@ impl ValidationCatalog {
             authored_model_diagnostics: validate_authored_catalog_models(authored_root),
             ..Self::default()
         };
-        for path in top_level_yaml_files(&authored_root.join("recipes")) {
+        for path in top_level_yaml_files(&authored_root.join("recipes")).unwrap_or_default() {
             catalog.collect_recipe(path);
         }
         catalog
@@ -197,27 +303,6 @@ impl ValidationCatalog {
     }
 }
 
-fn validate_app_definition_path(authored_root: &Path, path: &Path) -> Vec<Value> {
-    match authored_models::load_app_definition(path) {
-        Ok(value) => model_diagnostics(
-            authored_root,
-            path,
-            "app_definition",
-            Some(&value.id),
-            authored_models::validate_app_definition(&value),
-        ),
-        Err(error) => vec![diagnostic(
-            "error",
-            error.code(),
-            error.message(),
-            &authored_relative_path(authored_root, path),
-            Some("app_definition"),
-            None,
-            None,
-        )],
-    }
-}
-
 fn validate_device_profile_path(authored_root: &Path, path: &Path) -> Vec<Value> {
     match authored_models::load_device_profile(path) {
         Ok(value) => model_diagnostics(
@@ -270,9 +355,16 @@ fn authored_relative_path(authored_root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn top_level_yaml_files(directory: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
+/// Read the top-level YAML files of one authored directory.
+///
+/// A directory that does not exist is an empty authored set. Any other read
+/// failure is reported so a validating caller cannot mistake an unreadable
+/// directory for an empty one.
+fn top_level_yaml_files(directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
     let mut paths = entries
         .filter_map(Result::ok)
@@ -280,7 +372,7 @@ fn top_level_yaml_files(directory: &Path) -> Vec<PathBuf> {
         .filter(|path| path.is_file() && is_yaml_extension(path))
         .collect::<Vec<_>>();
     paths.sort();
-    paths
+    Ok(paths)
 }
 
 fn is_yaml_extension(path: &Path) -> bool {

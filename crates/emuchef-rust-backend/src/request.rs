@@ -1546,22 +1546,28 @@ mod tests {
             "id": "example",
             "name": "Example",
             "category": "utility",
-            "package": { "primary": "com.example.app", "aliases": [] },
-            "install_source": { "type": "remote_apk", "resolver": "direct_url", "options": {} },
-            "tracking_source": { "type": "remote_apk" },
+            "package_id": "com.example.app",
             "artifacts": {
-                "apk": { "required": true },
-                "shared_storage_config": { "supported": false },
-                "app_data_config": { "supported": false },
-                "byo_apk": { "required": false }
+                "apk": { "kind": "apk", "source": { "strategy": "user_provided" } }
             },
-            "provisioning": {
-                "launch_once_recommended": false,
-                "shared_storage_paths": [],
-                "app_data_paths": [],
-                "config_targets": []
-            },
-            "inputs": [],
+            "metadata": {}
+        })
+    }
+
+    /// The retired pre-v1 App Definition shape.
+    ///
+    /// Kept only so the request boundary can prove that the strict v1 parser
+    /// never accepts legacy App Definition payloads through a compatibility
+    /// path.
+    fn legacy_collision_app() -> Value {
+        json!({
+            "schema_version": 1,
+            "kind": "app_definition",
+            "id": "example",
+            "name": "Example",
+            "category": "utility",
+            "package": { "primary": "com.example.app", "aliases": [] },
+            "artifacts": { "apk": { "required": true } },
             "metadata": {}
         })
     }
@@ -1688,6 +1694,11 @@ steps:
                 "app": collision_app(),
                 "recipeId": "app.example.install",
                 "fingerprint": "frontend-authored"
+            }),
+            json!({
+                "authoredRoot": "/tmp/authored",
+                "app": legacy_collision_app(),
+                "recipeId": "app.example.install",
             }),
         ] {
             assert!(
