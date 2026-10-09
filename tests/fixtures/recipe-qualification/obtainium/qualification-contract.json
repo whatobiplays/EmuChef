@@ -4,7 +4,7 @@
   "planningDevicePlan": "ayaneo.generic.base",
   "authoredSource": {
     "path": "authored/recipes/app.obtainium.install.yaml",
-    "sha256": "d3f96f4d6f0fa812af75b0ddc18edad9da69b7b2ceae62468c0bd3c8b645caa7"
+    "sha256": "378cc9b519a9872a9a70667331c1a6a210aee3958d7d61abf66b55c0ecc4395d"
   },
   "selectedRecipes": [
     "app.obtainium.install"
@@ -30,15 +30,33 @@
       "install_obtainium"
     ]
   ],
+  "appDefinition": {
+    "id": "obtainium",
+    "packageName": "dev.imranr.obtainium",
+    "artifactId": "apk",
+    "sourceStrategy": "latest_release",
+    "provider": "github",
+    "baseUrl": "https://github.com",
+    "repository": "ImranR98/Obtainium",
+    "assetPattern": "^app-release\\.apk$",
+    "prerelease": false
+  },
+  "release": {
+    "metadataFixture": "tests/fixtures/recipe-qualification/obtainium/github-releases.json",
+    "cachedOldTag": "v1.0.0",
+    "selectedTag": "v2.0.0",
+    "assetName": "app-release.apk"
+  },
   "artifact": {
     "idSuffix": "obtainium_apk",
     "type": "remote_file",
-    "url": "https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk",
+    "appRef": "obtainium",
+    "appArtifact": "apk",
     "cache": "default"
   },
   "install": {
     "stepIdSuffix": "install_obtainium",
-    "packageName": "dev.imranr.obtainium",
+    "appRef": "obtainium",
     "replaceExisting": false,
     "skipConditionType": "package_installed"
   },

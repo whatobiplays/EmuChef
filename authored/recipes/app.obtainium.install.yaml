@@ -9,8 +9,9 @@ provides:
     - obtainium_install
 artifacts:
   obtainium_apk:
-    type: remote_file
-    url: https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk
+    type: app_artifact
+    app_ref: obtainium
+    artifact: apk
     cache: default
 steps:
   - id: resolve_artifacts
@@ -29,6 +30,7 @@ steps:
     type: install_apk
     name: Install Obtainium
     user_toggleable: false
+    app_ref: obtainium
     dependencies:
       - resolve_artifacts
     constraints:
@@ -37,8 +39,7 @@ steps:
       conflicts_with: []
     skip_if:
       - type: package_installed
-        params:
-          package_name: dev.imranr.obtainium
+        params: {}
     params:
       app:
         ref: artifacts.obtainium_apk.local_path

@@ -4820,6 +4820,111 @@ fn app_context_package_mismatch_blocks_install_after_canonical_artifact_resoluti
 }
 
 #[test]
+fn direct_url_cached_checksum_mismatch_blocks_install_before_device_mutation() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let url = "https://downloads.example.com/app.apk?channel=stable".to_string();
+    let mut execution_plan = app_context_install_plan(
+        url.clone(),
+        "com.example.expected",
+        Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        }),
+    );
+    execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::DirectUrl {
+        url: url.clone(),
+        sha256: Some("a".repeat(64)),
+    };
+    let cache_root = workspace.path().join("cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    fs::write(
+        cache_root.join(artifact_local_filename(
+            &execution_plan.artifacts[0].id,
+            &url,
+            "default",
+        )),
+        b"corrupted cached APK",
+    )
+    .expect("corrupted cache fixture should be written");
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &cache_root,
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifact_sha256_mismatch:"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert!(actual.get("resolved_artifacts").is_none());
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn direct_url_cached_apk_package_mismatch_blocks_install_before_device_mutation() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let url = "https://downloads.example.com/app.apk".to_string();
+    let mut execution_plan = app_context_install_plan(
+        url.clone(),
+        "com.example.expected",
+        Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        }),
+    );
+    execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::DirectUrl {
+        url: url.clone(),
+        sha256: None,
+    };
+    let cache_root = workspace.path().join("cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    fs::copy(
+        &apk,
+        cache_root.join(artifact_local_filename(
+            &execution_plan.artifacts[0].id,
+            &url,
+            "default",
+        )),
+    )
+    .expect("valid test APK should seed the direct URL cache");
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &cache_root,
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(actual["steps"][1]["status"], "failed");
+    let failure_message = actual["steps"][1]["message"].as_str().unwrap();
+    assert!(
+        failure_message.starts_with("apk_package_mismatch:"),
+        "unexpected cached direct APK install failure: {failure_message}"
+    );
+    assert_eq!(actual["resolved_artifacts"][0]["cacheHit"], true);
+    assert!(actual["resolved_artifacts"][0]
+        .get("redactedFinalUrl")
+        .is_none());
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
 fn app_context_install_rejects_missing_apk_provenance_before_device_install() {
     let workspace = tempfile::tempdir().expect("executor temp root should be created");
     let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);

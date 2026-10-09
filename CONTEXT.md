@@ -86,6 +86,29 @@ catalog. Existing Recipes that have not migrated retain their current
 form-based artifact, install, and package-condition behavior until their own
 migration.
 
+Direct-URL APK sources require a public HTTPS URL without credentials or a
+fragment; signed query parameters are allowed. A direct URL does not pin a
+release or guarantee immutable bytes. The App Definition may include an
+expected SHA-256, which the artifact resolver checks against the returned
+artifact after validating source policy, including on cache hits. The resolver
+calculates the SHA-256 for every direct-URL resolution and gives execution a
+verified per-run snapshot so later cache changes cannot alter bytes passed to
+APK inspection or installation. Durable execution reports include Recipe and
+App Definition artifact identities, filename, calculated SHA-256, cache status,
+and a redacted observed final URL only for network transfers. A calculated
+checksum without a trusted expected value is not publisher authentication.
+Hostname source addresses are resolved for each direct HTTPS request and
+redirect. Every resolved address must pass the public-address policy, and the
+accepted addresses are pinned for direct connections while normal TLS
+certificate and hostname verification remains enabled. A configured system
+proxy remains enabled; proxy-side DNS is controlled by that trusted network
+route and cannot be pinned by the local resolver. Execution records retain the
+exact approved plan, including its original URL query, with the matching plan
+digest. Consumer-facing reports serialize that exact plan as `reviewedPlan`
+when it contains no URL credentials, query, or fragment. When redaction is
+needed, the report omits `reviewedPlan` and instead serializes the separately
+named `redactedReviewedPlan` projection, plus an explicit redaction marker.
+
 Android package facts come from APK inspection rather than filenames. The
 APK-inspection contract uses a separately configured user-supplied
 `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools.
@@ -1849,18 +1872,23 @@ Standalone Obtainium automated qualification covers the real authored
 `app.obtainium.install` workflow. Its strict source-bound contract is at
 `tests/fixtures/recipe-qualification/obtainium/qualification-contract.json`,
 bound to the raw authored recipe SHA-256
-`d3f96f4d6f0fa812af75b0ddc18edad9da69b7b2ceae62468c0bd3c8b645caa7`, and its
+`378cc9b519a9872a9a70667331c1a6a210aee3958d7d61abf66b55c0ecc4395d`, and its
 active qualification module is
 `crates/emuchef-rust-backend/src/recipe_qualification_obtainium_tests.rs`.
 Qualification uses `ayaneo.generic.base` only as the production planning and
 capability context and explicitly selects only `app.obtainium.install`; the
 device plan does not contain Obtainium and is not treated as product
 provenance. The qualification covers production planning and review, authored
-URL/default-cache preservation with a seeded exact cache filename,
-deterministic install execution without network or ADB, package-state-driven
-repeated-install skipping, and truthful install-failure semantics through a
-private test-only device adapter. No authored YAML, device-plan/profile
-semantics, public API, or production executor source is changed.
+GitHub stable latest-release policy and asset-pattern preservation, including
+plan serialization and parsing. Deterministic release metadata selects the
+newest eligible stable release while an older release remains cached; the
+selected asset's URL determines the cache entry. The resulting plan resolves
+and installs the App Definition-owned APK without live GitHub access or ADB.
+Qualification also covers release and asset provenance, package-state-driven
+repeated-install skipping, package-identity rejection before device mutation,
+and truthful install-failure semantics through a private test-only device
+adapter. The standalone direct-URL source strategy remains independently
+validated and tested. Physical qualification is not claimed.
 
 Physical qualification for all three standalone workflows is deferred by owner
 with cleanup authority `not_authorized_for_recipe_qualification`.

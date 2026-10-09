@@ -492,6 +492,13 @@ fn planning_result_value(input: PlannerInput) -> Value {
     serde_json::to_value(plan_execution(input)).expect("planning result should serialize")
 }
 
+fn obtainium_planning_result_value(input: PlannerInput) -> Value {
+    let app = load_app_definition(repo_authored_root().join("apps/obtainium.yaml"))
+        .expect("Obtainium App Definition should load");
+    serde_json::to_value(plan_execution_with_app_definitions(input, &[app]))
+        .expect("Obtainium planning result should serialize")
+}
+
 fn normalized_planning_result_value(input: PlannerInput) -> Value {
     normalize_paths(planning_result_value(input))
 }
@@ -1271,11 +1278,11 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
         "app.xaniteog.install",
         "feature.copy_bios",
     ];
-    let first = planning_result_value(authored_corpus_planner_input_with_bindings(
+    let first = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
         &corpus_recipe_expansion_bindings(),
     ));
-    let second = planning_result_value(authored_corpus_planner_input_with_bindings(
+    let second = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
         &corpus_recipe_expansion_bindings(),
     ));
@@ -2853,11 +2860,11 @@ fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
         ),
     ];
 
-    let first = planning_result_value(authored_corpus_planner_input_with_bindings(
+    let first = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
         &input_bindings,
     ));
-    let second = planning_result_value(authored_corpus_planner_input_with_bindings(
+    let second = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
         &input_bindings,
     ));
@@ -2918,7 +2925,7 @@ fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() 
     );
     assert_eq!(input.selected_recipe_refs, vec!["app.obtainium.install"]);
 
-    let actual = planning_result_value(input);
+    let actual = obtainium_planning_result_value(input);
 
     assert_eq!(actual["status"], "success", "{actual:#}");
     assert_eq!(snapshot_files(&repo_authored_recipes_dir()), recipes_before);
@@ -5920,20 +5927,24 @@ fn assert_planning_result_shape(name: &str, parsed: &Value) {
 }
 
 fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>) {
+    let mut expected_plan_fields = vec![
+        "id",
+        "source",
+        "device_context",
+        "runtime_capabilities",
+        "inputs",
+        "artifacts",
+        "steps",
+        "schema_version",
+        "kind",
+    ];
+    if plan.contains_key("apps") {
+        expected_plan_fields.push("apps");
+    }
     assert_object_keys(
         &format!("{name}.execution_plan"),
         plan,
-        &[
-            "id",
-            "source",
-            "device_context",
-            "runtime_capabilities",
-            "inputs",
-            "artifacts",
-            "steps",
-            "schema_version",
-            "kind",
-        ],
+        &expected_plan_fields,
     );
     assert!(
         !plan.contains_key("permission_plan"),
@@ -6008,6 +6019,11 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
         plan.get("artifacts").and_then(Value::as_array).is_some(),
         "{name} execution_plan.artifacts should be an array"
     );
+    assert!(
+        plan.get("apps")
+            .is_none_or(|apps| apps.as_array().is_some()),
+        "{name} execution_plan.apps should be an array when present"
+    );
 
     let steps = plan
         .get("steps")
@@ -6018,20 +6034,24 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
         let step = step
             .as_object()
             .expect("planner execution_plan step should be an object");
+        let mut expected_step_fields = vec![
+            "id",
+            "recipe_ref",
+            "type",
+            "name",
+            "dependencies",
+            "constraints",
+            "params",
+            "skip_if",
+            "verify",
+        ];
+        if step.contains_key("app_id") {
+            expected_step_fields.push("app_id");
+        }
         assert_object_keys(
             &format!("{name}.execution_plan.steps[{index}]"),
             step,
-            &[
-                "id",
-                "recipe_ref",
-                "type",
-                "name",
-                "dependencies",
-                "constraints",
-                "params",
-                "skip_if",
-                "verify",
-            ],
+            &expected_step_fields,
         );
         assert_non_empty_string(name, step.get("id"), &format!("steps[{index}].id"));
         assert_non_empty_string(
@@ -6041,6 +6061,11 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
         );
         assert_non_empty_string(name, step.get("type"), &format!("steps[{index}].type"));
         assert_non_empty_string(name, step.get("name"), &format!("steps[{index}].name"));
+        assert!(
+            step.get("app_id")
+                .is_none_or(|app_id| app_id.as_str().is_some()),
+            "{name} steps[{index}].app_id should be a string when present"
+        );
         assert!(
             step.get("dependencies").and_then(Value::as_array).is_some(),
             "{name} steps[{index}].dependencies should be an array"
@@ -6386,14 +6411,73 @@ fn planner_validates_referenced_app_definition_and_named_artifact() {
     );
 
     let mut direct_url_app = armsx1_app_definition();
+    let expected_sha256 = "a".repeat(64);
     direct_url_app.artifacts.get_mut("apk").unwrap().source = AppArtifactSource::DirectUrl {
-        url: "https://example.com/app.apk".to_string(),
-        sha256: None,
+        url: "https://example.com/app.apk?channel=stable".to_string(),
+        sha256: Some(expected_sha256.clone()),
     };
-    assert_app_planning_error(
+    let result = plan_execution_with_app_definitions(
         armsx1_recipe_planner_input(),
-        &[direct_url_app],
-        "app_artifact_source_unsupported",
+        &[direct_url_app.clone()],
+    );
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result
+        .execution_plan
+        .expect("direct-URL App Definition should produce an execution plan");
+    let artifact = plan
+        .artifacts
+        .first()
+        .expect("the referenced app artifact should be in the plan");
+    assert_eq!(artifact.app_provenance.as_ref().unwrap().app_id, "armsx1");
+    let serialized = serde_json::to_value(&plan).unwrap();
+    assert_eq!(serialized["artifacts"][0]["source"]["kind"], "direct_url");
+    assert_eq!(
+        serialized["artifacts"][0]["source"]["url"],
+        "https://example.com/app.apk?channel=stable"
+    );
+    assert_eq!(
+        serialized["artifacts"][0]["source"]["sha256"],
+        expected_sha256
+    );
+    let parsed = crate::cli::parse_execution_plan_json(&serialized)
+        .expect("serialized direct-URL plan should parse for execution");
+    assert!(matches!(
+        &parsed.artifacts[0].source,
+        crate::planner::ExecutionArtifactSource::DirectUrl { url, sha256 }
+            if url == "https://example.com/app.apk?channel=stable"
+                && sha256.as_deref() == Some(expected_sha256.as_str())
+    ));
+    assert_eq!(
+        parsed.artifacts[0]
+            .app_provenance
+            .as_ref()
+            .map(|provenance| provenance.app_id.as_str()),
+        Some("armsx1")
+    );
+
+    let mut no_cache_input = armsx1_recipe_planner_input();
+    let recipe_artifact = no_cache_input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap()
+        .artifacts
+        .get_mut("installer")
+        .unwrap();
+    let RecipeArtifact::AppArtifact(reference) = recipe_artifact else {
+        panic!("ARMSX1 Recipe should refer to an App Definition artifact");
+    };
+    reference.cache = "none".to_string();
+    let no_cache_result = plan_execution_with_app_definitions(no_cache_input, &[direct_url_app]);
+    assert_eq!(no_cache_result.status, PlanningStatus::Success);
+    assert_eq!(
+        no_cache_result.execution_plan.unwrap().artifacts[0].cache,
+        "none"
     );
 }
 
@@ -6494,7 +6578,7 @@ fn app_authority_accepts_transitive_resolver_ancestor_selected_by_artifact_group
 
 #[test]
 fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
-    let result = plan_execution(authored_corpus_planner_input(&["app.obtainium.install"]));
+    let result = plan_execution(authored_corpus_planner_input(&["app.retroarch.provision"]));
 
     assert_eq!(
         result.status,
@@ -6512,6 +6596,6 @@ fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
     assert_eq!(install.skip_if[0].app_id, None);
     assert_eq!(
         install.skip_if[0].params.get("package_name"),
-        Some(&json!("dev.imranr.obtainium"))
+        Some(&json!("com.retroarch.aarch64"))
     );
 }

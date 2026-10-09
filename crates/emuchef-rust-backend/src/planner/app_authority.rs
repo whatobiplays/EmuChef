@@ -336,6 +336,14 @@ fn execution_artifact_source(
     artifact: &crate::authored_models::AppArtifactV1,
 ) -> Result<ExecutionArtifactSource, ()> {
     match &artifact.source {
+        AppArtifactSource::DirectUrl { url, sha256 }
+            if artifact.kind == crate::authored_models::AppArtifactKind::Apk =>
+        {
+            Ok(ExecutionArtifactSource::DirectUrl {
+                url: url.clone(),
+                sha256: sha256.clone(),
+            })
+        }
         AppArtifactSource::LatestRelease {
             provider: ReleaseProvider::Github,
             base_url,

@@ -22,9 +22,9 @@ use crate::errors::{ApiError, ApiErrorCode};
 use crate::executor::adb::FakeAdbCommandExecutor;
 use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
-    ExecutionProgressEvent, ExecutionResolvedRelease, ExecutionRunResult, ExecutorAdapters,
-    ExecutorDevice, ExecutorRunner, FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots,
-    StepFailureKind, StepRunStatus,
+    ExecutionProgressEvent, ExecutionResolvedArtifact, ExecutionResolvedRelease,
+    ExecutionRunResult, ExecutorAdapters, ExecutorDevice, ExecutorRunner, FakeDryRunDevice,
+    ProgressPhase, ProgressStatus, SandboxRoots, StepFailureKind, StepRunStatus,
 };
 use crate::model::OrderedMap;
 use crate::planner::{
@@ -142,9 +142,25 @@ pub struct ExecutionReport {
     pub execution_id: String,
     pub plan_id: String,
     pub plan_digest: String,
-    /// Full immutable plan content accepted by `startExecution`, retained so a
-    /// terminal report is a self-contained record of reviewed intent.
+    /// Exact immutable plan accepted for execution and bound by `plan_digest`.
+    /// It remains in the execution record but is not serialized to consumers,
+    /// because direct artifact URLs may contain signed query credentials.
+    #[serde(skip_serializing)]
     pub reviewed_plan: ExecutionPlan,
+    /// Exact plan for consumers when no source URL requires redaction.
+    #[serde(rename = "reviewedPlan", skip_serializing_if = "Option::is_none")]
+    pub public_reviewed_plan: Option<ExecutionPlan>,
+    /// Redacted consumer-facing plan used only when the exact plan contains
+    /// direct artifact URL credentials, queries, or fragments.
+    #[serde(
+        rename = "redactedReviewedPlan",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub redacted_reviewed_plan: Option<ExecutionPlan>,
+    /// Present when direct artifact source URLs were redacted from the public
+    /// projection. `plan_digest` identifies the exact retained plan above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_plan_source_urls_redacted: Option<bool>,
     pub mode: ExecutionMode,
     /// True only for fake-device dry runs. Such reports are not proof that any
     /// operation or verification ran against a real device.
@@ -160,6 +176,8 @@ pub struct ExecutionReport {
     pub recipes: Vec<ExecutionRecipeReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resolved_releases: Vec<ExecutionResolvedRelease>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_artifacts: Vec<ExecutionResolvedArtifact>,
     pub warnings: Vec<ExecutionIssue>,
     pub errors: Vec<ExecutionIssue>,
 }
@@ -614,6 +632,18 @@ fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(
                 })
                 .err()
                 .map(|error| error.code()),
+            ExecutionArtifactSource::DirectUrl { url, sha256 } => resolver
+                .admit_direct_url(
+                    ArtifactResolveRequest {
+                        artifact_id: &artifact.id,
+                        type_name: &artifact.type_name,
+                        url,
+                        cache_mode: &artifact.cache,
+                    },
+                    sha256.as_deref(),
+                )
+                .err()
+                .map(|error| error.code()),
             ExecutionArtifactSource::RemoteRelease {
                 provider,
                 service_origin,
@@ -727,6 +757,7 @@ fn initial_report(
     mode: ExecutionMode,
     target: Option<TargetDeviceBinding>,
 ) -> ExecutionReport {
+    let (redacted_plan, was_redacted) = redacted_report_plan(plan);
     let mut recipes = plan
         .recipes
         .iter()
@@ -772,6 +803,9 @@ fn initial_report(
         plan_id: plan.id.clone(),
         plan_digest: digest.to_string(),
         reviewed_plan: plan.clone(),
+        public_reviewed_plan: (!was_redacted).then(|| plan.clone()),
+        redacted_reviewed_plan: was_redacted.then_some(redacted_plan),
+        reviewed_plan_source_urls_redacted: was_redacted.then_some(true),
         mode,
         simulated: mode == ExecutionMode::DryRun,
         verification_scope: if mode == ExecutionMode::DryRun {
@@ -786,9 +820,36 @@ fn initial_report(
         latest_sequence: 0,
         recipes,
         resolved_releases: Vec::new(),
+        resolved_artifacts: Vec::new(),
         warnings: Vec::new(),
         errors: Vec::new(),
     }
+}
+
+fn redacted_report_plan(plan: &ExecutionPlan) -> (ExecutionPlan, bool) {
+    let mut redacted_plan = plan.clone();
+    let mut redacted = false;
+    for artifact in &mut redacted_plan.artifacts {
+        let crate::planner::ExecutionArtifactSource::DirectUrl { url, .. } = &mut artifact.source
+        else {
+            continue;
+        };
+        let Ok(mut parsed) = url::Url::parse(url) else {
+            *url = "<redacted-invalid-url>".to_string();
+            redacted = true;
+            continue;
+        };
+        let has_credentials = !parsed.username().is_empty() || parsed.password().is_some();
+        if parsed.query().is_some() || parsed.fragment().is_some() || has_credentials {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            *url = parsed.to_string();
+            redacted = true;
+        }
+    }
+    (redacted_plan, redacted)
 }
 
 fn execute_attempt(
@@ -975,6 +1036,7 @@ fn finish_attempt(
         return;
     };
     record.report.resolved_releases = result.resolved_releases.clone();
+    record.report.resolved_artifacts = result.resolved_artifacts.clone();
     for step_record in &result.steps {
         let recipe_id = record
             .report
@@ -1299,7 +1361,8 @@ fn read_only_roots(plan: &ExecutionPlan) -> Vec<PathBuf> {
             ExecutionArtifactSource::RemoteFile { url } => url
                 .strip_prefix("file://")
                 .map(|path| Path::new(path).to_path_buf()),
-            ExecutionArtifactSource::RemoteRelease { .. } => None,
+            ExecutionArtifactSource::DirectUrl { .. }
+            | ExecutionArtifactSource::RemoteRelease { .. } => None,
         }
     }));
     roots
@@ -1419,6 +1482,7 @@ mod tests {
             total_steps: 0,
             steps: Vec::new(),
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         };
         assert_eq!(overall_status(&result, false), ExecutionStatus::Succeeded);
         assert_eq!(
@@ -1460,12 +1524,14 @@ mod tests {
                 published_at: Some("2026-10-08T10:00:00Z".to_string()),
                 size: Some(42),
             }],
+            resolved_artifacts: Vec::new(),
         };
 
         finish_attempt(&state, &execution_id, result);
 
-        let report =
-            serde_json::to_value(&lock(&state).records.get(&execution_id).unwrap().report).unwrap();
+        let state_guard = lock(&state);
+        let retained_report = &state_guard.records.get(&execution_id).unwrap().report;
+        let report = serde_json::to_value(retained_report).unwrap();
         let selected = &report["resolvedReleases"][0];
         assert_eq!(selected["appId"], "armsx1");
         assert_eq!(selected["artifactId"], "apk");
@@ -1477,6 +1543,97 @@ mod tests {
         assert_eq!(selected["publishedAt"], "2026-10-08T10:00:00Z");
         assert_eq!(selected["size"], 42);
         assert!(selected.get("downloadUrl").is_none());
+    }
+
+    #[test]
+    fn terminal_report_serializes_resolved_direct_url_artifact_provenance_safely() {
+        let execution_id = "execution-direct-url".to_string();
+        let mut plan = test_plan("plan.direct-url");
+        plan.artifacts.push(crate::planner::ExecutionArtifact {
+            id: "app.obtainium.install/obtainium_apk".to_string(),
+            type_name: "remote_file".to_string(),
+            source: ExecutionArtifactSource::DirectUrl {
+                url: "https://cdn.example.com/obtainium/app-release.apk?token=private-signed-value"
+                    .to_string(),
+                sha256: None,
+            },
+            cache: "default".to_string(),
+            app_provenance: Some(crate::planner::ExecutionArtifactAppProvenance {
+                app_id: "obtainium".to_string(),
+                artifact_id: "apk".to_string(),
+                kind: "apk".to_string(),
+            }),
+        });
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let report = initial_report(&execution_id, &plan, &digest, ExecutionMode::DryRun, None);
+        let mut state = ExecutionState::default();
+        state.records.insert(
+            execution_id.clone(),
+            ExecutionRecord {
+                report,
+                events: Vec::new(),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let state = Arc::new(Mutex::new(state));
+        let result = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 0,
+            steps: Vec::new(),
+            resolved_releases: Vec::new(),
+            resolved_artifacts: vec![ExecutionResolvedArtifact {
+                recipe_artifact_id: "app.obtainium.install/obtainium_apk".to_string(),
+                app_id: "obtainium".to_string(),
+                app_artifact_id: "apk".to_string(),
+                filename: "app-release.apk".to_string(),
+                calculated_sha256: "ab".repeat(32),
+                cache_hit: false,
+                redacted_final_url: Some(
+                    "https://cdn.example.com/obtainium/app-release.apk".to_string(),
+                ),
+            }],
+        };
+
+        finish_attempt(&state, &execution_id, result);
+
+        let state_guard = lock(&state);
+        let retained_report = &state_guard.records.get(&execution_id).unwrap().report;
+        assert_eq!(retained_report.reviewed_plan, plan);
+        assert!(matches!(
+            &retained_report.reviewed_plan.artifacts[0].source,
+            ExecutionArtifactSource::DirectUrl { url, .. }
+                if url == "https://cdn.example.com/obtainium/app-release.apk?token=private-signed-value"
+        ));
+        assert_eq!(
+            crate::plan_digest::execution_plan_digest(&retained_report.reviewed_plan).unwrap(),
+            retained_report.plan_digest
+        );
+        let report = serde_json::to_value(retained_report).unwrap();
+        let artifact = &report["resolvedArtifacts"][0];
+        assert_eq!(
+            artifact["recipeArtifactId"],
+            "app.obtainium.install/obtainium_apk"
+        );
+        assert_eq!(artifact["appId"], "obtainium");
+        assert_eq!(artifact["appArtifactId"], "apk");
+        assert_eq!(artifact["filename"], "app-release.apk");
+        assert_eq!(artifact["calculatedSha256"], "ab".repeat(32));
+        assert_eq!(artifact["cacheHit"], false);
+        assert_eq!(
+            artifact["redactedFinalUrl"],
+            "https://cdn.example.com/obtainium/app-release.apk"
+        );
+        assert_eq!(report["reviewedPlanSourceUrlsRedacted"], true);
+        assert_eq!(
+            report["redactedReviewedPlan"]["artifacts"][0]["source"]["url"],
+            "https://cdn.example.com/obtainium/app-release.apk"
+        );
+        assert!(report.get("reviewedPlan").is_none());
+        assert!(report.get("resolvedReleases").is_none());
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("token="));
+        assert!(!serialized.contains("private-signed-value"));
     }
 
     #[test]
@@ -1604,6 +1761,7 @@ mod tests {
         assert_eq!(report["status"], "succeeded");
         assert_eq!(report["planDigest"], digest);
         assert_eq!(report["reviewedPlan"]["id"], "plan.phase0");
+        assert!(report.get("redactedReviewedPlan").is_none());
         assert_eq!(report["simulated"], true);
         assert_eq!(report["verificationScope"], "simulated_only");
         assert_eq!(report["recipes"][0]["name"], "Example Recipe");

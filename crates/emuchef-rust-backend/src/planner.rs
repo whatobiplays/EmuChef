@@ -167,7 +167,8 @@ impl ExecutionArtifact {
     pub fn remote_file_url(&self) -> Option<&str> {
         match &self.source {
             ExecutionArtifactSource::RemoteFile { url } => Some(url),
-            ExecutionArtifactSource::RemoteRelease { .. } => None,
+            ExecutionArtifactSource::DirectUrl { .. }
+            | ExecutionArtifactSource::RemoteRelease { .. } => None,
         }
     }
 }
@@ -185,7 +186,8 @@ impl Serialize for ExecutionArtifact {
         artifact.serialize_field("type", &self.type_name)?;
         match &self.source {
             ExecutionArtifactSource::RemoteFile { url } => artifact.serialize_field("url", url)?,
-            ExecutionArtifactSource::RemoteRelease { .. } => {
+            ExecutionArtifactSource::DirectUrl { .. }
+            | ExecutionArtifactSource::RemoteRelease { .. } => {
                 artifact.serialize_field("source", &self.source)?
             }
         }
@@ -206,6 +208,11 @@ impl Serialize for ExecutionArtifact {
 pub enum ExecutionArtifactSource {
     RemoteFile {
         url: String,
+    },
+    DirectUrl {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
     },
     RemoteRelease {
         provider: String,
