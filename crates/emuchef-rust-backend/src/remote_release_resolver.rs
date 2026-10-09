@@ -7,6 +7,7 @@ use regex::Regex;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde_json::Value;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use url::Url;
 
 const MAX_METADATA_BYTES: u64 = 2 * 1024 * 1024;
@@ -77,15 +78,13 @@ fn select_github_release_asset(
         })
         .filter_map(|release| {
             let tag = release.get("tag_name")?.as_str()?.to_string();
-            let published_at = release
-                .get("published_at")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Some((published_at, tag, release))
+            let published_at = release.get("published_at").and_then(Value::as_str)?;
+            let published_at_time = OffsetDateTime::parse(published_at, &Rfc3339).ok()?;
+            Some((published_at_time, published_at.to_string(), tag, release))
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-    let Some((published_at, release_tag, release)) = candidates.into_iter().next() else {
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.2.cmp(&left.2)));
+    let Some((_, published_at, release_tag, release)) = candidates.into_iter().next() else {
         return Err("remote_release_not_found: No eligible GitHub release was found".to_string());
     };
     let matches = release
@@ -111,12 +110,25 @@ fn select_github_release_asset(
                 download_url: download_url.to_string(),
                 asset_name: name.to_string(),
                 release_tag: release_tag.clone(),
-                published_at: published_at.clone(),
+                published_at: Some(published_at.clone()),
                 size: asset.get("size").and_then(Value::as_u64),
             })
         })
         .collect::<Vec<_>>();
     require_single_match(matches)
+}
+
+/// Select a GitHub release from fixture metadata through the production policy checks.
+#[cfg(test)]
+pub(crate) fn resolve_github_latest_from_fixture(
+    repository: &str,
+    include_prereleases: bool,
+    asset_pattern: &str,
+    releases: &Value,
+) -> Result<ResolvedRemoteRelease, String> {
+    validate_github_stable_release_policy(repository, include_prereleases, asset_pattern)?;
+    let matcher = compiled_asset_pattern(asset_pattern)?;
+    select_github_release_asset(releases, include_prereleases, &matcher)
 }
 
 pub(crate) fn resolve_remote_latest(
@@ -581,6 +593,82 @@ mod tests {
         assert_eq!(
             selected.download_url,
             "https://github.com/example/app/releases/download/v4/wanted-4.apk"
+        );
+    }
+
+    #[test]
+    fn github_release_selection_ignores_malformed_published_dates() {
+        let releases = json!([
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v1",
+                "published_at": "2025-12-31T00:00:00Z",
+                "assets": [{
+                    "name": "wanted.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted.apk"
+                }]
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v2",
+                "published_at": "2026-02-01T00:00:00Z",
+                "assets": [{
+                    "name": "wanted.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/v2/wanted.apk"
+                }]
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v-invalid-date",
+                "published_at": "9999-99-99T99:99:99Z",
+                "assets": [{
+                    "name": "wanted.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/invalid/wanted.apk"
+                }]
+            },
+            {
+                "draft": false,
+                "prerelease": false,
+                "tag_name": "v-missing-date",
+                "published_at": null,
+                "assets": [{
+                    "name": "wanted.apk",
+                    "browser_download_url": "https://github.com/example/app/releases/download/missing/wanted.apk"
+                }]
+            }
+        ]);
+        let matcher = Regex::new("^wanted\\.apk$").unwrap();
+
+        let selected = select_github_release_asset(&releases, false, &matcher).unwrap();
+
+        assert_eq!(selected.release_tag, "v2");
+        assert_eq!(
+            selected.published_at.as_deref(),
+            Some("2026-02-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn github_release_selection_rejects_releases_without_a_valid_published_date() {
+        let releases = json!([{
+            "draft": false,
+            "prerelease": false,
+            "tag_name": "v-undated",
+            "assets": [{
+                "name": "wanted.apk",
+                "browser_download_url": "https://github.com/example/app/releases/download/undated/wanted.apk"
+            }]
+        }]);
+        let matcher = Regex::new("^wanted\\.apk$").unwrap();
+
+        let error = select_github_release_asset(&releases, false, &matcher).unwrap_err();
+
+        assert_eq!(
+            error,
+            "remote_release_not_found: No eligible GitHub release was found"
         );
     }
 }

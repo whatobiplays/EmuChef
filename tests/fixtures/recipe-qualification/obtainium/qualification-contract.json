@@ -34,9 +34,18 @@
     "id": "obtainium",
     "packageName": "dev.imranr.obtainium",
     "artifactId": "apk",
-    "sourceStrategy": "direct_url",
-    "sourceUrl": "https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk",
-    "expectedSha256": null
+    "sourceStrategy": "latest_release",
+    "provider": "github",
+    "baseUrl": "https://github.com",
+    "repository": "ImranR98/Obtainium",
+    "assetPattern": "^app-release\\.apk$",
+    "prerelease": false
+  },
+  "release": {
+    "metadataFixture": "tests/fixtures/recipe-qualification/obtainium/github-releases.json",
+    "cachedOldTag": "v1.0.0",
+    "selectedTag": "v2.0.0",
+    "assetName": "app-release.apk"
   },
   "artifact": {
     "idSuffix": "obtainium_apk",

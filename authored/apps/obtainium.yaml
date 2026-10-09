@@ -10,8 +10,12 @@ artifacts:
     kind: apk
     name: Obtainium APK
     source:
-      strategy: direct_url
-      url: https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk
+      strategy: latest_release
+      provider: github
+      base_url: https://github.com
+      repository: ImranR98/Obtainium
+      asset_pattern: '^app-release\.apk$'
+      prerelease: false
 metadata:
   homepage: https://github.com/ImranR98/Obtainium
   tags:

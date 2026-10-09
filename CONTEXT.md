@@ -1872,18 +1872,23 @@ Standalone Obtainium automated qualification covers the real authored
 `app.obtainium.install` workflow. Its strict source-bound contract is at
 `tests/fixtures/recipe-qualification/obtainium/qualification-contract.json`,
 bound to the raw authored recipe SHA-256
-`d3f96f4d6f0fa812af75b0ddc18edad9da69b7b2ceae62468c0bd3c8b645caa7`, and its
+`378cc9b519a9872a9a70667331c1a6a210aee3958d7d61abf66b55c0ecc4395d`, and its
 active qualification module is
 `crates/emuchef-rust-backend/src/recipe_qualification_obtainium_tests.rs`.
 Qualification uses `ayaneo.generic.base` only as the production planning and
 capability context and explicitly selects only `app.obtainium.install`; the
 device plan does not contain Obtainium and is not treated as product
 provenance. The qualification covers production planning and review, authored
-URL/default-cache preservation with a seeded exact cache filename,
-deterministic install execution without network or ADB, package-state-driven
-repeated-install skipping, and truthful install-failure semantics through a
-private test-only device adapter. No authored YAML, device-plan/profile
-semantics, public API, or production executor source is changed.
+GitHub stable latest-release policy and asset-pattern preservation, including
+plan serialization and parsing. Deterministic release metadata selects the
+newest eligible stable release while an older release remains cached; the
+selected asset's URL determines the cache entry. The resulting plan resolves
+and installs the App Definition-owned APK without live GitHub access or ADB.
+Qualification also covers release and asset provenance, package-state-driven
+repeated-install skipping, package-identity rejection before device mutation,
+and truthful install-failure semantics through a private test-only device
+adapter. The standalone direct-URL source strategy remains independently
+validated and tested. Physical qualification is not claimed.
 
 Physical qualification for all three standalone workflows is deferred by owner
 with cleanup authority `not_authorized_for_recipe_qualification`.

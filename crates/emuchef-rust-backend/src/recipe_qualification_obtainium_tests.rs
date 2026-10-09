@@ -26,9 +26,6 @@ use crate::runtime_configuration::PlanConfigurationResult;
 const TARGET_RECIPE: &str = "app.obtainium.install";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.generic.base";
 const TARGET_PACKAGE: &str = "dev.imranr.obtainium";
-const TARGET_ARTIFACT_URL: &str =
-    "https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk";
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ObtainiumQualificationContract {
@@ -45,6 +42,7 @@ struct ObtainiumQualificationContract {
     required_operation_families: Vec<String>,
     material_dependency_edges: Vec<Vec<String>>,
     app_definition: AppDefinitionContract,
+    release: ReleaseContract,
     artifact: ArtifactContract,
     install: InstallContract,
     live_network_required_for_automated_qualification: bool,
@@ -60,8 +58,20 @@ struct AppDefinitionContract {
     package_name: String,
     artifact_id: String,
     source_strategy: String,
-    source_url: String,
-    expected_sha256: Option<String>,
+    provider: String,
+    base_url: String,
+    repository: String,
+    asset_pattern: String,
+    prerelease: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReleaseContract {
+    metadata_fixture: String,
+    cached_old_tag: String,
+    selected_tag: String,
+    asset_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,9 +157,15 @@ fn load_contract() -> ObtainiumQualificationContract {
     assert_eq!(contract.app_definition.id, "obtainium");
     assert_eq!(contract.app_definition.package_name, TARGET_PACKAGE);
     assert_eq!(contract.app_definition.artifact_id, "apk");
-    assert_eq!(contract.app_definition.source_strategy, "direct_url");
-    assert_eq!(contract.app_definition.source_url, TARGET_ARTIFACT_URL);
-    assert!(contract.app_definition.expected_sha256.is_none());
+    assert_eq!(contract.app_definition.source_strategy, "latest_release");
+    assert_eq!(contract.app_definition.provider, "github");
+    assert_eq!(contract.app_definition.base_url, "https://github.com");
+    assert_eq!(contract.app_definition.repository, "ImranR98/Obtainium");
+    assert_eq!(contract.app_definition.asset_pattern, r"^app-release\.apk$");
+    assert!(!contract.app_definition.prerelease);
+    assert_eq!(contract.release.cached_old_tag, "v1.0.0");
+    assert_eq!(contract.release.selected_tag, "v2.0.0");
+    assert_eq!(contract.release.asset_name, "app-release.apk");
     assert_eq!(contract.artifact.id_suffix, "obtainium_apk");
     assert_eq!(contract.artifact.type_name, "remote_file");
     assert_eq!(contract.artifact.app_ref, contract.app_definition.id);
@@ -249,6 +265,12 @@ fn obtainium_contract_binds_current_source_and_deferred_physical_status() {
         contract.authored_source.sha256,
         "authored Obtainium recipe changed; qualification expectations must be reviewed"
     );
+    assert_eq!(contract.app_definition.source_strategy, "latest_release");
+    assert_eq!(contract.app_definition.provider, "github");
+    assert_eq!(contract.app_definition.base_url, "https://github.com");
+    assert_eq!(contract.app_definition.repository, "ImranR98/Obtainium");
+    assert_eq!(contract.app_definition.asset_pattern, r"^app-release\.apk$");
+    assert!(!contract.app_definition.prerelease);
 }
 
 #[test]
@@ -329,9 +351,18 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
     assert_eq!(artifact.type_name, contract.artifact.type_name);
     assert!(matches!(
         &artifact.source,
-        ExecutionArtifactSource::DirectUrl { url, sha256 }
-            if url == &contract.app_definition.source_url
-                && sha256 == &contract.app_definition.expected_sha256
+        ExecutionArtifactSource::RemoteRelease {
+            provider,
+            service_origin,
+            repository,
+            include_prereleases,
+            asset_pattern,
+        }
+            if provider == &contract.app_definition.provider
+                && service_origin == &contract.app_definition.base_url
+                && repository == &contract.app_definition.repository
+                && include_prereleases == &contract.app_definition.prerelease
+                && asset_pattern == &contract.app_definition.asset_pattern
     ));
     assert_eq!(
         artifact
@@ -359,8 +390,18 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
         .expect("parsed plan should retain the Obtainium APK artifact");
     assert!(matches!(
         &parsed_artifact.source,
-        ExecutionArtifactSource::DirectUrl { url, sha256 }
-            if url == &contract.app_definition.source_url && sha256.is_none()
+        ExecutionArtifactSource::RemoteRelease {
+            provider,
+            service_origin,
+            repository,
+            include_prereleases,
+            asset_pattern,
+        }
+            if provider == &contract.app_definition.provider
+                && service_origin == &contract.app_definition.base_url
+                && repository == &contract.app_definition.repository
+                && include_prereleases == &contract.app_definition.prerelease
+                && asset_pattern == &contract.app_definition.asset_pattern
     ));
     assert_eq!(parsed_artifact.cache, contract.artifact.cache);
     assert_eq!(
@@ -430,11 +471,12 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
     let description = install_action
         .description
         .as_deref()
-        .expect("review should explain the direct URL source policy");
-    assert!(description.contains("direct HTTPS"));
-    assert!(description.contains("does not pin a release"));
-    assert!(description.contains("does not guarantee immutable bytes"));
-    assert!(description.contains("not publisher authentication"));
+        .expect("review should explain the stable GitHub release source");
+    assert_eq!(
+        description,
+        "The latest eligible stable GitHub APK for Obtainium is resolved during execution."
+    );
+    assert!(!description.contains("direct HTTPS"));
     let section_kinds = review.features[0]
         .sections
         .iter()
@@ -477,31 +519,57 @@ impl QualificationWorkspace {
     }
 }
 
-fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact) -> PathBuf {
-    let url = match &artifact.source {
-        ExecutionArtifactSource::RemoteFile { url }
-        | ExecutionArtifactSource::DirectUrl { url, .. } => url,
-        ExecutionArtifactSource::RemoteRelease { .. } => {
-            panic!("Obtainium cache fixture requires a concrete source URL")
-        }
-    };
+fn release_metadata_fixture(contract: &ObtainiumQualificationContract) -> Value {
+    let path = repository_root().join(&contract.release.metadata_fixture);
+    let bytes = fs::read(path).expect("Obtainium release metadata fixture should be readable");
+    serde_json::from_slice(&bytes).expect("Obtainium release metadata fixture should be valid")
+}
+
+fn release_asset_url(contract: &ObtainiumQualificationContract, tag: &str) -> String {
+    format!(
+        "{}/{}/releases/download/{}/{}",
+        contract.app_definition.base_url.trim_end_matches('/'),
+        contract.app_definition.repository,
+        tag,
+        contract.release.asset_name
+    )
+}
+
+fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact, url: &str) -> PathBuf {
     cache_root.join(artifact_local_filename(&artifact.id, url, &artifact.cache))
+}
+
+fn valid_apk_fixture_bytes(package_name: &'static str) -> Vec<u8> {
+    let fixture_workspace = tempfile::tempdir().expect("APK fixture root should be created");
+    let fixture_apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &fixture_workspace,
+        package_name,
+    );
+    fs::read(fixture_apk).expect("Obtainium APK fixture should be readable")
 }
 
 fn seed_artifact_cache(
     cache_root: &Path,
     plan: &ExecutionPlan,
     contract: &ObtainiumQualificationContract,
+    selected_package_name: &'static str,
 ) {
     fs::create_dir_all(cache_root).expect("cache root should be created");
     assert_eq!(plan.artifacts.len(), 1);
-    let fixture_workspace = tempfile::tempdir().expect("APK fixture root should be created");
     assert_eq!(contract.app_definition.package_name, TARGET_PACKAGE);
-    let fixture_apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
-        &fixture_workspace,
-        TARGET_PACKAGE,
-    );
-    let fixture_bytes = fs::read(fixture_apk).expect("Obtainium APK fixture should be readable");
+    let releases = release_metadata_fixture(contract);
+    let release_tags = releases
+        .as_array()
+        .expect("release metadata fixture should contain a list")
+        .iter()
+        .filter_map(|release| release.get("tag_name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(release_tags.contains(&contract.release.cached_old_tag.as_str()));
+    assert!(release_tags.contains(&contract.release.selected_tag.as_str()));
+    let selected_url = release_asset_url(contract, &contract.release.selected_tag);
+    let older_url = release_asset_url(contract, &contract.release.cached_old_tag);
+    let selected_bytes = valid_apk_fixture_bytes(selected_package_name);
+    let older_bytes = valid_apk_fixture_bytes("dev.example.stale.obtainium");
     for artifact in &plan.artifacts {
         assert!(artifact
             .id
@@ -509,12 +577,30 @@ fn seed_artifact_cache(
         assert_eq!(artifact.type_name, contract.artifact.type_name);
         assert!(matches!(
             &artifact.source,
-            ExecutionArtifactSource::DirectUrl { url, .. }
-                if url == &contract.app_definition.source_url
+            ExecutionArtifactSource::RemoteRelease {
+                provider,
+                service_origin,
+                repository,
+                include_prereleases,
+                asset_pattern,
+            }
+                if provider == &contract.app_definition.provider
+                    && service_origin == &contract.app_definition.base_url
+                    && repository == &contract.app_definition.repository
+                    && include_prereleases == &contract.app_definition.prerelease
+                    && asset_pattern == &contract.app_definition.asset_pattern
         ));
         assert_eq!(artifact.cache, "default");
-        fs::write(artifact_cache_path(cache_root, artifact), &fixture_bytes)
-            .expect("Obtainium APK fixture should be written");
+        fs::write(
+            artifact_cache_path(cache_root, artifact, &selected_url),
+            &selected_bytes,
+        )
+        .expect("selected Obtainium APK fixture should be written");
+        fs::write(
+            artifact_cache_path(cache_root, artifact, &older_url),
+            &older_bytes,
+        )
+        .expect("older cached Obtainium APK fixture should be written");
     }
 }
 
@@ -543,9 +629,10 @@ fn obtainium_generated_plan_executes_successfully_without_network_or_adb() {
     let contract = load_contract();
     let prepared = plan_obtainium();
     let plan = prepared.plan.expect("Obtainium plan should be generated");
-    seed_artifact_cache(&workspace.cache_root, &plan, &contract);
+    seed_artifact_cache(&workspace.cache_root, &plan, &contract, TARGET_PACKAGE);
 
     let mut runner = ExecutorRunner::new(dry_run_adapters(&workspace));
+    runner.set_github_release_metadata_fixtures(vec![release_metadata_fixture(&contract)]);
     let result = runner.run(&plan);
 
     assert!(
@@ -554,25 +641,39 @@ fn obtainium_generated_plan_executes_successfully_without_network_or_adb() {
     );
     assert_eq!(result.total_steps, plan.steps.len());
     assert_eq!(result.steps.len(), result.total_steps);
-    assert!(result.resolved_releases.is_empty());
-    assert_eq!(result.resolved_artifacts.len(), 1);
-    let materialized = &result.resolved_artifacts[0];
-    assert_eq!(materialized.recipe_artifact_id, plan.artifacts[0].id);
-    assert_eq!(materialized.app_id, "obtainium");
-    assert_eq!(materialized.app_artifact_id, "apk");
-    assert_eq!(materialized.filename, "app-release.apk");
-    assert_eq!(
-        materialized.calculated_sha256,
-        sha256_hex(
-            &fs::read(artifact_cache_path(
-                &workspace.cache_root,
-                &plan.artifacts[0]
-            ))
-            .expect("cached fixture APK should be readable")
-        )
+    assert_eq!(result.resolved_releases.len(), 1);
+    let release = &result.resolved_releases[0];
+    assert_eq!(release.app_id, contract.app_definition.id);
+    assert_eq!(release.artifact_id, contract.app_definition.artifact_id);
+    assert_eq!(release.release_tag, contract.release.selected_tag);
+    assert_eq!(release.asset_name, contract.release.asset_name);
+    assert!(result.resolved_artifacts.is_empty());
+    let selected_cache = artifact_cache_path(
+        &workspace.cache_root,
+        &plan.artifacts[0],
+        &release_asset_url(&contract, &contract.release.selected_tag),
     );
-    assert!(materialized.cache_hit);
-    assert!(materialized.redacted_final_url.is_none());
+    let older_cache = artifact_cache_path(
+        &workspace.cache_root,
+        &plan.artifacts[0],
+        &release_asset_url(&contract, &contract.release.cached_old_tag),
+    );
+    assert_ne!(
+        selected_cache, older_cache,
+        "release asset URLs use distinct cache keys"
+    );
+    assert!(selected_cache.is_file());
+    assert!(older_cache.is_file());
+    assert_ne!(
+        sha256_hex(&fs::read(&selected_cache).expect("selected release cache fixture should read")),
+        sha256_hex(&fs::read(&older_cache).expect("older cache fixture should read")),
+        "the newer selected APK and retained older cached APK must be distinct"
+    );
+    let serialized_result = serde_json::to_value(&result).expect("result should serialize");
+    assert!(serialized_result["resolved_releases"].is_array());
+    assert!(!serialized_result
+        .to_string()
+        .contains("browser_download_url"));
     for record in &result.steps {
         assert!(
             !matches!(
@@ -600,8 +701,10 @@ fn obtainium_install_skips_on_repeated_deterministic_run() {
     let contract = load_contract();
     let prepared = plan_obtainium();
     let plan = prepared.plan.expect("Obtainium plan should be generated");
-    seed_artifact_cache(&workspace.cache_root, &plan, &contract);
+    seed_artifact_cache(&workspace.cache_root, &plan, &contract, TARGET_PACKAGE);
     let mut runner = ExecutorRunner::new(dry_run_adapters(&workspace));
+    let fixture = release_metadata_fixture(&contract);
+    runner.set_github_release_metadata_fixtures(vec![fixture.clone(), fixture]);
 
     let first = runner.run(&plan);
     assert!(first.success, "first deterministic run should succeed");
@@ -628,6 +731,65 @@ fn obtainium_install_skips_on_repeated_deterministic_run() {
             record.status
         );
     }
+}
+
+#[test]
+fn obtainium_missing_release_fixture_fails_without_network_fallback() {
+    let workspace = QualificationWorkspace::new();
+    let prepared = plan_obtainium();
+    let plan = prepared.plan.expect("Obtainium plan should be generated");
+    let mut runner = ExecutorRunner::new(dry_run_adapters(&workspace));
+    runner.set_github_release_metadata_fixtures(Vec::new());
+
+    let result = runner.run(&plan);
+
+    assert!(!result.success);
+    assert_eq!(
+        result
+            .steps
+            .iter()
+            .find(|record| record.step_id.ends_with("/resolve_artifacts"))
+            .expect("artifact resolution record should exist")
+            .status,
+        StepRunStatus::Failed
+    );
+    assert_eq!(install_status(&result), StepRunStatus::Blocked);
+}
+
+#[test]
+fn obtainium_rejects_wrong_package_before_device_install_mutation() {
+    let workspace = QualificationWorkspace::new();
+    let contract = load_contract();
+    let prepared = plan_obtainium();
+    let plan = prepared.plan.expect("Obtainium plan should be generated");
+    seed_artifact_cache(
+        &workspace.cache_root,
+        &plan,
+        &contract,
+        "dev.example.unexpected.obtainium",
+    );
+
+    let mut runner = ExecutorRunner::new(dry_run_adapters(&workspace));
+    runner.set_github_release_metadata_fixtures(vec![release_metadata_fixture(&contract)]);
+    let result = runner.run(&plan);
+
+    assert!(!result.success);
+    assert_eq!(
+        result
+            .steps
+            .iter()
+            .find(|record| record.step_id.ends_with("/resolve_artifacts"))
+            .expect("artifact resolution record should exist")
+            .status,
+        StepRunStatus::Executed
+    );
+    assert_eq!(install_status(&result), StepRunStatus::Failed);
+    assert!(runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .all(|command| command.first().map(String::as_str) != Some("install_apk")));
 }
 
 #[derive(Debug, Default)]
@@ -736,7 +898,7 @@ fn obtainium_install_failure_stops_the_unchanged_generated_plan_truthfully() {
     let prepared = plan_obtainium();
     let plan = prepared.plan.expect("Obtainium plan should be generated");
     let plan_before = plan.clone();
-    seed_artifact_cache(&workspace.cache_root, &plan, &contract);
+    seed_artifact_cache(&workspace.cache_root, &plan, &contract, TARGET_PACKAGE);
 
     let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
         InstallFailureDevice::default(),
@@ -747,6 +909,7 @@ fn obtainium_install_failure_stops_the_unchanged_generated_plan_truthfully() {
         false,
     );
     let mut runner = ExecutorRunner::new(adapters);
+    runner.set_github_release_metadata_fixtures(vec![release_metadata_fixture(&contract)]);
     let result = runner.run(&plan);
 
     assert_eq!(

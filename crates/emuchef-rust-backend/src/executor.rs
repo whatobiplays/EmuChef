@@ -485,6 +485,8 @@ pub struct ExecutorRunner<D: ExecutorDevice = FakeDryRunDevice> {
     adapters: ExecutorAdapters<D>,
     root_preflight: RootPreflightState,
     root_preflight_failure: Option<String>,
+    #[cfg(test)]
+    github_release_metadata_fixtures: Option<std::collections::VecDeque<Value>>,
 }
 
 /// Internal lifecycle markers used only by qualification seams.  They are
@@ -502,6 +504,8 @@ impl Default for ExecutorRunner<FakeDryRunDevice> {
             adapters: ExecutorAdapters::default(),
             root_preflight: RootPreflightState::NotRun,
             root_preflight_failure: None,
+            #[cfg(test)]
+            github_release_metadata_fixtures: None,
         }
     }
 }
@@ -512,7 +516,15 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             adapters,
             root_preflight: RootPreflightState::NotRun,
             root_preflight_failure: None,
+            #[cfg(test)]
+            github_release_metadata_fixtures: None,
         }
+    }
+
+    /// Supply release metadata fixtures to exercise the production selection path offline.
+    #[cfg(test)]
+    pub(crate) fn set_github_release_metadata_fixtures(&mut self, fixtures: Vec<Value>) {
+        self.github_release_metadata_fixtures = Some(std::collections::VecDeque::from(fixtures));
     }
 
     #[cfg(test)]
@@ -1304,6 +1316,17 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 )));
             };
             let mut resolved_release = None;
+            #[cfg(test)]
+            let github_release_fixture = if matches!(
+                &artifact.source,
+                ExecutionArtifactSource::RemoteRelease { .. }
+            ) {
+                self.github_release_metadata_fixtures
+                    .as_mut()
+                    .map(|fixtures| fixtures.pop_front())
+            } else {
+                None
+            };
             let result = (|| {
                 let resolved_url = match &artifact.source {
                     ExecutionArtifactSource::RemoteFile { url } => url.clone(),
@@ -1326,6 +1349,30 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             asset_pattern,
                         )
                         .map_err(StepFailure::new)?;
+                        #[cfg(test)]
+                        let release = match github_release_fixture.as_ref() {
+                            Some(Some(fixture)) => {
+                                crate::remote_release_resolver::resolve_github_latest_from_fixture(
+                                    repository,
+                                    *include_prereleases,
+                                    asset_pattern,
+                                    fixture,
+                                )
+                            }
+                            .map_err(StepFailure::new)?,
+                            Some(None) => {
+                                return Err(StepFailure::new(
+                                    "remote_release_fixture_missing: No GitHub release fixture remains for this run".to_string(),
+                                ));
+                            }
+                            None => resolve_github_latest(
+                                repository,
+                                *include_prereleases,
+                                asset_pattern,
+                            )
+                            .map_err(StepFailure::new)?,
+                        };
+                        #[cfg(not(test))]
                         let release =
                             resolve_github_latest(repository, *include_prereleases, asset_pattern)
                                 .map_err(StepFailure::new)?;
