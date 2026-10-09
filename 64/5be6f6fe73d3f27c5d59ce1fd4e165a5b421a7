@@ -1,0 +1,50 @@
+crates/emuchef-rust-backend/Cargo.toml
+  s_497bf34bd41f16::t_e6611f49a771bf 32
+tests/fixtures/recipe-qualification/obtainium/github-releases.json
+  s_497bf34bd41f16::t_080f937191bd66 1-46
+crates/emuchef-rust-backend/src/remote_release_resolver.rs
+  s_497bf34bd41f16::t_e6611f49a771bf 10,82,86-87,113
+  s_497bf34bd41f16::t_67f967b1a6e17d 81,83
+  s_497bf34bd41f16::t_a21d64ed6a7e00 598-673
+  s_497bf34bd41f16::t_4fc6b5e8e0b327 121
+  s_497bf34bd41f16::t_8dc539f237ad38 122-133
+CONTEXT.md
+  s_497bf34bd41f16::t_50260dac7530db 1875,1882-1891
+tests/fixtures/recipe-qualification/obtainium/qualification-contract.json
+  s_497bf34bd41f16::t_d8ddaeb26fc3ca 37-48
+crates/emuchef-rust-backend/src/recipe_qualification_obtainium_tests.rs
+  s_497bf34bd41f16::t_921cd8108d0df2 599-603,661-664,674-676
+  s_497bf34bd41f16::t_0d9b63dc93a040 736-756
+  s_497bf34bd41f16::t_c203810e96d346 651-660,665-670,673
+  s_497bf34bd41f16::t_e8173adfa24342 632
+  s_497bf34bd41f16::t_c9581ee7ed1ebf 45,61-74,268-273,354-365,393-404,474-479,522-538,543-548,569-570,572,580-591,594-598
+  s_497bf34bd41f16::t_93be2828ea7d33 160-168,542,560-568,644-650,672
+  s_497bf34bd41f16::t_a873c7c3a1f8e0 549,555,571,635,704,706-707,757-794,901,912
+  s_497bf34bd41f16::t_6d6478399e4e11 550
+crates/emuchef-rust-backend/src/executor.rs
+  s_497bf34bd41f16::t_21038ac74c582c 525
+  s_497bf34bd41f16::t_62b9f3a904497f 526,528-529
+  s_497bf34bd41f16::t_21828c3fe90caa 1352,1375
+  s_497bf34bd41f16::t_300e8d90c2d122 488-489,507-508,519-520
+  s_497bf34bd41f16::t_348a773dd105ab 1319-1329,1353-1367,1374
+  s_497bf34bd41f16::t_2b9b41b6af2900 524
+  s_497bf34bd41f16::t_921cd8108d0df2 527,1368-1373
+authored/apps/obtainium.yaml
+  s_497bf34bd41f16::t_da8b577f9fcb40 13-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "645be6f6fe73d3f27c5d59ce1fd4e165a5b421a7",
+  "prompts": {},
+  "sessions": {
+    "s_497bf34bd41f16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11db6-d217-7f93-816a-d2130add16bc",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
