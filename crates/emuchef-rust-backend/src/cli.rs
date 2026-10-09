@@ -612,7 +612,8 @@ fn apply_workspace(plan_path: &Path, plan: &ExecutionPlan) -> ApplyWorkspace {
             .iter()
             .filter_map(|artifact| match &artifact.source {
                 ExecutionArtifactSource::RemoteFile { url } => file_url_to_path(url),
-                ExecutionArtifactSource::RemoteRelease { .. } => None,
+                ExecutionArtifactSource::DirectUrl { .. }
+                | ExecutionArtifactSource::RemoteRelease { .. } => None,
             }),
     );
     ApplyWorkspace {
@@ -1091,6 +1092,23 @@ fn parse_artifacts(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionArtifact>,
                 Some(source) => match required_string(source, "kind")?.as_str() {
                     "remote_file" => ExecutionArtifactSource::RemoteFile {
                         url: required_string(source, "url")?,
+                    },
+                    "direct_url" => ExecutionArtifactSource::DirectUrl {
+                        url: required_string(source, "url")?,
+                        sha256: match source.get(yaml_key("sha256")) {
+                            None | Some(YamlValue::Null) => None,
+                            Some(value) => Some(
+                                value
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        CliError::Message(
+                                            "execution artifact sha256 must be a string"
+                                                .to_string(),
+                                        )
+                                    })?
+                                    .to_string(),
+                            ),
+                        },
                     },
                     "remote_release" => ExecutionArtifactSource::RemoteRelease {
                         provider: required_string(source, "provider")?,

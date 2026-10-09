@@ -14,10 +14,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tempfile::TempPath;
 
 use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
@@ -43,6 +45,8 @@ pub struct ExecutionRunResult {
     pub steps: Vec<StepRunRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resolved_releases: Vec<ExecutionResolvedRelease>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_artifacts: Vec<ExecutionResolvedArtifact>,
 }
 
 /// Actual release identity selected while materializing an App-owned APK.
@@ -58,6 +62,22 @@ pub struct ExecutionResolvedRelease {
     pub published_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+/// Exact App Definition direct-URL artifact bytes retained for one execution.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionResolvedArtifact {
+    /// Fully qualified Recipe artifact identity from the reviewed plan.
+    pub recipe_artifact_id: String,
+    pub app_id: String,
+    pub app_artifact_id: String,
+    pub filename: String,
+    pub calculated_sha256: String,
+    pub cache_hit: bool,
+    /// The HTTP response URL with credentials and query/fragment data removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redacted_final_url: Option<String>,
 }
 
 fn app_apk_release_details(
@@ -101,6 +121,7 @@ mod resolved_release_result_tests {
             total_steps: 0,
             steps: Vec::new(),
             resolved_releases: vec![details],
+            resolved_artifacts: Vec::new(),
         };
 
         let value = serde_json::to_value(result).unwrap();
@@ -139,9 +160,43 @@ mod resolved_release_result_tests {
             total_steps: 0,
             steps: Vec::new(),
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         };
         let value = serde_json::to_value(result).unwrap();
         assert!(value.get("resolved_releases").is_none());
+    }
+
+    #[test]
+    fn execution_result_serializes_direct_url_materialization_provenance() {
+        let result = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 0,
+            steps: Vec::new(),
+            resolved_releases: Vec::new(),
+            resolved_artifacts: vec![ExecutionResolvedArtifact {
+                recipe_artifact_id: "app.obtainium.install/obtainium_apk".to_string(),
+                app_id: "obtainium".to_string(),
+                app_artifact_id: "apk".to_string(),
+                filename: "app-release.apk".to_string(),
+                calculated_sha256: "cd".repeat(32),
+                cache_hit: true,
+                redacted_final_url: None,
+            }],
+        };
+
+        let value = serde_json::to_value(result).unwrap();
+        let artifact = &value["resolved_artifacts"][0];
+        assert_eq!(
+            artifact["recipeArtifactId"],
+            "app.obtainium.install/obtainium_apk"
+        );
+        assert_eq!(artifact["appId"], "obtainium");
+        assert_eq!(artifact["appArtifactId"], "apk");
+        assert_eq!(artifact["filename"], "app-release.apk");
+        assert_eq!(artifact["calculatedSha256"], "cd".repeat(32));
+        assert_eq!(artifact["cacheHit"], true);
+        assert!(artifact.get("redactedFinalUrl").is_none());
     }
 }
 
@@ -911,6 +966,16 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         .and_then(|artifact| artifact.resolved_release.clone())
                 })
                 .collect(),
+            resolved_artifacts: plan
+                .artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    state
+                        .artifacts
+                        .get(&artifact.id)
+                        .and_then(|runtime| runtime.resolved_artifact.clone())
+                })
+                .collect(),
         }
     }
 
@@ -1242,6 +1307,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             let result = (|| {
                 let resolved_url = match &artifact.source {
                     ExecutionArtifactSource::RemoteFile { url } => url.clone(),
+                    ExecutionArtifactSource::DirectUrl { url, .. } => url.clone(),
                     ExecutionArtifactSource::RemoteRelease {
                         provider,
                         service_origin,
@@ -1274,10 +1340,48 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     url: &resolved_url,
                     cache_mode: &artifact.cache,
                 };
-                let resolved = resolver
-                    .resolve(request)
-                    .map_err(|error| StepFailure::new(error.executor_message(request)))?;
-                Ok((resolved_url, resolved))
+                let resolved = match &artifact.source {
+                    ExecutionArtifactSource::DirectUrl { sha256, .. } => {
+                        resolver.resolve_direct_url(request, sha256.as_deref())
+                    }
+                    ExecutionArtifactSource::RemoteFile { .. }
+                    | ExecutionArtifactSource::RemoteRelease { .. } => resolver.resolve(request),
+                }
+                .map_err(|error| StepFailure::new(error.executor_message(request)))?;
+                let resolved_artifact = if matches!(
+                    &artifact.source,
+                    ExecutionArtifactSource::DirectUrl { .. }
+                ) {
+                    let provenance = artifact
+                        .app_provenance
+                        .as_ref()
+                        .filter(|provenance| provenance.kind == "apk")
+                        .ok_or_else(|| {
+                            StepFailure::new(
+                                "app_artifact_provenance_invalid: Direct APK source is missing App Definition provenance.".to_string(),
+                            )
+                        })?;
+                    let calculated_sha256 = resolved
+                        .calculated_sha256
+                        .clone()
+                        .ok_or_else(|| {
+                            StepFailure::new(
+                                "artifact_sha256_unavailable: Direct APK materialization did not produce a calculated SHA-256.".to_string(),
+                            )
+                        })?;
+                    Some(ExecutionResolvedArtifact {
+                        recipe_artifact_id: artifact.id.clone(),
+                        app_id: provenance.app_id.clone(),
+                        app_artifact_id: provenance.artifact_id.clone(),
+                        filename: resolved.filename.clone(),
+                        calculated_sha256,
+                        cache_hit: resolved.cache_hit,
+                        redacted_final_url: resolved.redacted_final_url.clone(),
+                    })
+                } else {
+                    None
+                };
+                Ok((resolved_url, resolved, resolved_artifact))
             })();
             let artifact_state = state
                 .artifacts
@@ -1285,13 +1389,20 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 .expect("artifact runtime state should be initialized from plan");
             artifact_state.resolved_release = resolved_release;
             match result {
-                Ok((resolved_url, resolved)) => {
+                Ok((resolved_url, resolved, resolved_artifact)) => {
                     artifact_state.status = ArtifactRuntimeStatus::Resolved;
                     artifact_state.local_path =
                         Some(resolved.local_path.to_string_lossy().into_owned());
-                    artifact_state.resolved_url = Some(resolved_url);
+                    artifact_state.resolved_url =
+                        if matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. }) {
+                            None
+                        } else {
+                            Some(resolved_url)
+                        };
                     artifact_state.filename = Some(resolved.filename);
                     artifact_state.cache_hit = resolved.cache_hit;
+                    artifact_state.resolved_artifact = resolved_artifact;
+                    artifact_state.verified_path_guard = resolved.verified_path_guard;
                     artifact_state.error = None;
                 }
                 Err(failure) => {
@@ -3239,6 +3350,8 @@ impl ExecutionState {
                             cache_hit: false,
                             error: None,
                             resolved_release: None,
+                            resolved_artifact: None,
+                            verified_path_guard: None,
                         },
                     )
                 })
@@ -3287,6 +3400,8 @@ struct ArtifactRuntimeState {
     cache_hit: bool,
     error: Option<String>,
     resolved_release: Option<ExecutionResolvedRelease>,
+    resolved_artifact: Option<ExecutionResolvedArtifact>,
+    verified_path_guard: Option<Arc<TempPath>>,
 }
 
 #[derive(Clone, Debug)]
@@ -4460,6 +4575,8 @@ mod runtime_ref_projection_tests {
                 cache_hit: true,
                 error: None,
                 resolved_release: None,
+                resolved_artifact: None,
+                verified_path_guard: None,
             },
         );
 

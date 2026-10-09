@@ -922,24 +922,25 @@ fn is_service_origin(value: &str) -> bool {
 /// An authored App Definition describes a distributable public source, so it
 /// rejects the same machine-local hosts the source-selection and download paths
 /// already refuse instead of persisting an address those paths cannot use.
-fn parse_public_https_url(value: &str) -> Option<url::Url> {
+pub(crate) fn parse_public_https_url(value: &str) -> Option<url::Url> {
     let Ok(parsed) = url::Url::parse(value) else {
         return None;
     };
     let host = parsed.host()?;
     let is_public = parsed.scheme() == "https"
-        && !host_is_machine_local(&host)
+        && !host_is_non_public(&host)
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.fragment().is_none();
     is_public.then_some(parsed)
 }
 
-/// Return whether a URL host names the local machine.
+/// Return whether a URL host is local or uses a non-public address range.
 ///
-/// A trailing DNS root dot and an IPv4-mapped IPv6 address both name the same
-/// host as their plain form, so both are recognized as machine-local.
-fn host_is_machine_local(host: &url::Host<&str>) -> bool {
+/// A trailing DNS root dot and IPv4-mapped IPv6 address retain the same host
+/// policy as their plain forms. Hostname addresses are checked again when each
+/// direct HTTPS connection is established.
+fn host_is_non_public(host: &url::Host<&str>) -> bool {
     match host {
         url::Host::Domain(domain) => {
             let domain = domain.trim().trim_end_matches('.');
@@ -947,23 +948,50 @@ fn host_is_machine_local(host: &url::Host<&str>) -> bool {
                 || domain.eq_ignore_ascii_case("localhost")
                 || domain.ends_with(".localhost")
         }
-        url::Host::Ipv4(address) => ipv4_is_machine_local(*address),
-        url::Host::Ipv6(address) => {
-            address.is_loopback()
+        url::Host::Ipv4(address) => !is_public_ip(std::net::IpAddr::V4(*address)),
+        url::Host::Ipv6(address) => !is_public_ip(std::net::IpAddr::V6(*address)),
+    }
+}
+
+/// Return whether an IP address is globally reachable under the direct-URL
+/// source policy. Hostnames are checked against their resolved addresses by the
+/// HTTP transport before each connection.
+pub(crate) fn is_public_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => !ipv4_is_non_public(address),
+        std::net::IpAddr::V6(address) => {
+            let segments = address.segments();
+            !(address.is_loopback()
                 || address.is_unspecified()
                 || address.is_multicast()
-                || address.to_ipv4_mapped().is_some_and(ipv4_is_machine_local)
+                || address.to_ipv4_mapped().is_some_and(ipv4_is_non_public)
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xffc0) == 0xfec0
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0))
         }
     }
 }
 
-/// Return whether an IPv4 address names the local machine or a non-unicast
-/// address.
-fn ipv4_is_machine_local(address: std::net::Ipv4Addr) -> bool {
-    address.is_loopback() || address.is_unspecified() || address.is_multicast()
+/// Return whether an IPv4 address is private, local, shared, or non-unicast.
+fn ipv4_is_non_public(address: std::net::Ipv4Addr) -> bool {
+    let [first, second, _, _] = address.octets();
+    address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_unspecified()
+        || first == 0
+        || address.is_multicast()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || (first == 100 && (64..=127).contains(&second))
+        || (first == 192 && second == 0)
+        || (first == 198 && (second == 18 || second == 19))
+        || first >= 240
 }
 
-fn is_lowercase_sha256(value: &str) -> bool {
+pub(crate) fn is_lowercase_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -1527,7 +1555,32 @@ mod tests {
                 Some("app_artifact_url_invalid"),
             ),
             (
+                "https://10.0.0.1/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
+                "https://172.16.0.1/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
+                "https://192.168.1.1/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
+                "https://169.254.10.20/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
                 "https://0.0.0.0/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
+                "https://0.1.2.3/app.apk",
                 None,
                 Some("app_artifact_url_invalid"),
             ),
@@ -1537,10 +1590,21 @@ mod tests {
                 Some("app_artifact_url_invalid"),
             ),
             (
+                "https://[fc00::1]/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
+                "https://[fe80::1]/app.apk",
+                None,
+                Some("app_artifact_url_invalid"),
+            ),
+            (
                 "https://downloads.example.com/app.apk?version=2",
                 None,
                 None,
             ),
+            ("https://8.8.8.8/app.apk", None, None),
             (
                 "https://downloads.example.com/app.apk?version=2",
                 Some(lowercase_sha256.as_str()),

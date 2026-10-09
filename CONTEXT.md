@@ -86,6 +86,29 @@ catalog. Existing Recipes that have not migrated retain their current
 form-based artifact, install, and package-condition behavior until their own
 migration.
 
+Direct-URL APK sources require a public HTTPS URL without credentials or a
+fragment; signed query parameters are allowed. A direct URL does not pin a
+release or guarantee immutable bytes. The App Definition may include an
+expected SHA-256, which the artifact resolver checks against the returned
+artifact after validating source policy, including on cache hits. The resolver
+calculates the SHA-256 for every direct-URL resolution and gives execution a
+verified per-run snapshot so later cache changes cannot alter bytes passed to
+APK inspection or installation. Durable execution reports include Recipe and
+App Definition artifact identities, filename, calculated SHA-256, cache status,
+and a redacted observed final URL only for network transfers. A calculated
+checksum without a trusted expected value is not publisher authentication.
+Hostname source addresses are resolved for each direct HTTPS request and
+redirect. Every resolved address must pass the public-address policy, and the
+accepted addresses are pinned for direct connections while normal TLS
+certificate and hostname verification remains enabled. A configured system
+proxy remains enabled; proxy-side DNS is controlled by that trusted network
+route and cannot be pinned by the local resolver. Execution records retain the
+exact approved plan, including its original URL query, with the matching plan
+digest. Consumer-facing reports serialize that exact plan as `reviewedPlan`
+when it contains no URL credentials, query, or fragment. When redaction is
+needed, the report omits `reviewedPlan` and instead serializes the separately
+named `redactedReviewedPlan` projection, plus an explicit redaction marker.
+
 Android package facts come from APK inspection rather than filenames. The
 APK-inspection contract uses a separately configured user-supplied
 `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools.

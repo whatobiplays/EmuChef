@@ -4,16 +4,18 @@
 //! interface. It preserves the original URL bytes when deriving cache keys.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tempfile::{Builder as TempFileBuilder, NamedTempFile};
+use tempfile::{Builder as TempFileBuilder, NamedTempFile, TempPath};
 use url::Url;
 
 use crate::artifact_store::{prepare_metadata, publish_metadata};
 use crate::artifact_transport::{
-    ArtifactTransport, HttpArtifactTransport, HttpClientConfig, LocalFileTransport,
+    ArtifactTransport, DownloadMetadata, HttpArtifactTransport, HttpClientConfig,
+    LocalFileTransport, RedirectPolicy,
 };
 use crate::executor::SandboxRoots;
 
@@ -27,11 +29,14 @@ pub(crate) struct ArtifactResolveRequest<'a> {
 }
 
 /// Filesystem result recorded in executor runtime state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct ResolvedArtifact {
     pub local_path: PathBuf,
     pub filename: String,
     pub cache_hit: bool,
+    pub calculated_sha256: Option<String>,
+    pub redacted_final_url: Option<String>,
+    pub verified_path_guard: Option<Arc<TempPath>>,
 }
 
 /// Typed artifact failures converted to stable messages only by the executor.
@@ -48,11 +53,16 @@ pub(crate) enum ArtifactResolveError {
     HttpStatus { status: u16 },
     RedirectLimitExceeded { redirects: usize },
     RedirectDowngradeRejected,
+    RedirectPolicyRejected,
     ConnectTimeout,
     RequestTimeout,
     TlsVerificationFailed,
     ResponseIncomplete,
     ResponseTooLarge,
+    Sha256Unavailable,
+    ExpectedSha256Invalid,
+    ExpectedSha256Mismatch,
+    ArtifactChangedDuringResolution,
     CacheWriteFailed,
     CachePublishFailed,
     PartialCleanupFailed { primary: Box<ArtifactResolveError> },
@@ -74,11 +84,16 @@ impl ArtifactResolveError {
             Self::HttpStatus { .. } => "artifact_http_status",
             Self::RedirectLimitExceeded { .. } => "artifact_redirect_limit_exceeded",
             Self::RedirectDowngradeRejected => "artifact_redirect_downgrade_rejected",
+            Self::RedirectPolicyRejected => "artifact_redirect_policy_rejected",
             Self::ConnectTimeout => "artifact_connect_timeout",
             Self::RequestTimeout => "artifact_request_timeout",
             Self::TlsVerificationFailed => "artifact_tls_verification_failed",
             Self::ResponseIncomplete => "artifact_response_incomplete",
             Self::ResponseTooLarge => "artifact_response_too_large",
+            Self::Sha256Unavailable => "artifact_sha256_unavailable",
+            Self::ExpectedSha256Invalid => "artifact_sha256_invalid",
+            Self::ExpectedSha256Mismatch => "artifact_sha256_mismatch",
+            Self::ArtifactChangedDuringResolution => "artifact_changed_during_resolution",
             Self::CacheWriteFailed => "artifact_cache_write_failed",
             Self::CachePublishFailed => "artifact_cache_publish_failed",
             Self::PartialCleanupFailed { .. } => "artifact_partial_cleanup_failed",
@@ -119,11 +134,20 @@ impl ArtifactResolveError {
             Self::RedirectDowngradeRejected => {
                 "attempted a rejected HTTPS-to-HTTP redirect".to_string()
             }
+            Self::RedirectPolicyRejected => {
+                "redirected outside the public HTTPS source policy".to_string()
+            }
             Self::ConnectTimeout => "timed out while connecting".to_string(),
             Self::RequestTimeout => "exceeded the total request deadline".to_string(),
             Self::TlsVerificationFailed => "failed TLS verification".to_string(),
             Self::ResponseIncomplete => "returned an incomplete response".to_string(),
             Self::ResponseTooLarge => "exceeded the supported byte counter".to_string(),
+            Self::Sha256Unavailable => "could not be read for SHA-256 verification".to_string(),
+            Self::ExpectedSha256Invalid => "contains an invalid expected SHA-256".to_string(),
+            Self::ExpectedSha256Mismatch => "does not match the expected SHA-256".to_string(),
+            Self::ArtifactChangedDuringResolution => {
+                "changed while the artifact was being materialized".to_string()
+            }
             Self::CacheWriteFailed => "could not be written to artifact storage".to_string(),
             Self::CachePublishFailed => "could not be published to artifact storage".to_string(),
             Self::SandboxRejected => "was rejected by the filesystem sandbox".to_string(),
@@ -142,6 +166,12 @@ enum AdmittedArtifactSource {
     CacheHit,
     LocalFile(PathBuf),
     Http(Url),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ArtifactResolvePolicy<'a> {
+    RecipeRemoteFile,
+    DirectUrl { expected_sha256: Option<&'a str> },
 }
 
 /// Non-mutating result shared by start admission and runtime resolution.
@@ -195,7 +225,38 @@ impl<'a> ArtifactResolver<'a> {
         &self,
         request: ArtifactResolveRequest<'_>,
     ) -> Result<AdmittedArtifact, ArtifactResolveError> {
+        self.admit_with_policy(request, ArtifactResolvePolicy::RecipeRemoteFile)
+    }
+
+    /// Classify an App Definition-owned direct URL under its stricter source
+    /// policy, including when a cache entry already exists.
+    pub(crate) fn admit_direct_url(
+        &self,
+        request: ArtifactResolveRequest<'_>,
+        expected_sha256: Option<&str>,
+    ) -> Result<AdmittedArtifact, ArtifactResolveError> {
+        self.admit_with_policy(
+            request,
+            ArtifactResolvePolicy::DirectUrl { expected_sha256 },
+        )
+    }
+
+    fn admit_with_policy(
+        &self,
+        request: ArtifactResolveRequest<'_>,
+        policy: ArtifactResolvePolicy<'_>,
+    ) -> Result<AdmittedArtifact, ArtifactResolveError> {
         validate_artifact_definition(request)?;
+        let direct_url = match policy {
+            ArtifactResolvePolicy::RecipeRemoteFile => None,
+            ArtifactResolvePolicy::DirectUrl { expected_sha256 } => {
+                validate_expected_sha256(expected_sha256)?;
+                Some(
+                    crate::authored_models::parse_public_https_url(request.url)
+                        .ok_or(ArtifactResolveError::UrlInvalid)?,
+                )
+            }
+        };
         let filename = artifact_filename(request.artifact_id, request.url);
         let local_filename =
             artifact_local_filename(request.artifact_id, request.url, request.cache_mode);
@@ -222,8 +283,14 @@ impl<'a> ArtifactResolver<'a> {
             });
         }
 
-        let parsed_url = Url::parse(request.url).map_err(|_| ArtifactResolveError::UrlInvalid)?;
-        validate_source_url(&parsed_url)?;
+        let parsed_url = match direct_url {
+            Some(url) => url,
+            None => {
+                let url = Url::parse(request.url).map_err(|_| ArtifactResolveError::UrlInvalid)?;
+                validate_source_url(&url)?;
+                url
+            }
+        };
         let source = match parsed_url.scheme() {
             "file" => {
                 let source_path = file_url_to_path(request.url)
@@ -287,12 +354,53 @@ impl<'a> ArtifactResolver<'a> {
         &mut self,
         request: ArtifactResolveRequest<'_>,
     ) -> Result<ResolvedArtifact, ArtifactResolveError> {
-        let admitted = self.admit(request)?;
+        self.resolve_with_policy(request, ArtifactResolvePolicy::RecipeRemoteFile)
+    }
+
+    /// Resolve an App Definition-owned direct URL and retain a verified,
+    /// per-run snapshot for downstream path consumers.
+    pub(crate) fn resolve_direct_url(
+        &mut self,
+        request: ArtifactResolveRequest<'_>,
+        expected_sha256: Option<&str>,
+    ) -> Result<ResolvedArtifact, ArtifactResolveError> {
+        self.resolve_with_policy(
+            request,
+            ArtifactResolvePolicy::DirectUrl { expected_sha256 },
+        )
+    }
+
+    fn resolve_with_policy(
+        &mut self,
+        request: ArtifactResolveRequest<'_>,
+        policy: ArtifactResolvePolicy<'_>,
+    ) -> Result<ResolvedArtifact, ArtifactResolveError> {
+        let admitted = self.admit_with_policy(request, policy)?;
+        let is_direct_url = matches!(policy, ArtifactResolvePolicy::DirectUrl { .. });
+        let expected_sha256 = match policy {
+            ArtifactResolvePolicy::RecipeRemoteFile => None,
+            ArtifactResolvePolicy::DirectUrl { expected_sha256 } => expected_sha256,
+        };
         if matches!(admitted.source, AdmittedArtifactSource::CacheHit) {
+            if is_direct_url {
+                let (verified_path_guard, calculated_sha256) =
+                    snapshot_verified_file(&admitted.final_path, self.sandbox, expected_sha256)?;
+                return Ok(ResolvedArtifact {
+                    local_path: verified_path_guard.to_path_buf(),
+                    filename: admitted.filename,
+                    cache_hit: true,
+                    calculated_sha256: Some(calculated_sha256),
+                    redacted_final_url: None,
+                    verified_path_guard: Some(verified_path_guard),
+                });
+            }
             return Ok(ResolvedArtifact {
                 local_path: admitted.final_path,
                 filename: admitted.filename,
                 cache_hit: true,
+                calculated_sha256: None,
+                redacted_final_url: None,
+                verified_path_guard: None,
             });
         }
 
@@ -310,18 +418,53 @@ impl<'a> ArtifactResolver<'a> {
             .tempfile_in(parent)
             .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
 
+        let redirect_policy = if is_direct_url {
+            RedirectPolicy::PublicHttps
+        } else {
+            RedirectPolicy::Existing
+        };
         let transfer_result = match admitted.source {
             AdmittedArtifactSource::LocalFile(source_path) => self
                 .local_transport
                 .download(&source_path, partial.as_file_mut()),
-            AdmittedArtifactSource::Http(parsed_url) => self
-                .http_transport()?
-                .download(&parsed_url, partial.as_file_mut()),
+            AdmittedArtifactSource::Http(parsed_url) => {
+                let transport = self.http_transport()?;
+                if is_direct_url {
+                    transport.download_with_policy(
+                        &parsed_url,
+                        partial.as_file_mut(),
+                        redirect_policy,
+                    )
+                } else {
+                    transport.download(&parsed_url, partial.as_file_mut())
+                }
+            }
             AdmittedArtifactSource::CacheHit => unreachable!("cache hit returned above"),
         };
-        if let Err(error) = transfer_result {
-            return Err(cleanup_partial(partial, error, false));
-        }
+        let transfer_metadata = match transfer_result {
+            Ok(metadata) => metadata,
+            Err(error) => return Err(cleanup_partial(partial, error, false)),
+        };
+
+        let downloaded_sha256 = if is_direct_url {
+            if partial.as_file_mut().flush().is_err() {
+                return Err(cleanup_partial(
+                    partial,
+                    ArtifactResolveError::CacheWriteFailed,
+                    false,
+                ));
+            }
+            let calculated_sha256 = match calculate_file_sha256(partial.path()) {
+                Ok(calculated_sha256) => calculated_sha256,
+                Err(error) => return Err(cleanup_partial(partial, error, false)),
+            };
+            if let Err(error) = verify_expected_sha256(expected_sha256, &calculated_sha256) {
+                return Err(cleanup_partial(partial, error, false));
+            }
+            Some(calculated_sha256)
+        } else {
+            None
+        };
 
         let payload_fingerprint = partial.as_file().metadata().ok().map(|metadata| {
             let modified_nanos = metadata
@@ -344,20 +487,47 @@ impl<'a> ArtifactResolver<'a> {
         } else {
             None
         };
-        let (local_path, cache_hit) =
+        let (published_path, cache_hit) =
             finish_partial(partial, &admitted.final_path, admitted.default_cache, None)?;
         if !cache_hit {
             if let Some(metadata) = prepared_metadata.as_ref() {
                 // Metadata is optional support state. Failure intentionally
                 // leaves the payload usable and unindexed.
-                let _ = publish_metadata(&local_path, metadata);
+                let _ = publish_metadata(&published_path, metadata);
             }
         }
 
+        if is_direct_url {
+            let snapshot = snapshot_verified_file(&published_path, self.sandbox, expected_sha256);
+            if !admitted.default_cache {
+                let _ = fs::remove_file(&published_path);
+            }
+            let (verified_path_guard, calculated_sha256) = snapshot?;
+            if !cache_hit && downloaded_sha256.as_deref() != Some(calculated_sha256.as_str()) {
+                return Err(ArtifactResolveError::ArtifactChangedDuringResolution);
+            }
+            let redacted_final_url = if cache_hit {
+                None
+            } else {
+                redacted_download_url(&transfer_metadata)
+            };
+            return Ok(ResolvedArtifact {
+                local_path: verified_path_guard.to_path_buf(),
+                filename: admitted.filename,
+                cache_hit,
+                calculated_sha256: Some(calculated_sha256),
+                redacted_final_url,
+                verified_path_guard: Some(verified_path_guard),
+            });
+        }
+
         Ok(ResolvedArtifact {
-            local_path,
+            local_path: published_path,
             filename: admitted.filename,
             cache_hit,
+            calculated_sha256: None,
+            redacted_final_url: None,
+            verified_path_guard: None,
         })
     }
 
@@ -385,6 +555,106 @@ fn validate_artifact_definition(
 
 fn check_source_readable(path: &Path) -> io::Result<()> {
     File::open(path).map(drop)
+}
+
+fn validate_expected_sha256(expected_sha256: Option<&str>) -> Result<(), ArtifactResolveError> {
+    if expected_sha256.is_some_and(|value| !crate::authored_models::is_lowercase_sha256(value)) {
+        return Err(ArtifactResolveError::ExpectedSha256Invalid);
+    }
+    Ok(())
+}
+
+fn verify_expected_sha256(
+    expected_sha256: Option<&str>,
+    calculated_sha256: &str,
+) -> Result<(), ArtifactResolveError> {
+    if expected_sha256.is_some_and(|expected| expected != calculated_sha256) {
+        return Err(ArtifactResolveError::ExpectedSha256Mismatch);
+    }
+    Ok(())
+}
+
+fn calculate_file_sha256(path: &Path) -> Result<String, ArtifactResolveError> {
+    let mut file = File::open(path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(hex_digest(digest.finalize().as_slice()))
+}
+
+fn snapshot_verified_file(
+    source_path: &Path,
+    sandbox: &SandboxRoots,
+    expected_sha256: Option<&str>,
+) -> Result<(Arc<TempPath>, String), ArtifactResolveError> {
+    let verified_root = sandbox.runtime_root.join("verified-artifacts");
+    sandbox
+        .ensure_runtime_or_cache_write(&verified_root)
+        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+    match fs::symlink_metadata(&verified_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ArtifactResolveError::SandboxRejected);
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(ArtifactResolveError::CacheWriteFailed);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(ArtifactResolveError::CacheWriteFailed),
+    }
+    fs::create_dir_all(&verified_root).map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+    sandbox
+        .ensure_runtime_or_cache_write(&verified_root)
+        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+
+    let source_metadata =
+        fs::symlink_metadata(source_path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err(ArtifactResolveError::SandboxRejected);
+    }
+    let mut source =
+        File::open(source_path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+    let mut snapshot = TempFileBuilder::new()
+        .prefix(".emuchef-verified-")
+        .suffix(".apk")
+        .tempfile_in(&verified_root)
+        .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+        if count == 0 {
+            break;
+        }
+        snapshot
+            .as_file_mut()
+            .write_all(&buffer[..count])
+            .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+    }
+    snapshot
+        .as_file_mut()
+        .flush()
+        .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+    snapshot
+        .as_file()
+        .sync_all()
+        .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+    let calculated_sha256 = calculate_file_sha256(snapshot.path())?;
+    verify_expected_sha256(expected_sha256, &calculated_sha256)?;
+    Ok((Arc::new(snapshot.into_temp_path()), calculated_sha256))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validate_local_source(
@@ -614,30 +884,29 @@ fn url_scheme(url: &str) -> Option<&str> {
     (!scheme.is_empty()).then_some(scheme)
 }
 
-fn redacted_url(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    if scheme.is_empty() {
-        return None;
-    }
-    let without_sensitive_suffix = rest.split(['?', '#']).next().unwrap_or_default();
-    let (authority, path) = without_sensitive_suffix
-        .split_once('/')
-        .map(|(authority, path)| (authority, format!("/{path}")))
-        .unwrap_or((without_sensitive_suffix, String::new()));
-    let host = authority.rsplit('@').next().unwrap_or_default();
-    if host.is_empty() {
-        return None;
-    }
-    Some(format!("{scheme}://{host}{path}"))
+pub(crate) fn redacted_url(url: &str) -> Option<String> {
+    let mut parsed = Url::parse(url).ok()?;
+    parsed.set_username("").ok()?;
+    parsed.set_password(None).ok()?;
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Some(parsed.to_string())
+}
+
+fn redacted_download_url(metadata: &DownloadMetadata) -> Option<String> {
+    metadata
+        .observed_final_url
+        .as_deref()
+        .and_then(redacted_url)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
-    use std::net::TcpListener;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     use super::*;
 
@@ -648,6 +917,390 @@ mod tests {
             fake_device_root: root.join("device"),
             read_only_roots: vec![root.to_path_buf()],
         }
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        hex_digest(&Sha256::digest(bytes))
+    }
+
+    struct HttpsFixture {
+        address: SocketAddr,
+        certificate_der: Vec<u8>,
+        requests: Arc<AtomicUsize>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl HttpsFixture {
+        fn spawn(handler: impl Fn(&str) -> Vec<u8> + Send + Sync + 'static) -> Self {
+            use rcgen::{string::Ia5String, CertificateParams, KeyPair, SanType};
+            use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+            use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+            const HOST: &str = "downloads.example.test";
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            let mut params = CertificateParams::default();
+            params.subject_alt_names = vec![SanType::DnsName(
+                Ia5String::try_from(HOST).expect("fixture DNS name is valid"),
+            )];
+            let key = KeyPair::generate().unwrap();
+            let certificate = params.self_signed(&key).unwrap();
+            let certificate_der = certificate.der().to_vec();
+            let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+            let config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate.der().clone()], private_key)
+                .unwrap();
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let thread_requests = Arc::clone(&requests);
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let handler = Arc::new(handler);
+            let config = Arc::new(config);
+            let thread = thread::spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let connection = ServerConnection::new(Arc::clone(&config)).unwrap();
+                            let mut stream = StreamOwned::new(connection, stream);
+                            let mut request = [0u8; 4096];
+                            let Ok(count) = stream.read(&mut request) else {
+                                continue;
+                            };
+                            let request = String::from_utf8_lossy(&request[..count]);
+                            let target = request
+                                .lines()
+                                .next()
+                                .and_then(|line| line.split_whitespace().nth(1))
+                                .unwrap_or("/");
+                            thread_requests.fetch_add(1, Ordering::Relaxed);
+                            let response = handler(target);
+                            let _ = stream.write_all(&response);
+                            let _ = stream.flush();
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                address,
+                certificate_der,
+                requests,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn url(&self, path: &str) -> String {
+            format!(
+                "https://downloads.example.test:{}{path}",
+                self.address.port()
+            )
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+
+        fn resolver<'a>(
+            &self,
+            sandbox: &'a SandboxRoots,
+            policy_address: IpAddr,
+        ) -> ArtifactResolver<'a> {
+            let mut resolver = ArtifactResolver::new(sandbox);
+            resolver.http_transport = Some(
+                HttpArtifactTransport::with_test_root_and_host_mapping(
+                    HttpClientConfig {
+                        connect_timeout: Duration::from_secs(1),
+                        total_timeout: Duration::from_secs(3),
+                        use_system_proxy: false,
+                    },
+                    &self.certificate_der,
+                    "downloads.example.test",
+                    policy_address,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                )
+                .unwrap(),
+            );
+            resolver
+        }
+
+        fn stop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    impl Drop for HttpsFixture {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    fn tls_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn public_test_address() -> IpAddr {
+        "1.1.1.1".parse().unwrap()
+    }
+
+    #[test]
+    fn direct_https_resolver_downloads_fresh_bytes_with_and_without_trusted_sha256() {
+        const ARTIFACT_ID: &str = "app.obtainium.install/obtainium_apk";
+        let body = b"fresh HTTPS APK bytes";
+        let fixture = HttpsFixture::spawn(move |_| tls_response("200 OK", "", body));
+        let expected_sha256 = sha256(body);
+
+        for (path, trusted_sha256) in [
+            ("/without-checksum.apk", None),
+            ("/with-checksum.apk", Some(expected_sha256.as_str())),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let roots = sandbox(temp.path());
+            let url = fixture.url(path);
+            let resolved = fixture
+                .resolver(&roots, public_test_address())
+                .resolve_direct_url(
+                    ArtifactResolveRequest {
+                        artifact_id: ARTIFACT_ID,
+                        type_name: "remote_file",
+                        url: &url,
+                        cache_mode: "default",
+                    },
+                    trusted_sha256,
+                )
+                .unwrap();
+
+            assert!(!resolved.cache_hit);
+            assert_eq!(fs::read(&resolved.local_path).unwrap(), body);
+            assert_eq!(
+                resolved.calculated_sha256.as_deref(),
+                Some(expected_sha256.as_str())
+            );
+            assert_eq!(
+                resolved.redacted_final_url.as_deref(),
+                Some(
+                    format!(
+                        "https://downloads.example.test:{}{path}",
+                        fixture.address.port()
+                    )
+                    .as_str()
+                )
+            );
+            assert!(roots
+                .cache_root
+                .join(artifact_local_filename(ARTIFACT_ID, &url, "default"))
+                .is_file());
+        }
+        assert_eq!(fixture.request_count(), 2);
+    }
+
+    #[test]
+    fn direct_https_checksum_mismatch_cleans_partial_before_cache_publication() {
+        const ARTIFACT_ID: &str = "app.obtainium.install/obtainium_apk";
+        let fixture = HttpsFixture::spawn(|_| tls_response("200 OK", "", b"wrong artifact"));
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let url = fixture.url("/app.apk");
+        let expected_sha256 = sha256(b"trusted artifact");
+
+        let error = fixture
+            .resolver(&roots, public_test_address())
+            .resolve_direct_url(
+                ArtifactResolveRequest {
+                    artifact_id: ARTIFACT_ID,
+                    type_name: "remote_file",
+                    url: &url,
+                    cache_mode: "default",
+                },
+                Some(&expected_sha256),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "artifact_sha256_mismatch");
+        assert_eq!(fixture.request_count(), 1);
+        assert_eq!(fs::read_dir(&roots.cache_root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn direct_https_cache_none_keeps_only_the_verified_runtime_snapshot() {
+        const ARTIFACT_ID: &str = "app.obtainium.install/obtainium_apk";
+        let body = b"uncached HTTPS APK bytes";
+        let fixture = HttpsFixture::spawn(move |_| tls_response("200 OK", "", body));
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let url = fixture.url("/app.apk");
+
+        let resolved = fixture
+            .resolver(&roots, public_test_address())
+            .resolve_direct_url(
+                ArtifactResolveRequest {
+                    artifact_id: ARTIFACT_ID,
+                    type_name: "remote_file",
+                    url: &url,
+                    cache_mode: "none",
+                },
+                None,
+            )
+            .unwrap();
+
+        assert!(!resolved.cache_hit);
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), body);
+        assert!(resolved
+            .local_path
+            .starts_with(roots.runtime_root.join("verified-artifacts")));
+        assert_eq!(
+            fs::read_dir(roots.runtime_root.join("downloads"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(fixture.request_count(), 1);
+    }
+
+    #[test]
+    fn direct_https_resolver_records_and_redacts_a_signed_redirect_destination() {
+        const ARTIFACT_ID: &str = "app.obtainium.install/obtainium_apk";
+        const SIGNED_PATH: &str =
+            "/signed.apk?X-Amz-Credential=private-signed-value&X-Amz-Signature=sig";
+        let fixture = HttpsFixture::spawn(|target| match target {
+            "/start" => tls_response("302 Found", &format!("Location: {SIGNED_PATH}\r\n"), b""),
+            SIGNED_PATH => tls_response("200 OK", "", b"redirected APK bytes"),
+            _ => tls_response("404 Not Found", "", b""),
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let url = fixture.url("/start");
+
+        let resolved = fixture
+            .resolver(&roots, public_test_address())
+            .resolve_direct_url(
+                ArtifactResolveRequest {
+                    artifact_id: ARTIFACT_ID,
+                    type_name: "remote_file",
+                    url: &url,
+                    cache_mode: "default",
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(fixture.request_count(), 2);
+        assert_eq!(
+            resolved.redacted_final_url.as_deref(),
+            Some(
+                format!(
+                    "https://downloads.example.test:{}/signed.apk",
+                    fixture.address.port()
+                )
+                .as_str()
+            )
+        );
+        assert!(!resolved
+            .redacted_final_url
+            .as_deref()
+            .unwrap()
+            .contains("private-signed-value"));
+    }
+
+    #[test]
+    fn direct_https_rejects_private_dns_answers_before_connecting() {
+        const ARTIFACT_ID: &str = "app.obtainium.install/obtainium_apk";
+        for answer in ["10.20.30.40", "0.1.2.3"] {
+            let fixture =
+                HttpsFixture::spawn(|_| tls_response("200 OK", "", b"must not be fetched"));
+            let temp = tempfile::tempdir().unwrap();
+            let roots = sandbox(temp.path());
+            let url = fixture.url("/app.apk");
+
+            let error = fixture
+                .resolver(&roots, answer.parse().unwrap())
+                .resolve_direct_url(
+                    ArtifactResolveRequest {
+                        artifact_id: ARTIFACT_ID,
+                        type_name: "remote_file",
+                        url: &url,
+                        cache_mode: "default",
+                    },
+                    None,
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                error.code(),
+                "artifact_redirect_policy_rejected",
+                "DNS answer {answer} must be rejected"
+            );
+            assert_eq!(fixture.request_count(), 0, "DNS answer {answer}");
+            assert_eq!(fs::read_dir(&roots.cache_root).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn direct_https_cache_publication_race_hashes_and_reports_the_winning_file() {
+        const ARTIFACT_ID: &str = "app.obtainium.install/obtainium_apk";
+        const DOWNLOADED: &[u8] = b"response that lost publication";
+        const CACHE_WINNER: &[u8] = b"concurrent verified cache winner";
+        let request_arrived = Arc::new(std::sync::Barrier::new(2));
+        let response_released = Arc::new(std::sync::Barrier::new(2));
+        let fixture = HttpsFixture::spawn({
+            let request_arrived = Arc::clone(&request_arrived);
+            let response_released = Arc::clone(&response_released);
+            move |_| {
+                request_arrived.wait();
+                response_released.wait();
+                tls_response("200 OK", "", DOWNLOADED)
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let url = fixture.url("/race.apk");
+        let cache_path =
+            roots
+                .cache_root
+                .join(artifact_local_filename(ARTIFACT_ID, &url, "default"));
+        let mut resolver = fixture.resolver(&roots, public_test_address());
+
+        let resolved = std::thread::scope(|scope| {
+            let request = ArtifactResolveRequest {
+                artifact_id: ARTIFACT_ID,
+                type_name: "remote_file",
+                url: &url,
+                cache_mode: "default",
+            };
+            let resolution = scope.spawn(move || resolver.resolve_direct_url(request, None));
+            request_arrived.wait();
+            fs::write(&cache_path, CACHE_WINNER).unwrap();
+            response_released.wait();
+            resolution.join().unwrap().unwrap()
+        });
+
+        assert!(resolved.cache_hit);
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), CACHE_WINNER);
+        assert_eq!(fs::read(&cache_path).unwrap(), CACHE_WINNER);
+        assert_eq!(
+            resolved.calculated_sha256.as_deref(),
+            Some(sha256(CACHE_WINNER).as_str())
+        );
+        assert!(resolved.verified_path_guard.is_some());
+        assert_eq!(resolved.redacted_final_url, None);
+        assert_eq!(fixture.request_count(), 1);
     }
 
     fn spawn_http_server(
@@ -699,11 +1352,16 @@ mod tests {
             ArtifactResolveError::HttpStatus { status: 404 },
             ArtifactResolveError::RedirectLimitExceeded { redirects: 6 },
             ArtifactResolveError::RedirectDowngradeRejected,
+            ArtifactResolveError::RedirectPolicyRejected,
             ArtifactResolveError::ConnectTimeout,
             ArtifactResolveError::RequestTimeout,
             ArtifactResolveError::TlsVerificationFailed,
             ArtifactResolveError::ResponseIncomplete,
             ArtifactResolveError::ResponseTooLarge,
+            ArtifactResolveError::Sha256Unavailable,
+            ArtifactResolveError::ExpectedSha256Invalid,
+            ArtifactResolveError::ExpectedSha256Mismatch,
+            ArtifactResolveError::ArtifactChangedDuringResolution,
             ArtifactResolveError::CacheWriteFailed,
             ArtifactResolveError::CachePublishFailed,
             ArtifactResolveError::SandboxRejected,
@@ -736,6 +1394,234 @@ mod tests {
             redacted_url(request().url).as_deref(),
             Some("https://example.com/archive.zip")
         );
+    }
+
+    #[test]
+    fn direct_url_cache_hit_rejects_source_policy_before_accepting_cached_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        fs::create_dir_all(&roots.cache_root).unwrap();
+        let url = "https://user:secret@example.com/app.apk?token=private#fragment";
+        let artifact_id = "app.obtainium.install/obtainium_apk";
+        let cached_path =
+            roots
+                .cache_root
+                .join(artifact_local_filename(artifact_id, url, "default"));
+        fs::write(&cached_path, b"apparently cached").unwrap();
+
+        let error = ArtifactResolver::new(&roots)
+            .resolve_direct_url(
+                ArtifactResolveRequest {
+                    artifact_id,
+                    type_name: "remote_file",
+                    url,
+                    cache_mode: "default",
+                },
+                None,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "artifact_url_invalid");
+        assert!(!error
+            .executor_message(ArtifactResolveRequest {
+                artifact_id,
+                type_name: "remote_file",
+                url,
+                cache_mode: "default",
+            })
+            .contains("private"));
+        assert!(!roots.runtime_root.join("verified-artifacts").exists());
+    }
+
+    #[test]
+    fn direct_url_admission_accepts_signed_https_with_cache_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let url = "https://downloads.example.com/app.apk?signature=signed-value";
+        let admitted = ArtifactResolver::new(&roots)
+            .admit_direct_url(
+                ArtifactResolveRequest {
+                    artifact_id: "app.obtainium.install/obtainium_apk",
+                    type_name: "remote_file",
+                    url,
+                    cache_mode: "none",
+                },
+                None,
+            )
+            .unwrap();
+
+        assert!(!admitted.default_cache);
+        assert!(admitted
+            .final_path
+            .starts_with(roots.runtime_root.join("downloads")));
+        let AdmittedArtifactSource::Http(parsed_url) = admitted.source else {
+            panic!("a direct public HTTPS URL should use the HTTP transport");
+        };
+        assert_eq!(parsed_url.as_str(), url);
+    }
+
+    #[test]
+    fn direct_url_admission_rejects_invalid_expected_sha_before_cache_acceptance() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        fs::create_dir_all(&roots.cache_root).unwrap();
+        let url = "https://downloads.example.com/app.apk?signature=signed-value";
+        let artifact_id = "app.obtainium.install/obtainium_apk";
+        let cached_path =
+            roots
+                .cache_root
+                .join(artifact_local_filename(artifact_id, url, "default"));
+        fs::write(&cached_path, b"cached bytes").unwrap();
+        let invalid_sha256 = "A".repeat(64);
+
+        let error = ArtifactResolver::new(&roots)
+            .admit_direct_url(
+                ArtifactResolveRequest {
+                    artifact_id,
+                    type_name: "remote_file",
+                    url,
+                    cache_mode: "default",
+                },
+                Some(&invalid_sha256),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "artifact_sha256_invalid");
+        assert!(!roots.runtime_root.join("verified-artifacts").exists());
+    }
+
+    #[test]
+    fn direct_url_cache_hit_rejects_corrupted_bytes_and_uses_a_private_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        fs::create_dir_all(&roots.cache_root).unwrap();
+        let url = "https://downloads.example.com/app.apk?signature=signed-value";
+        let artifact_id = "app.obtainium.install/obtainium_apk";
+        let cached_path =
+            roots
+                .cache_root
+                .join(artifact_local_filename(artifact_id, url, "default"));
+        fs::write(&cached_path, b"corrupt cached artifact").unwrap();
+        let expected_sha256 = sha256(b"trusted artifact");
+        let request = ArtifactResolveRequest {
+            artifact_id,
+            type_name: "remote_file",
+            url,
+            cache_mode: "default",
+        };
+        let mut resolver = ArtifactResolver::new(&roots);
+        let error = resolver
+            .resolve_direct_url(request, Some(&expected_sha256))
+            .unwrap_err();
+        assert_eq!(error.code(), "artifact_sha256_mismatch");
+        assert!(!roots
+            .runtime_root
+            .join("verified-artifacts")
+            .read_dir()
+            .is_ok_and(|mut entries| entries.next().is_some()));
+
+        fs::write(&cached_path, b"trusted artifact").unwrap();
+        let resolved = resolver
+            .resolve_direct_url(request, Some(&expected_sha256))
+            .unwrap();
+        assert!(resolved.cache_hit);
+        assert_eq!(
+            resolved.calculated_sha256.as_deref(),
+            Some(expected_sha256.as_str())
+        );
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), b"trusted artifact");
+        assert!(resolved.verified_path_guard.is_some());
+
+        fs::write(&cached_path, b"changed shared cache").unwrap();
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), b"trusted artifact");
+    }
+
+    #[test]
+    fn concurrent_cache_publication_hashes_the_winning_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        fs::create_dir_all(&roots.cache_root).unwrap();
+        let destination = roots.cache_root.join("artifact.apk");
+        let candidates: [&[u8]; 2] = [b"first concurrent artifact", b"second concurrent artifact"];
+        let barrier = Arc::new(std::sync::Barrier::new(candidates.len()));
+        let writers = candidates
+            .iter()
+            .copied()
+            .map(|bytes| {
+                let destination = destination.clone();
+                let cache_root = roots.cache_root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut partial = TempFileBuilder::new()
+                        .prefix(".emuchef-artifact-")
+                        .suffix(".partial")
+                        .tempfile_in(cache_root)
+                        .unwrap();
+                    partial.write_all(bytes).unwrap();
+                    barrier.wait();
+                    finish_partial(partial, &destination, true, None).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes.iter().filter(|(_, cache_hit)| !cache_hit).count(),
+            1
+        );
+        assert!(outcomes.iter().all(|(path, _)| path == &destination));
+        let (verified_path, calculated_sha256) =
+            snapshot_verified_file(&destination, &roots, None).unwrap();
+        let winner_bytes = fs::read(verified_path.as_ref()).unwrap();
+        assert!(candidates.contains(&winner_bytes.as_slice()));
+        assert_eq!(calculated_sha256, sha256(&winner_bytes));
+
+        let losing_bytes = candidates
+            .iter()
+            .copied()
+            .find(|candidate| *candidate != winner_bytes.as_slice())
+            .unwrap();
+        let losing_checksum = sha256(losing_bytes);
+        assert_eq!(
+            verify_expected_sha256(Some(&losing_checksum), &calculated_sha256)
+                .unwrap_err()
+                .code(),
+            "artifact_sha256_mismatch"
+        );
+    }
+
+    #[test]
+    fn download_url_redaction_removes_credentials_query_and_fragment() {
+        let metadata = DownloadMetadata {
+            bytes_written: 12,
+            content_length: Some(12),
+            observed_final_url: Some(
+                "https://user:private@cdn.example.com/app.apk?signature=signed-value#fragment"
+                    .to_string(),
+            ),
+        };
+
+        assert_eq!(
+            redacted_download_url(&metadata).as_deref(),
+            Some("https://cdn.example.com/app.apk")
+        );
+        assert_eq!(
+            redacted_download_url(&metadata).as_deref(),
+            Some("https://cdn.example.com/app.apk")
+        );
+    }
+
+    #[test]
+    fn malformed_url_credentials_are_not_echoed_in_redacted_diagnostics() {
+        assert_eq!(
+            redacted_url("https://user:private@example.com/app.apk?token=private#fragment")
+                .as_deref(),
+            Some("https://example.com/app.apk")
+        );
+        assert_eq!(redacted_url("https://user:private"), None);
     }
 
     #[test]

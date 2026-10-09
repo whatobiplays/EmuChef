@@ -6550,6 +6550,7 @@ mod tests {
             total_steps: 2,
             steps: vec![step(StepRunStatus::Executed), step(StepRunStatus::Executed)],
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         };
         let failed = ExecutionRunResult {
             success: false,
@@ -6557,6 +6558,7 @@ mod tests {
             total_steps: 2,
             steps: vec![step(StepRunStatus::Executed), step(StepRunStatus::Failed)],
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         };
         assert!(!partial_changes_possible(&successful));
         assert!(partial_changes_possible(&failed));
@@ -7249,6 +7251,7 @@ mod tests {
                 cleanup: Some(ProcessCleanup::Confirmed),
             }],
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         }
     }
 
@@ -7927,6 +7930,7 @@ mod tests {
                 cleanup: Some(ProcessCleanup::Confirmed),
             }],
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         };
         assert!(
             host_sleep_evidence(
@@ -7951,6 +7955,7 @@ mod tests {
                 cleanup: Some(ProcessCleanup::Confirmed),
             }],
             resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
         };
         assert!(
             host_sleep_evidence(

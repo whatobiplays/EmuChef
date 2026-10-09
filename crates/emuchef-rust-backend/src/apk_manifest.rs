@@ -438,11 +438,35 @@ pub(crate) mod tests {
         )
     }
 
+    fn valid_manifest_with_package(package_name: &'static str) -> FixtureElement<'static> {
+        let mut manifest = valid_manifest();
+        let package = manifest
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "package")
+            .expect("valid fixture manifest should declare a package");
+        package.value = FixtureValue::Raw(package_name);
+        manifest
+    }
+
     /// Write the canonical valid synthetic APK for sibling module tests.
     pub(crate) fn write_valid_test_apk(workspace: &TempDir) -> std::path::PathBuf {
         write_apk(
             workspace,
             &[(ANDROID_MANIFEST_ENTRY, build_axml(&valid_manifest()))],
+        )
+    }
+
+    pub(crate) fn write_valid_test_apk_with_package(
+        workspace: &TempDir,
+        package_name: &'static str,
+    ) -> std::path::PathBuf {
+        write_apk(
+            workspace,
+            &[(
+                ANDROID_MANIFEST_ENTRY,
+                build_axml(&valid_manifest_with_package(package_name)),
+            )],
         )
     }
 
@@ -780,6 +804,11 @@ pub(crate) mod tests {
     fn build_axml(root: &FixtureElement<'_>) -> Vec<u8> {
         let mut strings = vec!["android".to_string(), ANDROID_NAMESPACE.to_string()];
         collect_strings(root, &mut strings);
+        // The parser resumes chunk iteration after the final string terminator.
+        let current_string_bytes = strings.iter().map(|value| value.len() + 3).sum::<usize>();
+        let final_string_length = (4 - ((current_string_bytes + 3) % 4)) % 4;
+        let padding_string = ["", "~", "~~", "~~~"][final_string_length];
+        strings.push(padding_string.to_string());
 
         let mut payload = string_pool_chunk(&strings);
         payload.extend(namespace_chunk(0x0100, &strings));

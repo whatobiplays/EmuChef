@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -24,10 +25,18 @@ const USER_AGENT: &str = "EmuChef/0.1";
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Successful transfer metadata used to validate response completeness.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DownloadMetadata {
     pub bytes_written: u64,
     pub content_length: Option<u64>,
+    /// Absolute response URL observed by the HTTP client after manual redirects.
+    pub observed_final_url: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RedirectPolicy {
+    Existing,
+    PublicHttps,
 }
 
 /// Transfer an artifact source to a resolver-selected destination.
@@ -75,6 +84,7 @@ impl ArtifactTransport for LocalFileTransport {
         Ok(DownloadMetadata {
             bytes_written,
             content_length: Some(bytes_written),
+            observed_final_url: None,
         })
     }
 }
@@ -103,6 +113,19 @@ impl Default for HttpClientConfig {
 pub(crate) struct HttpArtifactTransport {
     client: Client,
     total_timeout: Duration,
+    client_config: HttpClientConfig,
+    #[cfg(test)]
+    test_root_der: Option<Vec<u8>>,
+    #[cfg(test)]
+    test_host_mapping: Option<TestHostMapping>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestHostMapping {
+    host: String,
+    policy_address: IpAddr,
+    connection_address: IpAddr,
 }
 
 impl HttpArtifactTransport {
@@ -127,6 +150,11 @@ impl HttpArtifactTransport {
         Ok(Self {
             client,
             total_timeout: config.total_timeout,
+            client_config: config,
+            #[cfg(test)]
+            test_root_der: None,
+            #[cfg(test)]
+            test_host_mapping: None,
         })
     }
 
@@ -137,7 +165,33 @@ impl HttpArtifactTransport {
     ) -> Result<Self, ArtifactResolveError> {
         let certificate = reqwest::Certificate::from_der(certificate_der)
             .map_err(|_| ArtifactResolveError::TlsVerificationFailed)?;
-        Self::from_builder(Client::builder().add_root_certificate(certificate), config)
+        let mut transport =
+            Self::from_builder(Client::builder().add_root_certificate(certificate), config)?;
+        transport.test_root_der = Some(certificate_der.to_vec());
+        Ok(transport)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_root_and_host_mapping(
+        config: HttpClientConfig,
+        certificate_der: &[u8],
+        host: &str,
+        policy_address: IpAddr,
+        connection_address: IpAddr,
+    ) -> Result<Self, ArtifactResolveError> {
+        let certificate = reqwest::Certificate::from_der(certificate_der)
+            .map_err(|_| ArtifactResolveError::TlsVerificationFailed)?;
+        let builder = Client::builder()
+            .resolve(host, SocketAddr::new(connection_address, 0))
+            .add_root_certificate(certificate);
+        let mut transport = Self::from_builder(builder, config)?;
+        transport.test_root_der = Some(certificate_der.to_vec());
+        transport.test_host_mapping = Some(TestHostMapping {
+            host: host.to_string(),
+            policy_address,
+            connection_address,
+        });
+        Ok(transport)
     }
 
     pub(crate) fn download(
@@ -145,6 +199,20 @@ impl HttpArtifactTransport {
         initial_url: &Url,
         destination: &mut dyn Write,
     ) -> Result<DownloadMetadata, ArtifactResolveError> {
+        self.download_with_policy(initial_url, destination, RedirectPolicy::Existing)
+    }
+
+    pub(crate) fn download_with_policy(
+        &self,
+        initial_url: &Url,
+        destination: &mut dyn Write,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<DownloadMetadata, ArtifactResolveError> {
+        if redirect_policy == RedirectPolicy::PublicHttps
+            && crate::authored_models::parse_public_https_url(initial_url.as_str()).is_none()
+        {
+            return Err(ArtifactResolveError::RedirectPolicyRejected);
+        }
         let deadline = Instant::now()
             .checked_add(self.total_timeout)
             .ok_or(ArtifactResolveError::RequestTimeout)?;
@@ -154,8 +222,11 @@ impl HttpArtifactTransport {
 
         loop {
             let remaining = remaining(deadline)?;
-            let response = self
-                .client
+            let client = match redirect_policy {
+                RedirectPolicy::Existing => self.client.clone(),
+                RedirectPolicy::PublicHttps => self.public_https_client(&current_url)?,
+            };
+            let response = client
                 .get(current_url.clone())
                 .header(ACCEPT_ENCODING, "identity")
                 .timeout(remaining)
@@ -172,7 +243,13 @@ impl HttpArtifactTransport {
                 let next_url = current_url
                     .join(location)
                     .map_err(|_| ArtifactResolveError::DownloadFailed)?;
-                validate_redirect(&current_url, &next_url, &mut redirects, &mut visited)?;
+                validate_redirect(
+                    &current_url,
+                    &next_url,
+                    &mut redirects,
+                    &mut visited,
+                    redirect_policy,
+                )?;
                 current_url = next_url;
                 continue;
             }
@@ -182,8 +259,105 @@ impl HttpArtifactTransport {
                     status: response.status().as_u16(),
                 });
             }
-            return stream_response(response, destination, deadline);
+            let observed_final_url = response.url().as_str().to_string();
+            return stream_response(response, destination, deadline, observed_final_url);
         }
+    }
+
+    fn public_https_client(&self, url: &Url) -> Result<Client, ArtifactResolveError> {
+        let host = url
+            .host_str()
+            .ok_or(ArtifactResolveError::RedirectPolicyRejected)?;
+        let addresses = self.public_https_addresses(url)?;
+        let mut builder = Client::builder()
+            .redirect(Policy::none())
+            .connect_timeout(self.client_config.connect_timeout)
+            .user_agent(USER_AGENT);
+        if !self.client_config.use_system_proxy {
+            builder = builder.no_proxy();
+        }
+        #[cfg(test)]
+        if let Some(certificate_der) = self.test_root_der.as_deref() {
+            let certificate = reqwest::Certificate::from_der(certificate_der)
+                .map_err(|_| ArtifactResolveError::TlsVerificationFailed)?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        if matches!(url.host(), Some(url::Host::Domain(_))) {
+            let addresses = self.public_https_connection_addresses(host, addresses);
+            builder = builder.resolve_to_addrs(host, &addresses);
+        }
+        builder
+            .build()
+            .map_err(|_| ArtifactResolveError::DownloadFailed)
+    }
+
+    fn public_https_addresses(&self, url: &Url) -> Result<Vec<SocketAddr>, ArtifactResolveError> {
+        #[cfg(test)]
+        if let Some(mapping) = self
+            .test_host_mapping
+            .as_ref()
+            .filter(|mapping| mapping.host == url.host_str().unwrap_or_default())
+        {
+            if !crate::authored_models::is_public_ip(mapping.policy_address) {
+                return Err(ArtifactResolveError::RedirectPolicyRejected);
+            }
+            return Ok(vec![SocketAddr::new(mapping.policy_address, 0)]);
+        }
+
+        match url
+            .host()
+            .ok_or(ArtifactResolveError::RedirectPolicyRejected)?
+        {
+            url::Host::Ipv4(address) => {
+                let address = IpAddr::V4(address);
+                if crate::authored_models::is_public_ip(address) {
+                    Ok(vec![SocketAddr::new(address, 0)])
+                } else {
+                    Err(ArtifactResolveError::RedirectPolicyRejected)
+                }
+            }
+            url::Host::Ipv6(address) => {
+                let address = IpAddr::V6(address);
+                if crate::authored_models::is_public_ip(address) {
+                    Ok(vec![SocketAddr::new(address, 0)])
+                } else {
+                    Err(ArtifactResolveError::RedirectPolicyRejected)
+                }
+            }
+            url::Host::Domain(host) => {
+                let resolved = (host, 0)
+                    .to_socket_addrs()
+                    .map_err(|_| ArtifactResolveError::DownloadFailed)?
+                    .collect::<Vec<_>>();
+                if resolved.is_empty()
+                    || resolved
+                        .iter()
+                        .any(|address| !crate::authored_models::is_public_ip(address.ip()))
+                {
+                    return Err(ArtifactResolveError::RedirectPolicyRejected);
+                }
+                Ok(resolved
+                    .into_iter()
+                    .map(|address| SocketAddr::new(address.ip(), 0))
+                    .collect())
+            }
+        }
+    }
+
+    fn public_https_connection_addresses(
+        &self,
+        _host: &str,
+        validated_addresses: Vec<SocketAddr>,
+    ) -> Vec<SocketAddr> {
+        #[cfg(test)]
+        if let Some(mapping) = self
+            .test_host_mapping
+            .as_ref()
+            .filter(|mapping| mapping.host == _host)
+        {
+            return vec![SocketAddr::new(mapping.connection_address, 0)];
+        }
+        validated_addresses
     }
 }
 
@@ -192,6 +366,7 @@ fn validate_redirect(
     next_url: &Url,
     redirects: &mut usize,
     visited: &mut Vec<String>,
+    policy: RedirectPolicy,
 ) -> Result<(), ArtifactResolveError> {
     if !matches!(next_url.scheme(), "http" | "https") {
         return Err(ArtifactResolveError::SchemeUnsupported {
@@ -200,6 +375,11 @@ fn validate_redirect(
     }
     if current_url.scheme() == "https" && next_url.scheme() == "http" {
         return Err(ArtifactResolveError::RedirectDowngradeRejected);
+    }
+    if policy == RedirectPolicy::PublicHttps
+        && crate::authored_models::parse_public_https_url(next_url.as_str()).is_none()
+    {
+        return Err(ArtifactResolveError::RedirectPolicyRejected);
     }
     *redirects += 1;
     if *redirects > MAX_REDIRECTS || visited.iter().any(|url| url == next_url.as_str()) {
@@ -215,6 +395,7 @@ fn stream_response(
     mut response: Response,
     destination: &mut dyn Write,
     deadline: Instant,
+    observed_final_url: String,
 ) -> Result<DownloadMetadata, ArtifactResolveError> {
     let content_length = response.content_length();
     let mut bytes_written = 0u64;
@@ -250,6 +431,7 @@ fn stream_response(
     Ok(DownloadMetadata {
         bytes_written,
         content_length,
+        observed_final_url: Some(observed_final_url),
     })
 }
 
@@ -323,7 +505,6 @@ fn classify_read_error(error: io::Error) -> ArtifactResolveError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -478,7 +659,13 @@ mod tests {
         let mut redirects = 0;
         let mut visited = vec![https.as_str().to_string()];
         assert!(matches!(
-            validate_redirect(&https, &http, &mut redirects, &mut visited),
+            validate_redirect(
+                &https,
+                &http,
+                &mut redirects,
+                &mut visited,
+                RedirectPolicy::Existing,
+            ),
             Err(ArtifactResolveError::RedirectDowngradeRejected)
         ));
 
@@ -486,15 +673,91 @@ mod tests {
         let mut redirects = 5;
         let mut visited = vec![https.as_str().to_string()];
         assert!(matches!(
-            validate_redirect(&https, &next, &mut redirects, &mut visited),
+            validate_redirect(
+                &https,
+                &next,
+                &mut redirects,
+                &mut visited,
+                RedirectPolicy::Existing,
+            ),
             Err(ArtifactResolveError::RedirectLimitExceeded { redirects: 6 })
         ));
 
         let mut redirects = 0;
         let mut visited = vec![https.as_str().to_string()];
         assert!(matches!(
-            validate_redirect(&https, &https, &mut redirects, &mut visited),
+            validate_redirect(
+                &https,
+                &https,
+                &mut redirects,
+                &mut visited,
+                RedirectPolicy::Existing,
+            ),
             Err(ArtifactResolveError::RedirectLimitExceeded { redirects: 1 })
+        ));
+    }
+
+    #[test]
+    fn public_https_redirect_policy_allows_signed_urls_and_rejects_credentials_and_local_hosts() {
+        let current = Url::parse("https://downloads.example.com/start").unwrap();
+        let signed = Url::parse("https://cdn.example.net/download.apk?token=signed-value").unwrap();
+        let mut redirects = 0;
+        let mut visited = vec![current.as_str().to_string()];
+        validate_redirect(
+            &current,
+            &signed,
+            &mut redirects,
+            &mut visited,
+            RedirectPolicy::PublicHttps,
+        )
+        .expect("signed CDN query parameters are valid public HTTPS redirects");
+
+        let globally_routable = Url::parse("https://8.8.8.8/download.apk").unwrap();
+        validate_redirect(
+            &current,
+            &globally_routable,
+            &mut 0,
+            &mut vec![current.as_str().to_string()],
+            RedirectPolicy::PublicHttps,
+        )
+        .expect("globally routable literal IPv4 redirect destinations are allowed");
+
+        for target in [
+            "https://user:secret@cdn.example.net/download.apk",
+            "https://cdn.example.net/download.apk#private",
+            "https://localhost/download.apk",
+            "https://127.0.0.1/download.apk",
+            "https://10.1.2.3/download.apk",
+            "https://0.1.2.3/download.apk",
+            "https://169.254.12.34/download.apk",
+            "https://[fc00::1]/download.apk",
+            "https://[fe80::1]/download.apk",
+        ] {
+            let target = Url::parse(target).unwrap();
+            let mut redirects = 0;
+            let mut visited = vec![current.as_str().to_string()];
+            assert!(matches!(
+                validate_redirect(
+                    &current,
+                    &target,
+                    &mut redirects,
+                    &mut visited,
+                    RedirectPolicy::PublicHttps,
+                ),
+                Err(ArtifactResolveError::RedirectPolicyRejected)
+            ));
+        }
+
+        let downgrade = Url::parse("http://cdn.example.net/download.apk").unwrap();
+        assert!(matches!(
+            validate_redirect(
+                &current,
+                &downgrade,
+                &mut 0,
+                &mut vec![current.as_str().to_string()],
+                RedirectPolicy::PublicHttps,
+            ),
+            Err(ArtifactResolveError::RedirectDowngradeRejected)
         ));
     }
 
@@ -562,6 +825,12 @@ mod tests {
             }
             match target {
                 "/redirect301" => response("301 Moved Permanently", "Location: /ok\r\n", b""),
+                "/redirect-secret" => response(
+                    "302 Found",
+                    "Location: /ok?token=private-signed-value\r\n",
+                    b"",
+                ),
+                "/ok?token=private-signed-value" => response("200 OK", "", b"ok"),
                 "/ok" => response("200 OK", "", b"ok"),
                 "/loop" => response("302 Found", "Location: /loop\r\n", b""),
                 "/malformed" => b"HTTP/1.1 302 Found\r\nLocation: http://[::1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
@@ -574,10 +843,27 @@ mod tests {
         });
         let transport = HttpArtifactTransport::new(test_config()).unwrap();
         let mut output = Vec::new();
-        transport
-            .download(&server.url("/redirect301"), &mut output)
-            .unwrap();
+        let first_redirect = server.url("/redirect301");
+        let metadata = transport.download(&first_redirect, &mut output).unwrap();
         assert_eq!(output, b"ok");
+        assert_eq!(
+            metadata.observed_final_url.as_deref(),
+            Some(server.url("/ok").as_str())
+        );
+        output.clear();
+        let metadata = transport
+            .download(&server.url("/redirect-secret"), &mut output)
+            .unwrap();
+        let observed_final_url = metadata
+            .observed_final_url
+            .as_deref()
+            .expect("HTTP transport should report the response URL it observed");
+        assert!(observed_final_url.ends_with("/ok?token=private-signed-value"));
+        let redacted = crate::artifact_resolver::redacted_url(observed_final_url)
+            .expect("the final URL should have a safe redacted projection");
+        assert!(redacted.ends_with("/ok"));
+        assert!(!redacted.contains("private-signed-value"));
+        assert!(!redacted.contains("token"));
         output.clear();
         transport
             .download(&server.url("/chain/0"), &mut output)

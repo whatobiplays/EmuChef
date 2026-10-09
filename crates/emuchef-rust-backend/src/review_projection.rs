@@ -268,6 +268,9 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
             } if provider == "github" && service_origin == "https://github.com"
         )
     });
+    let direct_https_apk = app_artifact.is_some_and(|artifact| {
+        matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. })
+    });
     let title = if step.type_name == "install_apk" {
         app.map(|app| format!("Install {}", app.name))
     } else {
@@ -283,6 +286,8 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
                 app.name
             )
         })
+    } else if direct_https_apk {
+        Some("The configured public direct HTTPS APK URL is used during execution. It does not pin a release and does not guarantee immutable bytes. The APK SHA-256 is calculated and checked against the authored expected checksum when one is supplied; a calculated checksum alone is not publisher authentication.".to_string())
     } else {
         non_blank(&step.note)
             .filter(|note| *note != title)
@@ -516,7 +521,7 @@ mod tests {
             skip_if: Vec::new(),
             verify: Vec::new(),
         };
-        let plan = ExecutionPlan {
+        let mut plan = ExecutionPlan {
             id: "plan.review".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),
@@ -581,5 +586,19 @@ mod tests {
             action.description.as_deref(),
             Some("The latest eligible stable GitHub APK for ARMSX1 is resolved during execution.")
         );
+
+        plan.artifacts[0].source = ExecutionArtifactSource::DirectUrl {
+            url: "https://downloads.example.com/app.apk?token=private".to_string(),
+            sha256: None,
+        };
+        let direct_action = project_action(&plan, &step, "installs");
+        let description = direct_action
+            .description
+            .expect("direct URL review should describe its source policy");
+        assert!(description.contains("direct HTTPS"));
+        assert!(description.contains("does not pin a release"));
+        assert!(description.contains("does not guarantee immutable bytes"));
+        assert!(description.contains("not publisher authentication"));
+        assert!(!description.contains("private"));
     }
 }

@@ -18,7 +18,9 @@ use crate::executor::{
     DeviceOperationError, ExecutorAdapters, ExecutorDevice, ExecutorRunner, FakeDryRunDevice,
     StepRunStatus,
 };
-use crate::planner::{ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionStep};
+use crate::planner::{
+    ExecutionArtifact, ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, ExecutionStep,
+};
 use crate::runtime_configuration::PlanConfigurationResult;
 
 const TARGET_RECIPE: &str = "app.obtainium.install";
@@ -42,12 +44,24 @@ struct ObtainiumQualificationContract {
     optional_inputs: Vec<String>,
     required_operation_families: Vec<String>,
     material_dependency_edges: Vec<Vec<String>>,
+    app_definition: AppDefinitionContract,
     artifact: ArtifactContract,
     install: InstallContract,
     live_network_required_for_automated_qualification: bool,
     automated_status: String,
     physical_status: String,
     physical_cleanup_authority: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AppDefinitionContract {
+    id: String,
+    package_name: String,
+    artifact_id: String,
+    source_strategy: String,
+    source_url: String,
+    expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +77,8 @@ struct ArtifactContract {
     id_suffix: String,
     #[serde(rename = "type")]
     type_name: String,
-    url: String,
+    app_ref: String,
+    app_artifact: String,
     cache: String,
 }
 
@@ -71,7 +86,7 @@ struct ArtifactContract {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InstallContract {
     step_id_suffix: String,
-    package_name: String,
+    app_ref: String,
     replace_existing: bool,
     skip_condition_type: String,
 }
@@ -129,12 +144,22 @@ fn load_contract() -> ObtainiumQualificationContract {
             "install_obtainium".to_string()
         ]]
     );
+    assert_eq!(contract.app_definition.id, "obtainium");
+    assert_eq!(contract.app_definition.package_name, TARGET_PACKAGE);
+    assert_eq!(contract.app_definition.artifact_id, "apk");
+    assert_eq!(contract.app_definition.source_strategy, "direct_url");
+    assert_eq!(contract.app_definition.source_url, TARGET_ARTIFACT_URL);
+    assert!(contract.app_definition.expected_sha256.is_none());
     assert_eq!(contract.artifact.id_suffix, "obtainium_apk");
     assert_eq!(contract.artifact.type_name, "remote_file");
-    assert_eq!(contract.artifact.url, TARGET_ARTIFACT_URL);
+    assert_eq!(contract.artifact.app_ref, contract.app_definition.id);
+    assert_eq!(
+        contract.artifact.app_artifact,
+        contract.app_definition.artifact_id
+    );
     assert_eq!(contract.artifact.cache, "default");
     assert_eq!(contract.install.step_id_suffix, "install_obtainium");
-    assert_eq!(contract.install.package_name, TARGET_PACKAGE);
+    assert_eq!(contract.install.app_ref, contract.app_definition.id);
     assert!(!contract.install.replace_existing);
     assert_eq!(contract.install.skip_condition_type, "package_installed");
     assert!(!contract.live_network_required_for_automated_qualification);
@@ -302,16 +327,63 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
         .expect("Obtainium APK artifact should be emitted");
     assert_eq!(plan.artifacts.len(), 1);
     assert_eq!(artifact.type_name, contract.artifact.type_name);
+    assert!(matches!(
+        &artifact.source,
+        ExecutionArtifactSource::DirectUrl { url, sha256 }
+            if url == &contract.app_definition.source_url
+                && sha256 == &contract.app_definition.expected_sha256
+    ));
     assert_eq!(
-        artifact.remote_file_url(),
-        Some(contract.artifact.url.as_str())
+        artifact
+            .app_provenance
+            .as_ref()
+            .map(|provenance| provenance.app_id.as_str()),
+        Some(contract.app_definition.id.as_str())
+    );
+    assert_eq!(
+        artifact
+            .app_provenance
+            .as_ref()
+            .map(|provenance| provenance.artifact_id.as_str()),
+        Some(contract.app_definition.artifact_id.as_str())
     );
     assert_eq!(artifact.cache, contract.artifact.cache);
+
+    let serialized_plan = serde_json::to_value(plan).expect("plan should serialize");
+    let parsed_plan = crate::cli::parse_execution_plan_json(&serialized_plan)
+        .expect("serialized Obtainium plan should parse");
+    let parsed_artifact = parsed_plan
+        .artifacts
+        .iter()
+        .find(|candidate| candidate.id == artifact.id)
+        .expect("parsed plan should retain the Obtainium APK artifact");
+    assert!(matches!(
+        &parsed_artifact.source,
+        ExecutionArtifactSource::DirectUrl { url, sha256 }
+            if url == &contract.app_definition.source_url && sha256.is_none()
+    ));
+    assert_eq!(parsed_artifact.cache, contract.artifact.cache);
+    assert_eq!(
+        parsed_artifact.app_provenance.as_ref().map(|provenance| (
+            provenance.app_id.as_str(),
+            provenance.artifact_id.as_str(),
+            provenance.kind.as_str(),
+        )),
+        Some((
+            contract.app_definition.id.as_str(),
+            contract.app_definition.artifact_id.as_str(),
+            "apk",
+        ))
+    );
 
     let resolve = generated_step(plan, "resolve_artifacts");
     assert_eq!(resolve.type_name, "resolve_artifacts");
     let install = generated_step(plan, &contract.install.step_id_suffix);
     assert_eq!(install.type_name, "install_apk");
+    assert_eq!(
+        install.app_id.as_deref(),
+        Some(contract.install.app_ref.as_str())
+    );
     assert!(install.dependencies.contains(&resolve.id));
     assert_eq!(
         install.params.get("app"),
@@ -331,8 +403,14 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
         contract.install.skip_condition_type
     );
     assert_eq!(
-        install.skip_if[0].params.get("package_name"),
-        Some(&Value::String(contract.install.package_name.clone()))
+        install.skip_if[0].app_id.as_deref(),
+        Some(contract.install.app_ref.as_str())
+    );
+    assert!(install.skip_if[0].params.is_empty());
+    assert_eq!(plan.apps[0].id, contract.app_definition.id);
+    assert_eq!(
+        plan.apps[0].package_id,
+        contract.app_definition.package_name
     );
 
     let review = result
@@ -343,6 +421,20 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
     assert_eq!(review.features.len(), 1);
     assert_eq!(review.features[0].name, "Install Obtainium");
     assert!(!review.features[0].automatically_added);
+    let install_action = review.features[0]
+        .sections
+        .iter()
+        .find(|section| section.kind == "installs")
+        .and_then(|section| section.actions.first())
+        .expect("review should describe the Obtainium install action");
+    let description = install_action
+        .description
+        .as_deref()
+        .expect("review should explain the direct URL source policy");
+    assert!(description.contains("direct HTTPS"));
+    assert!(description.contains("does not pin a release"));
+    assert!(description.contains("does not guarantee immutable bytes"));
+    assert!(description.contains("not publisher authentication"));
     let section_kinds = review.features[0]
         .sections
         .iter()
@@ -386,13 +478,14 @@ impl QualificationWorkspace {
 }
 
 fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact) -> PathBuf {
-    cache_root.join(artifact_local_filename(
-        &artifact.id,
-        artifact
-            .remote_file_url()
-            .expect("legacy artifact has a direct URL"),
-        &artifact.cache,
-    ))
+    let url = match &artifact.source {
+        ExecutionArtifactSource::RemoteFile { url }
+        | ExecutionArtifactSource::DirectUrl { url, .. } => url,
+        ExecutionArtifactSource::RemoteRelease { .. } => {
+            panic!("Obtainium cache fixture requires a concrete source URL")
+        }
+    };
+    cache_root.join(artifact_local_filename(&artifact.id, url, &artifact.cache))
 }
 
 fn seed_artifact_cache(
@@ -402,21 +495,26 @@ fn seed_artifact_cache(
 ) {
     fs::create_dir_all(cache_root).expect("cache root should be created");
     assert_eq!(plan.artifacts.len(), 1);
+    let fixture_workspace = tempfile::tempdir().expect("APK fixture root should be created");
+    assert_eq!(contract.app_definition.package_name, TARGET_PACKAGE);
+    let fixture_apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &fixture_workspace,
+        TARGET_PACKAGE,
+    );
+    let fixture_bytes = fs::read(fixture_apk).expect("Obtainium APK fixture should be readable");
     for artifact in &plan.artifacts {
         assert!(artifact
             .id
             .ends_with(&format!("/{}", contract.artifact.id_suffix)));
         assert_eq!(artifact.type_name, contract.artifact.type_name);
-        assert_eq!(
-            artifact.remote_file_url(),
-            Some(contract.artifact.url.as_str())
-        );
+        assert!(matches!(
+            &artifact.source,
+            ExecutionArtifactSource::DirectUrl { url, .. }
+                if url == &contract.app_definition.source_url
+        ));
         assert_eq!(artifact.cache, "default");
-        fs::write(
-            artifact_cache_path(cache_root, artifact),
-            b"obtainium deterministic APK fixture\n",
-        )
-        .expect("Obtainium APK fixture should be written");
+        fs::write(artifact_cache_path(cache_root, artifact), &fixture_bytes)
+            .expect("Obtainium APK fixture should be written");
     }
 }
 
@@ -456,6 +554,25 @@ fn obtainium_generated_plan_executes_successfully_without_network_or_adb() {
     );
     assert_eq!(result.total_steps, plan.steps.len());
     assert_eq!(result.steps.len(), result.total_steps);
+    assert!(result.resolved_releases.is_empty());
+    assert_eq!(result.resolved_artifacts.len(), 1);
+    let materialized = &result.resolved_artifacts[0];
+    assert_eq!(materialized.recipe_artifact_id, plan.artifacts[0].id);
+    assert_eq!(materialized.app_id, "obtainium");
+    assert_eq!(materialized.app_artifact_id, "apk");
+    assert_eq!(materialized.filename, "app-release.apk");
+    assert_eq!(
+        materialized.calculated_sha256,
+        sha256_hex(
+            &fs::read(artifact_cache_path(
+                &workspace.cache_root,
+                &plan.artifacts[0]
+            ))
+            .expect("cached fixture APK should be readable")
+        )
+    );
+    assert!(materialized.cache_hit);
+    assert!(materialized.redacted_final_url.is_none());
     for record in &result.steps {
         assert!(
             !matches!(
