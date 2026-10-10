@@ -2970,6 +2970,7 @@ fn execution_report_document(
             "warnings": public.get("warnings"),
             "errors": public.get("errors"),
             "target": public.get("target"),
+            "resolvedReleases": project_resolved_releases(report.get("resolvedReleases")),
         },
     });
     let exact_serial = mapping
@@ -4013,6 +4014,14 @@ fn sanitize_real_projection(value: &mut Value, exact_serial: &str) {
         }
         Value::Object(values) => {
             for (key, value) in values.iter_mut() {
+                if key == "redactedFinalUrl" {
+                    *value = value
+                        .as_str()
+                        .and_then(redacted_public_report_url)
+                        .map(Value::String)
+                        .unwrap_or(Value::Null);
+                    continue;
+                }
                 // These values are generated locally from fixed protocol enums,
                 // counters, timestamps, booleans, or opaque public handles. Do
                 // not let an arbitrary serial corrupt that protocol merely by
@@ -4044,6 +4053,84 @@ fn sanitize_real_projection(value: &mut Value, exact_serial: &str) {
         }
         _ => {}
     }
+}
+
+/// Keep only validated release-resolution facts in public execution snapshots.
+fn project_resolved_releases(value: Option<&Value>) -> Value {
+    let releases = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|release| {
+            let provider = release.get("provider").and_then(Value::as_str)?;
+            if !matches!(provider, "github" | "gitlab" | "forgejo") {
+                return None;
+            }
+            let kind = release.get("kind").and_then(Value::as_str)?;
+            if !matches!(kind, "apk" | "file") {
+                return None;
+            }
+            let timestamp_source = release.get("timestampSource").and_then(Value::as_str)?;
+            if !matches!(
+                timestamp_source,
+                "published_at" | "released_at" | "created_at"
+            ) {
+                return None;
+            }
+            let calculated_sha256 = release
+                .get("calculatedSha256")
+                .and_then(Value::as_str)
+                .filter(|digest| {
+                    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })?;
+            let cache_hit = release.get("cacheHit").and_then(Value::as_bool)?;
+            let recipe_artifact_id = non_empty_report_string(release, "recipeArtifactId")?;
+            let app_id = non_empty_report_string(release, "appId")?;
+            let artifact_id = non_empty_report_string(release, "artifactId")?;
+            let release_tag = non_empty_report_string(release, "releaseTag")?;
+            let asset_name = non_empty_report_string(release, "assetName")?;
+            let redacted_final_url = release
+                .get("redactedFinalUrl")
+                .and_then(Value::as_str)
+                .and_then(redacted_public_report_url);
+            Some(json!({
+                "recipeArtifactId": recipe_artifact_id,
+                "provider": provider,
+                "appId": app_id,
+                "artifactId": artifact_id,
+                "kind": kind,
+                "releaseTag": release_tag,
+                "assetName": asset_name,
+                "publishedAt": release.get("publishedAt").and_then(Value::as_str),
+                "createdAt": release.get("createdAt").and_then(Value::as_str),
+                "timestampSource": timestamp_source,
+                "size": release.get("size").and_then(Value::as_u64),
+                "calculatedSha256": calculated_sha256,
+                "cacheHit": cache_hit,
+                "redactedFinalUrl": redacted_final_url,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Value::Array(releases)
+}
+
+fn non_empty_report_string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn redacted_public_report_url(value: &str) -> Option<String> {
+    let mut url = tauri::Url::parse(value).ok()?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return None;
+    }
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
 }
 
 fn sanitize_real_field(value: &mut Value, field: &str, serial: &str, fallback: &str) {
@@ -5548,6 +5635,140 @@ pub(crate) mod tests {
             "android_id",
             "build.fingerprint",
             "adb shell getprop",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn execution_report_preserves_redacted_download_url_and_marks_cache_hits_without_one() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let release = json!({
+            "recipeArtifactId": "recipe.install/app_apk",
+            "provider": "forgejo",
+            "appId": "example",
+            "artifactId": "app-apk",
+            "kind": "apk",
+            "releaseTag": "v1.2.3",
+            "assetName": "app.apk",
+            "publishedAt": "2026-10-08T10:00:00Z",
+            "createdAt": null,
+            "timestampSource": "published_at",
+            "size": 42,
+            "calculatedSha256": "a".repeat(64),
+            "cacheHit": false,
+            "redactedFinalUrl": "https://user:secret@downloads.example.net/v1/app.apk?signature=sensitive#fragment",
+            "downloadUrl": "https://downloads.example.net/private.apk?token=must-not-escape",
+        });
+        let cached_release = json!({
+            "recipeArtifactId": "recipe.install/app_symbols",
+            "provider": "forgejo",
+            "appId": "example",
+            "artifactId": "symbols",
+            "kind": "file",
+            "releaseTag": "v1.2.3",
+            "assetName": "symbols.zip",
+            "publishedAt": "2026-10-08T10:00:00Z",
+            "createdAt": null,
+            "timestampSource": "published_at",
+            "size": 43,
+            "calculatedSha256": "b".repeat(64),
+            "cacheHit": true,
+            "redactedFinalUrl": null,
+            "downloadUrl": "https://downloads.example.net/cached.zip?token=must-not-escape",
+        });
+        let report = json!({
+            "planId": "plan.release-report",
+            "status": "succeeded",
+            "recipes": [],
+            "warnings": [],
+            "errors": [],
+            "resolvedReleases": [release, cached_release],
+        });
+
+        let polling = project_snapshot(&mapping, &report);
+        assert!(polling.get("resolvedReleases").is_none());
+        let mut polling_fields = polling
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        polling_fields.sort();
+        assert_eq!(
+            polling_fields,
+            vec![
+                "completion",
+                "errors",
+                "executionHandle",
+                "finishedAt",
+                "latestSequence",
+                "progress",
+                "recipes",
+                "reviewHandle",
+                "simulated",
+                "startedAt",
+                "status",
+                "terminal",
+                "verificationScope",
+                "warnings",
+            ]
+        );
+        let public = project_real_snapshot(&mapping, &report);
+        assert!(public.get("resolvedReleases").is_none());
+
+        let document =
+            execution_report_document(&mapping, &report, &public, json!({ "status": "ready" }));
+        let serialized = document.to_string();
+        assert_eq!(
+            document["execution"]["resolvedReleases"],
+            json!([
+                {
+                    "recipeArtifactId": "recipe.install/app_apk",
+                    "provider": "forgejo",
+                    "appId": "example",
+                    "artifactId": "app-apk",
+                    "kind": "apk",
+                    "releaseTag": "v1.2.3",
+                    "assetName": "app.apk",
+                    "publishedAt": "2026-10-08T10:00:00Z",
+                    "createdAt": null,
+                    "timestampSource": "published_at",
+                    "size": 42,
+                    "calculatedSha256": "a".repeat(64),
+                    "cacheHit": false,
+                    "redactedFinalUrl": "https://downloads.example.net/v1/app.apk",
+                },
+                {
+                    "recipeArtifactId": "recipe.install/app_symbols",
+                    "provider": "forgejo",
+                    "appId": "example",
+                    "artifactId": "symbols",
+                    "kind": "file",
+                    "releaseTag": "v1.2.3",
+                    "assetName": "symbols.zip",
+                    "publishedAt": "2026-10-08T10:00:00Z",
+                    "createdAt": null,
+                    "timestampSource": "published_at",
+                    "size": 43,
+                    "calculatedSha256": "b".repeat(64),
+                    "cacheHit": true,
+                    "redactedFinalUrl": null,
+                }
+            ])
+        );
+        for forbidden in [
+            "secret",
+            "signature",
+            "sensitive",
+            "must-not-escape",
+            "downloadUrl",
         ] {
             assert!(!serialized.contains(forbidden), "leaked {forbidden}");
         }

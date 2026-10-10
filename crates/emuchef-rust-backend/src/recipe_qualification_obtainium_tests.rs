@@ -357,12 +357,14 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
             repository,
             include_prereleases,
             asset_pattern,
+            invert_asset_pattern: false,
+            ..
         }
             if provider == &contract.app_definition.provider
                 && service_origin == &contract.app_definition.base_url
                 && repository == &contract.app_definition.repository
                 && include_prereleases == &contract.app_definition.prerelease
-                && asset_pattern == &contract.app_definition.asset_pattern
+                && asset_pattern.as_deref() == Some(contract.app_definition.asset_pattern.as_str())
     ));
     assert_eq!(
         artifact
@@ -396,12 +398,14 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
             repository,
             include_prereleases,
             asset_pattern,
+            invert_asset_pattern: false,
+            ..
         }
             if provider == &contract.app_definition.provider
                 && service_origin == &contract.app_definition.base_url
                 && repository == &contract.app_definition.repository
                 && include_prereleases == &contract.app_definition.prerelease
-                && asset_pattern == &contract.app_definition.asset_pattern
+                && asset_pattern.as_deref() == Some(contract.app_definition.asset_pattern.as_str())
     ));
     assert_eq!(parsed_artifact.cache, contract.artifact.cache);
     assert_eq!(
@@ -474,7 +478,7 @@ fn obtainium_real_authored_plan_and_review_match_qualification_contract() {
         .expect("review should explain the stable GitHub release source");
     assert_eq!(
         description,
-        "The latest eligible stable GitHub APK for Obtainium is resolved during execution."
+        "The latest eligible stable GitHub APK for Obtainium is resolved during execution after matching filename pattern ^app-release\\.apk$."
     );
     assert!(!description.contains("direct HTTPS"));
     let section_kinds = review.features[0]
@@ -583,12 +587,14 @@ fn seed_artifact_cache(
                 repository,
                 include_prereleases,
                 asset_pattern,
+                invert_asset_pattern: false,
+                ..
             }
                 if provider == &contract.app_definition.provider
                     && service_origin == &contract.app_definition.base_url
                     && repository == &contract.app_definition.repository
                     && include_prereleases == &contract.app_definition.prerelease
-                    && asset_pattern == &contract.app_definition.asset_pattern
+                    && asset_pattern.as_deref() == Some(contract.app_definition.asset_pattern.as_str())
         ));
         assert_eq!(artifact.cache, "default");
         fs::write(

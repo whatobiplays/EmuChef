@@ -345,23 +345,38 @@ fn execution_artifact_source(
             })
         }
         AppArtifactSource::LatestRelease {
-            provider: ReleaseProvider::Github,
+            provider,
             base_url,
             repository,
-            asset_pattern: Some(asset_pattern),
+            asset_pattern,
             invert_asset_pattern,
-            prerelease: false,
-        } if base_url == "https://github.com"
-            && !repository.is_empty()
-            && invert_asset_pattern != &Some(true)
-            && regex::Regex::new(asset_pattern).is_ok() =>
-        {
+            prerelease,
+        } => {
+            let provider = match provider {
+                ReleaseProvider::Github => "github",
+                ReleaseProvider::Gitlab => "gitlab",
+                ReleaseProvider::Forgejo => "forgejo",
+            };
+            let artifact_kind = match artifact.kind {
+                crate::authored_models::AppArtifactKind::Apk => "apk",
+                crate::authored_models::AppArtifactKind::File => "file",
+            };
+            crate::remote_release_resolver::validate_remote_release_policy(
+                provider,
+                base_url,
+                repository,
+                artifact_kind,
+                asset_pattern.as_deref(),
+                invert_asset_pattern == &Some(true),
+            )
+            .map_err(|_| ())?;
             Ok(ExecutionArtifactSource::RemoteRelease {
-                provider: "github".to_string(),
+                provider: provider.to_string(),
                 service_origin: base_url.clone(),
                 repository: repository.clone(),
-                include_prereleases: false,
+                include_prereleases: *prerelease,
                 asset_pattern: asset_pattern.clone(),
+                invert_asset_pattern: invert_asset_pattern == &Some(true),
             })
         }
         _ => Err(()),

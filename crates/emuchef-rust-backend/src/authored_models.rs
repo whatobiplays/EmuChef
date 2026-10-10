@@ -911,7 +911,7 @@ fn is_public_https_url(value: &str) -> bool {
 /// A latest-release `base_url` names the provider service itself, so it accepts
 /// only the scheme, the host, and an optional default port. Query parameters,
 /// fragments, credentials, and nested web or API paths are all rejected.
-fn is_service_origin(value: &str) -> bool {
+pub(crate) fn is_service_origin(value: &str) -> bool {
     parse_public_https_url(value)
         .is_some_and(|parsed| parsed.query().is_none() && matches!(parsed.path(), "" | "/"))
 }

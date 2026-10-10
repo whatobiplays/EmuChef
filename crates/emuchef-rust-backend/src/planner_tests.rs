@@ -6238,10 +6238,12 @@ fn armsx1_plan_contains_app_identity_and_late_bound_release_policy() {
             repository,
             include_prereleases: false,
             asset_pattern,
+            invert_asset_pattern: false,
+            ..
         } if provider == "github"
             && service_origin == "https://github.com"
             && repository == "ARMSX2/ARMSX1"
-            && asset_pattern == r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$"
+            && asset_pattern.as_deref() == Some(r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$")
     ));
     let install = plan
         .steps
@@ -6263,6 +6265,59 @@ fn armsx1_plan_contains_app_identity_and_late_bound_release_policy() {
     let parsed = crate::cli::parse_execution_plan_json(&serialized)
         .expect("serialized app-authority plan should parse for execution");
     assert_eq!(parsed, plan);
+    assert_eq!(
+        crate::plan_digest::execution_plan_digest(&parsed).unwrap(),
+        crate::plan_digest::execution_plan_digest(&plan).unwrap()
+    );
+    assert_eq!(serialized["schema_version"], 1);
+    assert!(serialized["artifacts"][0]["source"]
+        .get("invert_asset_pattern")
+        .is_none());
+}
+
+#[test]
+fn latest_release_plan_accepts_an_omitted_filename_pattern_without_changing_v1_shape() {
+    let mut app = armsx1_app_definition();
+    let Some(crate::authored_models::AppArtifactSource::LatestRelease {
+        asset_pattern,
+        invert_asset_pattern,
+        ..
+    }) = app
+        .artifacts
+        .get_mut("apk")
+        .map(|artifact| &mut artifact.source)
+    else {
+        panic!("ARMSX1 must use a latest-release artifact");
+    };
+    *asset_pattern = None;
+    *invert_asset_pattern = None;
+
+    let mut input = armsx1_recipe_planner_input();
+    input.target_device = Some(crate::planner::TargetDeviceBinding {
+        serial: "device-1".to_string(),
+        manufacturer: Some("Example".to_string()),
+        model: Some("Example".to_string()),
+        android_api_level: Some(33),
+    });
+    let result = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.unwrap();
+    let serialized = serde_json::to_value(&plan).unwrap();
+    let source = &serialized["artifacts"][0]["source"];
+    assert_eq!(serialized["schema_version"], 1);
+    assert!(source.get("asset_pattern").is_none());
+    assert!(source.get("invert_asset_pattern").is_none());
+    let parsed = crate::cli::parse_execution_plan_json(&serialized).unwrap();
+    assert_eq!(parsed, plan);
+    assert_eq!(
+        crate::plan_digest::execution_plan_digest(&parsed).unwrap(),
+        crate::plan_digest::execution_plan_digest(&plan).unwrap()
+    );
 }
 
 #[test]

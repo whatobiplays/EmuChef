@@ -172,6 +172,7 @@ enum AdmittedArtifactSource {
 enum ArtifactResolvePolicy<'a> {
     RecipeRemoteFile,
     DirectUrl { expected_sha256: Option<&'a str> },
+    AppRelease,
 }
 
 /// Non-mutating result shared by start admission and runtime resolution.
@@ -256,6 +257,10 @@ impl<'a> ArtifactResolver<'a> {
                         .ok_or(ArtifactResolveError::UrlInvalid)?,
                 )
             }
+            ArtifactResolvePolicy::AppRelease => Some(
+                crate::authored_models::parse_public_https_url(request.url)
+                    .ok_or(ArtifactResolveError::UrlInvalid)?,
+            ),
         };
         let filename = artifact_filename(request.artifact_id, request.url);
         let local_filename =
@@ -370,19 +375,36 @@ impl<'a> ArtifactResolver<'a> {
         )
     }
 
+    /// Resolve a provider-selected App Artifact through public HTTPS policy,
+    /// calculating and retaining a verified per-run byte snapshot.
+    pub(crate) fn resolve_app_release(
+        &mut self,
+        request: ArtifactResolveRequest<'_>,
+    ) -> Result<ResolvedArtifact, ArtifactResolveError> {
+        self.resolve_with_policy(request, ArtifactResolvePolicy::AppRelease)
+    }
+
+    /// Reuse the resolver's hardened HTTP client for release metadata requests.
+    pub(crate) fn release_metadata_transport(
+        &mut self,
+    ) -> Result<&HttpArtifactTransport, ArtifactResolveError> {
+        self.http_transport()
+    }
+
     fn resolve_with_policy(
         &mut self,
         request: ArtifactResolveRequest<'_>,
         policy: ArtifactResolvePolicy<'_>,
     ) -> Result<ResolvedArtifact, ArtifactResolveError> {
         let admitted = self.admit_with_policy(request, policy)?;
-        let is_direct_url = matches!(policy, ArtifactResolvePolicy::DirectUrl { .. });
+        let requires_verified_snapshot = !matches!(policy, ArtifactResolvePolicy::RecipeRemoteFile);
+        let uses_public_https = requires_verified_snapshot;
         let expected_sha256 = match policy {
-            ArtifactResolvePolicy::RecipeRemoteFile => None,
+            ArtifactResolvePolicy::RecipeRemoteFile | ArtifactResolvePolicy::AppRelease => None,
             ArtifactResolvePolicy::DirectUrl { expected_sha256 } => expected_sha256,
         };
         if matches!(admitted.source, AdmittedArtifactSource::CacheHit) {
-            if is_direct_url {
+            if requires_verified_snapshot {
                 let (verified_path_guard, calculated_sha256) =
                     snapshot_verified_file(&admitted.final_path, self.sandbox, expected_sha256)?;
                 return Ok(ResolvedArtifact {
@@ -418,7 +440,7 @@ impl<'a> ArtifactResolver<'a> {
             .tempfile_in(parent)
             .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
 
-        let redirect_policy = if is_direct_url {
+        let redirect_policy = if uses_public_https {
             RedirectPolicy::PublicHttps
         } else {
             RedirectPolicy::Existing
@@ -429,7 +451,7 @@ impl<'a> ArtifactResolver<'a> {
                 .download(&source_path, partial.as_file_mut()),
             AdmittedArtifactSource::Http(parsed_url) => {
                 let transport = self.http_transport()?;
-                if is_direct_url {
+                if uses_public_https {
                     transport.download_with_policy(
                         &parsed_url,
                         partial.as_file_mut(),
@@ -446,7 +468,7 @@ impl<'a> ArtifactResolver<'a> {
             Err(error) => return Err(cleanup_partial(partial, error, false)),
         };
 
-        let downloaded_sha256 = if is_direct_url {
+        let downloaded_sha256 = if requires_verified_snapshot {
             if partial.as_file_mut().flush().is_err() {
                 return Err(cleanup_partial(
                     partial,
@@ -497,7 +519,7 @@ impl<'a> ArtifactResolver<'a> {
             }
         }
 
-        if is_direct_url {
+        if requires_verified_snapshot {
             let snapshot = snapshot_verified_file(&published_path, self.sandbox, expected_sha256);
             if !admitted.default_cache {
                 let _ = fs::remove_file(&published_path);
@@ -1058,6 +1080,72 @@ mod tests {
 
     fn public_test_address() -> IpAddr {
         "1.1.1.1".parse().unwrap()
+    }
+
+    #[test]
+    fn app_release_materialization_hashes_selected_url_and_reports_network_vs_cache_truthfully() {
+        const ARTIFACT_ID: &str = "app.example.install/release_apk";
+        let fixture = HttpsFixture::spawn(|target| match target {
+            "/v1.apk" => tls_response("200 OK", "", b"older release bytes"),
+            "/v2.apk?token=selected" => tls_response("200 OK", "", b"newer release bytes"),
+            _ => tls_response("404 Not Found", "", b"missing"),
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let older_url = fixture.url("/v1.apk");
+        let selected_url = fixture.url("/v2.apk?token=selected");
+        let mut resolver = fixture.resolver(&roots, public_test_address());
+
+        let older = resolver
+            .resolve_app_release(ArtifactResolveRequest {
+                artifact_id: ARTIFACT_ID,
+                type_name: "remote_file",
+                url: &older_url,
+                cache_mode: "default",
+            })
+            .unwrap();
+        let selected = resolver
+            .resolve_app_release(ArtifactResolveRequest {
+                artifact_id: ARTIFACT_ID,
+                type_name: "remote_file",
+                url: &selected_url,
+                cache_mode: "default",
+            })
+            .unwrap();
+
+        assert!(!older.cache_hit);
+        assert!(!selected.cache_hit);
+        assert_ne!(older.local_path, selected.local_path);
+        assert_eq!(
+            fs::read(&selected.local_path).unwrap(),
+            b"newer release bytes"
+        );
+        assert_eq!(
+            selected.calculated_sha256.as_deref(),
+            Some(sha256(b"newer release bytes").as_str())
+        );
+        assert!(selected
+            .redacted_final_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/v2.apk")));
+        assert!(!selected
+            .redacted_final_url
+            .as_deref()
+            .unwrap()
+            .contains("selected"));
+
+        let cached = resolver
+            .resolve_app_release(ArtifactResolveRequest {
+                artifact_id: ARTIFACT_ID,
+                type_name: "remote_file",
+                url: &selected_url,
+                cache_mode: "default",
+            })
+            .unwrap();
+        assert!(cached.cache_hit);
+        assert_eq!(cached.calculated_sha256, selected.calculated_sha256);
+        assert_eq!(cached.redacted_final_url, None);
+        assert_eq!(fixture.request_count(), 2);
     }
 
     #[test]

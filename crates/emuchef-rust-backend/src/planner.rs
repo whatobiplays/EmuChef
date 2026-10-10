@@ -219,8 +219,15 @@ pub enum ExecutionArtifactSource {
         service_origin: String,
         repository: String,
         include_prereleases: bool,
-        asset_pattern: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        asset_pattern: Option<String>,
+        #[serde(skip_serializing_if = "is_false")]
+        invert_asset_pattern: bool,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// App Definition artifact identity retained beside its runtime source.
