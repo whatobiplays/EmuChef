@@ -1,0 +1,44 @@
+crates/emuchef-rust-backend/src/owned_process.rs
+  s_47bff9df750fd0::t_fa81f53cbef612 1439-1454,1456-1459,1463-1478,1480-1482,1486-1505
+  s_47bff9df750fd0::t_4cb377fc40398c 845
+  s_47bff9df750fd0::t_905cb33402a1c4 1423-1427,1429-1433
+  s_47bff9df750fd0::t_0fa3516b54e313 1247-1248,1250-1258,1263-1264,1266-1274,1279-1287,1292-1293,1297-1303,1305-1316,1437-1438
+  s_47bff9df750fd0::t_d7b635e9c8b0b8 16,830-844,846-861,957,993-999,1002-1009,1011
+  s_47bff9df750fd0::t_577e89cb11f005 1319,1422
+crates/emuchef-rust-backend/src/executor_real_adb_tests/physical_interruption_qualification.rs
+  s_47bff9df750fd0::t_22bcb1169db363 5502-5523,5528-5571,5620
+  s_47bff9df750fd0::t_e80c3452799035 1932-1940,1982
+  s_47bff9df750fd0::t_2b3377d6e07969 1719-1720,1722-1724
+  s_47bff9df750fd0::t_f3024267afdbf9 8421,8425-8433,8435-8436,8439-8446
+  s_47bff9df750fd0::t_5cb4610f68cf95 1726-1728,1732,1748-1749
+  s_47bff9df750fd0::t_105296f5c0516e 1734-1738,1750,5495-5498,5524-5527
+  s_47bff9df750fd0::t_dea2723720a536 1853-1858,1861-1869,5446,5599-5605,5607-5619
+  s_47bff9df750fd0::t_6a3f805f782b8c 7056-7060,7063-7068,7132,7297,8384,8487,8884,8888
+  s_47bff9df750fd0::t_b6cdaff63ec4ed 1717-1718,1721,1725,1739-1747,1751-1763,1859-1860,5606
+  s_47bff9df750fd0::t_289f603d819f74 5447-5494,5499-5501
+  s_bb2b9735a76b2c::t_d684f30e3e467f 1733,1931,5621
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "433624576c8ba4d26916bcd9210bdb13b0d90a4c",
+  "prompts": {},
+  "sessions": {
+    "s_47bff9df750fd0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11f54-48ec-7582-af87-a5c7c0ec2d1c",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_bb2b9735a76b2c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a122f1-579f-7db0-89d8-a83d8c15159f",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
