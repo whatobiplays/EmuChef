@@ -1714,14 +1714,53 @@ impl Sentinel {
     }
 
     fn mark(&self, name: &str, contents: &str) -> Result<SystemTime, String> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.path(name))
+        let (file, modified_at) = self.stage_marker(name, contents)?;
+        self.publish_staged_marker(name, file, modified_at)
+    }
+
+    fn stage_marker(
+        &self,
+        name: &str,
+        contents: &str,
+    ) -> Result<(tempfile::NamedTempFile, SystemTime), String> {
+        let mut file = tempfile::Builder::new()
+            .prefix(".sentinel-")
+            .tempfile_in(&self.directory)
             .map_err(|_| format!("sentinel {name} could not be created"))?;
         file.write_all(contents.as_bytes())
             .map_err(|_| format!("sentinel {name} could not be written"))?;
-        self.marker_time(name)
+        file.flush()
+            .map_err(|_| format!("sentinel {name} could not be written"))?;
+        let modified_at = file
+            .as_file()
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map_err(|_| format!("sentinel {name} timestamp is unavailable"))?;
+        Ok((file, modified_at))
+    }
+
+    fn publish_staged_marker(
+        &self,
+        name: &str,
+        file: tempfile::NamedTempFile,
+        modified_at: SystemTime,
+    ) -> Result<SystemTime, String> {
+        file.persist_noclobber(self.path(name))
+            .map_err(|_| format!("sentinel {name} could not be created"))?;
+        Ok(modified_at)
+    }
+
+    /// Pause between staging and publication so tests can inspect visibility.
+    #[cfg(test)]
+    fn mark_with_pre_publish_hook(
+        &self,
+        name: &str,
+        contents: &str,
+        before_publish: impl FnOnce(),
+    ) -> Result<SystemTime, String> {
+        let (file, modified_at) = self.stage_marker(name, contents)?;
+        before_publish();
+        self.publish_staged_marker(name, file, modified_at)
     }
 
     fn marker_time(&self, name: &str) -> Result<SystemTime, String> {
@@ -1811,6 +1850,23 @@ impl Sentinel {
             fs::remove_file(self.path("abort"))
                 .map_err(|_| "sentinel cleanup could not remove abort marker".to_string())?;
         }
+        // All marker-producing qualification threads are joined before this
+        // cleanup runs, so it is safe to remove staging files left by an
+        // interrupted publication.
+        for entry in fs::read_dir(&self.directory)
+            .map_err(|_| "sentinel residual state could not be inspected".to_string())?
+        {
+            let entry =
+                entry.map_err(|_| "sentinel residual state could not be inspected".to_string())?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".sentinel-"))
+            {
+                fs::remove_file(entry.path())
+                    .map_err(|_| "sentinel cleanup could not remove a staged marker".to_string())?;
+            }
+        }
         if fs::read_dir(&self.directory)
             .map_err(|_| "sentinel residual state could not be inspected".to_string())?
             .next()
@@ -1873,6 +1929,16 @@ fn run_host_sleep_watcher(
     observer: &OwnedProcessObservationHandle,
     sentinel: &Sentinel,
 ) -> Result<SystemTime, String> {
+    run_host_sleep_watcher_with_stage_hook(observer, sentinel, || {})
+}
+
+/// Run the host-sleep handshake and signal after `sleep-entered` has passed
+/// validation, immediately before the watcher begins waiting for `wake`.
+fn run_host_sleep_watcher_with_stage_hook(
+    observer: &OwnedProcessObservationHandle,
+    sentinel: &Sentinel,
+    before_wait_for_wake: impl FnOnce(),
+) -> Result<SystemTime, String> {
     let operation_started =
         wait_for_sentinel_marker(sentinel, "operation-started", SENTINEL_TIMEOUT)?;
     let sleep_requested = wait_for_sentinel_action(sentinel, "sleep-requested", SENTINEL_TIMEOUT)?;
@@ -1913,6 +1979,7 @@ fn run_host_sleep_watcher(
     if freshness > ACTIVE_SAMPLE_FRESHNESS {
         return Err("sleep-entered exceeded the exact-child liveness freshness window".to_string());
     }
+    before_wait_for_wake();
     let wake = wait_for_sentinel_action(sentinel, "wake", SENTINEL_TIMEOUT)?;
     if wake < sleep_entered {
         return Err("wake predates the pre-suspend handoff".to_string());
@@ -5377,6 +5444,132 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_marker_is_not_visible_until_complete_publication() {
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        let writer_sentinel = sentinel.clone();
+        let staged_barrier = Arc::new(std::sync::Barrier::new(2));
+        let publish_barrier = Arc::new(std::sync::Barrier::new(2));
+        let writer_staged_barrier = Arc::clone(&staged_barrier);
+        let writer_publish_barrier = Arc::clone(&publish_barrier);
+        let writer = std::thread::spawn(move || {
+            writer_sentinel.mark_with_pre_publish_hook("sleep-ready", "ready\n", || {
+                writer_staged_barrier.wait();
+                writer_publish_barrier.wait();
+            })
+        });
+
+        staged_barrier.wait();
+        let visible_before_publication = sentinel.path("sleep-ready").exists();
+        let contents_before_publication = fs::read_to_string(sentinel.path("sleep-ready")).ok();
+        publish_barrier.wait();
+        let published_at = writer
+            .join()
+            .expect("marker writer should finish")
+            .expect("marker should publish");
+
+        assert!(
+            !visible_before_publication,
+            "a marker path must remain absent until its complete contents are published"
+        );
+        assert_eq!(
+            contents_before_publication, None,
+            "readers must not observe a partial marker payload"
+        );
+        assert_eq!(
+            fs::read_to_string(sentinel.path("sleep-ready"))
+                .expect("published marker should be readable"),
+            "ready\n"
+        );
+        assert_eq!(
+            published_at,
+            sentinel
+                .marker_time("sleep-ready")
+                .expect("published marker timestamp should be available")
+        );
+        let entries = fs::read_dir(sentinel_directory.path())
+            .expect("sentinel directory should be readable")
+            .count();
+        assert_eq!(
+            entries, 1,
+            "successful publication must remove its staging file"
+        );
+    }
+
+    #[test]
+    fn sentinel_mark_rejects_duplicate_names_without_replacing_or_leaking_staging_files() {
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("sleep-ready", "ready\n")
+            .expect("the first marker should publish");
+
+        let error = sentinel
+            .mark("sleep-ready", "replacement\n")
+            .expect_err("a marker name must not replace an existing marker");
+
+        assert!(error.contains("could not be created"));
+        assert_eq!(
+            fs::read_to_string(sentinel.path("sleep-ready"))
+                .expect("the original marker should remain readable"),
+            "ready\n"
+        );
+        let entries = fs::read_dir(sentinel_directory.path())
+            .expect("sentinel directory should be readable")
+            .count();
+        assert_eq!(
+            entries, 1,
+            "failed publication must remove its staging file"
+        );
+    }
+
+    #[test]
+    fn invalid_action_marker_is_not_reclassified_as_abort() {
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("wake", "not-ack\n")
+            .expect("invalid action marker should publish for validation");
+        sentinel
+            .mark("abort", "abort\n")
+            .expect("abort marker should publish");
+
+        let error = sentinel
+            .named_action_now("wake")
+            .expect_err("invalid action content must fail before abort handling");
+
+        assert!(error.contains("exactly 'ack'"));
+        assert!(!error.contains("aborted"));
+    }
+
+    #[test]
+    fn stale_action_marker_is_not_reclassified_as_abort() {
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        let stale_at = sentinel
+            .mark("wake", "ack\n")
+            .expect("stale action marker should publish for validation");
+        sentinel
+            .mark("abort", "abort\n")
+            .expect("abort marker should publish");
+
+        let error = sentinel
+            .wait_for_named_action_after("wake", stale_at + Duration::from_secs(1))
+            .expect_err("a stale action marker must fail before abort handling");
+
+        assert!(error.contains("marker was stale"));
+        assert!(!error.contains("aborted"));
+    }
+
+    #[test]
     fn sentinel_action_allows_an_in_progress_marker_write_to_settle() {
         let directory = tempfile::tempdir().expect("sentinel directory should be available");
         let sentinel = Sentinel {
@@ -5401,6 +5594,29 @@ mod tests {
         sentinel
             .cleanup()
             .expect("sentinel markers should clean up");
+    }
+
+    #[test]
+    fn sentinel_cleanup_removes_orphaned_staging_files() {
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        let staged = sentinel_directory.path().join(".sentinel-interrupted");
+        fs::write(&staged, "partial marker").expect("orphaned staging file should be created");
+
+        sentinel
+            .cleanup()
+            .expect("cleanup should remove an orphaned staged marker");
+
+        assert!(!staged.exists(), "orphaned staging file should be removed");
+        assert!(
+            fs::read_dir(sentinel_directory.path())
+                .expect("sentinel directory should remain readable")
+                .next()
+                .is_none(),
+            "sentinel cleanup should leave the directory empty"
+        );
     }
 
     #[test]
@@ -6837,11 +7053,19 @@ mod tests {
         }
     }
 
-    fn wait_for_test_marker(sentinel: &Sentinel, name: &str) -> SystemTime {
+    fn wait_for_test_marker(
+        sentinel: &Sentinel,
+        name: &str,
+        expected_contents: &str,
+    ) -> SystemTime {
         let started = Instant::now();
         loop {
-            if let Ok(time) = sentinel.marker_time(name) {
-                return time;
+            if let Ok(contents) = fs::read_to_string(sentinel.path(name)) {
+                if contents == expected_contents {
+                    return sentinel
+                        .marker_time(name)
+                        .expect("a complete marker should have a timestamp");
+                }
             }
             assert!(
                 started.elapsed() < Duration::from_secs(10),
@@ -6905,7 +7129,7 @@ mod tests {
             run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
         });
 
-        let sleep_ready = wait_for_test_marker(&sentinel, "sleep-ready");
+        let sleep_ready = wait_for_test_marker(&sentinel, "sleep-ready", "ready\n");
         assert!(
             sleep_ready
                 >= sentinel
@@ -7070,7 +7294,7 @@ mod tests {
         let watcher = std::thread::spawn(move || {
             run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
         });
-        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready", "ready\n");
         std::thread::sleep(HOST_SLEEP_HANDOFF_WINDOW + Duration::from_millis(300));
         sentinel
             .mark("sleep-entered", "ack\n")
@@ -8157,7 +8381,7 @@ mod tests {
         let watcher = std::thread::spawn(move || {
             run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
         });
-        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready", "ready\n");
         sentinel
             .mark("abort", "abort\n")
             .expect("abort marker should be created");
@@ -8194,19 +8418,35 @@ mod tests {
         sentinel
             .mark("sleep-requested", "ack\n")
             .expect("sleep-requested marker should be created");
+        let (wake_stage_sender, wake_stage_receiver) = std::sync::mpsc::channel();
         let watcher_observer = observer.clone();
         let watcher_sentinel = sentinel.clone();
         let watcher = std::thread::spawn(move || {
-            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+            run_host_sleep_watcher_with_stage_hook(
+                &watcher_observer,
+                &watcher_sentinel,
+                move || {
+                    wake_stage_sender
+                        .send(())
+                        .expect("the test should receive the wake-stage signal");
+                },
+            )
         });
-        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
-        sentinel
+        let sleep_ready_at = wait_for_test_marker(&sentinel, "sleep-ready", "ready\n");
+        let sleep_entered_at = sentinel
             .mark("sleep-entered", "ack\n")
             .expect("sleep-entered marker should be created");
+        assert!(
+            sleep_entered_at >= sleep_ready_at,
+            "sleep-entered must follow the complete sleep-ready handshake"
+        );
+        wake_stage_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the watcher must validate sleep-entered before waiting for wake");
+        let started = Instant::now();
         sentinel
             .mark("abort", "abort\n")
             .expect("abort marker should be created");
-        let started = Instant::now();
         let error = watcher
             .join()
             .expect("host-sleep watcher should finish")
@@ -8244,7 +8484,7 @@ mod tests {
         let watcher = std::thread::spawn(move || {
             run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
         });
-        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready", "ready\n");
         sentinel
             .mark("sleep-entered", "ack\n")
             .expect("sleep-entered marker should be created");
@@ -8641,11 +8881,11 @@ mod tests {
                 },
             )
         });
-        let operation_started = wait_for_test_marker(&sentinel, "operation-started");
+        let operation_started = wait_for_test_marker(&sentinel, "operation-started", "started\n");
         sentinel
             .mark("sleep-requested", "ack\n")
             .expect("sleep-requested marker should be created");
-        let sleep_ready = wait_for_test_marker(&sentinel, "sleep-ready");
+        let sleep_ready = wait_for_test_marker(&sentinel, "sleep-ready", "ready\n");
         assert!(
             sleep_ready
                 >= sentinel
