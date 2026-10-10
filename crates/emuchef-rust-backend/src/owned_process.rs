@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
@@ -28,55 +28,10 @@ const STREAM_BUFFER_BYTES: usize = 16 * 1024;
 
 #[cfg(test)]
 thread_local! {
-    /// A one-shot delay arm belongs only to the current test thread.  Keeping
-    /// the arm in thread-local storage prevents one qualification invocation
-    /// from changing an unrelated probe or parallel test.
-    static TEST_PROCESS_DELAY: RefCell<Option<(ProcessOperation, Duration)>> = const { RefCell::new(None) };
     /// A one-shot deadline arm belongs only to the current test thread.  It is
     /// consumed by exactly one matching owned-process invocation and cannot
     /// change production deadlines in non-test builds.
     static TEST_PROCESS_DEADLINE: RefCell<Option<(ProcessOperation, Duration)>> = const { RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) struct TestProcessDelayGuard;
-
-#[cfg(test)]
-impl Drop for TestProcessDelayGuard {
-    fn drop(&mut self) {
-        TEST_PROCESS_DELAY.with(|slot| {
-            slot.borrow_mut().take();
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn arm_test_process_delay(
-    operation: ProcessOperation,
-    delay: Duration,
-) -> TestProcessDelayGuard {
-    TEST_PROCESS_DELAY.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        assert!(
-            slot.replace((operation, delay)).is_none(),
-            "a process-delay arm must be scoped and cannot be replaced"
-        );
-    });
-    TestProcessDelayGuard
-}
-
-#[cfg(test)]
-fn take_test_process_delay(operation: ProcessOperation) -> Option<Duration> {
-    TEST_PROCESS_DELAY.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        match slot.take() {
-            Some((armed_operation, delay)) if armed_operation == operation => Some(delay),
-            other => {
-                *slot = other;
-                None
-            }
-        }
-    })
 }
 
 #[cfg(test)]
@@ -131,11 +86,6 @@ fn take_test_process_deadline(operation: ProcessOperation) -> Option<Duration> {
 
 #[cfg(not(test))]
 fn take_test_process_deadline(_operation: ProcessOperation) -> Option<Duration> {
-    None
-}
-
-#[cfg(not(test))]
-fn take_test_process_delay(_operation: ProcessOperation) -> Option<Duration> {
     None
 }
 
@@ -877,6 +827,38 @@ enum ProcessEvent {
     TimedOut,
 }
 
+/// Poll process output, exit status, and deadline in their established
+/// precedence order. Keeping the arbitration here lets unit tests supply
+/// deterministic futures while the production loop uses the same decision
+/// path.
+fn poll_process_event<O, S, T>(
+    context: &mut Context<'_>,
+    mut output_future: Pin<&mut O>,
+    sampled_status: &mut Option<Result<i32, ()>>,
+    mut status_future: Pin<&mut S>,
+    mut deadline_signal: Pin<&mut T>,
+    map_status: impl FnOnce(S::Output) -> Result<i32, ()>,
+) -> Poll<ProcessEvent>
+where
+    O: Future<Output = Result<(StreamCapture, StreamCapture), ProcessFailureKind>>,
+    S: Future,
+    T: Future,
+{
+    if let Poll::Ready(result) = output_future.as_mut().poll(context) {
+        return Poll::Ready(ProcessEvent::Output(result));
+    }
+    if let Some(result) = sampled_status.take() {
+        return Poll::Ready(ProcessEvent::Exited(result));
+    }
+    if let Poll::Ready(result) = status_future.as_mut().poll(context) {
+        return Poll::Ready(ProcessEvent::Exited(map_status(result)));
+    }
+    if deadline_signal.as_mut().poll(context).is_ready() {
+        return Poll::Ready(ProcessEvent::TimedOut);
+    }
+    Poll::Pending
+}
+
 enum SettledOutput {
     Complete(Result<(StreamCapture, StreamCapture), ProcessFailureKind>),
     TimedOut,
@@ -960,7 +942,6 @@ async fn run_child(
     stdout: ChildStdout,
     stderr: ChildStderr,
     deadline: Duration,
-    process_delay: Option<Duration>,
     observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
     // Capture the wall observation adjacent to the authoritative monotonic
@@ -973,16 +954,7 @@ async fn run_child(
     if let Some(observation) = observation.as_ref() {
         observation.install_deadline_basis(deadline_basis);
     }
-    run_child_with_deadline_signal(
-        child,
-        stdout,
-        stderr,
-        timer,
-        Some(deadline),
-        process_delay,
-        observation,
-    )
-    .await
+    run_child_with_deadline_signal(child, stdout, stderr, timer, Some(deadline), observation).await
 }
 
 async fn run_child_with_deadline_signal<D: Future>(
@@ -991,24 +963,14 @@ async fn run_child_with_deadline_signal<D: Future>(
     stderr: ChildStderr,
     deadline_signal: D,
     deadline: Option<Duration>,
-    process_delay: Option<Duration>,
     observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
     let mut status_future = Box::pin(child.status());
     let mut output_future = Box::pin(read_streams(stdout, stderr));
     let mut timer = Box::pin(deadline_signal);
-    let mut process_delay = process_delay.map(|delay| Box::pin(Timer::after(delay)));
-    let mut process_delay_ready = process_delay.is_none();
     let mut sampled_status = None;
 
     let event = poll_fn(|context| {
-        if !process_delay_ready {
-            if let Some(delay) = process_delay.as_mut() {
-                if delay.as_mut().poll(context).is_ready() {
-                    process_delay_ready = true;
-                }
-            }
-        }
         if let Some(observation) = observation.as_ref() {
             observation.handle.register_owner_waker(context.waker());
             if observation
@@ -1028,28 +990,26 @@ async fn run_child_with_deadline_signal<D: Future>(
                 }
             }
         }
-        // Output is checked first so an already-observed overflow/read failure
-        // retains precedence over a status or deadline observed in the same poll.
-        if let Poll::Ready(result) = output_future.as_mut().poll(context) {
-            return Poll::Ready(ProcessEvent::Output(result));
-        }
-        if let Some(result) = sampled_status.take() {
-            return Poll::Ready(ProcessEvent::Exited(result));
-        }
-        if let Poll::Ready(result) = status_future.as_mut().poll(context) {
-            return Poll::Ready(ProcessEvent::Exited(
+        match poll_process_event(
+            context,
+            output_future.as_mut(),
+            &mut sampled_status,
+            status_future.as_mut(),
+            timer.as_mut(),
+            |result| {
                 result
                     .map(|status| status.code().unwrap_or(-1))
-                    .map_err(|_| ()),
-            ));
-        }
-        if timer.as_mut().poll(context).is_ready() {
-            if let (Some(deadline), Some(observation)) = (deadline, observation.as_ref()) {
-                observation.deadline_reached(deadline);
+                    .map_err(|_| ())
+            },
+        ) {
+            Poll::Ready(ProcessEvent::TimedOut) => {
+                if let (Some(deadline), Some(observation)) = (deadline, observation.as_ref()) {
+                    observation.deadline_reached(deadline);
+                }
+                Poll::Ready(ProcessEvent::TimedOut)
             }
-            return Poll::Ready(ProcessEvent::TimedOut);
+            other => other,
         }
-        Poll::Pending
     })
     .await;
 
@@ -1171,7 +1131,6 @@ fn run_owned_process_with_deadline_and_observer(
         stdout,
         stderr,
         deadline,
-        take_test_process_delay(operation),
         observation.clone(),
     ));
     if let Some(observation) = observation.as_ref() {
@@ -1209,7 +1168,6 @@ fn run_owned_process_with_deadline_signal<D: Future + 'static>(
         stdout,
         stderr,
         deadline_signal,
-        None,
         None,
         None,
     ))
@@ -1258,16 +1216,6 @@ fn run_owned_process_for_test(
 }
 
 #[cfg(test)]
-fn run_owned_process_for_test_with_operation(
-    program: &str,
-    args: &[String],
-    deadline: Duration,
-    operation: ProcessOperation,
-) -> Result<CapturedProcessOutput, OwnedProcessError> {
-    run_owned_process_with_deadline(program, args, deadline, operation)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1296,129 +1244,79 @@ mod tests {
 
     #[test]
     fn scoped_deadline_override_is_consumed_once_for_matching_operation() {
-        let _deadline =
-            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let args = vec![
-            "--exact".to_string(),
-            "owned_process::tests::short_helper".to_string(),
-            "--ignored".to_string(),
-            "--nocapture".to_string(),
-        ];
+        let expected = Duration::from_millis(10);
+        let _deadline = arm_test_process_deadline(ProcessOperation::DeviceCopy, expected);
 
-        let first = run_owned_process(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &args,
-            ProcessOperation::DeviceCopy,
-        )
-        .expect_err("the matching scoped deadline should time out the first child");
-        assert_eq!(first.kind, ProcessFailureKind::TimedOut);
-
-        let second = run_owned_process(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &args,
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("the consumed override must not affect a later copy");
-        assert_eq!(second.status_code, Some(0));
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::DeviceCopy),
+            Some(expected)
+        );
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::DeviceCopy),
+            None,
+            "a matching deadline arm is consumed exactly once"
+        );
     }
 
     #[test]
     fn scoped_deadline_override_does_not_affect_nonmatching_operation() {
-        let _deadline =
-            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let args = vec![
-            "--exact".to_string(),
-            "owned_process::tests::short_helper".to_string(),
-            "--ignored".to_string(),
-            "--nocapture".to_string(),
-        ];
+        let expected = Duration::from_millis(10);
+        let _deadline = arm_test_process_deadline(ProcessOperation::DeviceCopy, expected);
 
-        let probe = run_owned_process(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &args,
-            ProcessOperation::Probe,
-        )
-        .expect("a nonmatching operation must retain the armed override");
-        assert_eq!(probe.status_code, Some(0));
-
-        let copy = run_owned_process(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &args,
-            ProcessOperation::DeviceCopy,
-        )
-        .expect_err("the matching operation should consume the retained override");
-        assert_eq!(copy.kind, ProcessFailureKind::TimedOut);
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::Probe),
+            None,
+            "a nonmatching operation must leave the arm available"
+        );
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::DeviceCopy),
+            Some(expected)
+        );
     }
 
     #[test]
     fn dropping_unused_deadline_override_removes_it() {
-        {
-            let _deadline =
-                arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
-        }
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let output = run_owned_process(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &[
-                "--exact".to_string(),
-                "owned_process::tests::short_helper".to_string(),
-                "--ignored".to_string(),
-                "--nocapture".to_string(),
-            ],
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("dropping an unused arm must restore the production deadline");
-        assert_eq!(output.status_code, Some(0));
+        let deadline =
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
+        drop(deadline);
+
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::DeviceCopy),
+            None,
+            "dropping an unused guard must clear its thread-local arm"
+        );
     }
 
     #[test]
     fn deadline_override_is_thread_local() {
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let args = vec![
-            "--exact".to_string(),
-            "owned_process::tests::short_helper".to_string(),
-            "--ignored".to_string(),
-            "--nocapture".to_string(),
-        ];
-        let worker_executable = executable.clone();
-        let worker_args = args.clone();
+        let (armed_sender, armed_receiver) = std::sync::mpsc::sync_channel(0);
+        let (continue_sender, continue_receiver) = std::sync::mpsc::sync_channel(0);
         let worker = std::thread::spawn(move || {
             let _deadline =
                 arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
-            run_owned_process(
-                worker_executable
-                    .to_str()
-                    .expect("worker executable should be utf-8"),
-                &worker_args,
-                ProcessOperation::DeviceCopy,
-            )
-            .expect_err("the worker's scoped deadline should apply on its thread")
-            .kind
+            armed_sender
+                .send(())
+                .expect("the parent should receive the arm synchronization");
+            continue_receiver
+                .recv()
+                .expect("the parent should release the worker");
+            take_test_process_deadline(ProcessOperation::DeviceCopy)
         });
-        let main_result = run_owned_process(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &args,
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("the worker's scoped deadline must not cross thread boundaries");
-        assert_eq!(main_result.status_code, Some(0));
+
+        armed_receiver
+            .recv()
+            .expect("the worker should arm its own thread-local deadline");
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::DeviceCopy),
+            None,
+            "the worker's arm must not be visible on the parent thread"
+        );
+        continue_sender
+            .send(())
+            .expect("the worker should be released to consume its arm");
         assert_eq!(
             worker.join().expect("worker should finish"),
-            ProcessFailureKind::TimedOut
+            Some(Duration::from_millis(10))
         );
     }
 
@@ -1521,134 +1419,90 @@ mod tests {
     }
 
     #[test]
-    fn child_that_exits_during_observer_delay_cannot_be_relabelled_as_timed_out() {
-        let _delay =
-            arm_test_process_delay(ProcessOperation::DeviceCopy, Duration::from_millis(100));
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let output = run_owned_process_for_test_with_operation(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &[
-                "--exact".to_string(),
-                "owned_process::tests::normal_helper".to_string(),
-                "--ignored".to_string(),
-                "--nocapture".to_string(),
-            ],
-            Duration::from_millis(10),
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("a completed exact child must remain completed while observation is delayed");
-
-        assert_eq!(output.status_code, Some(0));
-    }
-
-    #[test]
-    fn test_process_delay_is_scoped_to_one_operation_and_consumed_once() {
-        let _delay =
-            arm_test_process_delay(ProcessOperation::DeviceCopy, Duration::from_millis(100));
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let executable = executable
-            .to_str()
-            .expect("test executable should be utf-8");
-        let args = || {
-            vec![
-                "--exact".to_string(),
-                "owned_process::tests::normal_helper".to_string(),
-                "--ignored".to_string(),
-                "--nocapture".to_string(),
-            ]
-        };
-
-        let probe = run_owned_process_for_test_with_operation(
-            executable,
-            &args(),
-            Duration::from_millis(50),
-            ProcessOperation::Probe,
-        )
-        .expect("an identity probe must not consume the copy delay");
-        assert_eq!(probe.status_code, Some(0));
-
-        let delayed_observation = run_owned_process_for_test_with_operation(
-            executable,
-            &args(),
-            Duration::from_millis(10),
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("observer delay cannot turn a completed exact child into a timeout");
-        assert_eq!(delayed_observation.status_code, Some(0));
-
-        let immediate = run_owned_process_for_test_with_operation(
-            executable,
-            &args(),
-            Duration::from_millis(50),
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("the one-shot delay must not affect a second copy");
-        assert_eq!(immediate.status_code, Some(0));
-    }
-
-    #[test]
-    fn test_process_delay_arm_is_thread_local() {
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let executable = executable
-            .to_str()
-            .expect("test executable should be utf-8")
-            .to_string();
-        let args = vec![
-            "--exact".to_string(),
-            "owned_process::tests::normal_helper".to_string(),
-            "--ignored".to_string(),
-            "--nocapture".to_string(),
-        ];
-        let worker_executable = executable.clone();
-        let worker_args = args.clone();
-        let worker = std::thread::spawn(move || {
-            let _delay =
-                arm_test_process_delay(ProcessOperation::DeviceCopy, Duration::from_millis(100));
-            run_owned_process_for_test_with_operation(
-                &worker_executable,
-                &worker_args,
-                Duration::from_millis(10),
-                ProcessOperation::DeviceCopy,
-            )
-            .expect("the worker's observer delay must preserve child completion")
-            .status_code
-        });
-        let main_result = run_owned_process_for_test_with_operation(
-            &executable,
-            &args,
-            Duration::from_millis(50),
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("the worker's delay must not cross thread boundaries");
-        assert_eq!(main_result.status_code, Some(0));
-        assert_eq!(worker.join().expect("worker should finish"), Some(0));
-    }
-
-    #[test]
-    fn test_process_delay_guard_clears_after_unwind() {
+    fn deadline_override_clears_after_unwind() {
         let _ = std::panic::catch_unwind(|| {
-            let _delay =
-                arm_test_process_delay(ProcessOperation::DeviceCopy, Duration::from_millis(100));
-            panic!("exercise guard unwinding");
+            let _deadline =
+                arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
+            panic!("exercise deadline guard unwinding");
         });
-        let executable = std::env::current_exe().expect("test executable should be available");
-        let output = run_owned_process_for_test_with_operation(
-            executable
-                .to_str()
-                .expect("test executable should be utf-8"),
-            &[
-                "--exact".to_string(),
-                "owned_process::tests::normal_helper".to_string(),
-                "--ignored".to_string(),
-                "--nocapture".to_string(),
-            ],
-            Duration::from_millis(50),
-            ProcessOperation::DeviceCopy,
-        )
-        .expect("an unwound arm must not delay a later invocation");
-        assert_eq!(output.status_code, Some(0));
+
+        assert_eq!(
+            take_test_process_deadline(ProcessOperation::DeviceCopy),
+            None,
+            "unwinding must drop the guard and clear its thread-local arm"
+        );
+    }
+
+    #[test]
+    fn output_error_precedes_sampled_completion_and_ready_deadline() {
+        let mut output_future = Box::pin(future::ready(Err::<(StreamCapture, StreamCapture), _>(
+            ProcessFailureKind::StdoutOverflow,
+        )));
+        let mut sampled_status = Some(Ok(7));
+        let mut status_future = Box::pin(future::ready(Ok::<i32, ()>(0)));
+        let mut deadline_signal = Box::pin(future::ready(()));
+
+        let event = block_on(poll_fn(|context| {
+            poll_process_event(
+                context,
+                output_future.as_mut(),
+                &mut sampled_status,
+                status_future.as_mut(),
+                deadline_signal.as_mut(),
+                |result| result,
+            )
+        }));
+
+        assert!(matches!(
+            event,
+            ProcessEvent::Output(Err(ProcessFailureKind::StdoutOverflow))
+        ));
+    }
+
+    #[test]
+    fn process_completion_precedes_a_simultaneously_ready_deadline() {
+        let mut output_future = Box::pin(future::pending::<
+            Result<(StreamCapture, StreamCapture), ProcessFailureKind>,
+        >());
+        let mut sampled_status = None;
+        let mut status_future = Box::pin(future::ready(Ok::<i32, ()>(23)));
+        let mut deadline_signal = Box::pin(future::ready(()));
+
+        let event = block_on(poll_fn(|context| {
+            poll_process_event(
+                context,
+                output_future.as_mut(),
+                &mut sampled_status,
+                status_future.as_mut(),
+                deadline_signal.as_mut(),
+                |result| result,
+            )
+        }));
+
+        assert!(matches!(event, ProcessEvent::Exited(Ok(23))));
+    }
+
+    #[test]
+    fn timeout_is_selected_only_when_output_and_process_are_pending() {
+        let mut output_future = Box::pin(future::pending::<
+            Result<(StreamCapture, StreamCapture), ProcessFailureKind>,
+        >());
+        let mut sampled_status = None;
+        let mut status_future = Box::pin(future::pending::<Result<i32, ()>>());
+        let mut deadline_signal = Box::pin(future::ready(()));
+
+        let event = block_on(poll_fn(|context| {
+            poll_process_event(
+                context,
+                output_future.as_mut(),
+                &mut sampled_status,
+                status_future.as_mut(),
+                deadline_signal.as_mut(),
+                |result| result,
+            )
+        }));
+
+        assert!(matches!(event, ProcessEvent::TimedOut));
     }
 
     #[test]
