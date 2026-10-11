@@ -505,7 +505,8 @@ Purpose:
 Params:
 
 - `source`: required ref
-- `dest`: required literal device path
+- `dest`: required literal device path, compatible input ref, or single-key
+  `{ app_target: <target-id> }` value when the step has matching `app_ref`
 - `copy_policy`: optional, default `merge`
   - `merge`
   - `replace`
@@ -516,6 +517,14 @@ Source may resolve to:
 - `file_path`
 - `directory_path`
 - `path_list`
+
+Named targets resolve during Rust planning to Android user-0 device paths.
+Directory and path-list sources require a directory target. A single file may
+use a directory or exact file target; `sync` requires a directory target. A
+target at `app_data` or `external_app_data` adds `app_data_write` to the step's
+effective capabilities, and `shared_storage` adds `shared_storage_write`.
+Conditions using a named target inherit the step's `app_ref`; the reviewed plan
+contains only concrete paths and effective constraints.
 
 Primary output:
 
@@ -822,7 +831,8 @@ No separate authored schema concept is introduced for "elevated destination" or 
 Instead:
 
 - recipe steps use `copy_files`
-- constraints declare required capability such as `app_data_write`
+- constraints declare generic capabilities; named App Targets derive their
+  location-specific write capability during planning
 - executor internally chooses the correct write path based on destination path class
 
 Typical examples:

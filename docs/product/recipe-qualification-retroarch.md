@@ -32,6 +32,10 @@ The qualification covers the real authored
   `ExecutorAdapters::with_sandbox_roots` with pre-seeded default-cache
   fixtures, so no live public network access is required.
 
+Its app-aware copy destinations and path checks use named RetroArch App
+Targets. Planning records concrete user-0 paths and derived write capabilities
+in the immutable plan, including the external app-data config file path.
+
 ## 3. What the tests prove
 
 - Recipe admission, expansion, capability context, optional/supplied config

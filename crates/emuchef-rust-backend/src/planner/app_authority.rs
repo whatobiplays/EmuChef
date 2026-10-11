@@ -225,12 +225,18 @@ pub(crate) fn validate_recipe_app_authority(
         .map(|app| (app.id.clone(), app))
         .collect::<HashMap<_, _>>();
 
-    validate_app_authority(
+    let mut errors = validate_app_authority(
         &recipes,
         &expanded_recipe_refs,
         &selected_steps,
         &app_definitions,
-    )
+    );
+    if let Err(target_errors) =
+        super::app_targets::resolve_usage(&recipes, &expanded_recipe_refs, &app_definitions, None)
+    {
+        errors.extend(target_errors);
+    }
+    errors
 }
 
 fn is_legacy_app_step_form(recipe: &Recipe, step: &Step) -> bool {
@@ -283,7 +289,7 @@ fn validate_app_install_binding(
         ParamValue::Ref(value) => value
             .strip_prefix("artifacts.")?
             .strip_suffix(".local_path"),
-        ParamValue::Literal(_) => None,
+        ParamValue::Literal(_) | ParamValue::AppTarget(_) => None,
     });
     let Some(artifact_id) = artifact_ref else {
         return vec![app_authority_error(

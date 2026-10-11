@@ -25,8 +25,51 @@ use crate::validation::normalize_expected_sha256;
 use crate::yaml;
 
 mod app_authority;
+mod app_targets;
 
 pub(crate) use app_authority::validate_recipe_app_authority;
+
+/// Report the same per-step capability requirements that planning uses for
+/// target-aware selection. Resolution errors are retained so callers cannot
+/// accidentally substitute authored constraints for unresolved App Targets.
+/// Configuration descriptions retain their existing recipe-level union until
+/// Recipe availability is redesigned separately.
+pub(crate) fn effective_recipe_capabilities(
+    recipe: &Recipe,
+    app_definitions: &[AppDefinitionV1],
+) -> Result<Vec<Vec<String>>, Vec<PlannerMessage>> {
+    let recipes = HashMap::from([(recipe.id.clone(), recipe.clone())]);
+    let apps = index_app_definitions(app_definitions)?;
+    let usage =
+        app_targets::resolve_usage(&recipes, std::slice::from_ref(&recipe.id), &apps, None)?;
+    Ok(recipe
+        .steps
+        .iter()
+        .map(|step| {
+            usage[&make_execution_step_id(&recipe.id, &step.id)]
+                .capabilities
+                .clone()
+        })
+        .collect())
+}
+
+/// Reject duplicate App Definition identities before a catalog-backed caller
+/// can choose one definition arbitrarily for planning or capability reporting.
+fn index_app_definitions(
+    app_definitions: &[AppDefinitionV1],
+) -> Result<HashMap<String, AppDefinitionV1>, Vec<PlannerMessage>> {
+    let mut apps = HashMap::new();
+    for app in app_definitions {
+        if apps.insert(app.id.clone(), app.clone()).is_some() {
+            return Err(vec![app_authority::app_authority_error(
+                "app_definition_ambiguous",
+                "More than one App Definition has the same identity.",
+                json!({ "app_id": app.id }),
+            )]);
+        }
+    }
+    Ok(apps)
+}
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -557,20 +600,10 @@ pub fn plan_execution_with_app_definitions(
     input: PlannerInput,
     app_definitions: &[AppDefinitionV1],
 ) -> PlanningResult {
-    let mut app_definitions_by_id = HashMap::new();
-    for app in app_definitions {
-        if app_definitions_by_id
-            .insert(app.id.clone(), app.clone())
-            .is_some()
-        {
-            return error_result(vec![app_authority::app_authority_error(
-                "app_definition_ambiguous",
-                "More than one App Definition has the same identity.",
-                json!({ "app_id": app.id }),
-            )]);
-        }
-    }
-    let app_definitions = app_definitions_by_id;
+    let app_definitions = match index_app_definitions(app_definitions) {
+        Ok(apps) => apps,
+        Err(errors) => return error_result(errors),
+    };
     let recipes = input
         .recipes
         .iter()
@@ -610,11 +643,24 @@ pub fn plan_execution_with_app_definitions(
         })
         .collect::<OrderedMap<_>>();
 
+    // Validate all expanded authored target uses before capability pruning can
+    // hide a malformed or cross-app reference.
+    let target_usage = match app_targets::resolve_usage(
+        &recipes,
+        &expanded_recipe_refs,
+        &app_definitions,
+        Some(&effective_input_bindings),
+    ) {
+        Ok(usage) => usage,
+        Err(errors) => return error_result(errors),
+    };
+
     let (selected_step_ids, selection_errors) = selected_step_ids(
         &recipes,
         &expanded_recipe_refs,
         &effective_input_bindings,
         &input.runtime_capabilities,
+        &target_usage,
     );
     if !selection_errors.is_empty() {
         return error_result(selection_errors);
@@ -717,28 +763,62 @@ pub fn plan_execution_with_app_definitions(
                         .iter()
                         .map(|dependency| make_execution_step_id(&recipe.id, dependency))
                         .collect(),
-                    constraints: execution_constraints(&step.constraints, &recipe.id),
-                    params: normalize_step_params_for_execution(recipe, &step, &app_definitions),
+                    constraints: execution_constraints(
+                        &target_usage[&make_execution_step_id(&recipe.id, &step.id)].capabilities,
+                        &step.constraints,
+                        &recipe.id,
+                    ),
+                    params: normalize_step_params_for_execution(
+                        recipe,
+                        &step,
+                        &app_definitions,
+                        target_usage[&make_execution_step_id(&recipe.id, &step.id)]
+                            .dest
+                            .as_deref(),
+                        target_usage[&make_execution_step_id(&recipe.id, &step.id)].dest_kind,
+                    ),
                     skip_if: step
                         .skip_if
                         .iter()
-                        .map(|condition| {
-                            app_authority::execution_condition(
+                        .enumerate()
+                        .map(|(index, condition)| {
+                            let mut resolved = app_authority::execution_condition(
                                 condition,
                                 step.app_ref.as_deref(),
                                 &app_definitions,
-                            )
+                            );
+                            if let Some(path) = target_usage
+                                [&make_execution_step_id(&recipe.id, &step.id)]
+                                .skip_if_paths[index]
+                                .as_ref()
+                            {
+                                resolved
+                                    .params
+                                    .insert("path".to_string(), Value::String(path.clone()));
+                            }
+                            resolved
                         })
                         .collect(),
                     verify: step
                         .verify
                         .iter()
-                        .map(|condition| {
-                            app_authority::execution_condition(
+                        .enumerate()
+                        .map(|(index, condition)| {
+                            let mut resolved = app_authority::execution_condition(
                                 condition,
                                 step.app_ref.as_deref(),
                                 &app_definitions,
-                            )
+                            );
+                            if let Some(path) = target_usage
+                                [&make_execution_step_id(&recipe.id, &step.id)]
+                                .verify_paths[index]
+                                .as_ref()
+                            {
+                                resolved
+                                    .params
+                                    .insert("path".to_string(), Value::String(path.clone()));
+                            }
+                            resolved
                         })
                         .collect(),
                 })
@@ -1185,6 +1265,7 @@ fn selected_step_ids(
     expanded_recipe_refs: &[String],
     input_bindings: &OrderedMap<Value>,
     runtime_capabilities: &RuntimeCapabilities,
+    target_usage: &HashMap<String, app_targets::ResolvedStepUsage>,
 ) -> (HashSet<String>, Vec<PlannerMessage>) {
     let mut selected = HashSet::new();
     let mut availability_by_step_id = HashMap::new();
@@ -1198,11 +1279,11 @@ fn selected_step_ids(
         let mut requested_local_step_ids = Vec::new();
 
         for step in &recipe.steps {
-            let available =
-                step.constraints.capabilities.iter().all(|capability| {
-                    runtime_capability_available(runtime_capabilities, capability)
-                });
             let step_id = make_execution_step_id(recipe_id, &step.id);
+            let available = target_usage[&step_id]
+                .capabilities
+                .iter()
+                .all(|capability| runtime_capability_available(runtime_capabilities, capability));
             availability_by_step_id.insert(step_id, available);
             available_by_local_step_id.insert(step.id.clone(), available);
             if available {
@@ -2017,11 +2098,12 @@ fn emit_execution_artifacts(
 }
 
 fn execution_constraints(
+    capabilities: &[String],
     constraints: &StepConstraints,
     recipe_id: &str,
 ) -> ExecutionStepConstraints {
     ExecutionStepConstraints {
-        capabilities: constraints.capabilities.clone(),
+        capabilities: capabilities.to_vec(),
         conflicts_with: constraints
             .conflicts_with
             .iter()
@@ -2233,6 +2315,20 @@ fn validate_spec_param_contracts(
             continue;
         };
         match value {
+            ParamValue::AppTarget(_) if !accepts_param_source(param_spec, "app_target") => {
+                errors.push(param_contract_message(
+                    "invalid_param_source",
+                    format!(
+                        "Param '{param_name}' does not accept App Targets for step type '{}'.",
+                        step.type_name
+                    ),
+                    recipe_id,
+                    step,
+                    param_name,
+                    json!(param_spec.accepted_sources),
+                    param_value_to_json(value),
+                ));
+            }
             ParamValue::Literal(_) if !accepts_param_source(param_spec, "literal") => {
                 errors.push(param_contract_message(
                     "invalid_param_source",
@@ -2292,27 +2388,7 @@ fn validate_ref_param_contract(
     let Some(recipe) = recipes.get(recipe_id) else {
         return Vec::new();
     };
-    let value_type = match reference {
-        RuntimeRef::Input { target_id } => recipe
-            .inputs
-            .get(&target_id)
-            .map(|input| input_value_type(&input.type_name, input.multiple).to_string()),
-        RuntimeRef::ArtifactField { target_id, field } => recipe
-            .artifacts
-            .contains_key(&target_id)
-            .then(|| artifact_field_value_type(&field).map(ToString::to_string))
-            .flatten(),
-        RuntimeRef::StepShorthand { target_id } => recipe
-            .steps
-            .iter()
-            .find(|candidate| candidate.id == target_id)
-            .and_then(primary_output_value_type),
-        RuntimeRef::StepOutput { target_id, field } => recipe
-            .steps
-            .iter()
-            .find(|candidate| candidate.id == target_id)
-            .and_then(|candidate| step_output_value_type(candidate, &field)),
-    };
+    let value_type = reference_value_type(recipe, reference);
     let Some(value_type) = value_type else {
         return Vec::new();
     };
@@ -2335,6 +2411,32 @@ fn validate_ref_param_contract(
         json!(spec.accepted_value_types),
         json!({ "ref": ref_value, "valueType": value_type }),
     )]
+}
+
+/// Return the declared runtime type of a reference in its Recipe. The same
+/// type contract governs ordinary parameters and App Target copy-kind checks.
+fn reference_value_type(recipe: &Recipe, reference: RuntimeRef) -> Option<String> {
+    match reference {
+        RuntimeRef::Input { target_id } => recipe
+            .inputs
+            .get(&target_id)
+            .map(|input| input_value_type(&input.type_name, input.multiple).to_string()),
+        RuntimeRef::ArtifactField { target_id, field } => recipe
+            .artifacts
+            .contains_key(&target_id)
+            .then(|| artifact_field_value_type(&field).map(ToString::to_string))
+            .flatten(),
+        RuntimeRef::StepShorthand { target_id } => recipe
+            .steps
+            .iter()
+            .find(|candidate| candidate.id == target_id)
+            .and_then(primary_output_value_type),
+        RuntimeRef::StepOutput { target_id, field } => recipe
+            .steps
+            .iter()
+            .find(|candidate| candidate.id == target_id)
+            .and_then(|candidate| step_output_value_type(candidate, &field)),
+    }
 }
 
 fn primary_output_value_type(step: &Step) -> Option<String> {
@@ -3082,6 +3184,7 @@ fn expected_param_names(spec: &step_specs::StepSpecDto) -> Value {
 fn param_value_to_json(value: &ParamValue) -> Value {
     match value {
         ParamValue::Ref(ref_value) => json!({ "ref": ref_value }),
+        ParamValue::AppTarget(target_id) => json!({ "app_target": target_id }),
         ParamValue::Literal(value) => value.clone(),
     }
 }
@@ -3474,6 +3577,8 @@ fn normalize_step_params_for_execution(
     recipe: &Recipe,
     step: &Step,
     app_definitions: &HashMap<String, AppDefinitionV1>,
+    resolved_dest: Option<&str>,
+    resolved_dest_kind: Option<crate::authored_models::AppTargetKind>,
 ) -> OrderedMap<ExecutionParamValue> {
     if matches!(step.type_name.as_str(), "launch_app" | "force_stop_app") {
         if let Some(app_ref) = step.app_ref.as_deref() {
@@ -3527,6 +3632,16 @@ fn normalize_step_params_for_execution(
                     },
                 );
             }
+            ParamValue::AppTarget(_) => {
+                result.insert(
+                    param_name.clone(),
+                    ExecutionParamValue::Literal {
+                        value: Value::String(
+                            resolved_dest.expect("target prevalidated").to_string(),
+                        ),
+                    },
+                );
+            }
             ParamValue::Literal(value) => {
                 let value = if step.type_name == "install_apk" && param_name == "expected_sha256" {
                     value
@@ -3540,6 +3655,20 @@ fn normalize_step_params_for_execution(
                 result.insert(param_name.clone(), ExecutionParamValue::Literal { value });
             }
         }
+    }
+    if let Some(kind) = resolved_dest_kind {
+        result.insert(
+            "dest_kind".to_string(),
+            ExecutionParamValue::Literal {
+                value: Value::String(
+                    match kind {
+                        crate::authored_models::AppTargetKind::File => "file",
+                        crate::authored_models::AppTargetKind::Directory => "directory",
+                    }
+                    .to_string(),
+                ),
+            },
+        );
     }
     result
 }

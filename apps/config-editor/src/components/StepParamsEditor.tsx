@@ -140,7 +140,7 @@ function StepParamRow({
   const isStructuredParam = structuredKind !== null;
   const enumValues = typeof value === "string" ? paramSpec?.enumValues ?? [] : [];
   const acceptedSources = paramSpec?.acceptedSources ?? [];
-  const allowedRefSources = acceptedSources.filter((source) => source !== "literal");
+  const allowedRefSources = acceptedSources.filter((source) => source !== "literal" && source !== "app_target");
   const allowedValueTypes = paramSpec?.acceptedValueTypes ?? [];
 
   let control: ReactNode;

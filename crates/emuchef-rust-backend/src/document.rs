@@ -1296,7 +1296,7 @@ fn normalize_step_params(
 
 fn param_value_equals_default(value: &ParamValue, default: &Value) -> bool {
     match value {
-        ParamValue::Ref(_) => false,
+        ParamValue::Ref(_) | ParamValue::AppTarget(_) => false,
         ParamValue::Literal(value) => json_values_equal(value, default),
     }
 }

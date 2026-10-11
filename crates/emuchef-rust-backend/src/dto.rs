@@ -125,6 +125,7 @@ fn condition_to_dto(condition: &StepCondition) -> Value {
 fn param_to_dto(value: &ParamValue) -> Value {
     match value {
         ParamValue::Ref(ref_value) => json!({ "ref": ref_value }),
+        ParamValue::AppTarget(target_id) => json!({ "app_target": target_id }),
         ParamValue::Literal(value) => value.clone(),
     }
 }

@@ -618,6 +618,9 @@ fn parse_conditions(value: Option<&YamlValue>) -> Result<Vec<StepCondition>, Str
             let YamlValue::Mapping(mapping) = item else {
                 return Err("step condition must be a mapping".to_string());
             };
+            if contains_yaml_key(mapping, "app_ref") {
+                return Err("step conditions inherit app_ref from their enclosing step".to_string());
+            }
             Ok(StepCondition {
                 type_name: required_scalar_string(mapping, "type")?,
                 params: parse_json_map(get_yaml(mapping, "params"))?,
@@ -646,6 +649,16 @@ fn parse_params(value: Option<&YamlValue>) -> Result<OrderedMap<ParamValue>, Str
 
 fn parse_param_value(value: &YamlValue) -> Result<ParamValue, String> {
     if let YamlValue::Mapping(mapping) = value {
+        if mapping.contains_key(YamlValue::String("app_target".to_string())) {
+            let Some(target_id) = get_yaml(mapping, "app_target").and_then(YamlValue::as_str)
+            else {
+                return Err("app_target must name a valid target ID".to_string());
+            };
+            if mapping.len() != 1 || !crate::authored_models::is_valid_identifier(target_id) {
+                return Err("app_target must be the sole key with a valid target ID".to_string());
+            }
+            return Ok(ParamValue::AppTarget(target_id.to_string()));
+        }
         if mapping.len() == 1 {
             if let Some(ref_value) = get_yaml(mapping, "ref").and_then(YamlValue::as_str) {
                 validate_ref_syntax(ref_value)?;
@@ -1005,6 +1018,15 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 
 fn param_to_yaml(value: &ParamValue) -> YamlValue {
     match value {
+        ParamValue::AppTarget(target_id) => {
+            let mut mapping = Mapping::new();
+            insert(
+                &mut mapping,
+                "app_target",
+                YamlValue::String(target_id.clone()),
+            );
+            YamlValue::Mapping(mapping)
+        }
         ParamValue::Ref(ref_value) => {
             let mut mapping = Mapping::new();
             insert(&mut mapping, "ref", YamlValue::String(ref_value.clone()));
@@ -1264,6 +1286,22 @@ mod tests {
             parse_param_value(&yaml_value("wrapper:\n  ref: steps.extract")).unwrap(),
             ParamValue::Literal(json!({"wrapper": {"ref": "steps.extract"}}))
         );
+    }
+
+    #[test]
+    fn app_target_mapping_is_typed_and_reserved_shapes_are_rejected() {
+        assert_eq!(
+            parse_param_value(&yaml_value("app_target: system")).unwrap(),
+            ParamValue::AppTarget("system".to_string())
+        );
+        for source in [
+            "app_target: ''",
+            "app_target: 4",
+            "{app_target: system, extra: value}",
+            "{app_target: system, ref: inputs.destination}",
+        ] {
+            assert!(parse_param_value(&yaml_value(source)).is_err(), "{source}");
+        }
     }
 
     #[test]

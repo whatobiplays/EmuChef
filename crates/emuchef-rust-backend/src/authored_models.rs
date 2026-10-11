@@ -1036,7 +1036,7 @@ fn is_valid_repository_component(value: &str) -> bool {
 /// separators, trailing separators, '.' and '..' segments, control characters
 /// such as NUL, backslashes, home shorthand, environment variables,
 /// interpolation, and placeholders.
-fn is_valid_target_path(location: AppTargetLocation, path: &str) -> bool {
+pub(crate) fn is_valid_target_path(location: AppTargetLocation, path: &str) -> bool {
     if path.is_empty()
         || path.chars().any(char::is_control)
         || path.contains('\\')

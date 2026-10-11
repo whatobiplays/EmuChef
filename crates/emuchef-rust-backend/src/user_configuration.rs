@@ -1071,6 +1071,7 @@ fn step_contract_value(step: &crate::model::Step) -> JsonValue {
         "params": step.params.iter().map(|(key, value)| {
             let value = match value {
                 ParamValue::Ref(reference) => json!({ "ref": reference }),
+                ParamValue::AppTarget(target_id) => json!({ "app_target": target_id }),
                 ParamValue::Literal(value) => json!({ "literal": value }),
             };
             (key.clone(), value)
