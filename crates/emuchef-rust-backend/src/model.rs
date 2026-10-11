@@ -160,5 +160,7 @@ pub struct StepCondition {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParamValue {
     Ref(String),
+    /// A named destination in the enclosing step's App Definition.
+    AppTarget(String),
     Literal(Value),
 }

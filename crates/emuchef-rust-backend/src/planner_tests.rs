@@ -2367,7 +2367,7 @@ fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
             "copy",
             "dest",
             "invalid_param_source",
-            json!(["literal", "input_ref"]),
+            json!(["literal", "input_ref", "app_target"]),
             json!({"ref": "artifacts.app_apk.local_path"}),
         ),
         (
@@ -4952,6 +4952,59 @@ fn repo_plan_e2e_no_app_data_write_contexts_prune_app_data_dependents() {
             case.device_plan_ref
         );
     }
+}
+
+#[test]
+fn invalid_app_target_is_reported_before_capability_pruning() {
+    let case = repo_plan_e2e_no_app_data_write_cases().remove(0);
+    let temp = TempDir::new().unwrap();
+    let mut input = repo_plan_e2e_input(&case, &temp);
+    input
+        .selected_recipe_refs
+        .push("app.retroarch.provision".to_string());
+    input.runtime_capabilities.app_data_write = false;
+    let recipe = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.retroarch.provision")
+        .unwrap();
+    let step = recipe
+        .steps
+        .iter_mut()
+        .find(|step| step.id == "copy_assets")
+        .unwrap();
+    step.params.insert(
+        "dest".to_string(),
+        ParamValue::AppTarget("missing_target".to_string()),
+    );
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(
+        result["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "app_target_unknown"
+                && error["details"]["step_id"] == "copy_assets"),
+        "{result:#}"
+    );
+}
+
+#[test]
+fn derived_target_capability_matches_selected_plan_constraint() {
+    let case = repo_plan_e2e_cases().remove(0);
+    let temp = TempDir::new().unwrap();
+    let result = planning_result_value(repo_plan_e2e_input(&case, &temp));
+    assert_eq!(result["status"], "success", "{result:#}");
+    let copy_cheats = planner_step(&result, "app.retroarch.provision/copy_cheats");
+    assert_eq!(
+        copy_cheats["constraints"]["capabilities"],
+        json!(["shared_storage_write"])
+    );
+    assert_eq!(
+        copy_cheats["params"]["dest"]["value"],
+        "/storage/emulated/0/RetroArch/cheats"
+    );
 }
 
 #[test]

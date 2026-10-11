@@ -2263,7 +2263,7 @@ pub(crate) fn public_configuration_description(result: &Value, exact_serial: &st
         .into_iter()
         .flatten()
         .map(|recipe| {
-            json!({
+            let mut public = json!({
                 "id": recipe.get("id"),
                 "name": recipe.get("name"),
                 "description": recipe.get("description"),
@@ -2273,9 +2273,13 @@ pub(crate) fn public_configuration_description(result: &Value, exact_serial: &st
                 "available": recipe.get("available"),
                 "recipeDependencies": recipe.get("recipeDependencies"),
                 "contentRequirements": recipe.get("contentRequirements"),
-                "requiredCapabilities": recipe.get("requiredCapabilities"),
                 "unavailableCapabilities": recipe.get("unavailableCapabilities"),
-            })
+            });
+            if let Some(capabilities) = recipe.get("requiredCapabilities").and_then(Value::as_array)
+            {
+                public["requiredCapabilities"] = json!(capabilities);
+            }
+            public
         })
         .collect::<Vec<_>>();
     let inputs = result
@@ -3313,6 +3317,40 @@ mod tests {
         assert!(!serialized.contains("secret-serial"));
         assert!(!serialized.contains("targetDevice"));
         assert!(!serialized.contains("internal"));
+    }
+
+    #[test]
+    fn configuration_projection_omits_unknown_recipe_capabilities() {
+        let public = public_configuration_description(
+            &json!({
+                "devicePlan": "plan",
+                "selectedRecipes": ["feature.copy_roms"],
+                "expandedRecipes": ["feature.copy_roms"],
+                "recipeOptions": [
+                    {
+                        "id": "feature.copy_bios", "name": "BIOS", "available": false,
+                        "requiredCapabilities": null, "unavailableCapabilities": []
+                    },
+                    {
+                        "id": "feature.copy_roms", "name": "ROMs", "available": true,
+                        "requiredCapabilities": ["shared_storage_write"],
+                        "unavailableCapabilities": []
+                    }
+                ],
+                "inputs": [],
+                "diagnostics": []
+            }),
+            "",
+        );
+        let options = public["recipeOptions"].as_array().unwrap();
+        assert!(!options[0]
+            .as_object()
+            .unwrap()
+            .contains_key("requiredCapabilities"));
+        assert_eq!(
+            options[1]["requiredCapabilities"],
+            json!(["shared_storage_write"])
+        );
     }
 
     #[test]

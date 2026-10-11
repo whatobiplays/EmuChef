@@ -16,15 +16,16 @@ remains **In progress** with its deferred evidence requirements unchanged.
 The strict contract at
 `tests/fixtures/recipe-qualification/bios/qualification-contract.json` binds
 the raw `authored/recipes/feature.copy_bios.yaml` bytes to SHA-256
-`1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b`.
+`4f4471aacb0cacebffcebb4785b12f0e7ef43d306526031540d0496957840fbc`.
 Qualification uses the real authored catalog through
 `runtime_configuration::plan_configuration` with `ayaneo.generic.base` as
 production capability context and explicitly selects only
 `feature.copy_bios`.
 
 The tests exercise production planning, review projection, input validation,
-and deterministic execution of the unchanged generated plan. No authored YAML
-or device-plan/profile semantics are changed by the qualification.
+and deterministic execution of the unchanged generated plan. The BIOS Recipe
+uses RetroArch's named `system` target; the plan resolves its destination and
+verification path before review or execution.
 
 ## 3. What the tests prove
 
@@ -33,7 +34,7 @@ or device-plan/profile semantics are changed by the qualification.
 - Missing input and a nonexistent required directory fail before an executable
   plan, digest, or review is produced.
 - The authored `copy_files` step retains `sync` policy, the
-  `/sdcard/RetroArch/system` destination, and its `path_exists` verification.
+  `/storage/emulated/0/RetroArch/system` destination, and its `path_exists` verification.
 - Representative nested BIOS files copy successfully through normal sandbox
   adapters with exact source bytes preserved.
 - A private test device wrapper can force the authored destination verification

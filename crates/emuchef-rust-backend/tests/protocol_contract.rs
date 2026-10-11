@@ -110,7 +110,7 @@ fn assert_step_specs_surface(result: &Value) {
     );
     assert_eq!(
         copy_files.params["dest"].accepted_sources,
-        vec!["literal", "input_ref"]
+        vec!["literal", "input_ref", "app_target"]
     );
 
     let install_apk = parsed

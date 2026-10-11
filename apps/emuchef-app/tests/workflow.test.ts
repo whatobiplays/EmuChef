@@ -507,6 +507,50 @@ test("empty recipe selection prevents review", () => {
   assert.equal(reviewReady(state), false);
 });
 
+test("unselected target warnings remain visible without blocking ROM review", () => {
+  const diagnostic = {
+    key: "feature.copy_bios",
+    code: "app_target_unknown",
+    message: "App-owned target use in step 'copy_bios_dir' is invalid (app_target_unknown).",
+    severity: "warning",
+  };
+  const description = {
+    devicePlan: "plan.one",
+    selectedRecipes: ["feature.copy_roms"],
+    expandedRecipes: ["feature.copy_roms"],
+    recipeOptions: [{
+      id: "feature.copy_bios",
+      name: "Copy BIOS Files",
+      description: null,
+      selected: false,
+      recommended: false,
+      dependencyRequired: false,
+      available: false,
+      unavailableCapabilities: [],
+    }],
+    inputs: [],
+    diagnostics: [diagnostic],
+  };
+  const state = {
+    ...initialWorkflowState,
+    deviceHandle: facts.deviceHandle,
+    devicePlan: "plan.one",
+    descriptionDirty: false,
+    description,
+  };
+  assert.deepEqual(pageDiagnosticsForDisplay(description), [diagnostic]);
+  assert.equal(reviewReady(state), true);
+  assert.equal(reviewReady({
+    ...state,
+    description: {
+      ...description,
+      selectedRecipes: ["feature.copy_bios"],
+      expandedRecipes: ["feature.copy_bios"],
+      diagnostics: [{ ...diagnostic, severity: "error" }],
+    },
+  }), false);
+});
+
 test("required unresolved input prevents review", () => {
   const state = {
     ...initialWorkflowState,

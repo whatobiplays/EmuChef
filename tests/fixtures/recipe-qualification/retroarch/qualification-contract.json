@@ -4,22 +4,38 @@
   "planningDevicePlan": "ayaneo.konkr_pocket_fit.base",
   "authoredSource": {
     "path": "authored/recipes/app.retroarch.provision.yaml",
-    "sha256": "f695397e3db956d7150884cacf36242183bf41622f428d1a2ada04ad2f0ec4d2"
+    "sha256": "3715bb47eabcb8750c737d42ecbfd464ef08324d48d317be6a510b058abf3831"
   },
   "appSource": {
     "path": "authored/apps/retroarch.yaml",
-    "sha256": "1ae7a6aec4757ca5cc323a37f7d89795f23b38a6c20a3a0af65f86af4034f06f"
+    "sha256": "691844be13d81e8c3033bb94074348274d0e8c4ce65c2c1d325ef9d2bdd8d3dc"
   },
   "appLifecycle": {
     "appId": "retroarch",
     "packageId": "com.retroarch.aarch64",
     "launcherActivity": "com.retroarch.browser.mainmenu.MainMenuActivity",
-    "launchSteps": ["launch_retroarch_bootstrap", "launch_retroarch_permissions", "launch_retroarch"],
-    "forceStopSteps": ["stop_retroarch_after_bootstrap", "stop_retroarch_after_permissions"]
+    "launchSteps": [
+      "launch_retroarch_bootstrap",
+      "launch_retroarch_permissions",
+      "launch_retroarch"
+    ],
+    "forceStopSteps": [
+      "stop_retroarch_after_bootstrap",
+      "stop_retroarch_after_permissions"
+    ]
   },
-  "selectedRecipes": ["app.retroarch.provision"],
-  "expandedRecipes": ["app.retroarch.provision"],
-  "recipeConstraintCapabilities": ["apk_install", "app_launch", "app_data_write"],
+  "selectedRecipes": [
+    "app.retroarch.provision"
+  ],
+  "expandedRecipes": [
+    "app.retroarch.provision"
+  ],
+  "recipeConstraintCapabilities": [
+    "apk_install",
+    "app_launch",
+    "app_data_write",
+    "shared_storage_write"
+  ],
   "qualificationContextCapabilities": [
     "adb_available",
     "apk_install",
@@ -30,7 +46,9 @@
     "app_data_write"
   ],
   "requiredInputs": [],
-  "optionalInputs": ["app.retroarch.provision/retroarch_cfg"],
+  "optionalInputs": [
+    "app.retroarch.provision/retroarch_cfg"
+  ],
   "requiredOperationFamilies": [
     "resolve_artifacts",
     "install_apk",
@@ -57,16 +75,46 @@
     }
   ],
   "materialDependencyEdges": [
-    ["resolve_artifacts", "install_retroarch"],
-    ["install_retroarch", "launch_retroarch_bootstrap"],
-    ["launch_retroarch_bootstrap", "wait_for_retroarch_bootstrap"],
-    ["wait_for_retroarch_bootstrap", "stop_retroarch_after_bootstrap"],
-    ["stop_retroarch_after_bootstrap", "grant_retroarch_permissions"],
-    ["grant_retroarch_permissions", "launch_retroarch_permissions"],
-    ["launch_retroarch_permissions", "wait_for_retroarch_permissions"],
-    ["wait_for_retroarch_permissions", "stop_retroarch_after_permissions"],
-    ["extract_core_system_files", "copy_core_system_files"],
-    ["copy_core_system_files", "launch_retroarch"]
+    [
+      "resolve_artifacts",
+      "install_retroarch"
+    ],
+    [
+      "install_retroarch",
+      "launch_retroarch_bootstrap"
+    ],
+    [
+      "launch_retroarch_bootstrap",
+      "wait_for_retroarch_bootstrap"
+    ],
+    [
+      "wait_for_retroarch_bootstrap",
+      "stop_retroarch_after_bootstrap"
+    ],
+    [
+      "stop_retroarch_after_bootstrap",
+      "grant_retroarch_permissions"
+    ],
+    [
+      "grant_retroarch_permissions",
+      "launch_retroarch_permissions"
+    ],
+    [
+      "launch_retroarch_permissions",
+      "wait_for_retroarch_permissions"
+    ],
+    [
+      "wait_for_retroarch_permissions",
+      "stop_retroarch_after_permissions"
+    ],
+    [
+      "extract_core_system_files",
+      "copy_core_system_files"
+    ],
+    [
+      "copy_core_system_files",
+      "launch_retroarch"
+    ]
   ],
   "liveNetworkRequiredForAutomatedQualification": false,
   "automatedStatus": "foundation",

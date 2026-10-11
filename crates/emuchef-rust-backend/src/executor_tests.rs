@@ -4506,6 +4506,74 @@ fn copy_replace_deletes_only_inside_fake_device_root() {
 }
 
 #[test]
+fn copy_respects_resolved_file_and_directory_target_kinds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("device");
+    fs::create_dir_all(&fixture_root).unwrap();
+    fs::create_dir_all(fake_device_root.join("storage/emulated/0/existing")).unwrap();
+    let source = fixture_root.join("config.cfg");
+    fs::write(&source, "configuration").unwrap();
+
+    let copy_plan = |dest: &str, kind: &str| {
+        let mut params = OrderedMap::new();
+        params.insert(
+            "source".to_string(),
+            literal(runtime_value(
+                "file_path",
+                json!(source.to_string_lossy().to_string()),
+                Some("host"),
+            )),
+        );
+        params.insert("dest".to_string(), literal(json!(dest)));
+        params.insert("dest_kind".to_string(), literal(json!(kind)));
+        plan(vec![ExecutionStep {
+            id: "example.recipe/copy".to_string(),
+            recipe_ref: "example.recipe".to_string(),
+            app_id: None,
+            type_name: "copy_files".to_string(),
+            name: "Copy".to_string(),
+            note: "Copy".to_string(),
+            dependencies: Vec::new(),
+            constraints: constraints(),
+            params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        }])
+    };
+    let adapters = || {
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root.clone()],
+        )
+    };
+    let (invalid, _) = run_value(
+        &copy_plan("/storage/emulated/0/existing", "file"),
+        adapters(),
+    );
+    assert_eq!(invalid["success"], false);
+    assert!(invalid["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("existing directory"));
+
+    let (valid, _) = run_value(
+        &copy_plan("/storage/emulated/0/new-directory", "directory"),
+        adapters(),
+    );
+    assert_eq!(valid["success"], true);
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("storage/emulated/0/new-directory/config.cfg"))
+            .unwrap(),
+        "configuration"
+    );
+}
+
+#[test]
 fn copy_sync_removes_destination_only_files_from_directory_source() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");

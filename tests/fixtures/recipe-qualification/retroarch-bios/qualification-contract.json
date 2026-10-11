@@ -7,19 +7,19 @@
       "sourceKind": "recipe",
       "id": "app.retroarch.provision",
       "path": "authored/recipes/app.retroarch.provision.yaml",
-      "sha256": "f695397e3db956d7150884cacf36242183bf41622f428d1a2ada04ad2f0ec4d2"
+      "sha256": "3715bb47eabcb8750c737d42ecbfd464ef08324d48d317be6a510b058abf3831"
     },
     {
       "sourceKind": "appDefinition",
       "id": "retroarch",
       "path": "authored/apps/retroarch.yaml",
-      "sha256": "1ae7a6aec4757ca5cc323a37f7d89795f23b38a6c20a3a0af65f86af4034f06f"
+      "sha256": "691844be13d81e8c3033bb94074348274d0e8c4ce65c2c1d325ef9d2bdd8d3dc"
     },
     {
       "sourceKind": "recipe",
       "id": "feature.copy_bios",
       "path": "authored/recipes/feature.copy_bios.yaml",
-      "sha256": "1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b"
+      "sha256": "4f4471aacb0cacebffcebb4785b12f0e7ef43d306526031540d0496957840fbc"
     },
     {
       "sourceKind": "devicePlan",
@@ -38,11 +38,24 @@
     "appId": "retroarch",
     "packageId": "com.retroarch.aarch64",
     "launcherActivity": "com.retroarch.browser.mainmenu.MainMenuActivity",
-    "launchSteps": ["launch_retroarch_bootstrap", "launch_retroarch_permissions", "launch_retroarch"],
-    "forceStopSteps": ["stop_retroarch_after_bootstrap", "stop_retroarch_after_permissions"]
+    "launchSteps": [
+      "launch_retroarch_bootstrap",
+      "launch_retroarch_permissions",
+      "launch_retroarch"
+    ],
+    "forceStopSteps": [
+      "stop_retroarch_after_bootstrap",
+      "stop_retroarch_after_permissions"
+    ]
   },
-  "selectedRecipes": ["app.retroarch.provision", "feature.copy_bios"],
-  "expandedRecipes": ["app.retroarch.provision", "feature.copy_bios"],
+  "selectedRecipes": [
+    "app.retroarch.provision",
+    "feature.copy_bios"
+  ],
+  "expandedRecipes": [
+    "app.retroarch.provision",
+    "feature.copy_bios"
+  ],
   "recipeConstraintCapabilities": [
     "apk_install",
     "app_launch",
@@ -58,8 +71,12 @@
     "root_shell",
     "app_data_write"
   ],
-  "requiredInputs": ["feature.copy_bios/bios_source_dir"],
-  "optionalInputs": ["app.retroarch.provision/retroarch_cfg"],
+  "requiredInputs": [
+    "feature.copy_bios/bios_source_dir"
+  ],
+  "optionalInputs": [
+    "app.retroarch.provision/retroarch_cfg"
+  ],
   "requiredOperationFamilies": [
     "resolve_artifacts",
     "install_apk",

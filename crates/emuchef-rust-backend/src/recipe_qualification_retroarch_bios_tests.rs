@@ -22,7 +22,7 @@ const RETROARCH_RECIPE: &str = "app.retroarch.provision";
 const BIOS_RECIPE: &str = "feature.copy_bios";
 const RETROARCH_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
 const BIOS_INPUT_KEY: &str = "feature.copy_bios/bios_source_dir";
-const BIOS_DESTINATION: &str = "/sdcard/RetroArch/system";
+const BIOS_DESTINATION: &str = "/storage/emulated/0/RetroArch/system";
 const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
 const RETROARCH_LAUNCHER: &str = "com.retroarch.browser.mainmenu.MainMenuActivity";
 
@@ -641,14 +641,19 @@ fn combined_generated_plan_executes_with_exact_nested_bios_bytes() {
     }
 
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/RetroArch/system/sony/psx/scph5501.bin"))
-            .expect("nested PSX BIOS should be copied"),
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/RetroArch/system/sony/psx/scph5501.bin")
+        )
+        .expect("nested PSX BIOS should be copied"),
         fs::read(workspace.source_file("sony/psx/scph5501.bin"))
             .expect("source PSX BIOS should be readable")
     );
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/RetroArch/system/nintendo/gba/gba_bios.bin",))
-            .expect("nested GBA BIOS should be copied"),
+        fs::read(
+            workspace
+                .fake_device_file("storage/emulated/0/RetroArch/system/nintendo/gba/gba_bios.bin",)
+        )
+        .expect("nested GBA BIOS should be copied"),
         fs::read(workspace.source_file("nintendo/gba/gba_bios.bin"))
             .expect("source GBA BIOS should be readable")
     );

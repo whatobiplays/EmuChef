@@ -23,7 +23,7 @@ use crate::runtime_configuration::PlanConfigurationResult;
 const TARGET_RECIPE: &str = "feature.copy_bios";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.generic.base";
 const BIOS_INPUT_KEY: &str = "feature.copy_bios/bios_source_dir";
-const BIOS_DESTINATION: &str = "/sdcard/RetroArch/system";
+const BIOS_DESTINATION: &str = "/storage/emulated/0/RetroArch/system";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -412,9 +412,9 @@ fn bios_generated_plan_copies_nested_files_successfully_without_network_or_adb()
     }));
 
     let psx_destination =
-        workspace.fake_device_file("sdcard/RetroArch/system/sony/psx/scph5501.bin");
+        workspace.fake_device_file("storage/emulated/0/RetroArch/system/sony/psx/scph5501.bin");
     let gba_destination =
-        workspace.fake_device_file("sdcard/RetroArch/system/nintendo/gba/gba_bios.bin");
+        workspace.fake_device_file("storage/emulated/0/RetroArch/system/nintendo/gba/gba_bios.bin");
     assert_eq!(
         fs::read(psx_destination).expect("nested PSX BIOS should be copied"),
         fs::read(workspace.source_file("sony/psx/scph5501.bin"))
@@ -544,13 +544,13 @@ fn verification_fail_device_delegates_non_verification_operations() {
         )
         .expect("push should delegate");
     device
-        .mkdir_p("/sdcard/RetroArch/system")
+        .mkdir_p("/storage/emulated/0/RetroArch/system")
         .expect("mkdir should delegate");
     device
         .remove_file("/sdcard/file.bin")
         .expect("remove file should delegate");
     device
-        .remove_tree("/sdcard/RetroArch/system")
+        .remove_tree("/storage/emulated/0/RetroArch/system")
         .expect("remove tree should delegate");
     device
         .copy_on_device("/sdcard/source", "/sdcard/destination", true, false)

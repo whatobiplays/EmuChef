@@ -1837,6 +1837,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .get("copy_policy")
             .and_then(Value::as_str)
             .unwrap_or("merge");
+        let dest_kind = resolved_params.get("dest_kind").and_then(Value::as_str);
+        if dest_kind.is_some_and(|kind| !matches!(kind, "file" | "directory")) {
+            return Err(StepFailure::new(
+                "copy_files dest_kind must be file or directory".to_string(),
+            ));
+        }
         if !matches!(copy_policy, "merge" | "replace" | "sync") {
             return Err(StepFailure::new(format!(
                 "copy_files copy_policy must be merge, replace, or sync, got {copy_policy:?}"
@@ -1859,11 +1865,29 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 "app_data_write_unavailable: Destination {dest:?} requires both app_data_write and root_shell runtime capabilities."
             )));
         }
+        if dest_kind == Some("file") {
+            if source.type_name != "file_path" || copy_policy == "sync" {
+                return Err(StepFailure::new(
+                    "copy_files exact file target requires a single file and non-sync policy"
+                        .to_string(),
+                ));
+            }
+            if self.adapters.device.path_is_dir(dest)?
+                || (self.adapters.device.uses_fake_device_filesystem()
+                    && sandbox.fake_device_path(dest)?.is_dir())
+            {
+                return Err(StepFailure::new(
+                    "copy_files exact file target is an existing directory".to_string(),
+                ));
+            }
+        } else if dest_kind == Some("directory") && source.type_name == "file_path" {
+            self.adapters.device.mkdir_p(dest)?;
+        }
         let copied_paths = if self.adapters.device.uses_fake_device_filesystem()
             && source.location.as_deref() == Some("host")
             && !app_private_dest
         {
-            sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy)?
+            sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy, dest_kind)?
         } else if source.location.as_deref() == Some("device") {
             copy_device_source(&mut self.adapters.device, &source, dest, copy_policy)?
         } else if app_private_dest {
@@ -3412,12 +3436,13 @@ impl SandboxRoots {
         source: &RuntimeValue,
         dest: &str,
         copy_policy: &str,
+        dest_kind: Option<&str>,
     ) -> Result<Vec<String>, StepFailure> {
         match source.type_name.as_str() {
             "file_path" => {
                 let source_path = source_path_from_value(source)?;
                 self.ensure_read_allowed(&source_path)?;
-                let (target, dest_is_dir) = self.file_target_path(&source_path, dest)?;
+                let (target, dest_is_dir) = self.file_target_path(&source_path, dest, dest_kind)?;
                 if copy_policy == "replace" && target.exists() {
                     self.remove_fake_device_path(&target)?;
                 }
@@ -3493,8 +3518,19 @@ impl SandboxRoots {
         &self,
         source_path: &Path,
         dest: &str,
+        dest_kind: Option<&str>,
     ) -> Result<(PathBuf, bool), StepFailure> {
         let dest_path = self.fake_device_path(dest)?;
+        if dest_kind == Some("file") && dest_path.is_dir() {
+            return Err(StepFailure::new(
+                "copy_files exact file target is an existing directory".to_string(),
+            ));
+        }
+        if dest_kind == Some("directory") {
+            reject_symlink_ancestor(&self.fake_device_root, &dest_path)?;
+            reject_existing_symlink(&dest_path)?;
+            fs::create_dir_all(&dest_path).map_err(|error| StepFailure::new(error.to_string()))?;
+        }
         if dest_path.is_dir() {
             Ok((
                 dest_path.join(

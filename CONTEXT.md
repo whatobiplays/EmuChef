@@ -86,6 +86,28 @@ catalog. Existing Recipes that have not migrated retain their current
 form-based artifact, install, and package-condition behavior until their own
 migration.
 
+An App Definition target names a file or directory at `app_data`,
+`external_app_data`, `shared_storage`, or `absolute_device_path`. App-aware
+`copy_files.dest` and compatible `path_exists` or `file_exists` conditions use
+the single-key `{ app_target: <target-id> }` value. The enclosing step's
+`app_ref` supplies the owning App Definition. Planning resolves user-0 paths,
+validates source and destination kinds and app provenance, and derives
+`app_data_write` or `shared_storage_write` before capability selection. The
+execution plan retains concrete paths and effective capability constraints;
+review and execution do not resolve authored target IDs. Generic copy
+destinations and the user-configured ROM-copy Recipe retain their existing
+literal or input-reference behavior.
+Configuration discovery reports the union of effective step capabilities for
+each valid Recipe. A Recipe with an unresolved App Target is unavailable, has
+unknown required capabilities, and carries a diagnostic identifying the
+affected Recipe and step. Discovery does not substitute authored-only
+constraints when target resolution fails. Target-resolution diagnostics are
+blocking errors when the affected Recipe is selected or required by a selected
+Recipe. Diagnostics for unrelated unselected Recipes remain visible warnings.
+Unknown required capabilities are omitted from serialized Recipe options.
+Duplicate App Definition identities make capability requirements unknown and
+Recipes unavailable because planning cannot choose one definition safely.
+
 App-aware `launch_app` and `force_stop_app` steps require `app_ref` and no
 authored package or activity parameters. An App Definition launcher activity is
 one fully qualified Android class name. Planning requires it for app-aware
@@ -353,11 +375,12 @@ Step parameter specifications declare their accepted value sources and runtime
 value types. Authored recipe refs remain recipe-local (`inputs.<id>`,
 `artifacts.<id>.<field>`, and `steps.<id>[.outputs.<name>]`). Validation rejects
 literal or ref namespaces that a parameter does not accept and rejects refs
-whose declared runtime type is incompatible. `copy_files.dest` and
-`copy_files.copy_policy` accept either literals or compatible input refs, while
+whose declared runtime type is incompatible. `copy_files.dest` accepts a
+literal device path, compatible input ref, or typed App Target;
+`copy_files.copy_policy` accepts a literal or compatible input ref, while
 `copy_files.source` remains limited to compatible input, artifact, and step
 output refs. Canonical recipe YAML continues emitting direct literal values and
-single-field `{ ref: ... }` mappings.
+single-field `{ ref: ... }` and `{ app_target: ... }` mappings.
 
 Recipe input declarations support `string`, `integer`, `boolean`, `enum`,
 `file`, `directory`, `path`, `device_path`, `string_list`, `path_list`, and
@@ -1899,15 +1922,16 @@ Standalone BIOS automated qualification covers the real authored
 `feature.copy_bios` workflow. Its strict source-bound contract is at
 `tests/fixtures/recipe-qualification/bios/qualification-contract.json`, bound
 to the raw authored recipe SHA-256
-`1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b`, and its
+`4f4471aacb0cacebffcebb4785b12f0e7ef43d306526031540d0496957840fbc`, and its
 active qualification module is
 `crates/emuchef-rust-backend/src/recipe_qualification_bios_tests.rs`.
 Qualification uses `ayaneo.generic.base` as production capability context but
 explicitly selects only `feature.copy_bios`. It proves production planning and
 review, required-input rejection, recursive nested copy through normal sandbox
 adapters, and authored destination-verification failure through a private test
-device wrapper. No authored YAML, device-plan/profile semantics, public API,
-or production executor source is changed.
+device wrapper. The current BIOS Recipe uses RetroArch's named `system`
+target, resolved to `/storage/emulated/0/RetroArch/system`; physical execution
+remains deferred.
 
 Standalone ROM/content-copy automated qualification covers the real authored
 `feature.copy_roms` workflow. Its strict source-bound contract is at

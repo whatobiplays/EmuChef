@@ -484,3 +484,271 @@ fn invalid_requests_and_path_forms_return_structured_errors_without_fallback() {
     assert_eq!(path_response["error"]["code"], "load_failed");
     assert!(!Path::new("missing.yaml").exists());
 }
+
+fn write_target_availability_root(
+    temp: &TempDir,
+    shared_write: bool,
+    app_data_write: bool,
+) -> PathBuf {
+    let root = temp.path().join("target-authored");
+    let production = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+    for directory in ["recipes", "device_plans", "device_profiles", "apps"] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    for recipe in [
+        "app.retroarch.provision",
+        "feature.copy_bios",
+        "feature.copy_roms",
+    ] {
+        fs::copy(
+            production.join(format!("recipes/{recipe}.yaml")),
+            root.join(format!("recipes/{recipe}.yaml")),
+        )
+        .unwrap();
+    }
+    fs::copy(
+        production.join("apps/retroarch.yaml"),
+        root.join("apps/retroarch.yaml"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("device_profiles/target.profile.yaml"),
+        format!("schema_version: 1\nkind: device_profile\nid: target.profile\nname: Target profile\nmatch: {{}}\ncapability_defaults:\n  adb_available: true\n  apk_install: true\n  shared_storage_write: {shared_write}\n  app_launch: true\n  shell_command: true\n  package_remove_for_user: false\n  root_shell: true\n  app_data_write: {app_data_write}\ndevice_tags: []\n"),
+    ).unwrap();
+    fs::write(
+        root.join("device_plans/target.plan.yaml"),
+        "schema_version: 1\nkind: device_plan\nid: target.plan\nname: Target plan\ndevice_profile_ref: target.profile\nrecipes:\n  - recipe_ref: app.retroarch.provision\n    selected_by_default: true\n  - recipe_ref: feature.copy_bios\n    selected_by_default: true\n  - recipe_ref: feature.copy_roms\n    selected_by_default: true\ndefaults: {}\noverrides: {}\n",
+    ).unwrap();
+    root
+}
+
+fn target_recipe_option<'a>(response: &'a Value, recipe_id: &str) -> &'a Value {
+    response["result"]["recipeOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["id"] == recipe_id)
+        .unwrap_or_else(|| panic!("missing recipe option {recipe_id}: {response:#}"))
+}
+
+#[test]
+fn target_backed_recipe_options_include_derived_capabilities_and_preserve_generic_rom() {
+    let temp = TempDir::new().unwrap();
+    let root = write_target_availability_root(&temp, true, true);
+    let response = describe(json!({"authoredRoot": root, "devicePlan": "target.plan"}));
+    assert_eq!(response["ok"], true, "{response:#}");
+    for (recipe_id, capabilities) in [
+        (
+            "app.retroarch.provision",
+            json!([
+                "apk_install",
+                "app_data_write",
+                "app_launch",
+                "shared_storage_write"
+            ]),
+        ),
+        ("feature.copy_bios", json!(["shared_storage_write"])),
+        ("feature.copy_roms", json!(["shared_storage_write"])),
+    ] {
+        let option = target_recipe_option(&response, recipe_id);
+        assert_eq!(option["available"], true, "{recipe_id}: {option:#}");
+        assert_eq!(
+            option["requiredCapabilities"], capabilities,
+            "{recipe_id}: {option:#}"
+        );
+        assert_eq!(option["unavailableCapabilities"], json!([]));
+    }
+}
+
+#[test]
+fn target_backed_recipe_options_report_missing_write_capabilities() {
+    for (shared_write, app_data_write, retroarch_missing, bios_missing, rom_missing) in [
+        (
+            false,
+            true,
+            json!(["shared_storage_write"]),
+            json!(["shared_storage_write"]),
+            json!(["shared_storage_write"]),
+        ),
+        (true, false, json!(["app_data_write"]), json!([]), json!([])),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = write_target_availability_root(&temp, shared_write, app_data_write);
+        let response = describe(json!({"authoredRoot": root, "devicePlan": "target.plan"}));
+        assert_eq!(response["ok"], true, "{response:#}");
+        for (recipe_id, expected) in [
+            ("app.retroarch.provision", retroarch_missing),
+            ("feature.copy_bios", bios_missing),
+            ("feature.copy_roms", rom_missing),
+        ] {
+            let option = target_recipe_option(&response, recipe_id);
+            assert_eq!(
+                option["unavailableCapabilities"], expected,
+                "{recipe_id}: {option:#}"
+            );
+            assert_eq!(option["available"], expected.as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn invalid_target_references_never_fall_back_to_authored_only_availability() {
+    for (change, expected_code) in [
+        ("unknown", "app_target_unknown"),
+        ("wrong_kind", "app_target_kind_invalid"),
+        ("cross_app_source", "app_source_provenance_mismatch"),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = write_target_availability_root(&temp, true, true);
+        let path = root.join("recipes/feature.copy_bios.yaml");
+        let mut recipe = fs::read_to_string(&path).unwrap();
+        match change {
+            "unknown" => recipe = recipe.replace("app_target: system", "app_target: absent"),
+            "wrong_kind" => recipe = recipe.replace("app_target: system", "app_target: config"),
+            "cross_app_source" => {
+                fs::copy(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored/apps/armsx1.yaml"),
+                    root.join("apps/armsx1.yaml"),
+                )
+                .unwrap();
+                recipe = recipe.replace("steps:\n", "artifacts:\n  foreign_asset:\n    type: app_artifact\n    app_ref: armsx1\n    artifact: apk\nsteps:\n");
+                recipe = recipe.replace(
+                    "ref: inputs.bios_source_dir",
+                    "ref: artifacts.foreign_asset.local_path",
+                );
+            }
+            _ => unreachable!(),
+        }
+        fs::write(path, recipe).unwrap();
+        let response = describe(json!({"authoredRoot": root, "devicePlan": "target.plan"}));
+        assert_eq!(response["ok"], true, "{change}: {response:#}");
+        let option = target_recipe_option(&response, "feature.copy_bios");
+        assert_eq!(option["available"], false, "{change}: {option:#}");
+        assert!(
+            option.get("requiredCapabilities").is_none(),
+            "{change}: {option:#}"
+        );
+        assert_eq!(option["unavailableCapabilities"], json!([]));
+        assert!(
+            response["result"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == expected_code
+                    && diagnostic["key"] == "feature.copy_bios"
+                    && diagnostic["details"]["step_id"] == "copy_bios_dir"),
+            "{change}: {response:#}"
+        );
+        assert_eq!(
+            target_recipe_option(&response, "feature.copy_roms")["available"],
+            true
+        );
+    }
+}
+
+#[test]
+fn target_errors_block_only_selected_or_dependency_expanded_recipes() {
+    for (selection, rom_depends_on_bios, expected_severity) in [
+        (vec!["feature.copy_roms"], false, "warning"),
+        (vec!["feature.copy_bios"], false, "error"),
+        (vec!["feature.copy_roms"], true, "error"),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = write_target_availability_root(&temp, true, true);
+        let bios_path = root.join("recipes/feature.copy_bios.yaml");
+        let bios = fs::read_to_string(&bios_path).unwrap();
+        fs::write(
+            &bios_path,
+            bios.replace("app_target: system", "app_target: absent"),
+        )
+        .unwrap();
+        if rom_depends_on_bios {
+            let rom_path = root.join("recipes/feature.copy_roms.yaml");
+            let rom = fs::read_to_string(&rom_path).unwrap();
+            fs::write(
+                rom_path,
+                rom.replace(
+                    "recipe_dependencies: []",
+                    "recipe_dependencies: [feature.copy_bios]",
+                ),
+            )
+            .unwrap();
+        }
+        let source = temp.path().join("rom-source");
+        fs::create_dir(&source).unwrap();
+        let response = describe(json!({
+            "authoredRoot": root,
+            "devicePlan": "target.plan",
+            "selectedRecipes": selection,
+            "bindings": { "feature.copy_roms/source": source },
+        }));
+        assert_eq!(response["ok"], true, "{response:#}");
+        let bios = target_recipe_option(&response, "feature.copy_bios");
+        assert_eq!(bios["available"], false, "{response:#}");
+        assert!(bios.get("requiredCapabilities").is_none(), "{response:#}");
+        assert_eq!(
+            bios["dependencyRequired"], rom_depends_on_bios,
+            "{response:#}"
+        );
+        let target_diagnostics = response["result"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "app_target_unknown")
+            .collect::<Vec<_>>();
+        assert!(!target_diagnostics.is_empty(), "{response:#}");
+        assert!(
+            target_diagnostics.iter().all(|diagnostic| {
+                diagnostic["severity"] == expected_severity
+                    && diagnostic["key"] == "feature.copy_bios"
+                    && diagnostic["details"]["step_id"] == "copy_bios_dir"
+            }),
+            "{response:#}"
+        );
+        if expected_severity == "warning" {
+            assert!(
+                response["result"]["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|diagnostic| diagnostic["severity"] != "error"),
+                "{response:#}"
+            );
+            let rom = target_recipe_option(&response, "feature.copy_roms");
+            assert_eq!(rom["available"], true, "{response:#}");
+            assert_eq!(rom["requiredCapabilities"], json!(["shared_storage_write"]));
+        }
+    }
+}
+
+#[test]
+fn ambiguous_app_definitions_do_not_advertise_target_backed_recipes() {
+    let temp = TempDir::new().unwrap();
+    let root = write_target_availability_root(&temp, true, true);
+    fs::copy(
+        root.join("apps/retroarch.yaml"),
+        root.join("apps/retroarch-duplicate.yaml"),
+    )
+    .unwrap();
+    let response = describe(json!({
+        "authoredRoot": root,
+        "devicePlan": "target.plan",
+        "selectedRecipes": ["feature.copy_bios"],
+    }));
+    assert_eq!(response["ok"], true, "{response:#}");
+    let bios = target_recipe_option(&response, "feature.copy_bios");
+    assert_eq!(bios["available"], false, "{response:#}");
+    assert!(bios.get("requiredCapabilities").is_none(), "{response:#}");
+    assert!(
+        response["result"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |diagnostic| diagnostic["code"] == "app_definition_ambiguous"
+                    && diagnostic["key"] == "feature.copy_bios"
+                    && diagnostic["severity"] == "error"
+            ),
+        "{response:#}"
+    );
+}

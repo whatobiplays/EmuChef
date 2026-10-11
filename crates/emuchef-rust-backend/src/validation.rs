@@ -320,6 +320,15 @@ fn validate_step_params(
             continue;
         };
         match value {
+            ParamValue::AppTarget(_) if !accepts_source(param_spec, "app_target") => {
+                errors.push(param_contract_error(
+                    file,
+                    recipe,
+                    step_index,
+                    param_name,
+                    "This parameter does not accept an App Target.",
+                ));
+            }
             ParamValue::Literal(_) if !accepts_source(param_spec, "literal") => {
                 errors.push(param_contract_error(
                     file,

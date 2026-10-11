@@ -323,7 +323,7 @@ pub fn step_specs_result() -> StepSpecsResult {
                     (
                         "dest",
                         param(
-                            &["literal", "input_ref"],
+                            &["literal", "input_ref", "app_target"],
                             &["device_path"],
                             true,
                             vec![],

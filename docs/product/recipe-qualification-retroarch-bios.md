@@ -17,9 +17,8 @@ default order is:
 2. `feature.copy_bios`
 
 The qualification uses production catalog loading, planning, review projection,
-and executor adapters. It does not change recipe YAML, device-profile
-capabilities, production planner/runtime behavior, executor behavior, protocol
-APIs, or generated-plan ordering.
+and executor adapters. The source-bound contract below describes the current
+authored Recipes and App Definition after named target migration.
 
 ## 2. Source-bound contract
 
@@ -29,8 +28,9 @@ It binds the raw authored sources as follows:
 
 | Source | SHA-256 |
 |---|---|
-| `authored/recipes/app.retroarch.provision.yaml` | `d3fb4fc56064377e1d8e6954e0ac0aa3fc79d2e51d22e59ab00e0bbad821b2fa` |
-| `authored/recipes/feature.copy_bios.yaml` | `1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b` |
+| `authored/recipes/app.retroarch.provision.yaml` | `3715bb47eabcb8750c737d42ecbfd464ef08324d48d317be6a510b058abf3831` |
+| `authored/apps/retroarch.yaml` | `691844be13d81e8c3033bb94074348274d0e8c4ce65c2c1d325ef9d2bdd8d3dc` |
+| `authored/recipes/feature.copy_bios.yaml` | `4f4471aacb0cacebffcebb4785b12f0e7ef43d306526031540d0496957840fbc` |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `3da268bf1ce2dca8600baa47d7663a5d6542c0b5cd8c9a41510f2e9d71a3a969` |
 | `authored/device_profiles/ayaneo.konkr_pocket_fit.yaml` | `c1cef00eacf96760f1e21f405621b08e8b6070b983cfa5ec064209caf61a2db9` |
 
@@ -63,7 +63,7 @@ skips the authored RetroArch install through `package_installed`, still runs
 the BIOS sync copy, and remains successful.
 
 A test-private device wrapper can force only the authored BIOS destination
-verification for `/sdcard/RetroArch/system` to return false. The unchanged plan
+verification for `/storage/emulated/0/RetroArch/system` to return false. The unchanged plan
 is executed without adding cross-recipe dependencies or controlling step
 ordering: BIOS copy operations occur before that verification failure, prior
 results remain truthful, the BIOS step and overall run fail, and no later work

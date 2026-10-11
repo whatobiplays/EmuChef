@@ -1441,7 +1441,9 @@ mod tests {
             .into_iter()
             .map(|(name, value)| match value {
                 ParamValue::Literal(value) => (name, ExecutionParamValue::Literal { value }),
-                ParamValue::Ref(_) => panic!("generated permission params must be literal"),
+                ParamValue::Ref(_) | ParamValue::AppTarget(_) => {
+                    panic!("generated permission params must be literal")
+                }
             })
             .collect();
         let step = ExecutionStep {

@@ -475,16 +475,44 @@ pub(crate) fn describe_configuration(
         .iter()
         .map(|recipe| (recipe.id.as_str(), recipe))
         .collect::<HashMap<_, _>>();
+    let app_definitions = crate::catalog::load_app_definition_catalog(prepared.catalog.root())
+        .entries
+        .into_iter()
+        .map(|(_, app)| app)
+        .collect::<Vec<_>>();
+    let mut target_diagnostics = Vec::new();
     let recipe_options = prepared
         .recipes
         .iter()
         .map(|recipe| {
-            let required_capabilities = recipe
-                .steps
-                .iter()
-                .flat_map(|step| step.constraints.capabilities.iter())
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
+            // An unresolved target makes the recipe's requirements unknown.
+            // Keep it unavailable and report the authored error instead of
+            // treating an empty authored constraint list as complete.
+            let required_capabilities =
+                match crate::planner::effective_recipe_capabilities(recipe, &app_definitions) {
+                    Ok(capabilities) => Some(
+                        capabilities
+                            .into_iter()
+                            .flatten()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                    ),
+                    Err(errors) => {
+                        // Catalog discovery includes unselected Recipes. Their
+                        // target errors remain visible without blocking review
+                        // of an unrelated selected Recipe.
+                        let severity = if prepared.expanded_recipe_refs.contains(&recipe.id) {
+                            "error"
+                        } else {
+                            "warning"
+                        };
+                        target_diagnostics.extend(errors.into_iter().map(|error| {
+                            let mut diagnostic = planner_result_diagnostic(severity, error);
+                            diagnostic.key = Some(recipe.id.clone());
+                            diagnostic
+                        }));
+                        None
+                    }
+                };
             let mut content_requirements = std::collections::BTreeSet::new();
             if !recipe.artifacts.is_empty() {
                 content_requirements.insert("network_download");
@@ -503,11 +531,11 @@ pub(crate) fn describe_configuration(
                     _ => {}
                 }
             }
-            let unavailable_capabilities = prepared
-                .device_plan_parts
+            let unavailable_capabilities = required_capabilities
                 .as_ref()
-                .map(|_| {
-                    required_capabilities
+                .filter(|_| prepared.device_plan_parts.is_some())
+                .map(|capabilities| {
+                    capabilities
                         .iter()
                         .filter(|capability| {
                             !runtime_capability_available(
@@ -526,19 +554,22 @@ pub(crate) fn describe_configuration(
                 .is_some_and(|parts| parts.selected_recipe_refs.contains(&recipe.id));
             let dependency_required =
                 prepared.expanded_recipe_refs.contains(&recipe.id) && !explicitly_selected;
-            json!({
+            let mut option = json!({
                 "id": recipe.id,
                 "name": recipe.name,
                 "description": recipe.description,
                 "selected": explicitly_selected,
                 "recommended": recommended,
                 "dependencyRequired": dependency_required,
-                "available": unavailable_capabilities.is_empty(),
+                "available": required_capabilities.is_some() && unavailable_capabilities.is_empty(),
                 "recipeDependencies": recipe.recipe_dependencies,
                 "contentRequirements": content_requirements,
-                "requiredCapabilities": required_capabilities,
                 "unavailableCapabilities": unavailable_capabilities,
-            })
+            });
+            if let Some(capabilities) = required_capabilities {
+                option["requiredCapabilities"] = json!(capabilities);
+            }
+            option
         })
         .collect();
     let inputs = prepared
@@ -574,6 +605,8 @@ pub(crate) fn describe_configuration(
         })
         .collect();
 
+    let mut diagnostics = prepared.diagnostics;
+    diagnostics.extend(target_diagnostics);
     Ok(ConfigurationDescription {
         catalog: prepared.catalog.identity().cloned(),
         target_device: prepared.target_device.map(ConfigurationTargetDevice::from),
@@ -582,7 +615,7 @@ pub(crate) fn describe_configuration(
         expanded_recipes: prepared.expanded_recipe_refs,
         recipe_options,
         inputs,
-        diagnostics: prepared.diagnostics,
+        diagnostics,
     })
 }
 

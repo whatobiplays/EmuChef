@@ -597,6 +597,13 @@ fn decode_update_step_verify(object: &Map<String, Value>) -> Result<RecipeComman
 fn decode_authored_param_value(value: &Value) -> ParamValue {
     if let Value::Object(object) = value {
         if object.len() == 1 {
+            if let Some(Value::String(target_id)) = object.get("app_target") {
+                if crate::authored_models::is_valid_identifier(target_id) {
+                    return ParamValue::AppTarget(target_id.clone());
+                }
+            }
+        }
+        if object.len() == 1 {
             if let Some(Value::String(ref_value)) = object.get("ref") {
                 return ParamValue::Ref(ref_value.clone());
             }

@@ -343,25 +343,27 @@ steps:
   verify: []
 - id: copy_assets
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch assets
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_assets
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_assets
-    dest: /data/user/0/com.retroarch.aarch64/assets
+    dest:
+      app_target: assets
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/assets
+      path:
+        app_target: assets
 - id: extract_autoconfig
   type: extract_archive
   name: Extract RetroArch autoconfig
@@ -379,25 +381,27 @@ steps:
   verify: []
 - id: copy_autoconfig
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch autoconfig
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_autoconfig
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_autoconfig
-    dest: /data/user/0/com.retroarch.aarch64/autoconfig
+    dest:
+      app_target: autoconfig
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/autoconfig
+      path:
+        app_target: autoconfig
 - id: extract_cheats
   type: extract_archive
   name: Extract RetroArch cheats
@@ -415,25 +419,27 @@ steps:
   verify: []
 - id: copy_cheats
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch cheats
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_cheats
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_cheats
-    dest: /storage/emulated/0/RetroArch/cheats
+    dest:
+      app_target: cheats
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /storage/emulated/0/RetroArch/cheats
+      path:
+        app_target: cheats
 - id: extract_database_rdb
   type: extract_archive
   name: Extract RetroArch database
@@ -451,25 +457,27 @@ steps:
   verify: []
 - id: copy_database_rdb
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch database
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_database_rdb
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_database_rdb
-    dest: /data/user/0/com.retroarch.aarch64/database/rdb
+    dest:
+      app_target: database_rdb
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/database/rdb
+      path:
+        app_target: database_rdb
 - id: extract_info
   type: extract_archive
   name: Extract RetroArch info
@@ -487,25 +495,27 @@ steps:
   verify: []
 - id: copy_info
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch info
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_info
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_info
-    dest: /data/user/0/com.retroarch.aarch64/info
+    dest:
+      app_target: info
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/info
+      path:
+        app_target: info
 - id: extract_overlays
   type: extract_archive
   name: Extract RetroArch overlays
@@ -523,25 +533,27 @@ steps:
   verify: []
 - id: copy_overlays
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch overlays
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_overlays
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_overlays
-    dest: /data/user/0/com.retroarch.aarch64/overlays
+    dest:
+      app_target: overlays
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/overlays
+      path:
+        app_target: overlays
 - id: extract_shaders_glsl
   type: extract_archive
   name: Extract RetroArch GLSL shaders
@@ -559,25 +571,27 @@ steps:
   verify: []
 - id: copy_shaders_glsl
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch GLSL shaders
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_permissions
   - extract_shaders_glsl
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_shaders_glsl
-    dest: /data/user/0/com.retroarch.aarch64/shaders/shaders_glsl
+    dest:
+      app_target: shaders_glsl
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/shaders/shaders_glsl
+      path:
+        app_target: shaders_glsl
 - id: extract_cores
   type: extract_artifacts
   name: Extract selected RetroArch cores
@@ -595,25 +609,27 @@ steps:
   verify: []
 - id: copy_cores
   type: copy_files
+  app_ref: retroarch
   name: Copy selected RetroArch cores
   user_toggleable: true
   dependencies:
   - stop_retroarch_after_permissions
   - extract_cores
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_cores
-    dest: /data/user/0/com.retroarch.aarch64/cores
+    dest:
+      app_target: cores
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /data/user/0/com.retroarch.aarch64/cores
+      path:
+        app_target: cores
 - id: extract_core_system_files
   type: extract_artifacts
   name: Extract selected RetroArch core system files
@@ -631,52 +647,58 @@ steps:
   verify: []
 - id: copy_core_system_files
   type: copy_files
+  app_ref: retroarch
   name: Copy selected RetroArch core system files
   user_toggleable: true
   dependencies:
   - stop_retroarch_after_permissions
   - extract_core_system_files
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: steps.extract_core_system_files
-    dest: /storage/emulated/0/RetroArch/system
+    dest:
+      app_target: system
     copy_policy: merge
   verify:
   - type: path_exists
     params:
-      path: /storage/emulated/0/RetroArch/system/dolphin-emu
+      path:
+        app_target: system_dolphin_emu
   - type: path_exists
     params:
-      path: /storage/emulated/0/RetroArch/system/fbneo
+      path:
+        app_target: system_fbneo
   - type: path_exists
     params:
-      path: /storage/emulated/0/RetroArch/system/PPSSPP
+      path:
+        app_target: system_ppsspp
 - id: seed_retroarch_cfg
   type: copy_files
+  app_ref: retroarch
   name: Copy RetroArch config
   description: Copy the config file into Android/data folder.
   user_toggleable: true
   dependencies:
   - stop_retroarch_after_permissions
   constraints:
-    capabilities:
-    - app_data_write
+    capabilities: []
     conflicts_with: []
   skip_if: []
   params:
     source:
       ref: inputs.retroarch_cfg
-    dest: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
+    dest:
+      app_target: config
     copy_policy: replace
   verify:
   - type: file_exists
     params:
-      path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
+      path:
+        app_target: config
 - id: launch_retroarch
   type: launch_app
   app_ref: retroarch

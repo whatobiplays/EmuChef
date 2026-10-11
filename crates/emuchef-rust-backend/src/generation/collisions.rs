@@ -598,7 +598,7 @@ fn literal_array(value: Option<&ParamValue>) -> Option<&[Value]> {
 fn literal_non_empty_string(value: &ParamValue) -> Option<&str> {
     match value {
         ParamValue::Literal(value) => non_empty_string(value),
-        ParamValue::Ref(_) => None,
+        ParamValue::Ref(_) | ParamValue::AppTarget(_) => None,
     }
 }
 

@@ -16,6 +16,7 @@ import {
   literalSeedForParam,
   moveStringListValue,
   orderedParamNames,
+  paramValuesEqual,
   parseJsonParamDraft,
   parseNumberParamDraft,
   removeStringListValue,
@@ -388,6 +389,42 @@ test("incompatible or free-form values fall back to raw JSON", () => {
   assert.equal(structuredParamEditorKind(resolveSpec, "artifacts", ["app_apk", 1]), null);
   assert.equal(structuredParamEditorKind(grantSpec, "policy", ["warn"]), null);
   assert.equal(structuredParamEditorKind(copySpec, "metadata", { tags: ["free-form"] }), null);
+});
+
+test("typed App Target destinations remain editable through raw JSON without losing other params", () => {
+  const targetCopySpec: StepSpecDto = {
+    ...copySpec,
+    params: {
+      ...copySpec.params,
+      dest: {
+        ...copySpec.params.dest,
+        acceptedSources: ["literal", "input_ref", "app_target"],
+      },
+    },
+  };
+  const params = {
+    source: { ref: "inputs.bios_source_dir" },
+    dest: { app_target: "system" },
+    copy_policy: "merge",
+  };
+  assert.equal(isAuthoredRefValue(params.dest), false);
+  assert.equal(structuredParamEditorKind(targetCopySpec, "dest", params.dest), null);
+  assert.equal(paramValuesEqual(params.dest, { app_target: "system" }), true);
+
+  const edited = parseJsonParamDraft('{"app_target":"config"}');
+  assert.deepEqual(edited, { ok: true, value: { app_target: "config" } });
+  if (!edited.ok) {
+    return;
+  }
+  assert.deepEqual(buildUpdateStepParamsCommand("copy_bios_dir", params, "dest", edited.value), {
+    type: "UpdateStepParams",
+    stepId: "copy_bios_dir",
+    params: {
+      source: { ref: "inputs.bios_source_dir" },
+      dest: { app_target: "config" },
+      copy_policy: "merge",
+    },
+  });
 });
 
 test("structured param updates produce full UpdateStepParams commands and preserve unrelated params", () => {

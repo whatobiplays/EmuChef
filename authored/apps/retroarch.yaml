@@ -43,6 +43,18 @@ targets:
     kind: directory
     location: shared_storage
     path: RetroArch/system
+  system_dolphin_emu:
+    kind: directory
+    location: shared_storage
+    path: RetroArch/system/dolphin-emu
+  system_fbneo:
+    kind: directory
+    location: shared_storage
+    path: RetroArch/system/fbneo
+  system_ppsspp:
+    kind: directory
+    location: shared_storage
+    path: RetroArch/system/PPSSPP
   cheats:
     kind: directory
     location: shared_storage
