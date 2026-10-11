@@ -163,6 +163,22 @@ pub(super) fn validate_app_authority(
             ));
             continue;
         }
+        if matches!(step.type_name.as_str(), "launch_app" | "force_stop_app") {
+            if !step.params.is_empty() {
+                errors.push(app_authority_error(
+                    "app_lifecycle_identity_override_forbidden",
+                    "An app-context lifecycle step inherits its package and launcher from its App Definition and takes no authored parameters.",
+                    json!({ "recipe_ref": recipe_id, "step_id": step.id }),
+                ));
+            }
+            if step.type_name == "launch_app" && app.launcher_activity.is_none() {
+                errors.push(app_authority_error(
+                    "app_launcher_activity_required",
+                    "An app-context launch requires a launcher activity in its App Definition.",
+                    json!({ "recipe_ref": recipe_id, "step_id": step.id, "app_ref": app_ref }),
+                ));
+            }
+        }
         for condition in step.skip_if.iter().chain(&step.verify) {
             if condition.type_name == "package_installed" && !condition.params.is_empty() {
                 errors.push(app_authority_error(
@@ -237,7 +253,7 @@ fn is_legacy_app_step_form(recipe: &Recipe, step: &Step) -> bool {
         "grant_permissions" => ["runtime", "appops", "policy"]
             .iter()
             .any(|parameter| step.params.contains_key(*parameter)),
-        "launch_app" | "force_stop_app" => step.params.contains_key("package_name"),
+        "launch_app" | "force_stop_app" => step_specs::is_valid_legacy_lifecycle_form(step),
         _ => false,
     }
 }

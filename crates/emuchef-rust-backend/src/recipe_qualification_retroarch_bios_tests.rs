@@ -23,6 +23,8 @@ const BIOS_RECIPE: &str = "feature.copy_bios";
 const RETROARCH_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
 const BIOS_INPUT_KEY: &str = "feature.copy_bios/bios_source_dir";
 const BIOS_DESTINATION: &str = "/sdcard/RetroArch/system";
+const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
+const RETROARCH_LAUNCHER: &str = "com.retroarch.browser.mainmenu.MainMenuActivity";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,6 +33,7 @@ struct CombinedQualificationContract {
     planning_device_plan: String,
     device_profile: String,
     authored_sources: Vec<AuthoredSourceContract>,
+    app_lifecycle: AppLifecycleContract,
     selected_recipes: Vec<String>,
     expanded_recipes: Vec<String>,
     recipe_constraint_capabilities: Vec<String>,
@@ -52,6 +55,16 @@ struct AuthoredSourceContract {
     id: String,
     path: String,
     sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AppLifecycleContract {
+    app_id: String,
+    package_id: String,
+    launcher_activity: String,
+    launch_steps: Vec<String>,
+    force_stop_steps: Vec<String>,
 }
 
 fn repository_root() -> PathBuf {
@@ -154,6 +167,7 @@ fn combined_contract_binds_all_authored_sources_and_defers_physical_aliases() {
             RETROARCH_RECIPE,
             "authored/recipes/app.retroarch.provision.yaml",
         ),
+        ("appDefinition", "retroarch", "authored/apps/retroarch.yaml"),
         (
             "recipe",
             BIOS_RECIPE,
@@ -212,6 +226,56 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
         .plan
         .as_ref()
         .expect("combined plan should be generated");
+    let lifecycle = &contract.app_lifecycle;
+    assert_eq!(lifecycle.app_id, "retroarch");
+    assert_eq!(lifecycle.package_id, RETROARCH_PACKAGE);
+    assert_eq!(lifecycle.launcher_activity, RETROARCH_LAUNCHER);
+    assert_eq!(
+        lifecycle.launch_steps,
+        [
+            "launch_retroarch_bootstrap",
+            "launch_retroarch_permissions",
+            "launch_retroarch"
+        ]
+    );
+    assert_eq!(
+        lifecycle.force_stop_steps,
+        [
+            "stop_retroarch_after_bootstrap",
+            "stop_retroarch_after_permissions"
+        ]
+    );
+    assert_eq!(
+        plan.apps
+            .iter()
+            .filter(|app| app.id == lifecycle.app_id)
+            .count(),
+        1
+    );
+    for (ids, expected_type, activity) in [
+        (
+            &lifecycle.launch_steps,
+            "launch_app",
+            Some(RETROARCH_LAUNCHER),
+        ),
+        (&lifecycle.force_stop_steps, "force_stop_app", None),
+    ] {
+        for id in ids {
+            let step = plan
+                .steps
+                .iter()
+                .find(|step| {
+                    step.recipe_ref == RETROARCH_RECIPE && step.id.ends_with(&format!("/{id}"))
+                })
+                .unwrap();
+            assert_eq!(step.type_name, expected_type);
+            assert_eq!(step.app_id.as_deref(), Some(lifecycle.app_id.as_str()));
+            assert_eq!(
+                crate::planner::validated_plan_lifecycle_target(plan, step).unwrap(),
+                (RETROARCH_PACKAGE.to_string(), activity.map(str::to_string))
+            );
+        }
+    }
     assert!(result
         .plan_digest
         .as_deref()
@@ -323,6 +387,8 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
         .all(|notice| notice.severity != "blocker"));
 
     let serialized = serde_json::to_string(review).expect("review should serialize");
+    assert!(serialized.contains(RETROARCH_PACKAGE));
+    assert!(serialized.contains(RETROARCH_LAUNCHER));
     assert!(serialized.contains("retroarch.cfg"));
     assert!(serialized.contains("bios-source"));
     assert!(!serialized.contains(&temp.path().to_string_lossy().to_string()));
@@ -525,6 +591,32 @@ fn combined_generated_plan_executes_with_exact_nested_bios_bytes() {
     assert!(result.success, "combined plan should execute successfully");
     assert_eq!(result.total_steps, plan.steps.len());
     assert_eq!(result.steps.len(), result.total_steps);
+    let lifecycle_commands = runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .filter(|command| {
+            matches!(
+                command.first().map(String::as_str),
+                Some("launch_app" | "force_stop_app")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_commands,
+        vec![
+            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
+            vec!["force_stop_app", RETROARCH_PACKAGE],
+            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
+            vec!["force_stop_app", RETROARCH_PACKAGE],
+            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
+        ]
+        .into_iter()
+        .map(|command| command.into_iter().map(str::to_string).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
+    );
     assert!(result.steps.iter().all(|record| {
         !matches!(
             record.status,

@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::model::{ParamValue, Step};
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StepSpecsResult {
     #[serde(rename = "stepSpecs")]
@@ -423,17 +425,8 @@ pub fn step_specs_result() -> StepSpecsResult {
                 "Launch App",
                 None,
                 vec![],
-                vec!["package_name", "activity"],
-                map(vec![
-                    (
-                        "activity",
-                        param(&["literal"], &["string"], false, vec![], None),
-                    ),
-                    (
-                        "package_name",
-                        param(&["literal"], &["string"], true, vec![], None),
-                    ),
-                ]),
+                vec![],
+                map(vec![]),
                 map(vec![]),
             ),
             spec(
@@ -453,11 +446,8 @@ pub fn step_specs_result() -> StepSpecsResult {
                 "Force Stop",
                 None,
                 vec![],
-                vec!["package_name"],
-                map(vec![(
-                    "package_name",
-                    param(&["literal"], &["string"], true, vec![], None),
-                )]),
+                vec![],
+                map(vec![]),
                 map(vec![]),
             ),
         ],
@@ -469,6 +459,98 @@ pub fn step_spec_for(type_name: &str) -> Option<StepSpecDto> {
         .step_specs
         .into_iter()
         .find(|spec| spec.type_name == type_name)
+}
+
+/// Return the internal parameter contract for an authored step. The public
+/// StepSpec always describes the App Definition form; existing package-based
+/// steps retain a separate contract until their Recipes are migrated.
+pub(crate) fn authored_step_spec_for(step: &Step) -> Option<StepSpecDto> {
+    let mut spec = step_spec_for(&step.type_name)?;
+    if step.app_ref.is_some() || !step.params.contains_key("package_name") {
+        return Some(spec);
+    }
+    match step.type_name.as_str() {
+        "launch_app" => {
+            spec.param_order = vec!["package_name".to_string(), "activity".to_string()];
+            spec.params = map(vec![
+                (
+                    "activity",
+                    param(&["literal"], &["string"], false, vec![], None),
+                ),
+                (
+                    "package_name",
+                    param(&["literal"], &["string"], true, vec![], None),
+                ),
+            ]);
+        }
+        "force_stop_app" => {
+            spec.param_order = vec!["package_name".to_string()];
+            spec.params = map(vec![(
+                "package_name",
+                param(&["literal"], &["string"], true, vec![], None),
+            )]);
+        }
+        _ => {}
+    }
+    Some(spec)
+}
+
+/// Admit only complete literal legacy lifecycle forms with a valid package and
+/// optional valid activity. A missing or malformed
+/// App Definition context cannot become a legacy step by carrying one key.
+pub(crate) fn is_valid_legacy_lifecycle_form(step: &Step) -> bool {
+    if step.app_ref.is_some() {
+        return false;
+    }
+    let allowed = match step.type_name.as_str() {
+        "launch_app" => &["package_name", "activity"][..],
+        "force_stop_app" => &["package_name"][..],
+        _ => return false,
+    };
+    if step
+        .params
+        .keys()
+        .any(|name| !allowed.contains(&name.as_str()))
+    {
+        return false;
+    }
+    if !matches!(step.params.get("package_name"), Some(ParamValue::Literal(Value::String(package))) if crate::authored_models::is_valid_package_id(package))
+    {
+        return false;
+    }
+    match step.params.get("activity") {
+        None => true,
+        Some(ParamValue::Literal(Value::String(activity))) => is_valid_legacy_activity(activity),
+        _ => false,
+    }
+}
+
+fn is_valid_legacy_activity(activity: &str) -> bool {
+    let class = if let Some((package, class)) = activity.split_once('/') {
+        if !crate::authored_models::is_valid_package_id(package) {
+            return false;
+        }
+        class
+    } else {
+        activity
+    };
+    if crate::authored_models::is_valid_concrete_launcher_activity(class) {
+        return true;
+    }
+    let Some(relative) = class.strip_prefix('.') else {
+        return false;
+    };
+    !relative.is_empty()
+        && relative.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        })
 }
 
 pub fn is_supported_step_type(type_name: &str) -> bool {
@@ -670,5 +752,21 @@ mod tests {
             step_spec_for("wait").unwrap().app_context,
             AppContextRequirement::None
         );
+    }
+
+    #[test]
+    fn lifecycle_step_specs_expose_only_app_context_as_authored_identity() {
+        for step_type in ["launch_app", "force_stop_app"] {
+            let spec = step_spec_for(step_type).expect("lifecycle step spec");
+            assert_eq!(spec.app_context, AppContextRequirement::Required);
+            assert!(
+                spec.params.is_empty(),
+                "{step_type} exposes identity params"
+            );
+            assert!(
+                spec.param_order.is_empty(),
+                "{step_type} orders identity params"
+            );
+        }
     }
 }

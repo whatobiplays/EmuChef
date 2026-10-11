@@ -22,8 +22,8 @@ The qualification covers the real authored
 
 - a strict qualification contract at
   `tests/fixtures/recipe-qualification/retroarch/qualification-contract.json` bound by
-  SHA-256 to the raw authored recipe bytes, so authored changes fail closed
-  until expectations are deliberately reviewed;
+  SHA-256 to the raw authored Recipe and App Definition bytes, so authored
+  changes fail closed until expectations are deliberately reviewed;
 - real catalog admission through `CatalogSnapshot::legacy_local` and production
   planning through `runtime_configuration::plan_configuration` with the
   `ayaneo.konkr_pocket_fit.base` device plan;
@@ -43,6 +43,11 @@ The qualification covers the real authored
   first-launch sequences: bootstrap launch, 1500 ms wait, and force-stop;
   then post-permission launch, 5000 ms wait, and force-stop, with direct
   dependency and ordering assertions.
+- The RetroArch App Definition names package `com.retroarch.aarch64` and the
+  verified launcher alias `com.retroarch.browser.mainmenu.MainMenuActivity`.
+  All three launches and two force stops select `retroarch` by `app_ref`.
+  Planning records the concrete package and launcher in the reviewed plan;
+  review text and deterministic device commands show the same target.
 - Artifact definitions enter the production resolution model at their exact
   default-cache filenames with authored URLs unchanged.
 - The generated workflow completes successfully through the deterministic

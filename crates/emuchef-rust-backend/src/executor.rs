@@ -1143,8 +1143,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
             "copy_files" => self.execute_copy_files(plan, step, &resolved_params),
             "install_apk" => self.execute_install_apk(plan, state, step, &resolved_params),
-            "launch_app" => self.execute_launch_app(&resolved_params),
-            "force_stop_app" => self.execute_force_stop_app(&resolved_params),
+            "launch_app" => self.execute_launch_app(plan, step, &resolved_params),
+            "force_stop_app" => self.execute_force_stop_app(plan, step, &resolved_params),
             other => Err(StepFailure::new(format!(
                 "Unsupported executor step type: {other}"
             ))),
@@ -2073,8 +2073,20 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
     fn execute_launch_app(
         &mut self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        if step.app_id.is_some() {
+            let (package, activity) = crate::planner::validated_plan_lifecycle_target(plan, step)
+                .map_err(|reason| {
+                StepFailure::new(format!("App launch identity is invalid: {reason}."))
+            })?;
+            self.adapters
+                .device
+                .launch_app(&package, activity.as_deref())?;
+            return Ok(OrderedMap::new());
+        }
         let package_name = resolved_params
             .get("package_name")
             .map(value_to_string)
@@ -2091,8 +2103,18 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
     fn execute_force_stop_app(
         &mut self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        if step.app_id.is_some() {
+            let (package, _) = crate::planner::validated_plan_lifecycle_target(plan, step)
+                .map_err(|reason| {
+                    StepFailure::new(format!("App force-stop identity is invalid: {reason}."))
+                })?;
+            self.adapters.device.force_stop_app(&package)?;
+            return Ok(OrderedMap::new());
+        }
         let package_name = resolved_params
             .get("package_name")
             .map(value_to_string)

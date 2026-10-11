@@ -13,9 +13,9 @@ use crate::model::{
     StepCondition, StepConstraints,
 };
 use crate::planner::{
-    build_permission_intent, normalized_plan_step_note, plan_execution,
-    plan_execution_with_app_definitions, resolve_runtime_bindings, BindingSource, DeviceContext,
-    PlannerInput, PlanningStatus, RuntimeCapabilities,
+    build_permission_intent, normalized_plan_step_note, plan_execution_with_app_definitions,
+    resolve_runtime_bindings, BindingSource, DeviceContext, PlannerInput, PlanningStatus,
+    RuntimeCapabilities,
 };
 use crate::runtime_configuration::input_reuse_diagnostics;
 
@@ -247,12 +247,25 @@ fn repo_detected_context_planning_result_with_bindings(
         materialize_required_test_host_binding(input_id, value);
         bindings.insert((*input_id).to_string(), value.clone());
     }
+    let authored_root = repo_authored_root();
+    let app_catalog = crate::catalog::load_app_definition_catalog(&authored_root);
+    assert!(
+        app_catalog.diagnostics.is_empty(),
+        "repo App Definition catalog should be valid: {:?}",
+        app_catalog.diagnostics
+    );
+    let app_definitions = app_catalog
+        .entries
+        .into_iter()
+        .map(|(_, app)| app)
+        .collect::<Vec<_>>();
     serde_json::to_value(
         plan_from_authored_device_plan_with_detected_facts(
-            repo_authored_root(),
+            authored_root,
             device_plan_ref,
             plan_id.to_string(),
             bindings,
+            &app_definitions,
             detected_facts,
         )
         .unwrap_or_else(|error| {
@@ -489,14 +502,33 @@ fn repo_plan_e2e_no_app_data_write_cases() -> Vec<RepoPlanE2eCase> {
 }
 
 fn planning_result_value(input: PlannerInput) -> Value {
-    serde_json::to_value(plan_execution(input)).expect("planning result should serialize")
+    let apps = if input.recipes.iter().any(|recipe| {
+        recipe
+            .steps
+            .iter()
+            .any(|step| step.app_ref.as_deref() == Some("retroarch"))
+    }) {
+        vec![
+            load_app_definition(repo_authored_root().join("apps/retroarch.yaml"))
+                .expect("RetroArch App Definition should load"),
+        ]
+    } else {
+        Vec::new()
+    };
+    serde_json::to_value(plan_execution_with_app_definitions(input, &apps))
+        .expect("planning result should serialize")
 }
 
 fn obtainium_planning_result_value(input: PlannerInput) -> Value {
-    let app = load_app_definition(repo_authored_root().join("apps/obtainium.yaml"))
+    let obtainium = load_app_definition(repo_authored_root().join("apps/obtainium.yaml"))
         .expect("Obtainium App Definition should load");
-    serde_json::to_value(plan_execution_with_app_definitions(input, &[app]))
-        .expect("Obtainium planning result should serialize")
+    let retroarch = load_app_definition(repo_authored_root().join("apps/retroarch.yaml"))
+        .expect("RetroArch App Definition should load");
+    serde_json::to_value(plan_execution_with_app_definitions(
+        input,
+        &[obtainium, retroarch],
+    ))
+    .expect("Obtainium planning result should serialize")
 }
 
 fn normalized_planning_result_value(input: PlannerInput) -> Value {
@@ -2596,7 +2628,7 @@ fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
 }
 
 #[test]
-fn param_contract_reports_unknown_params_only_for_focused_step_types() {
+fn param_contract_rejects_unknown_params_and_preserves_valid_legacy_lifecycle() {
     let focused = planning_result_value(param_contract_input(vec![param_contract_step(
         "copy",
         "copy_files",
@@ -2620,6 +2652,17 @@ fn param_contract_reports_unknown_params_only_for_focused_step_types() {
         "launch",
         "launch_app",
         vec![],
+        ref_params(vec![(
+            "package_name",
+            ParamValue::Literal(json!("com.example.app")),
+        )]),
+    )]));
+    assert_eq!(non_focused["status"], "success", "{non_focused:#}");
+
+    let malformed_legacy = planning_result_value(param_contract_input(vec![param_contract_step(
+        "launch",
+        "launch_app",
+        vec![],
         ref_params(vec![
             (
                 "package_name",
@@ -2628,7 +2671,10 @@ fn param_contract_reports_unknown_params_only_for_focused_step_types() {
             ("extra", ParamValue::Literal(json!(true))),
         ]),
     )]));
-    assert_eq!(non_focused["status"], "success", "{non_focused:#}");
+    assert_eq!(
+        malformed_legacy["errors"][0]["code"],
+        "app_context_required"
+    );
 }
 
 #[test]
@@ -6196,6 +6242,233 @@ fn assert_app_planning_error(
     );
 }
 
+fn lifecycle_planner_input(
+    step_type: &str,
+    app_ref: Option<&str>,
+    params: OrderedMap<ParamValue>,
+) -> PlannerInput {
+    let mut input = armsx1_recipe_planner_input();
+    let recipe = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .expect("ARMSX1 recipe");
+    let mut lifecycle = recipe
+        .steps
+        .iter()
+        .find(|step| step.type_name == "install_apk")
+        .expect("ARMSX1 install step")
+        .clone();
+    lifecycle.id = "lifecycle".to_string();
+    lifecycle.type_name = step_type.to_string();
+    lifecycle.name = "App lifecycle".to_string();
+    lifecycle.app_ref = app_ref.map(str::to_string);
+    lifecycle.dependencies.clear();
+    lifecycle.constraints.capabilities.clear();
+    lifecycle.skip_if.clear();
+    lifecycle.verify.clear();
+    lifecycle.params = params;
+    recipe.steps.push(lifecycle);
+    input
+}
+
+#[test]
+fn app_lifecycle_plan_contains_concrete_identity_and_keeps_its_snapshot() {
+    let mut app = armsx1_app_definition();
+    app.launcher_activity = Some("com.nanodata.armsx.MainActivity".to_string());
+    let input = lifecycle_planner_input("launch_app", Some("armsx1"), OrderedMap::new());
+    let result = plan_execution_with_app_definitions(input, &[app.clone()]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.expect("valid app-aware launch plan");
+    let launch = plan
+        .steps
+        .iter()
+        .find(|step| step.id.ends_with("/lifecycle"))
+        .unwrap();
+    assert_eq!(launch.app_id.as_deref(), Some("armsx1"));
+    assert_eq!(launch.params.len(), 2);
+    assert_eq!(
+        launch.params["package_name"],
+        crate::planner::ExecutionParamValue::Literal {
+            value: json!("com.nanodata.armsx"),
+        }
+    );
+    assert_eq!(
+        launch.params["activity"],
+        crate::planner::ExecutionParamValue::Literal {
+            value: json!("com.nanodata.armsx.MainActivity"),
+        }
+    );
+    let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+    app.package_id = "com.example.changed".to_string();
+    app.launcher_activity = Some("com.example.changed.OtherActivity".to_string());
+    assert_eq!(
+        crate::plan_digest::execution_plan_digest(&plan).unwrap(),
+        digest
+    );
+    let parsed =
+        crate::cli::parse_execution_plan_json(&serde_json::to_value(&plan).unwrap()).unwrap();
+    assert_eq!(parsed.apps, plan.apps);
+    assert_eq!(parsed.steps[1].app_id, launch.app_id);
+    assert_eq!(parsed.steps[1].params, launch.params);
+
+    let stop = plan_execution_with_app_definitions(
+        lifecycle_planner_input("force_stop_app", Some("armsx1"), OrderedMap::new()),
+        &[armsx1_app_definition()],
+    );
+    assert_eq!(stop.status, PlanningStatus::Success, "{:?}", stop.errors);
+    let stop_plan = stop.execution_plan.unwrap();
+    let stop_step = stop_plan
+        .steps
+        .iter()
+        .find(|step| step.id.ends_with("/lifecycle"))
+        .unwrap();
+    assert_eq!(stop_step.app_id.as_deref(), Some("armsx1"));
+    assert_eq!(stop_step.params.len(), 1);
+    assert_eq!(
+        stop_step.params["package_name"],
+        crate::planner::ExecutionParamValue::Literal {
+            value: json!("com.nanodata.armsx"),
+        }
+    );
+}
+
+#[test]
+fn app_lifecycle_launch_rejects_missing_or_invalid_launcher() {
+    let input = lifecycle_planner_input("launch_app", Some("armsx1"), OrderedMap::new());
+    assert_app_planning_error(
+        input.clone(),
+        &[armsx1_app_definition()],
+        "app_launcher_activity_required",
+    );
+    assert_app_planning_error(
+        lifecycle_planner_input("launch_app", Some("unknown-app"), OrderedMap::new()),
+        &[armsx1_app_definition()],
+        "app_definition_unknown",
+    );
+    assert_app_planning_error(
+        lifecycle_planner_input("launch_app", Some(""), OrderedMap::new()),
+        &[armsx1_app_definition()],
+        "app_reference_invalid",
+    );
+    let mut malformed = armsx1_app_definition();
+    malformed.launcher_activity = Some("com.nanodata.armsx/.MainActivity".to_string());
+    assert_app_planning_error(input, &[malformed], "app_definition_invalid");
+}
+
+#[test]
+fn lifecycle_form_diagnostics_reject_missing_context_without_catalog() {
+    let input = lifecycle_planner_input("launch_app", None, OrderedMap::new());
+    let recipe = input
+        .recipes
+        .iter()
+        .find(|recipe| recipe.id == "app.armsx1.install")
+        .unwrap();
+    let diagnostics = crate::validation::validate_loaded_recipe_result(
+        recipe,
+        std::path::Path::new("app.armsx1.install.yaml"),
+        None,
+    );
+    assert!(
+        diagnostics["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["code"] == "app_context_required"
+                    && entry["field"]
+                        .as_str()
+                        .is_some_and(|field| field.ends_with(".app_ref"))
+            }),
+        "{diagnostics:#}"
+    );
+}
+
+#[test]
+fn app_lifecycle_rejects_overrides_and_malformed_legacy_forms() {
+    let mut app = armsx1_app_definition();
+    app.launcher_activity = Some("com.nanodata.armsx.MainActivity".to_string());
+    for step_type in ["launch_app", "force_stop_app"] {
+        let mut params = OrderedMap::new();
+        params.insert(
+            "package_name".to_string(),
+            ParamValue::Literal(json!("com.example.other")),
+        );
+        assert_app_planning_error(
+            lifecycle_planner_input(step_type, Some("armsx1"), params.clone()),
+            &[app.clone()],
+            "app_lifecycle_identity_override_forbidden",
+        );
+        params.insert("package_name".to_string(), ParamValue::Literal(json!(" ")));
+        assert_app_planning_error(
+            lifecycle_planner_input(step_type, None, params),
+            &[app.clone()],
+            "app_context_required",
+        );
+        assert_app_planning_error(
+            lifecycle_planner_input(step_type, None, OrderedMap::new()),
+            &[app.clone()],
+            "app_context_required",
+        );
+    }
+    let mut malformed_activity = OrderedMap::new();
+    malformed_activity.insert(
+        "package_name".to_string(),
+        ParamValue::Literal(json!("com.example.legacy")),
+    );
+    malformed_activity.insert(
+        "activity".to_string(),
+        ParamValue::Literal(json!("bad activity")),
+    );
+    assert_app_planning_error(
+        lifecycle_planner_input("launch_app", None, malformed_activity),
+        &[app.clone()],
+        "app_context_required",
+    );
+
+    for activity in [
+        ".MainActivity",
+        "com.example.legacy/.MainActivity",
+        "com.example.legacy/com.example.legacy.MainActivity",
+        "com.example.legacy.MainActivity",
+    ] {
+        let mut legacy = OrderedMap::new();
+        legacy.insert(
+            "package_name".to_string(),
+            ParamValue::Literal(json!("com.example.legacy")),
+        );
+        legacy.insert("activity".to_string(), ParamValue::Literal(json!(activity)));
+        let result = plan_execution_with_app_definitions(
+            lifecycle_planner_input("launch_app", None, legacy),
+            &[app.clone()],
+        );
+        assert_eq!(
+            result.status,
+            PlanningStatus::Success,
+            "{activity}: {:?}",
+            result.errors
+        );
+        let plan = result.execution_plan.unwrap();
+        let launch = plan
+            .steps
+            .iter()
+            .find(|step| step.id.ends_with("/lifecycle"))
+            .unwrap();
+        assert_eq!(launch.app_id, None);
+        assert_eq!(
+            launch.params["activity"],
+            crate::planner::ExecutionParamValue::Literal {
+                value: json!(activity),
+            }
+        );
+    }
+}
+
 #[test]
 fn armsx1_plan_contains_app_identity_and_late_bound_release_policy() {
     let mut input = armsx1_recipe_planner_input();
@@ -6633,7 +6906,12 @@ fn app_authority_accepts_transitive_resolver_ancestor_selected_by_artifact_group
 
 #[test]
 fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
-    let result = plan_execution(authored_corpus_planner_input(&["app.retroarch.provision"]));
+    let app = load_app_definition(repo_authored_root().join("apps/retroarch.yaml"))
+        .expect("RetroArch App Definition should load");
+    let result = plan_execution_with_app_definitions(
+        authored_corpus_planner_input(&["app.retroarch.provision"]),
+        &[app],
+    );
 
     assert_eq!(
         result.status,

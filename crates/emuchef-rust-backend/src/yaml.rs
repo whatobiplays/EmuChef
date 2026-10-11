@@ -973,7 +973,7 @@ fn step_to_yaml(step: &Step) -> YamlValue {
 fn params_to_yaml(step: &Step) -> YamlValue {
     let mut mapping = Mapping::new();
     let mut ordered_names = Vec::new();
-    if let Some(spec) = step_specs::step_spec_for(&step.type_name) {
+    if let Some(spec) = step_specs::authored_step_spec_for(step) {
         for name in spec.param_order {
             push_unique(&mut ordered_names, name);
         }

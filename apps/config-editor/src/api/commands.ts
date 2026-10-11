@@ -24,6 +24,7 @@ export type EditorCommand =
   | { type: "ReorderStep"; stepId: string; toIndex: number }
   | { type: "UpdateStepBasics"; stepId: string; name: string; description: string | null }
   | { type: "SetStepUserToggleable"; stepId: string; userToggleable: boolean }
+  | { type: "SetStepAppRef"; stepId: string; appRef: string | null }
   | { type: "UpdateStepDependencies"; stepId: string; dependencies: string[] }
   | { type: "UpdateStepParams"; stepId: string; params: Record<string, unknown> }
   | { type: "UpdateStepConstraints"; stepId: string; constraints: Record<string, unknown> }

@@ -30,6 +30,8 @@ use crate::runtime_configuration::PlanConfigurationResult;
 const TARGET_RECIPE: &str = "app.retroarch.provision";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.konkr_pocket_fit.base";
 const OPTIONAL_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
+const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
+const RETROARCH_LAUNCHER: &str = "com.retroarch.browser.mainmenu.MainMenuActivity";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +40,8 @@ struct RetroArchQualificationContract {
     target_recipe: String,
     planning_device_plan: String,
     authored_source: AuthoredSourceContract,
+    app_source: AuthoredSourceContract,
+    app_lifecycle: AppLifecycleContract,
     selected_recipes: Vec<String>,
     expanded_recipes: Vec<String>,
     recipe_constraint_capabilities: Vec<String>,
@@ -58,6 +62,16 @@ struct RetroArchQualificationContract {
 struct AuthoredSourceContract {
     path: String,
     sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AppLifecycleContract {
+    app_id: String,
+    package_id: String,
+    launcher_activity: String,
+    launch_steps: Vec<String>,
+    force_stop_steps: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,32 +195,26 @@ fn runtime_capability_enabled(plan: &ExecutionPlan, capability: &str) -> bool {
 #[test]
 fn retroarch_contract_binds_current_source_and_deferred_physical_status() {
     let contract = load_contract();
-    let source_path = Path::new(&contract.authored_source.path);
-    assert!(
-        source_path.is_relative(),
-        "contract source path must be repository-relative"
-    );
-    assert_eq!(
-        source_path,
-        Path::new("authored/recipes/app.retroarch.provision.yaml")
-    );
-    let resolved = repository_root().join(source_path);
     let canonical_root = repository_root()
         .canonicalize()
         .expect("repo root should canonicalize");
-    let canonical_source = resolved
-        .canonicalize()
-        .expect("authored recipe should resolve");
-    assert!(
-        canonical_source.starts_with(canonical_root),
-        "contract source path must not escape the repository root"
-    );
-    let raw = fs::read(&resolved).expect("authored recipe should be readable");
-    assert_eq!(
-        sha256_hex(&raw),
-        contract.authored_source.sha256,
-        "authored RetroArch recipe changed; qualification expectations must be reviewed"
-    );
+    for (source, expected_path) in [
+        (
+            &contract.authored_source,
+            "authored/recipes/app.retroarch.provision.yaml",
+        ),
+        (&contract.app_source, "authored/apps/retroarch.yaml"),
+    ] {
+        let source_path = Path::new(&source.path);
+        assert!(source_path.is_relative());
+        assert_eq!(source_path, Path::new(expected_path));
+        let resolved = repository_root().join(source_path);
+        let canonical_source = resolved
+            .canonicalize()
+            .expect("authored source should resolve");
+        assert!(canonical_source.starts_with(&canonical_root));
+        assert_eq!(sha256_hex(&fs::read(resolved).unwrap()), source.sha256);
+    }
 }
 
 #[test]
@@ -221,6 +229,57 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
         "planning must produce no error diagnostics"
     );
     let plan = result.plan.expect("plan should be generated");
+    let review =
+        serde_json::to_string(result.review.as_ref().expect("review should exist")).unwrap();
+    assert!(review.contains(RETROARCH_PACKAGE));
+    assert!(review.contains(RETROARCH_LAUNCHER));
+    let lifecycle = &contract.app_lifecycle;
+    assert_eq!(lifecycle.app_id, "retroarch");
+    assert_eq!(lifecycle.package_id, RETROARCH_PACKAGE);
+    assert_eq!(lifecycle.launcher_activity, RETROARCH_LAUNCHER);
+    assert_eq!(
+        lifecycle.launch_steps,
+        [
+            "launch_retroarch_bootstrap",
+            "launch_retroarch_permissions",
+            "launch_retroarch"
+        ]
+    );
+    assert_eq!(
+        lifecycle.force_stop_steps,
+        [
+            "stop_retroarch_after_bootstrap",
+            "stop_retroarch_after_permissions"
+        ]
+    );
+    assert_eq!(
+        plan.apps
+            .iter()
+            .filter(|app| app.id == lifecycle.app_id)
+            .count(),
+        1
+    );
+    for (ids, step_type, expected_activity) in [
+        (
+            &lifecycle.launch_steps,
+            "launch_app",
+            Some(RETROARCH_LAUNCHER),
+        ),
+        (&lifecycle.force_stop_steps, "force_stop_app", None),
+    ] {
+        for id in ids {
+            let step = generated_step_for_authored_id(&plan, id);
+            assert_eq!(step.type_name, step_type);
+            assert_eq!(step.app_id.as_deref(), Some(lifecycle.app_id.as_str()));
+            assert_eq!(
+                crate::planner::validated_plan_lifecycle_target(&plan, step).unwrap(),
+                (
+                    RETROARCH_PACKAGE.to_string(),
+                    expected_activity.map(str::to_string)
+                )
+            );
+        }
+    }
     assert!(
         result
             .plan_digest
@@ -711,6 +770,32 @@ fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
     );
     assert_eq!(result.total_steps, plan.steps.len());
     assert_eq!(result.steps.len(), result.total_steps);
+    let lifecycle_commands = runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .filter(|command| {
+            matches!(
+                command.first().map(String::as_str),
+                Some("launch_app" | "force_stop_app")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_commands,
+        vec![
+            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
+            vec!["force_stop_app", RETROARCH_PACKAGE],
+            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
+            vec!["force_stop_app", RETROARCH_PACKAGE],
+            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
+        ]
+        .into_iter()
+        .map(|command| command.into_iter().map(str::to_string).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
+    );
     for record in &result.steps {
         assert!(
             !matches!(

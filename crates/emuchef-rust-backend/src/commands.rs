@@ -111,6 +111,11 @@ pub enum RecipeCommand {
         step_id: String,
         user_toggleable: bool,
     },
+    /// Set or clear the App Definition identifier for one authored step.
+    SetStepAppRef {
+        step_id: String,
+        app_ref: Option<String>,
+    },
     UpdateStepDependencies {
         step_id: String,
         dependencies: Vec<String>,
@@ -211,6 +216,7 @@ pub fn decode_recipe_command(payload: &Value) -> Result<RecipeCommand, ApiError>
         "ReorderStep" => decode_reorder_step(object),
         "UpdateStepBasics" => decode_update_step_basics(object),
         "SetStepUserToggleable" => decode_set_step_user_toggleable(object),
+        "SetStepAppRef" => decode_set_step_app_ref(object),
         "UpdateStepDependencies" => decode_update_step_dependencies(object),
         "UpdateStepParams" => decode_update_step_params(object),
         "UpdateStepConstraints" => decode_update_step_constraints(object),
@@ -492,6 +498,19 @@ fn decode_set_step_user_toggleable(object: &Map<String, Value>) -> Result<Recipe
     Ok(RecipeCommand::SetStepUserToggleable {
         step_id: required_str(object, "stepId", "SetStepUserToggleable")?,
         user_toggleable: required_bool(object, "userToggleable", "SetStepUserToggleable")?,
+    })
+}
+
+fn decode_set_step_app_ref(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    reject_unexpected_fields(object, &["type", "stepId", "appRef"], "SetStepAppRef")?;
+    let app_ref = match required_optional_str(object, "appRef", "SetStepAppRef")? {
+        Value::String(value) => Some(value),
+        Value::Null => None,
+        _ => unreachable!("required_optional_str accepts only strings or null"),
+    };
+    Ok(RecipeCommand::SetStepAppRef {
+        step_id: required_str(object, "stepId", "SetStepAppRef")?,
+        app_ref,
     })
 }
 

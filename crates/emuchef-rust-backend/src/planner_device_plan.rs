@@ -22,7 +22,7 @@ use crate::device_profile_match::{
 };
 use crate::model::{OrderedMap, Recipe};
 #[cfg(test)]
-use crate::planner::{plan_execution, PlannerInput};
+use crate::planner::{plan_execution_with_app_definitions, PlannerInput};
 use crate::planner::{
     DeviceContext, PlannerLoadError, PlanningResult, PlanningStatus, RuntimeCapabilities,
 };
@@ -197,13 +197,15 @@ pub(crate) fn planner_input_from_authored_device_plan_with_detected_facts(
 /// This composes the fake/test-backed detected-context path with the pure
 /// profile mismatch warning helper. It remains crate-private product behavior:
 /// it does not probe devices, call route code, or change normal planner input
-/// construction.
+/// construction. The caller supplies the App Definitions needed by the
+/// selected Recipes, so a fixture does not depend on any particular app file.
 #[cfg(test)]
 pub(crate) fn plan_from_authored_device_plan_with_detected_facts(
     authored_root: impl AsRef<Path>,
     device_plan_ref: &str,
     plan_id: String,
     explicit_input_bindings: OrderedMap<JsonValue>,
+    app_definitions: &[crate::authored_models::AppDefinitionV1],
     detected_facts: &DetectedDeviceFacts,
 ) -> Result<PlanningResult, PlannerLoadError> {
     let authored_root = authored_root.as_ref();
@@ -215,7 +217,7 @@ pub(crate) fn plan_from_authored_device_plan_with_detected_facts(
         detected_facts,
     )?;
     let profile_match = load_device_plan_profile_match_criteria(authored_root, device_plan_ref)?;
-    let mut result = plan_execution(input);
+    let mut result = plan_execution_with_app_definitions(input, app_definitions);
     add_detected_profile_mismatch_warning(&mut result, detected_facts, &profile_match);
 
     Ok(result)

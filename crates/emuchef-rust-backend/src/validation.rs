@@ -222,7 +222,7 @@ fn dependency_field(recipe: &Recipe, step_id: &str, dependency_id: &str) -> Opti
 fn validate_step_contracts(file: &str, recipe: &Recipe) -> Vec<Value> {
     let mut errors = Vec::new();
     for (step_index, step) in recipe.steps.iter().enumerate() {
-        let Some(spec) = step_specs::step_spec_for(&step.type_name) else {
+        let Some(spec) = step_specs::authored_step_spec_for(step) else {
             errors.push(diagnostic(
                 "error",
                 "param_contract_violation",
@@ -234,6 +234,35 @@ fn validate_step_contracts(file: &str, recipe: &Recipe) -> Vec<Value> {
             ));
             continue;
         };
+        if matches!(step.type_name.as_str(), "launch_app" | "force_stop_app")
+            && step.app_ref.is_none()
+            && !step_specs::is_valid_legacy_lifecycle_form(step)
+        {
+            errors.push(diagnostic(
+                "error",
+                "app_context_required",
+                "A lifecycle step requires an App Definition ID or a valid legacy literal package and optional activity.",
+                file,
+                Some("recipe"),
+                Some(&recipe.id),
+                Some(&format!("steps[{step_index}].app_ref")),
+            ));
+        }
+        if step
+            .app_ref
+            .as_deref()
+            .is_some_and(|app_ref| !crate::authored_models::is_valid_identifier(app_ref))
+        {
+            errors.push(diagnostic(
+                "error",
+                "app_reference_invalid",
+                "The App Definition ID must use authored identifier syntax.",
+                file,
+                Some("recipe"),
+                Some(&recipe.id),
+                Some(&format!("steps[{step_index}].app_ref")),
+            ));
+        }
         errors.extend(validate_step_params(file, recipe, step_index, step, &spec));
     }
     errors
@@ -346,7 +375,7 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
         .collect::<HashMap<_, _>>();
 
     for (step_index, step) in recipe.steps.iter().enumerate() {
-        let step_spec = step_specs::step_spec_for(&step.type_name);
+        let step_spec = step_specs::authored_step_spec_for(step);
         for (param_name, value) in &step.params {
             let ParamValue::Ref(ref_value) = value else {
                 continue;
