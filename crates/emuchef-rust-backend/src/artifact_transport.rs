@@ -12,7 +12,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{ACCEPT_ENCODING, LOCATION};
+use reqwest::header::{HeaderMap, ACCEPT_ENCODING, LOCATION};
 use reqwest::redirect::Policy;
 use url::Url;
 
@@ -31,6 +31,14 @@ pub(crate) struct DownloadMetadata {
     pub content_length: Option<u64>,
     /// Absolute response URL observed by the HTTP client after manual redirects.
     pub observed_final_url: Option<String>,
+}
+
+/// Bounded provider metadata returned through the public HTTPS transport.
+#[derive(Clone, Debug)]
+pub(crate) struct MetadataResponse {
+    pub body: Vec<u8>,
+    pub headers: HeaderMap,
+    pub final_url: Url,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +272,90 @@ impl HttpArtifactTransport {
         }
     }
 
+    /// Fetch bounded JSON metadata using the same public-address, TLS, and
+    /// redirect checks used for App Artifact downloads.
+    pub(crate) fn get_public_metadata(
+        &self,
+        initial_url: &Url,
+        max_bytes: u64,
+    ) -> Result<MetadataResponse, ArtifactResolveError> {
+        if crate::authored_models::parse_public_https_url(initial_url.as_str()).is_none() {
+            return Err(ArtifactResolveError::RedirectPolicyRejected);
+        }
+        let deadline = Instant::now()
+            .checked_add(self.total_timeout)
+            .ok_or(ArtifactResolveError::RequestTimeout)?;
+        let mut current_url = initial_url.clone();
+        let mut redirects = 0usize;
+        let mut visited = vec![current_url.as_str().to_string()];
+
+        loop {
+            let response = self
+                .public_https_client(&current_url)?
+                .get(current_url.clone())
+                .header(ACCEPT_ENCODING, "identity")
+                .timeout(remaining(deadline)?)
+                .send()
+                .map_err(|error| classify_reqwest_error(&error))?;
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .ok_or(ArtifactResolveError::DownloadFailed)?
+                    .to_str()
+                    .map_err(|_| ArtifactResolveError::DownloadFailed)?;
+                let next_url = current_url
+                    .join(location)
+                    .map_err(|_| ArtifactResolveError::DownloadFailed)?;
+                validate_redirect(
+                    &current_url,
+                    &next_url,
+                    &mut redirects,
+                    &mut visited,
+                    RedirectPolicy::PublicHttps,
+                )?;
+                if !same_origin(&current_url, &next_url) {
+                    return Err(ArtifactResolveError::RedirectPolicyRejected);
+                }
+                current_url = next_url;
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(ArtifactResolveError::HttpStatus {
+                    status: response.status().as_u16(),
+                });
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > max_bytes)
+            {
+                return Err(ArtifactResolveError::ResponseTooLarge);
+            }
+            let headers = response.headers().clone();
+            let final_url = response.url().clone();
+            let content_length = response.content_length();
+            let mut response = response;
+            let mut body = Vec::new();
+            response
+                .by_ref()
+                .take(max_bytes.saturating_add(1))
+                .read_to_end(&mut body)
+                .map_err(classify_read_error)?;
+            if body.len() as u64 > max_bytes {
+                return Err(ArtifactResolveError::ResponseTooLarge);
+            }
+            if content_length.is_some_and(|expected| expected != body.len() as u64) {
+                return Err(ArtifactResolveError::ResponseIncomplete);
+            }
+            remaining(deadline)?;
+            return Ok(MetadataResponse {
+                body,
+                headers,
+                final_url,
+            });
+        }
+    }
+
     fn public_https_client(&self, url: &Url) -> Result<Client, ArtifactResolveError> {
         let host = url
             .host_str()
@@ -389,6 +481,16 @@ fn validate_redirect(
     }
     visited.push(next_url.as_str().to_string());
     Ok(())
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str().is_some_and(|host| {
+            right
+                .host_str()
+                .is_some_and(|next_host| host.eq_ignore_ascii_case(next_host))
+        })
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn stream_response(
@@ -935,13 +1037,29 @@ mod tests {
     fn spawn_tls_server(response_bytes: Vec<u8>) -> (String, Vec<u8>, JoinHandle<()>) {
         use std::net::{IpAddr, Ipv4Addr};
 
+        spawn_tls_server_with_responses(
+            vec![response_bytes],
+            &IpAddr::V4(Ipv4Addr::LOCALHOST).to_string(),
+        )
+    }
+
+    fn spawn_tls_server_with_responses(
+        responses: Vec<Vec<u8>>,
+        host: &str,
+    ) -> (String, Vec<u8>, JoinHandle<()>) {
+        use std::net::IpAddr;
+
         use rcgen::{CertificateParams, KeyPair, SanType};
         use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
         use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut params = CertificateParams::default();
-        params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        let subject_alt_name = host
+            .parse::<IpAddr>()
+            .map(SanType::IpAddress)
+            .unwrap_or_else(|_| SanType::DnsName(host.try_into().unwrap()));
+        params.subject_alt_names = vec![subject_alt_name];
         let key = KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key).unwrap();
         let certificate_der = certificate.der().to_vec();
@@ -953,16 +1071,20 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let thread = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let connection = ServerConnection::new(Arc::new(config)).unwrap();
-            let mut stream = StreamOwned::new(connection, stream);
-            let mut request = [0u8; 4096];
-            if stream.read(&mut request).is_ok() {
-                let _ = stream.write_all(&response_bytes);
+            for response_bytes in responses {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let connection = ServerConnection::new(Arc::new(config.clone())).unwrap();
+                let mut stream = StreamOwned::new(connection, stream);
+                let mut request = [0u8; 4096];
+                if stream.read(&mut request).is_ok() {
+                    let _ = stream.write_all(&response_bytes);
+                }
             }
         });
         (
-            format!("https://127.0.0.1:{}/artifact", address.port()),
+            format!("https://{host}:{}/artifact", address.port()),
             certificate_der,
             thread,
         )
@@ -1006,6 +1128,81 @@ mod tests {
             .download(&Url::parse(&wrong_host_url).unwrap(), &mut Vec::new())
             .unwrap_err();
         assert_eq!(error.code(), "artifact_tls_verification_failed");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn public_metadata_fetch_uses_tls_bounds_and_same_origin_redirects() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let (url, certificate, thread) = spawn_tls_server_with_responses(
+            vec![
+                response("302 Found", "Location: /metadata?page=2\r\n", b""),
+                response("200 OK", "X-Page: one\r\n", b"[1]"),
+            ],
+            "metadata.example.test",
+        );
+        let parsed = Url::parse(&url).unwrap();
+        let transport = HttpArtifactTransport::with_test_root_and_host_mapping(
+            test_config(),
+            &certificate,
+            parsed.host_str().unwrap(),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+        let metadata = transport.get_public_metadata(&parsed, 16).unwrap();
+        thread.join().unwrap();
+        assert_eq!(metadata.body, b"[1]");
+        assert_eq!(metadata.headers["x-page"], "one");
+        assert_eq!(metadata.final_url, parsed.join("/metadata?page=2").unwrap());
+
+        let (url, certificate, thread) = spawn_tls_server_with_responses(
+            vec![response("200 OK", "", b"too large")],
+            "metadata.example.test",
+        );
+        let parsed = Url::parse(&url).unwrap();
+        let transport = HttpArtifactTransport::with_test_root_and_host_mapping(
+            test_config(),
+            &certificate,
+            parsed.host_str().unwrap(),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+        assert_eq!(
+            transport
+                .get_public_metadata(&parsed, 4)
+                .unwrap_err()
+                .code(),
+            "artifact_response_too_large"
+        );
+        thread.join().unwrap();
+
+        let (url, certificate, thread) = spawn_tls_server_with_responses(
+            vec![response(
+                "302 Found",
+                "Location: https://8.8.8.8/releases\r\n",
+                b"",
+            )],
+            "metadata.example.test",
+        );
+        let parsed = Url::parse(&url).unwrap();
+        let transport = HttpArtifactTransport::with_test_root_and_host_mapping(
+            test_config(),
+            &certificate,
+            parsed.host_str().unwrap(),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+        assert_eq!(
+            transport
+                .get_public_metadata(&parsed, 16)
+                .unwrap_err()
+                .code(),
+            "artifact_redirect_policy_rejected"
+        );
         thread.join().unwrap();
     }
 }

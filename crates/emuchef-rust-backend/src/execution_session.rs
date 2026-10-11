@@ -622,6 +622,16 @@ fn eligible_launch_candidate(
 fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(), ApiError> {
     let resolver = ArtifactResolver::new(&sandbox);
     for artifact in &plan.artifacts {
+        if validate_artifact_provenance(plan, artifact).is_err() {
+            return Err(ApiError::new(
+                ApiErrorCode::ExecutionStartFailed,
+                "Execution artifacts are not ready.",
+                json!({
+                    "code": "artifact_not_ready",
+                    "artifactCode": "app_artifact_provenance_invalid",
+                }),
+            ));
+        }
         let admission_error = match &artifact.source {
             ExecutionArtifactSource::RemoteFile { url } => resolver
                 .admit(ArtifactResolveRequest {
@@ -648,15 +658,21 @@ fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(
                 provider,
                 service_origin,
                 repository,
-                include_prereleases,
                 asset_pattern,
+                invert_asset_pattern,
+                ..
             } => {
-                if provider != "github" || service_origin != "https://github.com" {
-                    Some("remote_release_policy_unsupported")
-                } else if crate::remote_release_resolver::validate_github_stable_release_policy(
+                let provenance = artifact
+                    .app_provenance
+                    .as_ref()
+                    .expect("release provenance was validated above");
+                if crate::remote_release_resolver::validate_remote_release_policy(
+                    provider,
+                    service_origin,
                     repository,
-                    *include_prereleases,
-                    asset_pattern,
+                    &provenance.kind,
+                    asset_pattern.as_deref(),
+                    *invert_asset_pattern,
                 )
                 .is_err()
                 {
@@ -681,6 +697,56 @@ fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(
         }
     }
     Ok(())
+}
+
+fn validate_artifact_provenance(
+    plan: &ExecutionPlan,
+    artifact: &crate::planner::ExecutionArtifact,
+) -> Result<(), ()> {
+    match &artifact.source {
+        ExecutionArtifactSource::RemoteFile { .. } => {
+            if artifact.app_provenance.is_none() {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+        ExecutionArtifactSource::DirectUrl { .. }
+        | ExecutionArtifactSource::RemoteRelease { .. } => {
+            let provenance = artifact.app_provenance.as_ref().ok_or(())?;
+            if artifact.type_name != "remote_file"
+                || !crate::authored_models::is_valid_identifier(&provenance.app_id)
+                || !crate::authored_models::is_valid_identifier(&provenance.artifact_id)
+                || !matches!(provenance.kind.as_str(), "apk" | "file")
+                || plan
+                    .apps
+                    .iter()
+                    .filter(|app| app.id == provenance.app_id)
+                    .count()
+                    != 1
+            {
+                return Err(());
+            }
+            if matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. })
+                && provenance.kind != "apk"
+            {
+                return Err(());
+            }
+            if plan.artifacts.iter().any(|other| {
+                other
+                    .app_provenance
+                    .as_ref()
+                    .is_some_and(|other_provenance| {
+                        other_provenance.app_id == provenance.app_id
+                            && other_provenance.artifact_id == provenance.artifact_id
+                            && other_provenance.kind != provenance.kind
+                    })
+            }) {
+                return Err(());
+            }
+            Ok(())
+        }
+    }
 }
 
 fn preflight_target(
@@ -1517,12 +1583,20 @@ mod tests {
             total_steps: 0,
             steps: Vec::new(),
             resolved_releases: vec![ExecutionResolvedRelease {
+                recipe_artifact_id: "app.armsx1.install/armsx1_apk".to_string(),
+                provider: "github".to_string(),
                 app_id: "armsx1".to_string(),
                 artifact_id: "apk".to_string(),
+                kind: "apk".to_string(),
                 release_tag: "v20261008".to_string(),
                 asset_name: "ARMSX1-release-20261008-arm64-v8a.apk".to_string(),
                 published_at: Some("2026-10-08T10:00:00Z".to_string()),
+                created_at: None,
+                timestamp_source: "published_at".to_string(),
                 size: Some(42),
+                calculated_sha256: "a".repeat(64),
+                cache_hit: false,
+                redacted_final_url: Some("https://github.com/ARMSX1/ARMSX1/releases/download/v20261008/ARMSX1-release.apk".to_string()),
             }],
             resolved_artifacts: Vec::new(),
         };
@@ -1966,6 +2040,13 @@ mod tests {
     fn late_bound_release_admission_checks_policy_without_network_or_filesystem_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let mut plan = test_plan("plan.late-bound-release");
+        plan.apps.push(crate::planner::ExecutionAppSnapshot {
+            id: "example".to_string(),
+            name: "Example App".to_string(),
+            description: None,
+            category: None,
+            package_id: "com.example.app".to_string(),
+        });
         plan.artifacts.push(crate::planner::ExecutionArtifact {
             id: "recipe.example/installer".to_string(),
             type_name: "remote_file".to_string(),
@@ -1974,10 +2055,15 @@ mod tests {
                 service_origin: "https://github.com".to_string(),
                 repository: "ARMSX2/ARMSX1".to_string(),
                 include_prereleases: false,
-                asset_pattern: r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string(),
+                asset_pattern: Some(r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string()),
+                invert_asset_pattern: false,
             },
             cache: "default".to_string(),
-            app_provenance: None,
+            app_provenance: Some(crate::planner::ExecutionArtifactAppProvenance {
+                app_id: "example".to_string(),
+                artifact_id: "apk".to_string(),
+                kind: "apk".to_string(),
+            }),
         });
         let sandbox = SandboxRoots {
             runtime_root: temp.path().join("runtime"),
@@ -1991,12 +2077,51 @@ mod tests {
         assert!(!sandbox.cache_root.exists());
         assert!(!sandbox.fake_device_root.exists());
 
+        let mut inconsistent_kind = plan.artifacts[0].clone();
+        inconsistent_kind.id = "recipe.example/second-installer".to_string();
+        inconsistent_kind.app_provenance.as_mut().unwrap().kind = "file".to_string();
+        plan.artifacts.push(inconsistent_kind);
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "app_artifact_provenance_invalid"
+        );
+        plan.artifacts.pop();
+
+        plan.artifacts[0].app_provenance = None;
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "app_artifact_provenance_invalid"
+        );
+        plan.artifacts[0].app_provenance = Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "executable".to_string(),
+        });
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "app_artifact_provenance_invalid"
+        );
+        plan.artifacts[0].app_provenance.as_mut().unwrap().kind = "file".to_string();
+        assert!(admit_plan_artifacts(&plan, sandbox.clone()).is_ok());
+        plan.artifacts[0].app_provenance.as_mut().unwrap().kind = "apk".to_string();
+        plan.artifacts[0].app_provenance.as_mut().unwrap().app_id = "unknown".to_string();
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "app_artifact_provenance_invalid"
+        );
+        plan.artifacts[0].app_provenance.as_mut().unwrap().app_id = "example".to_string();
+
         plan.artifacts[0].source = ExecutionArtifactSource::RemoteRelease {
-            provider: "github".to_string(),
+            provider: "unsupported".to_string(),
             service_origin: "https://github.com".to_string(),
             repository: "ARMSX2/ARMSX1".to_string(),
-            include_prereleases: true,
-            asset_pattern: r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string(),
+            include_prereleases: false,
+            asset_pattern: Some(r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string()),
+            invert_asset_pattern: false,
         };
         let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
         assert_eq!(
@@ -2011,7 +2136,22 @@ mod tests {
             service_origin: "https://github.com".to_string(),
             repository: "ARMSX2/ARMSX1".to_string(),
             include_prereleases: false,
-            asset_pattern: r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string(),
+            asset_pattern: None,
+            invert_asset_pattern: true,
+        };
+        let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();
+        assert_eq!(
+            error.details["artifactCode"],
+            "remote_release_policy_invalid"
+        );
+
+        plan.artifacts[0].source = ExecutionArtifactSource::RemoteRelease {
+            provider: "github".to_string(),
+            service_origin: "https://github.com".to_string(),
+            repository: "ARMSX2/ARMSX1".to_string(),
+            include_prereleases: false,
+            asset_pattern: Some(r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$".to_string()),
+            invert_asset_pattern: false,
         };
         plan.artifacts[0].cache = "unknown".to_string();
         let error = admit_plan_artifacts(&plan, sandbox.clone()).unwrap_err();

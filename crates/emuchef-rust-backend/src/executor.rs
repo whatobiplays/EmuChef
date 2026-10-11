@@ -23,6 +23,7 @@ use tempfile::TempPath;
 
 use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
+use crate::artifact_transport::{HttpArtifactTransport, HttpClientConfig};
 use crate::model::OrderedMap;
 use crate::owned_process::ProcessCleanup;
 use crate::planner::{
@@ -54,14 +55,25 @@ pub struct ExecutionRunResult {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionResolvedRelease {
+    pub recipe_artifact_id: String,
+    pub provider: String,
     pub app_id: String,
     pub artifact_id: String,
+    pub kind: String,
     pub release_tag: String,
     pub asset_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    pub timestamp_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    pub calculated_sha256: String,
+    pub cache_hit: bool,
+    /// The observed response URL with credentials and query data removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redacted_final_url: Option<String>,
 }
 
 /// Exact App Definition direct-URL artifact bytes retained for one execution.
@@ -80,18 +92,30 @@ pub struct ExecutionResolvedArtifact {
     pub redacted_final_url: Option<String>,
 }
 
-fn app_apk_release_details(
+fn app_release_details(
     provenance: Option<&ExecutionArtifactAppProvenance>,
+    recipe_artifact_id: &str,
+    provider: &str,
     release: &ResolvedRemoteRelease,
+    resolved: &crate::artifact_resolver::ResolvedArtifact,
 ) -> Option<ExecutionResolvedRelease> {
-    let provenance = provenance.filter(|provenance| provenance.kind == "apk")?;
+    let provenance = provenance?;
+    let calculated_sha256 = resolved.calculated_sha256.clone()?;
     Some(ExecutionResolvedRelease {
+        recipe_artifact_id: recipe_artifact_id.to_string(),
+        provider: provider.to_string(),
         app_id: provenance.app_id.clone(),
         artifact_id: provenance.artifact_id.clone(),
+        kind: provenance.kind.clone(),
         release_tag: release.release_tag.clone(),
         asset_name: release.asset_name.clone(),
         published_at: release.published_at.clone(),
+        created_at: release.created_at.clone(),
+        timestamp_source: release.timestamp_source.to_string(),
         size: release.size,
+        calculated_sha256,
+        cache_hit: resolved.cache_hit,
+        redacted_final_url: resolved.redacted_final_url.clone(),
     })
 }
 
@@ -111,10 +135,27 @@ mod resolved_release_result_tests {
             asset_name: "ARMSX1-release-20261008-arm64-v8a.apk".to_string(),
             release_tag: "v20261008".to_string(),
             published_at: Some("2026-10-08T10:00:00Z".to_string()),
+            created_at: None,
+            timestamp_source: "published_at",
             size: Some(42),
         };
+        let resolved = crate::artifact_resolver::ResolvedArtifact {
+            local_path: std::path::PathBuf::new(),
+            filename: release.asset_name.clone(),
+            cache_hit: false,
+            calculated_sha256: Some("cd".repeat(32)),
+            redacted_final_url: Some("https://example.invalid/download.apk".to_string()),
+            verified_path_guard: None,
+        };
 
-        let details = app_apk_release_details(Some(&provenance), &release).unwrap();
+        let details = app_release_details(
+            Some(&provenance),
+            "app.armsx1.install/installer",
+            "github",
+            &release,
+            &resolved,
+        )
+        .unwrap();
         let result = ExecutionRunResult {
             success: true,
             cancelled: false,
@@ -128,6 +169,8 @@ mod resolved_release_result_tests {
         let selected = &value["resolved_releases"][0];
         assert_eq!(selected["appId"], "armsx1");
         assert_eq!(selected["artifactId"], "apk");
+        assert_eq!(selected["kind"], "apk");
+        assert_eq!(selected["provider"], "github");
         assert_eq!(selected["releaseTag"], "v20261008");
         assert_eq!(
             selected["assetName"],
@@ -135,26 +178,78 @@ mod resolved_release_result_tests {
         );
         assert_eq!(selected["publishedAt"], "2026-10-08T10:00:00Z");
         assert_eq!(selected["size"], 42);
+        assert_eq!(selected["calculatedSha256"], "cd".repeat(32));
+        assert_eq!(selected["cacheHit"], false);
+        assert_eq!(
+            selected["redactedFinalUrl"],
+            "https://example.invalid/download.apk"
+        );
         assert!(selected.get("downloadUrl").is_none());
     }
 
     #[test]
-    fn execution_result_omits_empty_release_metadata_and_non_apk_provenance() {
+    fn execution_result_reports_generic_file_release_provenance_without_inventing_published_at() {
         let provenance = ExecutionArtifactAppProvenance {
             app_id: "example-app".to_string(),
             artifact_id: "data".to_string(),
             kind: "file".to_string(),
         };
-        let release = ResolvedRemoteRelease {
-            download_url: "https://example.invalid/file".to_string(),
-            asset_name: "data.zip".to_string(),
-            release_tag: "v1".to_string(),
-            published_at: None,
-            size: None,
+        let release_metadata = serde_json::json!([{
+            "draft": false,
+            "prerelease": false,
+            "tag_name": "v1",
+            "created_at": "2026-01-01T00:00:00Z",
+            "assets": [{
+                "name": "data.zip",
+                "browser_download_url": "https://forge.example.net/data.zip"
+            }]
+        }]);
+        let release = crate::remote_release_resolver::resolve_remote_latest_from_fixture(
+            "forgejo",
+            "https://forge.example.net",
+            "owner/repo",
+            "file",
+            false,
+            None,
+            false,
+            &release_metadata,
+        )
+        .expect("the valid file asset should be selected for the terminal report");
+        let resolved = crate::artifact_resolver::ResolvedArtifact {
+            local_path: std::path::PathBuf::new(),
+            filename: release.asset_name.clone(),
+            cache_hit: true,
+            calculated_sha256: Some("ef".repeat(32)),
+            redacted_final_url: None,
+            verified_path_guard: None,
         };
-        assert!(app_apk_release_details(Some(&provenance), &release).is_none());
-
+        let details = app_release_details(
+            Some(&provenance),
+            "recipe.example/data",
+            "forgejo",
+            &release,
+            &resolved,
+        )
+        .unwrap();
         let result = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 0,
+            steps: Vec::new(),
+            resolved_releases: vec![details],
+            resolved_artifacts: Vec::new(),
+        };
+        let value = serde_json::to_value(result).unwrap();
+        let selected = &value["resolved_releases"][0];
+        assert_eq!(selected["kind"], "file");
+        assert_eq!(selected["assetName"], "data.zip");
+        assert_eq!(selected["createdAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(selected["timestampSource"], "created_at");
+        assert_eq!(selected["cacheHit"], true);
+        assert!(selected.get("publishedAt").is_none());
+        assert!(selected.get("redactedFinalUrl").is_none());
+
+        let empty_result = ExecutionRunResult {
             success: true,
             cancelled: false,
             total_steps: 0,
@@ -162,7 +257,7 @@ mod resolved_release_result_tests {
             resolved_releases: Vec::new(),
             resolved_artifacts: Vec::new(),
         };
-        let value = serde_json::to_value(result).unwrap();
+        let value = serde_json::to_value(empty_result).unwrap();
         assert!(value.get("resolved_releases").is_none());
     }
 
@@ -1172,12 +1267,20 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .get("include_prereleases")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let transport = HttpArtifactTransport::new(HttpClientConfig::default()).map_err(|_| {
+            StepFailure::new(
+                "remote_release_client_failed: Network access could not be initialized".to_string(),
+            )
+        })?;
         let resolved = resolve_remote_latest(
+            &transport,
             provider,
             base_url,
             repository,
+            "apk",
             include_prereleases,
-            asset_pattern,
+            Some(asset_pattern),
+            false,
         )
         .map_err(StepFailure::new)?;
         Ok(remote_release_outputs(resolved))
@@ -1315,9 +1418,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     "unknown_artifact_ref: Unknown artifact ref: 'artifacts.{artifact_id}'."
                 )));
             };
-            let mut resolved_release = None;
             #[cfg(test)]
-            let github_release_fixture = if matches!(
+            let release_metadata_fixture = if matches!(
                 &artifact.source,
                 ExecutionArtifactSource::RemoteRelease { .. }
             ) {
@@ -1328,58 +1430,134 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 None
             };
             let result = (|| {
-                let resolved_url = match &artifact.source {
-                    ExecutionArtifactSource::RemoteFile { url } => url.clone(),
-                    ExecutionArtifactSource::DirectUrl { url, .. } => url.clone(),
+                let (resolved_url, selected_release) = match &artifact.source {
+                    ExecutionArtifactSource::RemoteFile { url } => (url.clone(), None),
+                    ExecutionArtifactSource::DirectUrl { url, .. } => (url.clone(), None),
                     ExecutionArtifactSource::RemoteRelease {
                         provider,
                         service_origin,
                         repository,
                         include_prereleases,
                         asset_pattern,
+                        invert_asset_pattern,
                     } => {
-                        if provider != "github" || service_origin != "https://github.com" {
-                            return Err(StepFailure::new(
-                                "remote_release_policy_unsupported: Only stable GitHub release artifacts are supported by this plan.".to_string(),
-                            ));
-                        }
-                        crate::remote_release_resolver::validate_github_stable_release_policy(
+                        let provenance = artifact
+                            .app_provenance
+                            .as_ref()
+                            .filter(|provenance| {
+                                crate::authored_models::is_valid_identifier(&provenance.app_id)
+                                    && crate::authored_models::is_valid_identifier(
+                                        &provenance.artifact_id,
+                                    )
+                                    && matches!(provenance.kind.as_str(), "apk" | "file")
+                                    && plan.apps.iter().filter(|app| app.id == provenance.app_id).count()
+                                        == 1
+                            })
+                            .ok_or_else(|| {
+                                StepFailure::new(
+                                    "app_artifact_provenance_invalid: Release artifact provenance is missing or inconsistent.".to_string(),
+                                )
+                            })?;
+                        crate::remote_release_resolver::validate_remote_release_policy(
+                            provider,
+                            service_origin,
                             repository,
-                            *include_prereleases,
-                            asset_pattern,
+                            &provenance.kind,
+                            asset_pattern.as_deref(),
+                            *invert_asset_pattern,
                         )
                         .map_err(StepFailure::new)?;
                         #[cfg(test)]
-                        let release = match github_release_fixture.as_ref() {
+                        let release = match release_metadata_fixture.as_ref() {
                             Some(Some(fixture)) => {
-                                crate::remote_release_resolver::resolve_github_latest_from_fixture(
+                                crate::remote_release_resolver::resolve_remote_latest_from_fixture(
+                                    provider,
+                                    service_origin,
                                     repository,
+                                    &provenance.kind,
                                     *include_prereleases,
-                                    asset_pattern,
+                                    asset_pattern.as_deref(),
+                                    *invert_asset_pattern,
                                     fixture,
                                 )
                             }
                             .map_err(StepFailure::new)?,
                             Some(None) => {
                                 return Err(StepFailure::new(
-                                    "remote_release_fixture_missing: No GitHub release fixture remains for this run".to_string(),
+                                    "remote_release_fixture_missing: No release metadata fixture remains for this run".to_string(),
                                 ));
                             }
-                            None => resolve_github_latest(
-                                repository,
-                                *include_prereleases,
-                                asset_pattern,
-                            )
-                            .map_err(StepFailure::new)?,
+                            None => {
+                                let transport = resolver
+                                    .release_metadata_transport()
+                                    .map_err(|_| StepFailure::new(
+                                        "remote_release_client_failed: Network access could not be initialized".to_string(),
+                                    ))?;
+                                resolve_remote_latest(
+                                    transport,
+                                    provider,
+                                    service_origin,
+                                    repository,
+                                    &provenance.kind,
+                                    *include_prereleases,
+                                    asset_pattern.as_deref(),
+                                    *invert_asset_pattern,
+                                )
+                                .map_err(StepFailure::new)?
+                            }
                         };
                         #[cfg(not(test))]
-                        let release =
-                            resolve_github_latest(repository, *include_prereleases, asset_pattern)
-                                .map_err(StepFailure::new)?;
-                        resolved_release =
-                            app_apk_release_details(artifact.app_provenance.as_ref(), &release);
-                        release.download_url
+                        let release = {
+                            let transport = resolver
+                                .release_metadata_transport()
+                                .map_err(|_| StepFailure::new(
+                                    "remote_release_client_failed: Network access could not be initialized".to_string(),
+                                ))?;
+                            resolve_remote_latest(
+                                transport,
+                                provider,
+                                service_origin,
+                                repository,
+                                &provenance.kind,
+                                *include_prereleases,
+                                asset_pattern.as_deref(),
+                                *invert_asset_pattern,
+                            )
+                            .map_err(StepFailure::new)?
+                        };
+                        (
+                            release.download_url.clone(),
+                            Some((provider.clone(), release)),
+                        )
                     }
+                };
+                let direct_provenance = if matches!(
+                    &artifact.source,
+                    ExecutionArtifactSource::DirectUrl { .. }
+                ) {
+                    Some(
+                        artifact
+                            .app_provenance
+                            .as_ref()
+                            .filter(|provenance| {
+                                provenance.kind == "apk"
+                                    && crate::authored_models::is_valid_identifier(
+                                        &provenance.app_id,
+                                    )
+                                    && crate::authored_models::is_valid_identifier(
+                                        &provenance.artifact_id,
+                                    )
+                                    && plan.apps.iter().filter(|app| app.id == provenance.app_id).count()
+                                        == 1
+                            })
+                            .ok_or_else(|| {
+                                StepFailure::new(
+                                    "app_artifact_provenance_invalid: Direct APK source is missing App Definition provenance.".to_string(),
+                                )
+                            })?,
+                    )
+                } else {
+                    None
                 };
                 let request = ArtifactResolveRequest {
                     artifact_id: &artifact.id,
@@ -1391,23 +1569,13 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     ExecutionArtifactSource::DirectUrl { sha256, .. } => {
                         resolver.resolve_direct_url(request, sha256.as_deref())
                     }
-                    ExecutionArtifactSource::RemoteFile { .. }
-                    | ExecutionArtifactSource::RemoteRelease { .. } => resolver.resolve(request),
+                    ExecutionArtifactSource::RemoteRelease { .. } => {
+                        resolver.resolve_app_release(request)
+                    }
+                    ExecutionArtifactSource::RemoteFile { .. } => resolver.resolve(request),
                 }
                 .map_err(|error| StepFailure::new(error.executor_message(request)))?;
-                let resolved_artifact = if matches!(
-                    &artifact.source,
-                    ExecutionArtifactSource::DirectUrl { .. }
-                ) {
-                    let provenance = artifact
-                        .app_provenance
-                        .as_ref()
-                        .filter(|provenance| provenance.kind == "apk")
-                        .ok_or_else(|| {
-                            StepFailure::new(
-                                "app_artifact_provenance_invalid: Direct APK source is missing App Definition provenance.".to_string(),
-                            )
-                        })?;
+                let resolved_artifact = if let Some(provenance) = direct_provenance {
                     let calculated_sha256 = resolved
                         .calculated_sha256
                         .clone()
@@ -1428,24 +1596,42 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 } else {
                     None
                 };
-                Ok((resolved_url, resolved, resolved_artifact))
+                let resolved_release = selected_release.as_ref().and_then(|(provider, release)| {
+                    app_release_details(
+                        artifact.app_provenance.as_ref(),
+                        &artifact.id,
+                        provider,
+                        release,
+                        &resolved,
+                    )
+                });
+                if selected_release.is_some() && resolved_release.is_none() {
+                    return Err(StepFailure::new(
+                        "artifact_sha256_unavailable: Release materialization did not produce verifiable bytes.".to_string(),
+                    ));
+                }
+                Ok((resolved_url, resolved, resolved_artifact, resolved_release))
             })();
             let artifact_state = state
                 .artifacts
                 .get_mut(&artifact.id)
                 .expect("artifact runtime state should be initialized from plan");
-            artifact_state.resolved_release = resolved_release;
+            artifact_state.resolved_release = None;
             match result {
-                Ok((resolved_url, resolved, resolved_artifact)) => {
+                Ok((resolved_url, resolved, resolved_artifact, resolved_release)) => {
                     artifact_state.status = ArtifactRuntimeStatus::Resolved;
                     artifact_state.local_path =
                         Some(resolved.local_path.to_string_lossy().into_owned());
-                    artifact_state.resolved_url =
-                        if matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. }) {
-                            None
-                        } else {
-                            Some(resolved_url)
-                        };
+                    artifact_state.resolved_url = if matches!(
+                        &artifact.source,
+                        ExecutionArtifactSource::DirectUrl { .. }
+                            | ExecutionArtifactSource::RemoteRelease { .. }
+                    ) {
+                        None
+                    } else {
+                        Some(resolved_url)
+                    };
+                    artifact_state.resolved_release = resolved_release;
                     artifact_state.filename = Some(resolved.filename);
                     artifact_state.cache_hit = resolved.cache_hit;
                     artifact_state.resolved_artifact = resolved_artifact;

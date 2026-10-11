@@ -109,6 +109,47 @@ when it contains no URL credentials, query, or fragment. When redaction is
 needed, the report omits `reviewedPlan` and instead serializes the separately
 named `redactedReviewedPlan` projection, plus an explicit redaction marker.
 
+App-owned `latest_release` artifacts support GitHub, GitLab, and Forgejo from
+their authored public HTTPS service origin and repository. Review records the
+provider policy without resolving a release; execution resolves the latest
+eligible release before selecting an asset or consulting the artifact cache.
+Draft GitHub and Forgejo releases and upcoming GitLab releases are excluded.
+GitHub eligibility follows the provider's prerelease flag and ranks by parsed
+`published_at`. GitLab has no first-class prerelease flag, so its approved
+best-effort classification checks the lowercase concatenated tag and release
+name for `alpha`, `beta`, `preview`, `prerelease`, or `pre-release`, or the
+`rc` token; it ranks by parsed `released_at`. Forgejo uses parsed
+`published_at`, falling back to parsed `created_at` when needed. Missing or
+malformed timestamps do not rank as valid GitHub candidates; non-upcoming
+GitLab releases with missing or malformed `released_at` fail closed; Forgejo
+requires at least one usable publication or creation timestamp. Equal
+timestamps use deterministic tag and provider-identity tie-breaking.
+
+Release discovery is bounded to five pages of thirty releases. GitLab requests
+descending `released_at` order and can stop once a selected eligible release is
+strictly newer than every release on the current page. GitHub and Forgejo
+continue according to their pagination markers because their list endpoints
+do not provide a relied-upon timestamp-order guarantee. Pagination endpoints
+and links must remain on the selected provider API origin and expected release
+path. Exhausted results with no eligible release, ambiguous pagination, or a
+history that cannot establish the latest eligible release within the bound
+fail with stable errors. The resolver selects the latest eligible release
+first, then filters its assets by the App Artifact kind (`apk` or `file`) and
+optional filename-only regular expression; inversion defaults to false and is
+invalid without a pattern. Exactly one asset must remain. The version-1
+Execution Plan preserves the optional pattern and default inversion semantics.
+
+The selected asset URL is part of the existing artifact-scoped cache identity,
+so a cached older release cannot replace release discovery. Release metadata
+and selected downloads use the public HTTPS policy, including public-address
+checks, TLS verification, redirect validation, bounded responses, sandbox
+admission, and atomic publication. Runtime admission verifies App Artifact
+provenance and kind against the plan snapshot. Review describes the policy for
+the exact artifact referenced by the installation step. Execution reports
+include the selected release and asset, calculated SHA-256, cache status, and a
+redacted final URL only when a network download observed one; cache hits do not
+claim a network URL.
+
 Android package facts come from APK inspection rather than filenames. The
 APK-inspection contract uses a separately configured user-supplied
 `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools.

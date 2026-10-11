@@ -249,24 +249,30 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
         .app_id
         .as_deref()
         .and_then(|app_id| plan.apps.iter().find(|app| app.id == app_id));
-    let app_artifact = app.and_then(|app| {
-        plan.artifacts.iter().find(|artifact| {
-            artifact
-                .app_provenance
-                .as_ref()
-                .is_some_and(|provenance| provenance.app_id == app.id && provenance.kind == "apk")
-        })
-    });
-    let late_bound_github_release = app_artifact.is_some_and(|artifact| {
-        matches!(
-            &artifact.source,
-            ExecutionArtifactSource::RemoteRelease {
-                provider,
-                service_origin,
-                include_prereleases: false,
-                ..
-            } if provider == "github" && service_origin == "https://github.com"
-        )
+    let app_artifact = app.and_then(|app| install_apk_artifact(plan, step, &app.id));
+    let late_bound_release = app_artifact.and_then(|artifact| {
+        let ExecutionArtifactSource::RemoteRelease {
+            provider,
+            include_prereleases,
+            asset_pattern,
+            invert_asset_pattern,
+            ..
+        } = &artifact.source
+        else {
+            return None;
+        };
+        let provider_label = match provider.as_str() {
+            "github" => "GitHub",
+            "gitlab" => "GitLab",
+            "forgejo" => "Forgejo",
+            _ => return None,
+        };
+        Some((
+            provider_label,
+            *include_prereleases,
+            asset_pattern.as_deref(),
+            *invert_asset_pattern,
+        ))
     });
     let direct_https_apk = app_artifact.is_some_and(|artifact| {
         matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. })
@@ -279,13 +285,34 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     .or_else(|| non_blank(&step.name).map(str::to_string))
     .or_else(|| non_blank(&step.note).map(str::to_string))
     .unwrap_or_else(|| neutral_action_title(section).to_string());
-    let description = if late_bound_github_release {
-        app.map(|app| {
-            format!(
-                "The latest eligible stable GitHub APK for {} is resolved during execution.",
-                app.name
-            )
-        })
+    let description = if let (
+        Some(app),
+        Some((provider, include_prereleases, asset_pattern, invert_asset_pattern)),
+    ) = (app, late_bound_release)
+    {
+        let release_scope = if include_prereleases {
+            "stable or prerelease"
+        } else {
+            "stable"
+        };
+        let pattern = asset_pattern
+            .map(|pattern| {
+                if invert_asset_pattern {
+                    format!(" after excluding filename pattern {pattern}")
+                } else {
+                    format!(" after matching filename pattern {pattern}")
+                }
+            })
+            .unwrap_or_default();
+        let provider_note = if provider == "GitLab" {
+            " GitLab prerelease classification uses a best-effort release name and tag heuristic."
+        } else {
+            ""
+        };
+        Some(format!(
+            "The latest eligible {release_scope} {provider} APK for {} is resolved during execution{pattern}.{provider_note}",
+            app.name
+        ))
     } else if direct_https_apk {
         Some("The configured public direct HTTPS APK URL is used during execution. It does not pin a release and does not guarantee immutable bytes. The APK SHA-256 is calculated and checked against the authored expected checksum when one is supplied; a calculated checksum alone is not publisher authentication.".to_string())
     } else {
@@ -303,6 +330,26 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
         },
         device_location: device_destination(step),
     }
+}
+
+fn install_apk_artifact<'a>(
+    plan: &'a ExecutionPlan,
+    step: &ExecutionStep,
+    app_id: &str,
+) -> Option<&'a crate::planner::ExecutionArtifact> {
+    let ExecutionParamValue::Ref { ref_value } = step.params.get("app")? else {
+        return None;
+    };
+    let artifact_id = ref_value
+        .strip_prefix("artifacts.")?
+        .strip_suffix(".local_path")?;
+    plan.artifacts.iter().find(|artifact| {
+        artifact.id == artifact_id
+            && artifact
+                .app_provenance
+                .as_ref()
+                .is_some_and(|provenance| provenance.app_id == app_id && provenance.kind == "apk")
+    })
 }
 
 fn neutral_action_title(section: &str) -> &'static str {
@@ -501,11 +548,11 @@ mod tests {
     fn app_install_review_uses_only_the_plan_snapshot_and_late_bound_release_policy() {
         use crate::planner::{
             DeviceContext, ExecutionAppSnapshot, ExecutionArtifact, ExecutionArtifactAppProvenance,
-            ExecutionArtifactSource, ExecutionPlanSource, ExecutionStepConstraints,
-            RuntimeCapabilities,
+            ExecutionArtifactSource, ExecutionParamValue, ExecutionPlanSource,
+            ExecutionStepConstraints, RuntimeCapabilities,
         };
 
-        let step = ExecutionStep {
+        let mut step = ExecutionStep {
             id: "app.armsx1.install/install".to_string(),
             recipe_ref: "app.armsx1.install".to_string(),
             app_id: Some("armsx1".to_string()),
@@ -565,7 +612,8 @@ mod tests {
                     service_origin: "https://github.com".to_string(),
                     repository: "ARMSX2/ARMSX1".to_string(),
                     include_prereleases: false,
-                    asset_pattern: "^ARMSX1-release-[0-9]{8}-arm64-v8a\\.apk$".to_string(),
+                    asset_pattern: Some("^ARMSX1-release-[0-9]{8}-arm64-v8a\\.apk$".to_string()),
+                    invert_asset_pattern: false,
                 },
                 cache: "default".to_string(),
                 app_provenance: Some(ExecutionArtifactAppProvenance {
@@ -578,15 +626,57 @@ mod tests {
             schema_version: 1,
             kind: "execution_plan",
         };
+        step.params.insert(
+            "app".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "artifacts.app.armsx1.install/installer.local_path".to_string(),
+            },
+        );
 
         let action = project_action(&plan, &step, "installs");
 
         assert_eq!(action.title, "Install ARMSX1");
-        assert_eq!(
-            action.description.as_deref(),
-            Some("The latest eligible stable GitHub APK for ARMSX1 is resolved during execution.")
+        let description = action.description.expect("release policy is described");
+        assert!(description.contains("GitHub"));
+        assert!(description.contains("stable GitHub APK"));
+
+        let mut second_artifact = plan.artifacts[0].clone();
+        second_artifact.id = "app.armsx1.install/alternate-apk".to_string();
+        second_artifact.source = ExecutionArtifactSource::RemoteRelease {
+            provider: "forgejo".to_string(),
+            service_origin: "https://forgejo.example".to_string(),
+            repository: "maintainer/armsx1".to_string(),
+            include_prereleases: true,
+            asset_pattern: Some("^selected-armsx1\\.apk$".to_string()),
+            invert_asset_pattern: false,
+        };
+        second_artifact.app_provenance = Some(ExecutionArtifactAppProvenance {
+            app_id: "armsx1".to_string(),
+            artifact_id: "alternate-apk".to_string(),
+            kind: "apk".to_string(),
+        });
+        plan.artifacts.push(second_artifact);
+        step.params.insert(
+            "app".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "artifacts.app.armsx1.install/alternate-apk.local_path".to_string(),
+            },
         );
 
+        let selected_action = project_action(&plan, &step, "installs");
+        let selected_description = selected_action
+            .description
+            .expect("review should describe the artifact consumed by the install step");
+        assert!(selected_description.contains("Forgejo"));
+        assert!(selected_description.contains("selected-armsx1\\.apk"));
+        assert!(selected_description.contains("stable or prerelease"));
+
+        step.params.insert(
+            "app".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "artifacts.app.armsx1.install/installer.local_path".to_string(),
+            },
+        );
         plan.artifacts[0].source = ExecutionArtifactSource::DirectUrl {
             url: "https://downloads.example.com/app.apk?token=private".to_string(),
             sha256: None,

@@ -1110,13 +1110,36 @@ fn parse_artifacts(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionArtifact>,
                             ),
                         },
                     },
-                    "remote_release" => ExecutionArtifactSource::RemoteRelease {
-                        provider: required_string(source, "provider")?,
-                        service_origin: required_string(source, "service_origin")?,
-                        repository: required_string(source, "repository")?,
-                        include_prereleases: required_bool(source, "include_prereleases")?,
-                        asset_pattern: required_string(source, "asset_pattern")?,
-                    },
+                    "remote_release" => {
+                        let asset_pattern = match source.get(yaml_key("asset_pattern")) {
+                            None | Some(YamlValue::Null) => None,
+                            Some(YamlValue::String(value)) => Some(value.clone()),
+                            Some(_) => {
+                                return Err(CliError::Message(
+                                    "execution artifact asset_pattern must be a string".to_string(),
+                                ));
+                            }
+                        };
+                        let invert_asset_pattern =
+                            match source.get(yaml_key("invert_asset_pattern")) {
+                                None | Some(YamlValue::Null) => false,
+                                Some(YamlValue::Bool(value)) => *value,
+                                Some(_) => {
+                                    return Err(CliError::Message(
+                                        "execution artifact invert_asset_pattern must be a boolean"
+                                            .to_string(),
+                                    ));
+                                }
+                            };
+                        ExecutionArtifactSource::RemoteRelease {
+                            provider: required_string(source, "provider")?,
+                            service_origin: required_string(source, "service_origin")?,
+                            repository: required_string(source, "repository")?,
+                            include_prereleases: required_bool(source, "include_prereleases")?,
+                            asset_pattern,
+                            invert_asset_pattern,
+                        }
+                    }
                     _ => {
                         return Err(CliError::Message(
                             "execution artifact source kind is unsupported".to_string(),
