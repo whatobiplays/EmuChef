@@ -1,0 +1,131 @@
+apps/config-editor/src/components/StepsEditor.tsx
+  s_88b52be2e099e2::t_8201e7b3e92fbb 319-331,334
+  s_88b52be2e099e2::t_8ee427cc128dd7 318,332-333
+crates/emuchef-rust-backend/src/step_specs.rs
+  s_88b52be2e099e2::t_c8a1e59368d1e5 476-483,510-514,518,523,546-552,762-769
+  s_88b52be2e099e2::t_19681e3f712a89 529-537,543
+  s_88b52be2e099e2::t_479275fb76ad1e 756-761,770-771
+  s_88b52be2e099e2::t_3d0e025b69d687 517
+  s_88b52be2e099e2::t_3527da430d63f7 13-14,428-429,449-450,464-475,484-497,500-509,515-516,519-522,524-528,538-542,544-545,553-554
+  s_88b52be2e099e2::t_91a9857e8a4602 498-499
+  s_525263b66e1e64::t_5468f1ae8e1f72 555
+crates/emuchef-rust-backend/src/authored_models.rs
+  s_88b52be2e099e2::t_0c2d181ca7ae24 876,885-891
+  s_88b52be2e099e2::t_c579e85995d333 1169,1177-1183
+  s_88b52be2e099e2::t_c0866351eb9d04 892-893
+  s_88b52be2e099e2::t_36174030eb7fc1 1184
+apps/config-editor/src/api/commands.ts
+  s_88b52be2e099e2::t_5accaca8b8985c 27
+crates/emuchef-rust-backend/src/planner.rs
+  s_88b52be2e099e2::t_9665e09310f288 288-303,307-317,321-338
+  s_88b52be2e099e2::t_0407eabaf90a78 721,2151,2182-2183,3476,3478-3504,3514
+  s_88b52be2e099e2::t_c8a1e59368d1e5 304-306,318-320
+crates/emuchef-rust-backend/tests/editor_step_commands.rs
+  s_88b52be2e099e2::t_d560f25cfefe2a 333-336,349-350,359-360,385,387-388,393-394,400-401,410-413,418,471-472
+  s_88b52be2e099e2::t_f02fce35f86870 218,361-384,386,419-470
+  s_88b52be2e099e2::t_f21edc3d7bce76 227-228,235,314-315
+  s_88b52be2e099e2::t_c8a1e59368d1e5 219-226,229-234,337-348,351-358,389-392,395-399,402-409,414-417
+  s_9488c1ad6d376f::t_d96e91ca6e4658 332
+authored/apps/retroarch.yaml
+  s_88b52be2e099e2::t_5c0c021f6d8530 8
+authored/recipes/app.retroarch.provision.yaml
+  s_88b52be2e099e2::t_5c0c021f6d8530 189,200,218,227,288,299,317,327,682,701
+crates/emuchef-rust-backend/src/execution_session.rs
+  s_88b52be2e099e2::t_33581fe3d49564 583,593-595
+  s_88b52be2e099e2::t_2310faf098b10d 2432-2437,2441,2459-2463,2468-2471,2475-2477,2481-2484,2488-2491
+  s_88b52be2e099e2::t_c8a1e59368d1e5 584-592,2438-2440,2442-2458,2464-2467,2472-2474,2478-2480,2485-2487
+crates/emuchef-rust-backend/src/executor.rs
+  s_88b52be2e099e2::t_ebc64091c301a4 1146-1147,2076-2077,2080-2081,2088-2089,2106-2107,2110-2111,2115-2117
+  s_88b52be2e099e2::t_c8a1e59368d1e5 2082-2087,2112-2114
+crates/emuchef-rust-backend/src/yaml.rs
+  s_88b52be2e099e2::t_184f90ac0670fc 976
+crates/emuchef-rust-backend/src/planner_tests.rs
+  s_88b52be2e099e2::t_65c4328e432afe 16
+  s_88b52be2e099e2::t_2be6cdbb3b1c91 6349-6358
+  s_88b52be2e099e2::t_332c657e0f1b3a 250-261,264,268
+  s_88b52be2e099e2::t_00218fb4b01125 6365-6366,6372-6375,6389-6392
+  s_88b52be2e099e2::t_074a1abf8bad2e 6316-6318
+  s_88b52be2e099e2::t_0128f103ebb20a 2631
+  s_88b52be2e099e2::t_144bea598f55df 6434-6448,6455-6456,6462,6469
+  s_88b52be2e099e2::t_9bafb6030532e3 17-18,6367-6371,6376-6388,6449-6454,6457-6461,6463-6468
+  s_88b52be2e099e2::t_37b82749280212 505,510,515-519
+  s_88b52be2e099e2::t_c8a1e59368d1e5 506-509,511-514,527-531,2655-2658,2674-2677,6281-6286,6288-6292,6295-6306,6310-6315,6326-6330,6333-6338,6344-6348,6398-6401,6420-6427,6912-6914
+  s_88b52be2e099e2::t_151371cbfc1a96 6245-6280,6287,6293-6294,6307-6309,6319-6325,6331-6332,6339-6343,6359-6364,6393-6397,6402-6419,6428-6433,6470-6471
+  s_88b52be2e099e2::t_5bc774d642f381 523,525-526,2661-2662,6909-6911
+  s_9488c1ad6d376f::t_1fe070103eb13d 2652-2654,2659-2660
+crates/emuchef-rust-backend/src/validation.rs
+  s_88b52be2e099e2::t_9bafb6030532e3 251-255
+  s_88b52be2e099e2::t_184f90ac0670fc 225,378
+  s_88b52be2e099e2::t_ffa62324266152 237-250,256-265
+crates/emuchef-rust-backend/src/commands.rs
+  s_88b52be2e099e2::t_5accaca8b8985c 114-118,219,504-513
+  s_88b52be2e099e2::t_4cb2ecbbddfefe 514-516
+crates/emuchef-rust-backend/src/recipe_qualification_retroarch_tests.rs
+  s_88b52be2e099e2::t_c8a1e59368d1e5 202-205,212-214,232-233,240-261,263-267,274-280,773-798
+  s_88b52be2e099e2::t_93b1576fc4862e 234-235
+  s_88b52be2e099e2::t_2aff9b5189e5e8 33-34,43-44,67-76,201,206-211,215-217,236-239,262,268-273,281-282
+crates/emuchef-rust-backend/src/review_projection.rs
+  s_88b52be2e099e2::t_c8a1e59368d1e5 280-284
+  s_88b52be2e099e2::t_93b1576fc4862e 293-303
+crates/emuchef-rust-backend/src/executor_tests.rs
+  s_88b52be2e099e2::t_476c3d610740b5 2656,2662-2663
+  s_88b52be2e099e2::t_9bb296e0adefb5 2590-2619,2624-2628,2632-2633,2640-2641,2646-2650,2657,2670-2673
+  s_88b52be2e099e2::t_c8a1e59368d1e5 2620-2623,2629-2631,2634-2639,2642-2645,2651-2655,2658-2661,2664-2669
+  s_88b52be2e099e2::t_bba4738ad2b407 2589
+crates/emuchef-rust-backend/src/planner/app_authority.rs
+  s_88b52be2e099e2::t_93e18cf640345a 166-181,256
+crates/emuchef-rust-backend/src/document.rs
+  s_88b52be2e099e2::t_5accaca8b8985c 304-306,863-875
+  s_88b52be2e099e2::t_184f90ac0670fc 1200
+  s_88b52be2e099e2::t_65cedb6c5703bd 876-878
+tests/fixtures/recipe-qualification/retroarch-bios/qualification-contract.json
+  s_88b52be2e099e2::t_fc3d1293bf5525 10-16,37-43
+tests/fixtures/recipe-qualification/retroarch/qualification-contract.json
+  s_88b52be2e099e2::t_fc3d1293bf5525 7-18
+crates/emuchef-rust-backend/src/recipe_qualification_retroarch_bios_tests.rs
+  s_88b52be2e099e2::t_8ab547e6a709bc 26-27,36,60-69,229-232,255,261-263,271-272,277-278
+  s_88b52be2e099e2::t_c8a1e59368d1e5 170,233-254,256-260,264-270,273-276,594-619
+  s_88b52be2e099e2::t_93b1576fc4862e 390-391
+crates/emuchef-rust-backend/src/planner_device_plan.rs
+  s_88b52be2e099e2::t_4d5b0bf6dbe659 25
+  s_88b52be2e099e2::t_332c657e0f1b3a 200-201,208,220
+CONTEXT.md
+  s_88b52be2e099e2::t_5edef01751e090 89-95,103,1884-1887
+  s_88b52be2e099e2::t_0c57a445dce05c 96,1888-1890
+  s_88b52be2e099e2::t_8ee427cc128dd7 97-102
+docs/product/recipe-qualification-retroarch.md
+  s_88b52be2e099e2::t_5edef01751e090 46-50
+  s_88b52be2e099e2::t_0c57a445dce05c 25-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "15369e8c8c93ead6dd193d91b124c72e5c7f3650",
+  "prompts": {},
+  "sessions": {
+    "s_525263b66e1e64": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12304-455e-7913-a6ba-214820ce6185",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_88b52be2e099e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12860-b261-7510-b194-92b7cb8b33c2",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_9488c1ad6d376f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12875-897b-7ee0-bee2-3b6928143159",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
