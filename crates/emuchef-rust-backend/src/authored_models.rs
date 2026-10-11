@@ -873,17 +873,22 @@ fn validate_launcher_activity(
     let Some(launcher_activity) = launcher_activity else {
         return;
     };
-    // A nested Android class keeps the `$` separator of its binary name, so
-    // `com.example.app.Outer$MainActivity` names one valid launcher activity.
-    let pattern = Regex::new(r"^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)+$")
-        .expect("the launcher-activity regex is valid");
-    if !pattern.is_match(launcher_activity) {
+    if !is_valid_concrete_launcher_activity(launcher_activity) {
         diagnostics.push(AuthoredModelDiagnostic::new(
             "launcher_activity_invalid",
             "The launcher activity must be one fully-qualified activity class name.",
             "launcher_activity",
         ));
     }
+}
+
+/// Check the fully qualified class syntax accepted for an App Definition
+/// launcher and for the concrete activity sealed into an execution plan.
+pub(crate) fn is_valid_concrete_launcher_activity(activity: &str) -> bool {
+    // A nested Android class keeps the `$` separator of its binary name.
+    let pattern = Regex::new(r"^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)+$")
+        .expect("the launcher-activity regex is valid");
+    pattern.is_match(activity)
 }
 
 fn validate_optional_nonblank(
@@ -1161,15 +1166,21 @@ fn validate_identity(
 }
 
 fn validate_package_id(diagnostics: &mut Vec<AuthoredModelDiagnostic>, package_id: &str) {
-    let package_pattern = Regex::new(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
-        .expect("the package-id regex is valid");
-    if !package_pattern.is_match(package_id) {
+    if !is_valid_package_id(package_id) {
         diagnostics.push(AuthoredModelDiagnostic::new(
             "package_id_invalid",
             "Package IDs must contain at least two valid dot-separated identifier segments.",
             "package_id",
         ));
     }
+}
+
+/// Check Android package syntax shared by authored definitions and reviewed
+/// plan identity checks.
+pub(crate) fn is_valid_package_id(package_id: &str) -> bool {
+    let package_pattern = Regex::new(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
+        .expect("the package-id regex is valid");
+    package_pattern.is_match(package_id)
 }
 fn validate_model_patterns(diagnostics: &mut Vec<AuthoredModelDiagnostic>, patterns: &[String]) {
     let mut seen = HashSet::new();

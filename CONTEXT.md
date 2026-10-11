@@ -86,6 +86,21 @@ catalog. Existing Recipes that have not migrated retain their current
 form-based artifact, install, and package-condition behavior until their own
 migration.
 
+App-aware `launch_app` and `force_stop_app` steps require `app_ref` and no
+authored package or activity parameters. An App Definition launcher activity is
+one fully qualified Android class name. Planning requires it for app-aware
+launch, then seals the package and activity as literal values beside the App
+snapshot in the reviewed plan. Force-stop seals the package alone. Execution
+and retained final-launch eligibility verify the plan-local snapshot and
+concrete target before contacting the device. Existing lifecycle steps without
+app context remain valid only when they carry a valid literal Android package
+and, for launch, an optional valid literal activity. Config Editor exposes an
+editable App Definition ID for launch and force-stop steps, while other step
+types retain their existing read-only display of an assigned context. Changing
+the ID preserves any authored parameters so the author can clear them
+explicitly. An empty field removes `app_ref`, and Rust validation supplies
+diagnostics for incomplete forms.
+
 Direct-URL APK sources require a public HTTPS URL without credentials or a
 fragment; signed query parameters are allowed. A direct URL does not pin a
 release or guarantee immutable bytes. The App Definition may include an
@@ -1866,9 +1881,13 @@ The qualification uses the real authored catalog through
 `runtime_configuration::plan_configuration` with the
 `ayaneo.konkr_pocket_fit.base` device plan, exercises the production review
 projection, and executes the unchanged generated plan through
-`ExecutorAdapters::with_sandbox_roots`. It explicitly qualifies the authored
-first-launch/bootstrap lifecycle as bootstrap launch -> 1500 ms wait -> force-stop
-followed by permission launch -> 5000 ms wait -> force-stop, including generated
+`ExecutorAdapters::with_sandbox_roots`. It qualifies the App Definition launcher
+alias `com.retroarch.browser.mainmenu.MainMenuActivity` and the plan-local
+package/activity operands of all three launches and two force stops. Both the
+RetroArch Recipe and App Definition source bytes are digest-bound. It also
+qualifies the authored first-launch/bootstrap lifecycle as bootstrap launch ->
+1500 ms wait -> force-stop followed by permission launch -> 5000 ms wait ->
+force-stop, including generated
 plan dependency/order checks, successful deterministic execution records, and a
 test-private lifecycle failure regression that preserves prior results and blocks
 dependent work. It also preserves optional configuration behavior, repeated-install

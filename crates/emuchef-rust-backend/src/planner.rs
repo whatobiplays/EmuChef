@@ -285,6 +285,57 @@ pub enum ExecutionParamValue {
     },
 }
 
+/// Validate an app-context lifecycle step against only the reviewed plan.
+/// The returned strings are concrete ADB operands; dynamic refs and missing
+/// launcher activities are never eligible for app-context execution.
+pub(crate) fn validated_plan_lifecycle_target(
+    plan: &ExecutionPlan,
+    step: &ExecutionStep,
+) -> Result<(String, Option<String>), &'static str> {
+    let app_id = step.app_id.as_deref().ok_or("app identity is missing")?;
+    let mut matching = plan.apps.iter().filter(|app| app.id == app_id);
+    let app = matching.next().ok_or("app snapshot is missing")?;
+    if matching.next().is_some() {
+        return Err("app snapshot is ambiguous");
+    }
+    if !crate::authored_models::is_valid_package_id(&app.package_id) {
+        return Err("app snapshot package is invalid");
+    }
+    let Some(ExecutionParamValue::Literal {
+        value: Value::String(package_name),
+    }) = step.params.get("package_name")
+    else {
+        return Err("concrete package is missing");
+    };
+    if package_name != &app.package_id {
+        return Err("concrete package differs from the app snapshot");
+    }
+    match step.type_name.as_str() {
+        "launch_app" => {
+            if step.params.len() != 2 {
+                return Err("app launch has unexpected parameters");
+            }
+            let Some(ExecutionParamValue::Literal {
+                value: Value::String(activity),
+            }) = step.params.get("activity")
+            else {
+                return Err("concrete launcher activity is missing");
+            };
+            if !crate::authored_models::is_valid_concrete_launcher_activity(activity) {
+                return Err("concrete launcher activity is invalid");
+            }
+            Ok((package_name.clone(), Some(activity.clone())))
+        }
+        "force_stop_app" => {
+            if step.params.len() != 1 {
+                return Err("app force-stop has unexpected parameters");
+            }
+            Ok((package_name.clone(), None))
+        }
+        _ => Err("step is not an app lifecycle operation"),
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct PermissionIntentPlan {
@@ -667,7 +718,7 @@ pub fn plan_execution_with_app_definitions(
                         .map(|dependency| make_execution_step_id(&recipe.id, dependency))
                         .collect(),
                     constraints: execution_constraints(&step.constraints, &recipe.id),
-                    params: normalize_step_params_for_execution(recipe, &step),
+                    params: normalize_step_params_for_execution(recipe, &step, &app_definitions),
                     skip_if: step
                         .skip_if
                         .iter()
@@ -2097,7 +2148,7 @@ fn validate_step_param_contracts(
         if !is_emitted_step_type(&step.type_name) {
             continue;
         }
-        let Some(spec) = step_specs::step_spec_for(&step.type_name) else {
+        let Some(spec) = step_specs::authored_step_spec_for(step) else {
             continue;
         };
         let normalized = params_with_defaults(step);
@@ -2128,6 +2179,8 @@ fn is_emitted_step_type(step_type: &str) -> bool {
             | "install_apk"
             | "wait"
             | "grant_permissions"
+            | "launch_app"
+            | "force_stop_app"
     )
 }
 
@@ -3420,7 +3473,35 @@ fn unknown_step_ref_message(
 fn normalize_step_params_for_execution(
     recipe: &Recipe,
     step: &Step,
+    app_definitions: &HashMap<String, AppDefinitionV1>,
 ) -> OrderedMap<ExecutionParamValue> {
+    if matches!(step.type_name.as_str(), "launch_app" | "force_stop_app") {
+        if let Some(app_ref) = step.app_ref.as_deref() {
+            let app = app_definitions
+                .get(app_ref)
+                .expect("app authority validated the lifecycle App Definition");
+            let mut result = OrderedMap::new();
+            result.insert(
+                "package_name".to_string(),
+                ExecutionParamValue::Literal {
+                    value: Value::String(app.package_id.clone()),
+                },
+            );
+            if step.type_name == "launch_app" {
+                result.insert(
+                    "activity".to_string(),
+                    ExecutionParamValue::Literal {
+                        value: Value::String(
+                            app.launcher_activity
+                                .clone()
+                                .expect("app authority validated the launcher activity"),
+                        ),
+                    },
+                );
+            }
+            return result;
+        }
+    }
     let normalized = params_with_defaults(step);
     if matches!(
         step.type_name.as_str(),
@@ -3430,7 +3511,7 @@ fn normalize_step_params_for_execution(
     }
 
     let mut result = OrderedMap::new();
-    let Some(spec) = step_specs::step_spec_for(&step.type_name) else {
+    let Some(spec) = step_specs::authored_step_spec_for(step) else {
         return result;
     };
     for param_name in spec.params.keys() {

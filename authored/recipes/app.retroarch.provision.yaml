@@ -186,6 +186,7 @@ steps:
   verify: []
 - id: launch_retroarch_bootstrap
   type: launch_app
+  app_ref: retroarch
   name: Launch RetroArch for bootstrap
   description: Launch RetroArch once so it can initialize its storage and defaults.
   user_toggleable: false
@@ -196,8 +197,7 @@ steps:
     - app_launch
     conflicts_with: []
   skip_if: []
-  params:
-    package_name: com.retroarch.aarch64
+  params: {}
   verify: []
 - id: wait_for_retroarch_bootstrap
   type: wait
@@ -215,6 +215,7 @@ steps:
   verify: []
 - id: stop_retroarch_after_bootstrap
   type: force_stop_app
+  app_ref: retroarch
   name: Force stop RetroArch after bootstrap
   user_toggleable: false
   dependencies:
@@ -223,8 +224,7 @@ steps:
     capabilities: []
     conflicts_with: []
   skip_if: []
-  params:
-    package_name: com.retroarch.aarch64
+  params: {}
   verify: []
 - id: grant_retroarch_permissions
   type: grant_permissions
@@ -285,6 +285,7 @@ steps:
   verify: []
 - id: launch_retroarch_permissions
   type: launch_app
+  app_ref: retroarch
   name: Launch RetroArch after permissions
   description: Launch RetroArch once so it can initialize its storage and defaults.
   user_toggleable: false
@@ -295,8 +296,7 @@ steps:
     - app_launch
     conflicts_with: []
   skip_if: []
-  params:
-    package_name: com.retroarch.aarch64
+  params: {}
   verify: []
 - id: wait_for_retroarch_permissions
   type: wait
@@ -314,6 +314,7 @@ steps:
   verify: []
 - id: stop_retroarch_after_permissions
   type: force_stop_app
+  app_ref: retroarch
   name: Force stop RetroArch
   description: Force stop RetroArch after the permissions launch.
   user_toggleable: false
@@ -323,8 +324,7 @@ steps:
     capabilities: []
     conflicts_with: []
   skip_if: []
-  params:
-    package_name: com.retroarch.aarch64
+  params: {}
   verify: []
 - id: extract_assets
   type: extract_archive
@@ -679,6 +679,7 @@ steps:
       path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
 - id: launch_retroarch
   type: launch_app
+  app_ref: retroarch
   name: Launch RetroArch
   description: Launch RetroArch again after permissions and optional config seeding.
   user_toggleable: true
@@ -697,6 +698,5 @@ steps:
     - app_launch
     conflicts_with: []
   skip_if: []
-  params:
-    package_name: com.retroarch.aarch64
+  params: {}
   verify: []

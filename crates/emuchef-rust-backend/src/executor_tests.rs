@@ -2587,6 +2587,91 @@ fn launch_and_force_stop_dry_run_match_compatibility_empty_outputs_and_internal_
 }
 
 #[test]
+fn app_aware_lifecycle_requires_the_reviewed_snapshot_and_concrete_target_before_device_calls() {
+    let app = crate::planner::ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.app".to_string(),
+    };
+    let mut launch = launch_app_step(
+        "example.recipe/launch",
+        "com.example.app",
+        Some("com.example.app.MainActivity"),
+    );
+    launch.app_id = Some(app.id.clone());
+    let mut stop = force_stop_app_step("example.recipe/stop", "com.example.app");
+    stop.app_id = Some(app.id.clone());
+    let mut valid = plan(vec![launch, stop]);
+    valid.apps.push(app.clone());
+    let (result, runner) = run_value(&valid, DryRunExecutorAdapters::default());
+    assert_eq!(result["success"], true);
+    assert_eq!(runner.adapters().device().commands().len(), 2);
+
+    let mut invalid_plans = Vec::new();
+    let mut missing = valid.clone();
+    missing.apps.clear();
+    invalid_plans.push(missing);
+    let mut duplicate = valid.clone();
+    duplicate.apps.push(app);
+    invalid_plans.push(duplicate);
+    let mut package = valid.clone();
+    package.steps[0].params.insert(
+        "package_name".to_string(),
+        literal(json!("com.example.other")),
+    );
+    invalid_plans.push(package);
+    let mut no_activity = valid.clone();
+    no_activity.steps[0].params.shift_remove("activity");
+    invalid_plans.push(no_activity);
+    let mut malformed_activity = valid.clone();
+    malformed_activity.steps[0]
+        .params
+        .insert("activity".to_string(), literal(json!(".MainActivity")));
+    invalid_plans.push(malformed_activity);
+    let mut dynamic = valid.clone();
+    dynamic.steps[0].params.insert(
+        "activity".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.other.outputs.activity".to_string(),
+        },
+    );
+    invalid_plans.push(dynamic);
+    let mut stop_package = valid.clone();
+    stop_package.steps[1].params.insert(
+        "package_name".to_string(),
+        literal(json!("com.example.other")),
+    );
+    invalid_plans.push(stop_package);
+
+    for invalid in invalid_plans {
+        let (result, runner) = run_value(&invalid, DryRunExecutorAdapters::default());
+        assert_eq!(result["success"], false, "{invalid:?}");
+        assert!(result["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["status"] == "failed"));
+        let commands = runner.adapters().device().commands();
+        if result["steps"][0]["status"] == "failed" {
+            assert!(
+                !commands.iter().any(|command| command[0] == "launch_app"),
+                "{invalid:?}"
+            );
+        }
+        if result["steps"][1]["status"] == "failed" {
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command[0] == "force_stop_app"),
+                "{invalid:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn device_app_failures_block_dependents_but_unrelated_steps_continue() {
     let mut dependent = wait_step("example.recipe/dependent", "Dependent", 1);
     dependent.dependencies = vec!["example.recipe/launch".to_string()];

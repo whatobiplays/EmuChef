@@ -301,6 +301,9 @@ impl RecipeDocument {
                 step_id,
                 user_toggleable,
             } => self.updated_step_user_toggleable_recipe(step_id, user_toggleable),
+            RecipeCommand::SetStepAppRef { step_id, app_ref } => {
+                self.updated_step_app_ref_recipe(step_id, app_ref)
+            }
             RecipeCommand::UpdateStepDependencies {
                 step_id,
                 dependencies,
@@ -857,6 +860,22 @@ impl RecipeDocument {
         Ok(recipe)
     }
 
+    /// Change only the step's App Definition reference. Existing parameters
+    /// remain authored so the editor can show and clear them explicitly.
+    fn updated_step_app_ref_recipe(
+        &self,
+        step_id: String,
+        app_ref: Option<String>,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        recipe.steps[index].app_ref = app_ref.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+        Ok(recipe)
+    }
+
     fn updated_step_dependencies_recipe(
         &self,
         step_id: String,
@@ -1178,7 +1197,7 @@ fn ref_matches(ref_value: &str, target_kind: RefTargetKind, target_id: &str) -> 
 }
 
 fn is_supported_step_param(step: &Step, param_name: &str) -> bool {
-    step_specs::step_spec_for(&step.type_name)
+    step_specs::authored_step_spec_for(step)
         .is_some_and(|spec| spec.params.contains_key(param_name))
 }
 

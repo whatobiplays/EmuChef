@@ -277,6 +277,11 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     let direct_https_apk = app_artifact.is_some_and(|artifact| {
         matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. })
     });
+    let lifecycle_target = step
+        .app_id
+        .as_ref()
+        .filter(|_| matches!(step.type_name.as_str(), "launch_app" | "force_stop_app"))
+        .map(|_| crate::planner::validated_plan_lifecycle_target(plan, step));
     let title = if step.type_name == "install_apk" {
         app.map(|app| format!("Install {}", app.name))
     } else {
@@ -285,7 +290,17 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     .or_else(|| non_blank(&step.name).map(str::to_string))
     .or_else(|| non_blank(&step.note).map(str::to_string))
     .unwrap_or_else(|| neutral_action_title(section).to_string());
-    let description = if let (
+    let description = if let Some(target) = lifecycle_target {
+        let target = match target {
+            Ok((package, Some(activity))) => format!("Target: {package}/{activity}."),
+            Ok((package, None)) => format!("Target package: {package}."),
+            Err(_) => "The reviewed app lifecycle target is invalid.".to_string(),
+        };
+        Some(match non_blank(&step.note).filter(|note| *note != title) {
+            Some(note) => format!("{note} {target}"),
+            None => target,
+        })
+    } else if let (
         Some(app),
         Some((provider, include_prereleases, asset_pattern, invert_asset_pattern)),
     ) = (app, late_bound_release)

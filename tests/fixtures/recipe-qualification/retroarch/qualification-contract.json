@@ -4,7 +4,18 @@
   "planningDevicePlan": "ayaneo.konkr_pocket_fit.base",
   "authoredSource": {
     "path": "authored/recipes/app.retroarch.provision.yaml",
-    "sha256": "659a0fdc0e407fcf2333b22bfcdce50dedcc1b7d81d44b8e4bd157a909c31d5a"
+    "sha256": "f695397e3db956d7150884cacf36242183bf41622f428d1a2ada04ad2f0ec4d2"
+  },
+  "appSource": {
+    "path": "authored/apps/retroarch.yaml",
+    "sha256": "1ae7a6aec4757ca5cc323a37f7d89795f23b38a6c20a3a0af65f86af4034f06f"
+  },
+  "appLifecycle": {
+    "appId": "retroarch",
+    "packageId": "com.retroarch.aarch64",
+    "launcherActivity": "com.retroarch.browser.mainmenu.MainMenuActivity",
+    "launchSteps": ["launch_retroarch_bootstrap", "launch_retroarch_permissions", "launch_retroarch"],
+    "forceStopSteps": ["stop_retroarch_after_bootstrap", "stop_retroarch_after_permissions"]
   },
   "selectedRecipes": ["app.retroarch.provision"],
   "expandedRecipes": ["app.retroarch.provision"],

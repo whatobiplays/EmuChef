@@ -315,7 +315,23 @@ function StepDetailPanel({
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadonlyText label="ID" value={step.id} />
         <ReadonlyText label="Type" value={step.type} />
-        {step.appRef ? <ReadonlyText label="App Definition context" value={step.appRef} /> : null}
+        {step.type === "launch_app" || step.type === "force_stop_app" ? (
+          <EditableTextField
+            label="App Definition ID"
+            placeholder="App Definition ID"
+            readOnly={readOnly}
+            value={step.appRef ?? ""}
+            onCommit={(value) => {
+              const appRef = value.trim() || null;
+              if (appRef === (step.appRef ?? null)) {
+                return false;
+              }
+              return onCommand({ type: "SetStepAppRef", stepId: step.id, appRef });
+            }}
+          />
+        ) : step.appRef ? (
+          <ReadonlyText label="App Definition context" value={step.appRef} />
+        ) : null}
         <EditableTextField
           label="Display Name"
           readOnly={readOnly}

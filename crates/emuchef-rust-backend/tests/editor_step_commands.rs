@@ -217,6 +217,24 @@ fn capabilities_stay_on_editor_session_surface() {
 fn step_command_codec_matches_compatibility_shapes() {
     assert_eq!(
         decode_recipe_command(
+            &json!({"type": "SetStepAppRef", "stepId": "pause", "appRef": "retroarch"})
+        )
+        .unwrap(),
+        RecipeCommand::SetStepAppRef {
+            step_id: "pause".to_string(),
+            app_ref: Some("retroarch".to_string())
+        },
+    );
+    assert_eq!(
+        decode_recipe_command(&json!({"type": "SetStepAppRef", "stepId": "pause", "appRef": null}))
+            .unwrap(),
+        RecipeCommand::SetStepAppRef {
+            step_id: "pause".to_string(),
+            app_ref: None
+        },
+    );
+    assert_eq!(
+        decode_recipe_command(
             &json!({"type": "AddStep", "stepId": "pause", "stepType": "wait", "name": "Pause", "index": 1})
         )
         .unwrap(),
@@ -293,6 +311,8 @@ fn malformed_or_out_of_scope_step_commands_are_invalid_command() {
         json!({"type": "UpdateStepBasics", "stepId": "pause", "name": "Pause"}),
         json!({"type": "UpdateStepBasics", "stepId": "pause", "name": "Pause", "description": 1}),
         json!({"type": "SetStepUserToggleable", "stepId": "pause", "userToggleable": "true"}),
+        json!({"type": "SetStepAppRef", "stepId": "pause"}),
+        json!({"type": "SetStepAppRef", "stepId": "pause", "appRef": 4}),
         json!({"type": "UpdateStepDependencies", "stepId": "pause", "dependencies": "resolve"}),
         json!({"type": "UpdateStepDependencies", "stepId": "pause", "dependencies": ["resolve", ""]}),
         json!({"type": "UpdateStepParams", "stepId": "pause"}),
@@ -307,6 +327,147 @@ fn malformed_or_out_of_scope_step_commands_are_invalid_command() {
         let error = decode_recipe_command(&payload).expect_err("payload should be invalid");
         assert_eq!(error.code, ApiErrorCode::InvalidCommand);
     }
+}
+
+#[test]
+fn step_app_ref_command_keeps_legacy_params_and_supports_diagnostics_undo_and_clear() {
+    let temp_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
+    let responses = sidecar_responses(&jsonl_input(vec![
+        open_request(&temp_recipe.path),
+        command_request(
+            "add",
+            json!({"type": "AddStep", "stepId": "launch", "stepType": "launch_app", "name": "Launch"}),
+        ),
+        command_request(
+            "legacy",
+            json!({"type": "UpdateStepParams", "stepId": "launch", "params": {"package_name": "com.example.legacy", "activity": ".MainActivity"}}),
+        ),
+        command_request(
+            "app-ref",
+            json!({"type": "SetStepAppRef", "stepId": "launch", "appRef": "retroarch"}),
+        ),
+        request("undo", "undo"),
+        request("redo", "redo"),
+        command_request(
+            "clear-params",
+            json!({"type": "UpdateStepParams", "stepId": "launch", "params": {}}),
+        ),
+        command_request(
+            "clear-app-ref",
+            json!({"type": "SetStepAppRef", "stepId": "launch", "appRef": "  "}),
+        ),
+        request("undo-again", "undo"),
+        request("redo-again", "redo"),
+        command_request(
+            "add-stop",
+            json!({"type": "AddStep", "stepId": "stop", "stepType": "force_stop_app", "name": "Stop"}),
+        ),
+        command_request(
+            "legacy-stop",
+            json!({"type": "UpdateStepParams", "stepId": "stop", "params": {"package_name": "com.example.legacy"}}),
+        ),
+        command_request(
+            "stop-app-ref",
+            json!({"type": "SetStepAppRef", "stepId": "stop", "appRef": "retroarch"}),
+        ),
+        request("undo-stop", "undo"),
+        request("redo-stop", "redo"),
+        command_request(
+            "clear-stop-params",
+            json!({"type": "UpdateStepParams", "stepId": "stop", "params": {}}),
+        ),
+        command_request(
+            "clear-stop-app-ref",
+            json!({"type": "SetStepAppRef", "stepId": "stop", "appRef": null}),
+        ),
+        request("undo-clear-stop", "undo"),
+        request("redo-clear-stop", "redo"),
+    ]));
+    assert_eq!(responses.len(), 19);
+    let with_ref = assert_changed(&responses[3]);
+    assert_eq!(step(with_ref, "launch")["appRef"], "retroarch");
+    assert_eq!(
+        step(with_ref, "launch")["params"],
+        json!({"package_name": "com.example.legacy", "activity": ".MainActivity"})
+    );
+    assert_eq!(with_ref["dirty"], true);
+    assert_eq!(with_ref["canUndo"], true);
+    assert!(with_ref["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["severity"] == "error"));
+    let undone = &responses[4]["result"]["document"];
+    assert!(step(undone, "launch")["appRef"].is_null());
+    assert_eq!(
+        step(undone, "launch")["params"],
+        step(with_ref, "launch")["params"]
+    );
+    assert_eq!(
+        step(&responses[5]["result"]["document"], "launch")["appRef"],
+        "retroarch"
+    );
+    let cleared = assert_changed(&responses[7]);
+    assert!(step(cleared, "launch")["appRef"].is_null());
+    assert_eq!(step(cleared, "launch")["params"], json!({}));
+    assert!(!cleared["yaml"].as_str().unwrap().contains("app_ref: ''"));
+    assert_eq!(
+        step(&responses[8]["result"]["document"], "launch")["appRef"],
+        "retroarch"
+    );
+    assert!(step(&responses[9]["result"]["document"], "launch")["appRef"].is_null());
+
+    let stop_with_ref = assert_changed(&responses[12]);
+    assert_eq!(step(stop_with_ref, "stop")["appRef"], "retroarch");
+    assert_eq!(
+        step(stop_with_ref, "stop")["params"],
+        json!({"package_name": "com.example.legacy"})
+    );
+    assert_eq!(stop_with_ref["dirty"], true);
+    assert!(stop_with_ref["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["severity"] == "error"));
+    let stop_yaml: serde_yaml::Value =
+        serde_yaml::from_str(stop_with_ref["yaml"].as_str().unwrap()).unwrap();
+    let stop_yaml_step = stop_yaml["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some("stop"))
+        .unwrap();
+    assert_eq!(stop_yaml_step["app_ref"].as_str(), Some("retroarch"));
+    assert_eq!(
+        stop_yaml_step["params"]["package_name"].as_str(),
+        Some("com.example.legacy")
+    );
+    assert!(step(&responses[13]["result"]["document"], "stop")["appRef"].is_null());
+    assert_eq!(
+        step(&responses[14]["result"]["document"], "stop")["appRef"],
+        "retroarch"
+    );
+    let stop_cleared = assert_changed(&responses[16]);
+    assert!(step(stop_cleared, "stop")["appRef"].is_null());
+    assert_eq!(step(stop_cleared, "stop")["params"], json!({}));
+    let cleared_yaml: serde_yaml::Value =
+        serde_yaml::from_str(stop_cleared["yaml"].as_str().unwrap()).unwrap();
+    let cleared_stop_yaml_step = cleared_yaml["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some("stop"))
+        .unwrap();
+    assert!(cleared_stop_yaml_step
+        .as_mapping()
+        .unwrap()
+        .get("app_ref")
+        .is_none());
+    assert_eq!(
+        step(&responses[17]["result"]["document"], "stop")["appRef"],
+        "retroarch"
+    );
+    assert!(step(&responses[18]["result"]["document"], "stop")["appRef"].is_null());
 }
 
 #[test]

@@ -580,6 +580,19 @@ fn eligible_launch_candidate(
         if step.type_name != "launch_app" || !succeeded_steps.contains(step.id.as_str()) {
             continue;
         }
+        if step.app_id.is_some() {
+            let candidate =
+                crate::planner::validated_plan_lifecycle_target(&report.reviewed_plan, step)
+                    .map_err(|reason| {
+                        ApiError::new(
+                            ApiErrorCode::LaunchUnavailable,
+                            "The retained app launch does not match its reviewed App snapshot.",
+                            json!({ "reason": reason }),
+                        )
+                    })?;
+            candidates.insert(candidate);
+            continue;
+        }
         let Some(ExecutionParamValue::Literal {
             value: package_name,
         }) = step.params.get("package_name")
@@ -2414,6 +2427,66 @@ mod tests {
         second_report.step_id = "recipe.example/launch-two".to_string();
         ambiguous.recipes[0].steps.push(second_report);
         assert!(eligible_launch_candidate(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn app_aware_launch_candidate_requires_matching_reviewed_snapshot_and_concrete_activity() {
+        let mut valid = eligible_report(ExecutionStatus::Succeeded);
+        valid.reviewed_plan.steps[0].app_id = Some("example-app".to_string());
+        valid.reviewed_plan.steps[0].params.insert(
+            "activity".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!("com.example.app.MainActivity"),
+            },
+        );
+        valid
+            .reviewed_plan
+            .apps
+            .push(crate::planner::ExecutionAppSnapshot {
+                id: "example-app".to_string(),
+                name: "Example App".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.example.app".to_string(),
+            });
+        assert_eq!(
+            eligible_launch_candidate(&valid).unwrap(),
+            (
+                "com.example.app".to_string(),
+                Some("com.example.app.MainActivity".to_string()),
+            )
+        );
+
+        let mut invalid = valid.clone();
+        invalid.reviewed_plan.apps.clear();
+        assert!(eligible_launch_candidate(&invalid).is_err());
+        invalid = valid.clone();
+        invalid
+            .reviewed_plan
+            .apps
+            .push(invalid.reviewed_plan.apps[0].clone());
+        assert!(eligible_launch_candidate(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.reviewed_plan.steps[0].params.insert(
+            "package_name".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!("com.example.other"),
+            },
+        );
+        assert!(eligible_launch_candidate(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.reviewed_plan.steps[0]
+            .params
+            .shift_remove("activity");
+        assert!(eligible_launch_candidate(&invalid).is_err());
+        invalid = valid.clone();
+        invalid.reviewed_plan.steps[0].params.insert(
+            "activity".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!(".MainActivity"),
+            },
+        );
+        assert!(eligible_launch_candidate(&invalid).is_err());
     }
 
     fn manager(root: &Path) -> ExecutionSessionManager {

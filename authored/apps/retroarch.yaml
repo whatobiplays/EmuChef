@@ -5,6 +5,7 @@ name: RetroArch (AArch64)
 description: Multi-system emulator frontend.
 category: emulator
 package_id: com.retroarch.aarch64
+launcher_activity: com.retroarch.browser.mainmenu.MainMenuActivity
 artifacts:
   apk:
     kind: apk
