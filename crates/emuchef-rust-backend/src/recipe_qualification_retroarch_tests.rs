@@ -25,7 +25,9 @@ use crate::executor::{
 use crate::planner::{
     BindingSource, ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionStep,
 };
-use crate::runtime_configuration::PlanConfigurationResult;
+use crate::runtime_configuration::{
+    DeviceContextOverride, PlanConfigurationResult, RuntimeCapabilityAvailability,
+};
 
 const TARGET_RECIPE: &str = "app.retroarch.provision";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.konkr_pocket_fit.base";
@@ -55,6 +57,7 @@ struct RetroArchQualificationContract {
     automated_status: String,
     physical_status: String,
     physical_cleanup_authority: String,
+    permission_android_api_level: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +125,7 @@ fn load_contract() -> RetroArchQualificationContract {
         contract.physical_cleanup_authority, "not_authorized_for_recipe_qualification",
         "RetroArch recipe qualification grants no physical cleanup authority"
     );
+    assert!(contract.permission_android_api_level > 0);
     assert!(!contract.live_network_required_for_automated_qualification);
     contract
 }
@@ -129,6 +133,18 @@ fn load_contract() -> RetroArchQualificationContract {
 /// Prepare the real authored RetroArch configuration through the production
 /// runtime-configuration path. No target serial and no device probe is used.
 fn plan_retroarch(config_path: Option<&Path>) -> PlanConfigurationResult {
+    plan_retroarch_with_permissions(
+        config_path,
+        None,
+        Some(load_contract().permission_android_api_level),
+    )
+}
+
+fn plan_retroarch_with_permissions(
+    config_path: Option<&Path>,
+    root_shell: Option<bool>,
+    android_api_level: Option<i64>,
+) -> PlanConfigurationResult {
     use crate::catalog_source::CatalogSnapshot;
     use crate::model::OrderedMap;
     use crate::runtime_configuration::{plan_configuration, ConfigurationContextRequest};
@@ -150,9 +166,17 @@ fn plan_retroarch(config_path: Option<&Path>) -> PlanConfigurationResult {
         device_plan: Some(QUALIFICATION_DEVICE_PLAN.to_string()),
         selected_recipes: Some(vec![TARGET_RECIPE.to_string()]),
         explicit_bindings,
-        device_context: None,
+        device_context: Some(DeviceContextOverride {
+            android_api_level,
+            ..DeviceContextOverride::default()
+        }),
         target_device: None,
-        runtime_capability_availability: None,
+        runtime_capability_availability: root_shell.map(|root_shell| {
+            RuntimeCapabilityAvailability {
+                root_shell,
+                app_data_write: root_shell,
+            }
+        }),
     })
     .expect("real authored RetroArch configuration should prepare")
 }
@@ -395,45 +419,211 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
 }
 
 #[test]
-fn retroarch_manage_external_storage_is_required_without_root() {
-    let result = plan_retroarch(None);
-    let plan = result.plan.expect("plan should be generated");
-    let step = generated_step_for_authored_id(&plan, "grant_retroarch_permissions");
-    let appops = match step.params.get("appops") {
-        Some(ExecutionParamValue::Literal {
-            value: Value::Array(actions),
-        }) => actions,
-        other => panic!("expected literal appops array, got {other:?}"),
-    };
-    let manage_external_storage = appops
-        .iter()
-        .find(|action| action.get("op").and_then(Value::as_str) == Some("MANAGE_EXTERNAL_STORAGE"))
-        .expect("RetroArch must declare MANAGE_EXTERNAL_STORAGE app-op automation");
-
-    assert_eq!(
-        manage_external_storage
-            .get("package_name")
-            .and_then(Value::as_str),
-        Some("com.retroarch.aarch64")
-    );
-    assert_eq!(
-        manage_external_storage.get("mode").and_then(Value::as_str),
-        Some("allow")
-    );
-    assert_eq!(
-        manage_external_storage
-            .get("required")
-            .and_then(Value::as_bool),
+fn retroarch_permission_sets_follow_rooted_and_unrooted_ordering_contract() {
+    let contract = load_contract();
+    let unrooted = plan_retroarch_with_permissions(
+        None,
+        Some(false),
+        Some(contract.permission_android_api_level),
+    )
+    .plan
+    .expect("unrooted baseline provisioning should remain plan-able");
+    let rooted = plan_retroarch_with_permissions(
+        None,
         Some(true),
-        "all-files access is required for unattended RetroArch provisioning"
+        Some(contract.permission_android_api_level),
+    )
+    .plan
+    .expect("rooted permission provisioning should be plan-able");
+
+    let unrooted_steps = serde_json::to_value(&unrooted).unwrap();
+    let unrooted_ids = unrooted_steps["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(unrooted_ids
+        .iter()
+        .any(|id| id.ends_with("/grant_retroarch_baseline")));
+    // The App Definition assigns all-files access to elevated, so an
+    // unrooted plan retains baseline grants and omits that root-only action.
+    assert!(!unrooted_ids
+        .iter()
+        .any(|id| id.ends_with("/grant_retroarch_elevated")));
+    let baseline = generated_step_for_authored_id(&unrooted, "grant_retroarch_baseline");
+    assert_eq!(
+        baseline.params.len(),
+        0,
+        "actions live only in permission_plan"
     );
-    assert!(
-        manage_external_storage
-            .get("when")
-            .and_then(Value::as_object)
-            .is_none_or(|when| !when.contains_key("rooted")),
-        "MANAGE_EXTERNAL_STORAGE must be attempted on supported non-root devices"
+    assert_eq!(
+        serde_json::to_value(&baseline.permission_plan).unwrap()["permission_set"],
+        "baseline"
     );
+    let baseline_actions = serde_json::to_value(&baseline.permission_plan).unwrap()["actions"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(baseline_actions.len(), 7);
+    assert!(baseline_actions.iter().all(|action| {
+        action["kind"] == "runtime_permission"
+            && action["package_name"] == RETROARCH_PACKAGE
+            && action["applicability"]["status"] == "applicable"
+    }));
+    let unrooted_launch = generated_step_for_authored_id(&unrooted, "launch_retroarch_permissions");
+    assert!(unrooted_launch
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.ends_with("/grant_retroarch_baseline")));
+
+    let rooted_steps = serde_json::to_value(&rooted).unwrap();
+    let rooted_ids = rooted_steps["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let baseline_index = rooted_ids
+        .iter()
+        .position(|id| id.ends_with("/grant_retroarch_baseline"))
+        .unwrap();
+    let elevated_index = rooted_ids
+        .iter()
+        .position(|id| id.ends_with("/grant_retroarch_elevated"))
+        .unwrap();
+    let launch_index = rooted_ids
+        .iter()
+        .position(|id| id.ends_with("/launch_retroarch_permissions"))
+        .unwrap();
+    // Baseline is a dependency of both following steps. The stable
+    // topological sort preserves their authored order when elevated and
+    // launch become ready together.
+    assert!(baseline_index < elevated_index && elevated_index < launch_index);
+    let elevated = generated_step_for_authored_id(&rooted, "grant_retroarch_elevated");
+    assert_eq!(
+        elevated.params.len(),
+        0,
+        "actions live only in permission_plan"
+    );
+    assert_eq!(
+        serde_json::to_value(&elevated.permission_plan).unwrap()["permission_set"],
+        "elevated"
+    );
+    assert_eq!(
+        serde_json::to_value(&elevated.permission_plan).unwrap()["actions"][0],
+        serde_json::json!({
+            "kind": "app_op",
+            "package_name": RETROARCH_PACKAGE,
+            "op": "MANAGE_EXTERNAL_STORAGE",
+            "mode": "allow",
+            "applicability": { "status": "applicable" }
+        })
+    );
+    assert!(elevated
+        .constraints
+        .capabilities
+        .iter()
+        .any(|capability| capability == "root_shell"));
+    let rooted_launch = generated_step_for_authored_id(&rooted, "launch_retroarch_permissions");
+    assert!(rooted_launch
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.ends_with("/grant_retroarch_baseline")));
+    assert!(!rooted_launch
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.ends_with("/grant_retroarch_elevated")));
+
+    let isolated_steps = |source: &ExecutionPlan, authored_ids: &[&str]| {
+        let mut isolated = source.clone();
+        isolated.steps = authored_ids
+            .iter()
+            .map(|authored_id| generated_step_for_authored_id(source, authored_id).clone())
+            .collect();
+        let baseline_id = isolated.steps[0].id.clone();
+        isolated.steps[0].dependencies.clear();
+        for step in isolated.steps.iter_mut().skip(1) {
+            step.dependencies = vec![baseline_id.clone()];
+        }
+        isolated
+    };
+    let unrooted_execution = isolated_steps(
+        &unrooted,
+        &["grant_retroarch_baseline", "launch_retroarch_permissions"],
+    );
+    let mut unrooted_runner = ExecutorRunner::new(ExecutorAdapters::default());
+    let unrooted_result = unrooted_runner.run(&unrooted_execution);
+    assert!(unrooted_result.success);
+    let unrooted_calls = unrooted_runner.adapters().device().commands();
+    let unrooted_permission_calls = unrooted_calls
+        .iter()
+        .filter(|call| {
+            call.first()
+                .is_some_and(|operation| operation == "permission_operation")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unrooted_permission_calls.len(), 7);
+    assert!(unrooted_permission_calls
+        .iter()
+        .all(|call| call.get(1).is_some_and(|set| set == "baseline")));
+    assert!(!unrooted_calls.iter().any(|call| call
+        .first()
+        .is_some_and(|operation| operation == "root_preflight")));
+    assert!(unrooted_calls
+        .iter()
+        .position(|call| call
+            .first()
+            .is_some_and(|operation| operation == "launch_app"))
+        .is_some_and(|launch_index| unrooted_calls
+            .iter()
+            .rposition(|call| call
+                .first()
+                .is_some_and(|operation| operation == "permission_operation"))
+            .is_some_and(|permission_index| permission_index < launch_index)));
+
+    let rooted_execution = isolated_steps(
+        &rooted,
+        &[
+            "grant_retroarch_baseline",
+            "grant_retroarch_elevated",
+            "launch_retroarch_permissions",
+        ],
+    );
+    let mut rooted_runner = ExecutorRunner::new(ExecutorAdapters::default());
+    let rooted_result = rooted_runner.run(&rooted_execution);
+    assert!(rooted_result.success);
+    let rooted_calls = rooted_runner.adapters().device().commands();
+    let rooted_operation_sequence = rooted_calls
+        .iter()
+        .filter_map(|call| match call.first().map(String::as_str) {
+            Some("permission_operation") => call.get(1).cloned(),
+            Some("root_preflight") => Some("root_preflight".to_string()),
+            Some("launch_app") => Some("launch_app".to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut expected_rooted_sequence = vec!["baseline".to_string(); 7];
+    expected_rooted_sequence.extend([
+        "root_preflight".to_string(),
+        "elevated".to_string(),
+        "launch_app".to_string(),
+    ]);
+    assert_eq!(rooted_operation_sequence, expected_rooted_sequence);
+}
+
+#[test]
+fn bounded_app_permission_actions_require_a_known_android_api_level() {
+    let result = plan_retroarch_with_permissions(None, Some(false), None);
+    assert!(result.plan.is_none());
+    let serialized = serde_json::to_value(result).unwrap();
+    let diagnostics = serialized["diagnostics"].as_array().unwrap();
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["code"] == "permission_api_level_unknown"
+            && diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Android API level"))
+    }));
 }
 
 #[test]
@@ -735,6 +925,13 @@ impl ExecutorDevice for FirstLaunchFailureDevice {
         <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
     }
 
+    fn apply_permission_operation(
+        &mut self,
+        operation: crate::executor::PermissionOperation,
+    ) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::apply_permission_operation(&mut self.inner, operation)
+    }
+
     fn launch_app(
         &mut self,
         package_name: &str,
@@ -810,7 +1007,8 @@ fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
     for suffix in [
         "/resolve_artifacts",
         "/install_retroarch",
-        "/grant_retroarch_permissions",
+        "/grant_retroarch_baseline",
+        "/grant_retroarch_elevated",
         "/copy_core_system_files",
         "/seed_retroarch_cfg",
         "/launch_retroarch",
@@ -905,7 +1103,8 @@ fn retroarch_first_launch_failure_blocks_dependent_work_truthfully() {
         .and_then(|record| record.message.as_deref())
         .is_some_and(|message| message.contains("deterministic RetroArch bootstrap stop failure")));
     for suffix in [
-        "/grant_retroarch_permissions",
+        "/grant_retroarch_baseline",
+        "/grant_retroarch_elevated",
         "/launch_retroarch_permissions",
         "/wait_for_retroarch_permissions",
         "/stop_retroarch_after_permissions",

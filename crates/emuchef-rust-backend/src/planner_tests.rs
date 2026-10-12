@@ -280,11 +280,15 @@ fn repo_baseline_planning_result_with_bindings(
     plan_id: &str,
     input_bindings: &[(&str, Value)],
 ) -> Value {
-    planning_result_value(repo_device_plan_planner_input_with_bindings_and_plan_id(
+    let mut input = repo_device_plan_planner_input_with_bindings_and_plan_id(
         device_plan_ref,
         plan_id,
         input_bindings,
-    ))
+    );
+    // Product planning fixtures that include RetroArch provide a known target
+    // API level so bounded App Definition actions can be resolved.
+    input.device_context.android_api_level = Some(35);
+    planning_result_value(input)
 }
 
 fn repo_device_plan_planner_input_with_bindings_and_plan_id(
@@ -409,7 +413,7 @@ fn repo_plan_e2e_input_for_device_plan(
     temp: &TempDir,
     binding_kinds: &[RepoPlanE2eBinding],
 ) -> PlannerInput {
-    PlannerInput::from_authored_device_plan(
+    let mut input = PlannerInput::from_authored_device_plan(
         repo_authored_root(),
         device_plan_ref,
         format!("plan.p7l.{device_plan_ref}.001"),
@@ -417,7 +421,10 @@ fn repo_plan_e2e_input_for_device_plan(
     )
     .unwrap_or_else(|error| {
         panic!("{device_plan_ref} should build current repository PlannerInput: {error}")
-    })
+    });
+    // These deterministic repository qualification plans model Android API 35.
+    input.device_context.android_api_level = Some(35);
+    input
 }
 
 fn repo_plan_e2e_bindings(
@@ -3848,6 +3855,7 @@ fn detected_context_planning_result_appends_manufacturer_mismatch_warning() {
             brand: Some("AYANEO".to_string()),
             model: Some("AYANEO Pocket S mini".to_string()),
             android_version: Some(13),
+            android_api_level: Some(35),
             ..DetectedDeviceFacts::default()
         },
     );
@@ -3881,6 +3889,7 @@ fn detected_context_planning_result_appends_brand_and_model_mismatch_warning() {
             brand: Some("Valve".to_string()),
             model: Some("Steam Deck".to_string()),
             android_version: Some(13),
+            android_api_level: Some(35),
             ..DetectedDeviceFacts::default()
         },
     );
@@ -3910,6 +3919,7 @@ fn detected_context_planning_result_appends_android_minimum_mismatch_warning() {
             brand: Some("AYANEO".to_string()),
             model: Some("AYANEO Pocket S mini".to_string()),
             android_version: Some(12),
+            android_api_level: Some(35),
             ..DetectedDeviceFacts::default()
         },
     );
@@ -3929,7 +3939,7 @@ fn detected_context_planning_result_appends_android_minimum_mismatch_warning() {
 }
 
 #[test]
-fn detected_context_planning_result_missing_detected_fields_do_not_warn() {
+fn detected_context_planning_result_missing_identity_fields_do_not_warn_with_known_api() {
     let plan_id = "plan.p8q.detected.missing_fields.001";
     let baseline =
         repo_baseline_planning_result_with_bindings("ayaneo.pocket_s_mini.base", plan_id, &[]);
@@ -3937,7 +3947,10 @@ fn detected_context_planning_result_missing_detected_fields_do_not_warn() {
         "ayaneo.pocket_s_mini.base",
         plan_id,
         &[],
-        &DetectedDeviceFacts::default(),
+        &DetectedDeviceFacts {
+            android_api_level: Some(35),
+            ..DetectedDeviceFacts::default()
+        },
     );
 
     assert_planning_result_stable_non_context_fields_eq(&baseline, &actual);
@@ -4666,20 +4679,24 @@ metadata: {{}}
 
 #[test]
 fn repo_device_plan_profile_context_can_plan_successfully_without_compatibility_or_devices() {
-    let first = planning_result_value(repo_device_plan_planner_input_with_bindings(
+    let mut first_input = repo_device_plan_planner_input_with_bindings(
         "ayaneo.pocket_s_mini.base",
         &[(
             "app.retroarch.provision/retroarch_cfg",
             json!("/tmp/emuchef-p7i-retroarch.cfg"),
         )],
-    ));
-    let second = planning_result_value(repo_device_plan_planner_input_with_bindings(
+    );
+    let mut second_input = repo_device_plan_planner_input_with_bindings(
         "ayaneo.pocket_s_mini.base",
         &[(
             "app.retroarch.provision/retroarch_cfg",
             json!("/tmp/emuchef-p7i-retroarch.cfg"),
         )],
-    ));
+    );
+    first_input.device_context.android_api_level = Some(35);
+    second_input.device_context.android_api_level = Some(35);
+    let first = planning_result_value(first_input);
+    let second = planning_result_value(second_input);
 
     assert_eq!(first, second);
     assert_planning_result_shape("repo device plan/profile context", &first);
@@ -4705,9 +4722,13 @@ fn repo_device_plan_profile_context_can_plan_successfully_without_compatibility_
         step_ids.contains(&"app.retroarch.provision/seed_retroarch_cfg"),
         "{step_ids:#?}"
     );
-    assert!(!serde_json::to_string(&first)
-        .expect("planning result should serialize")
-        .contains("permission_plan"));
+    assert!(!first["execution_plan"]
+        .as_object()
+        .unwrap()
+        .contains_key("permission_plan"));
+    let baseline = planner_step(&first, "app.retroarch.provision/grant_retroarch_baseline");
+    assert_eq!(baseline["params"], json!({}));
+    assert_eq!(baseline["permission_plan"]["permission_set"], "baseline");
 }
 
 #[test]
@@ -6147,6 +6168,12 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
         if step.contains_key("app_id") {
             expected_step_fields.push("app_id");
         }
+        let is_app_permission_step = step.get("type").and_then(Value::as_str)
+            == Some("grant_permissions")
+            && step.contains_key("app_id");
+        if is_app_permission_step {
+            expected_step_fields.push("permission_plan");
+        }
         assert_object_keys(
             &format!("{name}.execution_plan.steps[{index}]"),
             step,
@@ -6204,6 +6231,32 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
             step.get("verify").and_then(Value::as_array).is_some(),
             "{name} steps[{index}].verify should be an array"
         );
+        if is_app_permission_step {
+            let permission_plan = step
+                .get("permission_plan")
+                .and_then(Value::as_object)
+                .expect("App Definition permission steps should carry their typed plan");
+            assert!(
+                matches!(
+                    permission_plan
+                        .get("permission_set")
+                        .and_then(Value::as_str),
+                    Some("baseline" | "elevated")
+                ),
+                "{name} steps[{index}] should select a known permission set"
+            );
+            assert!(permission_plan
+                .get("actions")
+                .and_then(Value::as_array)
+                .is_some_and(|actions| !actions.is_empty()));
+            assert_eq!(
+                step.get("params")
+                    .and_then(Value::as_object)
+                    .map(serde_json::Map::len),
+                Some(0),
+                "{name} permission action facts must not be duplicated in params"
+            );
+        }
     }
 }
 
@@ -6692,6 +6745,139 @@ fn app_authority_rejects_unknown_step_app_reference() {
         panic!("ARMSX1 Recipe should refer to an App Definition artifact");
     };
     reference.app_ref = "missing-app".to_string();
+    assert_app_planning_error(input, &[armsx1_app_definition()], "app_definition_unknown");
+}
+
+#[test]
+fn unbounded_app_permission_actions_resolve_without_a_known_android_api_level() {
+    let mut app = armsx1_app_definition();
+    app.permission_sets = Some(crate::authored_models::AppPermissionSets {
+        baseline: Some(crate::authored_models::AppPermissionSet {
+            runtime: vec![crate::authored_models::AppRuntimePermissionAction {
+                permission: "android.permission.CAMERA".to_string(),
+                android_api_min: None,
+                android_api_max: None,
+            }],
+            app_ops: Vec::new(),
+        }),
+        elevated: None,
+    });
+    let params = ref_params(vec![
+        ("permission_set", ParamValue::Literal(json!("baseline"))),
+        ("policy", ParamValue::Literal(json!({"on_failure": "warn"}))),
+    ]);
+    let mut input = lifecycle_planner_input("grant_permissions", Some("armsx1"), params);
+    input.device_context.android_api_level = None;
+
+    let result = plan_execution_with_app_definitions(input, &[app]);
+
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let step = result
+        .execution_plan
+        .unwrap()
+        .steps
+        .into_iter()
+        .find(|step| step.type_name == "grant_permissions")
+        .unwrap();
+    assert!(step.params.is_empty());
+    assert!(matches!(
+        step.permission_plan.unwrap().actions[0].applicability(),
+        crate::planner::PermissionActionApplicability::Applicable
+    ));
+}
+
+#[test]
+fn bounded_elevated_permission_requires_api_level_before_root_capability_pruning() {
+    let mut app = armsx1_app_definition();
+    app.permission_sets = Some(crate::authored_models::AppPermissionSets {
+        baseline: None,
+        elevated: Some(crate::authored_models::AppPermissionSet {
+            runtime: vec![crate::authored_models::AppRuntimePermissionAction {
+                permission: "android.permission.POST_NOTIFICATIONS".to_string(),
+                android_api_min: Some(33),
+                android_api_max: None,
+            }],
+            app_ops: Vec::new(),
+        }),
+    });
+    let params = ref_params(vec![
+        ("permission_set", ParamValue::Literal(json!("elevated"))),
+        ("policy", ParamValue::Literal(json!({"on_failure": "warn"}))),
+    ]);
+    let mut input = lifecycle_planner_input("grant_permissions", Some("armsx1"), params);
+    input.device_context.android_api_level = None;
+    input.runtime_capabilities.root_shell = false;
+
+    assert_app_planning_error(input, &[app], "permission_api_level_unknown");
+}
+
+#[test]
+fn confirmed_out_of_range_app_permission_is_retained_with_its_reason() {
+    let mut app = armsx1_app_definition();
+    app.permission_sets = Some(crate::authored_models::AppPermissionSets {
+        baseline: Some(crate::authored_models::AppPermissionSet {
+            runtime: vec![crate::authored_models::AppRuntimePermissionAction {
+                permission: "android.permission.POST_NOTIFICATIONS".to_string(),
+                android_api_min: Some(33),
+                android_api_max: None,
+            }],
+            app_ops: Vec::new(),
+        }),
+        elevated: None,
+    });
+    let params = ref_params(vec![
+        ("permission_set", ParamValue::Literal(json!("baseline"))),
+        ("policy", ParamValue::Literal(json!({"on_failure": "warn"}))),
+    ]);
+    let mut input = lifecycle_planner_input("grant_permissions", Some("armsx1"), params);
+    input.device_context.android_api_level = Some(35);
+    input.target_device = Some(crate::planner::TargetDeviceBinding {
+        serial: "target-api-30".to_string(),
+        manufacturer: None,
+        model: None,
+        android_api_level: Some(30),
+    });
+
+    let result = plan_execution_with_app_definitions(input, &[app]);
+
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.unwrap();
+    assert_eq!(plan.device_context.android_api_level, Some(30));
+    let step = plan
+        .steps
+        .into_iter()
+        .find(|step| step.type_name == "grant_permissions")
+        .unwrap();
+    assert_eq!(
+        step.permission_plan.unwrap().actions[0].applicability(),
+        &crate::planner::PermissionActionApplicability::NotApplicable {
+            reason: crate::planner::PermissionNotApplicableReason::AndroidApiBelowMinimum {
+                actual: 30,
+                minimum: 33,
+            },
+        }
+    );
+}
+
+#[test]
+fn new_form_permission_reference_is_validated_before_capability_pruning() {
+    let params = ref_params(vec![
+        ("permission_set", ParamValue::Literal(json!("baseline"))),
+        ("policy", ParamValue::Literal(json!({"on_failure": "warn"}))),
+    ]);
+    let mut input = lifecycle_planner_input("grant_permissions", Some("missing-app"), params);
+    input.runtime_capabilities.shell_command = false;
+
     assert_app_planning_error(input, &[armsx1_app_definition()], "app_definition_unknown");
 }
 

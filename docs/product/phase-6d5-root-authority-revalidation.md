@@ -43,17 +43,24 @@ constraints, the application-private path boundary, and the operation rules:
 `copy_files` private sources or destinations, device-side `extract_archive`
 private destinations that reach `mkdir_p`, and private `path_exists` or
 `file_exists` conditions require root. Equivalent shared-storage destinations
-do not. Current permission commands remain nonprivileged unless a private
-predicate itself requires root. Actual command-time privilege remains
-adapter-owned; the executor runner does not maintain a second list of
-privileged command shapes.
+do not. Legacy permission commands and new-form baseline permission actions
+remain nonprivileged. Baseline steps require `shell_command`; elevated steps
+require both `shell_command` and `root_shell` and are omitted if either
+capability is unavailable. New-form elevated permission steps require root
+through the same shared Rust/Tauri root-work contract. Their closed typed
+operations grant runtime permissions or set app-ops to `allow`; they do not
+accept shell commands. Actual command-time privilege remains adapter-owned; the
+executor runner does not maintain a second list of privileged command shapes.
 
 `ExecutorDevice::configure_root_authority` and
 `ExecutorDevice::owns_per_command_root_authority` are lifecycle/configuration
-hooks. The executor-visible operation surface remains the established thirteen
-device operations. `RealAdbDevice` owns per-command root checks; dry-run devices
-retain the existing cached fake preflight behavior and issue zero new root
-probes.
+hooks. The executor-visible operation surface has fourteen typed device
+operations, including the required permission-operation method. Baseline
+permissions use ordinary ADB shell execution. Elevated permissions use the
+existing guarded `su -c` path, with reviewed root authorization, identity
+checks, and a fresh root revalidation for each command. Dry-run devices
+simulate the typed operation and retain the existing cached fake preflight
+behavior.
 
 ## 3. Per-command ordering and classification
 
@@ -98,12 +105,21 @@ post-operation identity marker is emitted. If the recheck succeeds, the root
 classification is returned and the intended privileged command count remains
 zero.
 
-Current permission actions remain nonprivileged and receive zero Phase 6D.5
-root probes. They continue to use their existing `adb shell pm grant` and
-`adb shell appops set` commands and are treated as mutating intended commands
-for prior-mutation accounting. Any future root-wrapped permission operation
-must use the adapter-owned privileged-shell seam and will then receive the same
-per-command root verification automatically.
+At the Phase 6D.5 implementation point, permission actions were ordinary,
+non-root ADB shell commands and therefore received zero Phase 6D.5 root probes.
+That description records the historical implementation; current Issue #16
+behavior distinguishes legacy and new-form permission actions:
+
+- Legacy permission commands and new-form baseline actions use ordinary, non-root
+  ADB shell commands. They require `shell_command` and do not run root preflight.
+- New-form elevated actions use the closed typed permission operation. They
+  require reviewed root authorization and run through the existing guarded
+  `su -c` path. The real adapter checks identity and freshly revalidates root
+  before each privileged command.
+
+Capability eligibility, reviewed authorization, root preflight, and actual
+command privilege are separate checks. Every permission command remains a
+mutating intended command for prior-mutation accounting.
 
 ## 4. Mutation evidence and partial changes
 

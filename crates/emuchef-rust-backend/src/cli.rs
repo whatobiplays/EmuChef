@@ -1199,6 +1199,10 @@ fn parse_steps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionStep>, CliErro
         .map(|item| {
             let mapping = as_mapping(item, "execution step must be a mapping")?;
             let constraints = optional_mapping_value(mapping, "constraints")?;
+            let permission_plan = mapping
+                .get(yaml_key("permission_plan"))
+                .map(parse_permission_plan)
+                .transpose()?;
             let id = required_string(mapping, "id")?;
             let type_name = required_string(mapping, "type")?;
             let name = required_string(mapping, "name")?;
@@ -1225,12 +1229,21 @@ fn parse_steps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionStep>, CliErro
                         .transpose()?
                         .unwrap_or_default(),
                 },
+                permission_plan,
                 params: parse_params(mapping)?,
                 skip_if: parse_conditions(mapping, "skip_if")?,
                 verify: parse_conditions(mapping, "verify")?,
             })
         })
         .collect()
+}
+
+fn parse_permission_plan(value: &YamlValue) -> Result<crate::planner::PermissionPlan, CliError> {
+    serde_json::from_value(yaml_to_json(value)?).map_err(|error| {
+        CliError::Message(format!(
+            "Execution step permission_plan is invalid: {error}"
+        ))
+    })
 }
 
 fn parse_params(
@@ -1491,6 +1504,111 @@ mod tests {
     }
 
     #[test]
+    fn apply_plan_parser_retains_and_executes_step_local_permission_authority() {
+        let plan_value = json!({
+            "id": "plan.permission-parser",
+            "source": {
+                "device_profile_ref": "profile.example",
+                "device_plan_ref": "plan.example",
+                "selected_recipe_refs": ["recipe.example"],
+                "expanded_recipe_refs": ["recipe.example"]
+            },
+            "apps": [{
+                "id": "retroarch",
+                "name": "RetroArch",
+                "package_id": "com.retroarch.aarch64"
+            }],
+            "device_context": {
+                "manufacturer": "Example",
+                "model": "Example",
+                "android_version": 15,
+                "android_api_level": 35,
+                "device_tags": []
+            },
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": false,
+                "shared_storage_write": false,
+                "app_launch": false,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "inputs": [],
+            "artifacts": [],
+            "steps": [{
+                "id": "recipe.example/grant",
+                "recipe_ref": "recipe.example",
+                "app_id": "retroarch",
+                "type": "grant_permissions",
+                "name": "Grant baseline permissions",
+                "dependencies": [],
+                "constraints": {
+                    "capabilities": ["shell_command"],
+                    "conflicts_with": []
+                },
+                "permission_plan": {
+                    "permission_set": "baseline",
+                    "on_failure": "warn",
+                    "actions": [
+                        {
+                            "kind": "runtime_permission",
+                            "package_name": "com.retroarch.aarch64",
+                            "permission": "android.permission.CAMERA",
+                            "applicability": {"status": "applicable"}
+                        },
+                        {
+                            "kind": "app_op",
+                            "package_name": "com.retroarch.aarch64",
+                            "op": "MANAGE_EXTERNAL_STORAGE",
+                            "mode": "allow",
+                            "android_api_max": 34,
+                            "applicability": {
+                                "status": "not_applicable",
+                                "reason": {
+                                    "reason": "android_api_above_maximum",
+                                    "actual": 35,
+                                    "maximum": 34
+                                }
+                            }
+                        }
+                    ]
+                },
+                "params": {},
+                "skip_if": [],
+                "verify": []
+            }],
+            "schema_version": 1,
+            "kind": "execution_plan"
+        });
+
+        let plan = parse_execution_plan_json(&plan_value).expect("plan should parse");
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["steps"][0]["permission_plan"],
+            plan_value["steps"][0]["permission_plan"]
+        );
+
+        let mut runner = ExecutorRunner::new(ExecutorAdapters::default());
+        let result = runner.run(&plan);
+
+        assert!(result.success);
+        assert_eq!(
+            result.steps[0].outputs["permission_results"].value["actions"][0]["status"],
+            "executed"
+        );
+        assert_eq!(
+            result.steps[0].outputs["permission_results"].value["actions"][1]["status"],
+            "not_applicable"
+        );
+        assert_eq!(runner.adapters().device().commands().len(), 1);
+        assert_eq!(
+            runner.adapters().device().commands()[0][0],
+            "permission_operation"
+        );
+    }
+
+    #[test]
     fn canonical_plan_dispatches_to_rust_planner() {
         let output = run_plan_with_adb_runner(
             &[
@@ -1498,6 +1616,8 @@ mod tests {
                 repo_authored_root(),
                 "--device-plan".to_string(),
                 "ayaneo.pocket_s_mini.base".to_string(),
+                "--adb".to_string(),
+                "fixture-adb".to_string(),
             ],
             &FakeProbeRunner {
                 calls: RefCell::new(Vec::new()),

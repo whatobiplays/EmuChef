@@ -808,14 +808,17 @@ contract and evidence are recorded in
 `RESULT.md`.
 
 The private executor identity guard samples complete, stable same-serial
-evidence at the existing operation boundary without adding a public executor
-method or changing the current thirteen-operation surface. Required product,
-device, board, hardware, API, ABI, build-fingerprint, and normalized Android ID
-fields must be present; the reviewed manufacturer/model/API target is checked
-before mutation. Optional hardware SKU absence is represented explicitly, and
-sample disagreement or incomplete evidence is unverified rather than treated
-as a match. Android IDs are normalized lowercase 1–16 digit hex values with
-zero, placeholder, null, unknown, malformed, and overlong values rejected.
+evidence at the existing operation boundary without adding a public identity
+method. At the Phase 6D.4 completion point, the executor exposed thirteen
+operations. Issue #16 adds the required typed permission operation, bringing
+the current `ExecutorDevice` interface to fourteen executor-visible
+operations. Required product, device, board, hardware, API, ABI,
+build-fingerprint, and normalized Android ID fields must be present; the
+reviewed manufacturer/model/API target is checked before mutation. Optional
+hardware SKU absence is represented explicitly, and sample disagreement or
+incomplete evidence is unverified rather than treated as a match. Android IDs
+are normalized lowercase 1–16 digit hex values with zero, placeholder, null,
+unknown, malformed, and overlong values rejected.
 
 Pre-operation identity changes or unverified evidence fail-stop before the
 operation. A completed operation receives a bounded post-operation check only

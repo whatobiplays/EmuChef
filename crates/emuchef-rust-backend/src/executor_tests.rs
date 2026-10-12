@@ -15,14 +15,16 @@ use crate::executor::identity::IdentityCheckPhase;
 use crate::executor::{
     adb::{AdbCommandError, FakeAdbCommandExecutor, RealAdbDevice},
     map_adb_error, DeviceOperationKind, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
-    OperationLifecycle, StepFailureKind,
+    OperationLifecycle, PermissionOperation, StepFailureKind,
 };
 use crate::model::OrderedMap;
 use crate::owned_process::{ProcessCleanup, ProcessFailureKind, ProcessOperation};
 use crate::planner::{
-    plan_execution, DeviceContext, ExecutionArtifact, ExecutionInputValue, ExecutionParamValue,
-    ExecutionPlan, ExecutionPlanSource, ExecutionStep, ExecutionStepCondition,
-    ExecutionStepConstraints, PlannerInput, RuntimeCapabilities, RuntimeValue, TargetDeviceBinding,
+    plan_execution, DeviceContext, ExecutionAppSnapshot, ExecutionArtifact, ExecutionInputValue,
+    ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep, ExecutionStepCondition,
+    ExecutionStepConstraints, PermissionActionApplicability, PermissionFailurePolicy,
+    PermissionNotApplicableReason, PermissionPlan, PermissionPlanAction, PermissionSetKind,
+    PlannerInput, RuntimeCapabilities, RuntimeValue, TargetDeviceBinding,
 };
 
 fn golden_path(name: &str) -> PathBuf {
@@ -92,6 +94,52 @@ fn plan_with_artifacts(
     }
 }
 
+fn app_permission_action(
+    permission: &str,
+    applicability: PermissionActionApplicability,
+) -> PermissionPlanAction {
+    PermissionPlanAction::RuntimePermission {
+        package_name: "com.example.permission".to_string(),
+        permission: permission.to_string(),
+        android_api_min: None,
+        android_api_max: None,
+        applicability,
+    }
+}
+
+fn app_permission_plan(
+    permission_set: PermissionSetKind,
+    on_failure: PermissionFailurePolicy,
+    actions: Vec<PermissionPlanAction>,
+) -> ExecutionPlan {
+    let mut execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/permission-plan".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: Some("permission-app".to_string()),
+        type_name: "grant_permissions".to_string(),
+        name: "Permission plan".to_string(),
+        note: "Permission plan".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        permission_plan: Some(PermissionPlan {
+            permission_set,
+            on_failure,
+            actions,
+        }),
+        params: OrderedMap::new(),
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "permission-app".to_string(),
+        name: "Permission App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.permission".to_string(),
+    });
+    execution_plan
+}
+
 fn app_context_install_plan(
     url: String,
     package_id: &str,
@@ -116,6 +164,7 @@ fn app_context_install_plan(
         note: "Resolve app APK".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params: resolve_params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -136,6 +185,7 @@ fn app_context_install_plan(
         note: "Install app".to_string(),
         dependencies: vec!["example.recipe/resolve".to_string()],
         constraints: constraints(),
+        permission_plan: None,
         params: install_params,
         skip_if: Vec::new(),
         verify: vec![ExecutionStepCondition {
@@ -192,6 +242,7 @@ fn download_remote_file_step(
         note: "Download Remote File".to_string(),
         dependencies,
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -276,6 +327,7 @@ fn wait_step(id: &str, name: &str, duration_ms: i64) -> ExecutionStep {
         note: name.to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -370,6 +422,303 @@ fn reviewed_root_authorization_requires_actual_root_work_and_matching_capabiliti
     let authorized = plan(vec![rooted]);
     assert!(crate::executor::reviewed_plan_requires_root(&authorized));
     assert!(crate::executor::reviewed_root_authorized(&authorized));
+
+    let elevated = app_permission_plan(
+        PermissionSetKind::Elevated,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action(
+            "android.permission.MANAGE_EXTERNAL_STORAGE",
+            PermissionActionApplicability::Applicable,
+        )],
+    );
+    assert!(crate::executor::reviewed_plan_requires_root(&elevated));
+    assert!(crate::executor::reviewed_root_authorized(&elevated));
+
+    let elevated_inapplicable = app_permission_plan(
+        PermissionSetKind::Elevated,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action(
+            "android.permission.MANAGE_EXTERNAL_STORAGE",
+            PermissionActionApplicability::NotApplicable {
+                reason: crate::planner::PermissionNotApplicableReason::AndroidApiBelowMinimum {
+                    actual: 29,
+                    minimum: 30,
+                },
+            },
+        )],
+    );
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &elevated_inapplicable
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(
+        &elevated_inapplicable
+    ));
+
+    let baseline = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action(
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        )],
+    );
+    assert!(!crate::executor::reviewed_plan_requires_root(&baseline));
+    assert!(!crate::executor::reviewed_root_authorized(&baseline));
+}
+
+#[test]
+fn app_permission_warn_policy_records_failures_and_runs_independent_actions() {
+    let permissions = [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.POST_NOTIFICATIONS",
+    ];
+    let mut execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        permissions
+            .iter()
+            .map(|permission| {
+                app_permission_action(permission, PermissionActionApplicability::Applicable)
+            })
+            .collect(),
+    );
+    execution_plan.runtime_capabilities.root_shell = false;
+    let mut adapters = DryRunExecutorAdapters::default();
+    for permission in [permissions[0], permissions[2]] {
+        adapters.device_mut().fail_permission_operation(
+            PermissionOperation::GrantRuntimePermission {
+                package_name: "com.example.permission".to_string(),
+                permission: permission.to_string(),
+                permission_set: PermissionSetKind::Baseline,
+            },
+            "permission denied",
+        );
+    }
+
+    let (actual, runner) = run_value(&execution_plan, adapters);
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    let actions = actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        actions
+            .iter()
+            .map(|action| action["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["failed", "executed", "failed"]
+    );
+    assert!(actions
+        .iter()
+        .all(|action| action["permission_set"] == "baseline"));
+    let calls = runner.adapters().device().commands();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call
+                .first()
+                .is_some_and(|kind| kind == "permission_operation"))
+            .count(),
+        3
+    );
+    assert!(!calls
+        .iter()
+        .any(|call| call.first().is_some_and(|kind| kind == "root_preflight")));
+}
+
+#[test]
+fn app_permission_fail_policy_runs_remaining_actions_and_preserves_all_results() {
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters.device_mut().fail_permission_operation(
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
+        "permission denied",
+    );
+    let execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Fail,
+        [
+            "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
+        ]
+        .iter()
+        .map(|permission| {
+            app_permission_action(permission, PermissionActionApplicability::Applicable)
+        })
+        .collect(),
+    );
+
+    let (actual, runner) = run_value(&execution_plan, adapters);
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(actual["steps"][0]["message"], "permission denied");
+    let actions = actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0]["status"], "failed");
+    assert_eq!(actions[1]["status"], "executed");
+    assert!(!runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .any(|call| call.first().is_some_and(|kind| kind == "root_preflight")));
+}
+
+#[test]
+fn unsupported_elevated_permission_operation_is_not_downgraded_by_warn() {
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters.device_mut().fail_permission_operation_with_error(
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Elevated,
+        },
+        crate::executor::DeviceOperationError {
+            kind: DeviceOperationKind::RootAuthorityUnverified,
+            message: "This adapter cannot perform elevated permission operations.".to_string(),
+            cleanup: None,
+        },
+    );
+    let execution_plan = app_permission_plan(
+        PermissionSetKind::Elevated,
+        PermissionFailurePolicy::Warn,
+        [
+            "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
+        ]
+        .iter()
+        .map(|permission| {
+            app_permission_action(permission, PermissionActionApplicability::Applicable)
+        })
+        .collect(),
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+
+    let result = runner.run(&execution_plan);
+
+    assert!(!result.success);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Failed
+    );
+    assert_eq!(
+        result.steps[0].failure_kind,
+        Some(StepFailureKind::RootAuthorityUnverified)
+    );
+    let actions = result.steps[0].outputs["permission_results"].value["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(actions.len(), 1, "safety failures stop remaining actions");
+    assert_eq!(actions[0]["status"], "failed");
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 1);
+}
+
+#[test]
+fn selected_elevated_permission_step_with_no_applicable_actions_skips_before_root_preflight() {
+    let execution_plan = app_permission_plan(
+        PermissionSetKind::Elevated,
+        PermissionFailurePolicy::Fail,
+        vec![app_permission_action(
+            "android.permission.MANAGE_EXTERNAL_STORAGE",
+            PermissionActionApplicability::NotApplicable {
+                reason: PermissionNotApplicableReason::AndroidApiBelowMinimum {
+                    actual: 28,
+                    minimum: 30,
+                },
+            },
+        )],
+    );
+    let mut runner = ExecutorRunner::new(DryRunExecutorAdapters::default());
+
+    let result = runner.run(&execution_plan);
+
+    assert!(result.success);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Skipped
+    );
+    let actions = result.steps[0].outputs["permission_results"].value["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["status"], "not_applicable");
+    assert_eq!(
+        actions[0]["reason"],
+        "Android API level 28 is below the action minimum of 30."
+    );
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 0);
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn invalid_app_permission_identity_fails_before_device_calls_without_legacy_fallback() {
+    let mut execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action(
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        )],
+    );
+    let Some(PermissionPlanAction::RuntimePermission { package_name, .. }) = execution_plan.steps
+        [0]
+    .permission_plan
+    .as_mut()
+    .unwrap()
+    .actions
+    .first_mut() else {
+        unreachable!();
+    };
+    *package_name = "com.example.other".to_string();
+    let mut runner = ExecutorRunner::new(DryRunExecutorAdapters::default());
+
+    let result = runner.run(&execution_plan);
+
+    assert!(!result.success);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Failed
+    );
+    assert!(result.steps[0]
+        .message
+        .as_deref()
+        .is_some_and(|message| message.contains("package differs from the app snapshot")));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn canonical_execution_plan_digest_covers_step_local_permission_authority() {
+    let mut original = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action(
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        )],
+    );
+    let original_digest = crate::plan_digest::execution_plan_digest(&original).unwrap();
+    let Some(PermissionPlanAction::RuntimePermission { permission, .. }) = original.steps[0]
+        .permission_plan
+        .as_mut()
+        .unwrap()
+        .actions
+        .first_mut()
+    else {
+        unreachable!();
+    };
+    *permission = "android.permission.RECORD_AUDIO".to_string();
+
+    let changed_digest = crate::plan_digest::execution_plan_digest(&original).unwrap();
+
+    assert_ne!(original_digest, changed_digest);
 }
 
 #[test]
@@ -383,6 +732,7 @@ fn reviewed_root_authorization_classifies_input_bound_copy_destinations() {
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params: [
             (
                 "source".to_string(),
@@ -588,6 +938,7 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1090,6 +1441,7 @@ fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
         note: "Extract Archive".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1118,6 +1470,7 @@ fn install_apk_step(id: &str, apk_path: &Path, replace_existing: bool) -> Execut
         note: "Install APK".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1189,6 +1542,7 @@ fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> Exec
         note: "Launch App".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1207,6 +1561,7 @@ fn force_stop_app_step(id: &str, package_name: &str) -> ExecutionStep {
         note: "Force Stop App".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1359,6 +1714,7 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
         note: "Grant".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1406,6 +1762,7 @@ fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_bl
             note: "Grant Fail".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1455,6 +1812,7 @@ fn real_device_timeout_fails_current_step_and_leaves_later_steps_unscheduled() {
             note: "Timeout".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1508,6 +1866,7 @@ fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_step
             note: "First".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params: first_params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1521,6 +1880,7 @@ fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_step
             note: "Transport".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params: second_params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1593,6 +1953,7 @@ fn real_device_storage_failure_stops_after_prior_evidence_and_keeps_later_steps_
             note: "First".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params: first_params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1606,6 +1967,7 @@ fn real_device_storage_failure_stops_after_prior_evidence_and_keeps_later_steps_
             note: "Storage".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params: second_params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1706,6 +2068,7 @@ fn transport_failure_during_verification_preserves_completed_operation_outputs()
         note: "Verify transport".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1759,6 +2122,7 @@ fn optional_permission_transport_failure_cannot_be_downgraded_or_followed() {
         note: "Optional".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1901,6 +2265,7 @@ fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_e
         note: "First".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params: first_params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -1923,6 +2288,7 @@ fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_e
         note: "Second".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params: second_params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -2022,6 +2388,7 @@ fn optional_permission_command_failure_is_reported_without_failing_the_step() {
         note: "Grant Optional".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -2077,6 +2444,7 @@ fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
         note: "Grant Require All".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -2486,6 +2854,7 @@ fn install_apk_validation_stays_at_compatibility_executor_layer_with_compatibili
         note: "Invalid Runtime".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -2756,6 +3125,7 @@ fn permission_required_failure_preserves_partial_permission_results_like_compati
         note: "Grant Partial".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -2841,6 +3211,7 @@ fn permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
         note: "Grant Matrix".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -3445,6 +3816,7 @@ fn executor_can_use_explicit_real_adb_device_for_selected_handlers() {
         note: "Grant".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -3816,6 +4188,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
         note: "Extract".to_string(),
         dependencies: vec!["example.recipe/resolve".to_string()],
         constraints: constraints(),
+        permission_plan: None,
         params: extract_params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -3829,6 +4202,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
         note: "Copy".to_string(),
         dependencies: vec!["example.recipe/extract".to_string()],
         constraints: constraints(),
+        permission_plan: None,
         params: copy_params,
         skip_if: Vec::new(),
         verify: vec![
@@ -3875,6 +4249,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
                 note: "Resolve".to_string(),
                 dependencies: Vec::new(),
                 constraints: constraints(),
+                permission_plan: None,
                 params: resolve_params,
                 skip_if: Vec::new(),
                 verify: Vec::new(),
@@ -3984,6 +4359,7 @@ fn unsupported_artifact_scheme_fails_without_network_download_attempt() {
                 note: "Resolve".to_string(),
                 dependencies: Vec::new(),
                 constraints: constraints(),
+                permission_plan: None,
                 params: resolve_params,
                 skip_if: Vec::new(),
                 verify: Vec::new(),
@@ -4049,6 +4425,7 @@ fn http_status_failure_blocks_dependents_allows_unrelated_steps_and_cleans_parti
                 note: "Resolve".to_string(),
                 dependencies: Vec::new(),
                 constraints: constraints(),
+                permission_plan: None,
                 params: resolve_params,
                 skip_if: Vec::new(),
                 verify: Vec::new(),
@@ -4481,6 +4858,7 @@ fn copy_replace_deletes_only_inside_fake_device_root() {
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -4538,6 +4916,7 @@ fn copy_respects_resolved_file_and_directory_target_kinds() {
             note: "Copy".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
+            permission_plan: None,
             params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -4606,6 +4985,7 @@ fn copy_sync_removes_destination_only_files_from_directory_source() {
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -4659,6 +5039,7 @@ fn copy_rejects_destination_traversal_before_writing() {
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -4716,6 +5097,7 @@ fn copy_rejects_fake_device_symlink_escape() {
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -4772,6 +5154,7 @@ fn copy_rejects_symlinked_fake_device_root_before_writing() {
         note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
+        permission_plan: None,
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
@@ -4899,6 +5282,7 @@ fn downloaded_local_path_ref_installs_the_host_apk() {
         note: "Install Downloaded APK".to_string(),
         dependencies: vec!["download".to_string()],
         constraints: constraints(),
+        permission_plan: None,
         params: install_params,
         skip_if: Vec::new(),
         verify: Vec::new(),

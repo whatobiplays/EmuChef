@@ -1227,12 +1227,21 @@ fn collect_permission_warnings(
         .and_then(Value::as_array);
     for action in actions.into_iter().flatten() {
         if action.get("status").and_then(Value::as_str) == Some("failed") {
+            let planned_action = action.get("permission_set").is_some();
             report.warnings.push(ExecutionIssue {
-                code: "optional_permission_failed".to_string(),
+                code: if planned_action {
+                    "permission_action_failed".to_string()
+                } else {
+                    "optional_permission_failed".to_string()
+                },
                 message: action
                     .get("message")
                     .and_then(Value::as_str)
-                    .unwrap_or("An optional permission action failed.")
+                    .unwrap_or(if planned_action {
+                        "A permission action failed under the warning policy."
+                    } else {
+                        "An optional permission action failed."
+                    })
                     .to_string(),
                 recipe_id: recipe_id.clone(),
                 step_id: Some(step_id.to_string()),
@@ -1486,9 +1495,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::executor::StepRunRecord;
     use crate::planner::{
-        DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlanSource,
-        ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepConstraints, RuntimeCapabilities,
+        DeviceContext, ExecutionAppSnapshot, ExecutionArtifact, ExecutionParamValue,
+        ExecutionPlanSource, ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepConstraints,
+        PermissionActionApplicability, PermissionFailurePolicy, PermissionPlan,
+        PermissionPlanAction, PermissionSetKind, RuntimeCapabilities,
     };
 
     #[test]
@@ -1572,6 +1584,131 @@ mod tests {
         assert_eq!(overall_status(&result, false), ExecutionStatus::Failed);
         result.cancelled = true;
         assert_eq!(overall_status(&result, false), ExecutionStatus::Cancelled);
+    }
+
+    #[test]
+    fn planned_permission_warn_and_fail_policies_produce_truthful_terminal_reports() {
+        for (policy, step_status, success, expected_status) in [
+            (
+                "warn",
+                StepRunStatus::Executed,
+                true,
+                ExecutionStatus::SucceededWithWarnings,
+            ),
+            (
+                "fail",
+                StepRunStatus::Failed,
+                false,
+                ExecutionStatus::Failed,
+            ),
+        ] {
+            let execution_id = format!("execution-permission-{policy}");
+            let mut plan = test_plan(&format!("plan-permission-{policy}"));
+            plan.apps.push(ExecutionAppSnapshot {
+                id: "permission-app".to_string(),
+                name: "Permission App".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.example.permission".to_string(),
+            });
+            let step = &mut plan.steps[0];
+            step.type_name = "grant_permissions".to_string();
+            step.app_id = Some("permission-app".to_string());
+            step.params.clear();
+            step.permission_plan = Some(PermissionPlan {
+                permission_set: PermissionSetKind::Baseline,
+                on_failure: if policy == "warn" {
+                    PermissionFailurePolicy::Warn
+                } else {
+                    PermissionFailurePolicy::Fail
+                },
+                actions: vec![PermissionPlanAction::RuntimePermission {
+                    package_name: "com.example.permission".to_string(),
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                    applicability: PermissionActionApplicability::Applicable,
+                }],
+            });
+            let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+            let mut report =
+                initial_report(&execution_id, &plan, &digest, ExecutionMode::DryRun, None);
+            report.recipes[0].steps[0].status = if success {
+                StepExecutionStatus::Succeeded
+            } else {
+                StepExecutionStatus::Failed
+            };
+            let mut outputs = OrderedMap::new();
+            outputs.insert(
+                "permission_results".to_string(),
+                RuntimeValue {
+                    type_name: "permission_results".to_string(),
+                    value: json!({
+                        "actions": [{
+                            "status": "failed",
+                            "permission_set": "baseline",
+                            "message": "permission denied"
+                        }]
+                    }),
+                    location: None,
+                },
+            );
+            let state = Arc::new(Mutex::new(ExecutionState::default()));
+            lock(&state).records.insert(
+                execution_id.clone(),
+                ExecutionRecord {
+                    report,
+                    events: Vec::new(),
+                    cancel_requested: Arc::new(AtomicBool::new(false)),
+                },
+            );
+
+            finish_attempt(
+                &state,
+                &execution_id,
+                ExecutionRunResult {
+                    success,
+                    cancelled: false,
+                    total_steps: 1,
+                    steps: vec![StepRunRecord {
+                        step_id: plan.steps[0].id.clone(),
+                        status: step_status,
+                        message: (!success).then(|| "permission denied".to_string()),
+                        outputs,
+                        failure_kind: (!success).then_some(StepFailureKind::OperationCommandFailed),
+                        cleanup: None,
+                    }],
+                    resolved_releases: Vec::new(),
+                    resolved_artifacts: Vec::new(),
+                },
+            );
+
+            let state = lock(&state);
+            let finished = &state.records[&execution_id].report;
+            assert_eq!(finished.status, expected_status);
+            if policy == "warn" {
+                assert_eq!(finished.warnings.len(), 1);
+                assert_eq!(finished.warnings[0].code, "permission_action_failed");
+                assert_eq!(finished.warnings[0].message, "permission denied");
+                assert!(finished.errors.is_empty());
+                assert_eq!(
+                    finished.recipes[0].status,
+                    RecipeExecutionStatus::SucceededWithWarnings
+                );
+            } else {
+                assert!(finished.warnings.is_empty());
+                assert_eq!(finished.errors.len(), 1);
+                assert_eq!(finished.errors[0].message, "permission denied");
+                assert_eq!(
+                    finished.errors[0].step_id.as_deref(),
+                    Some("recipe.example/wait")
+                );
+                assert_eq!(
+                    finished.errors[0].recipe_id.as_deref(),
+                    Some("recipe.example")
+                );
+            }
+        }
     }
 
     #[test]
@@ -1918,6 +2055,7 @@ mod tests {
                 capabilities: Vec::new(),
                 conflicts_with: Vec::new(),
             },
+            permission_plan: None,
             params,
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -1937,6 +2075,7 @@ mod tests {
                     capabilities: Vec::new(),
                     conflicts_with: Vec::new(),
                 },
+                permission_plan: None,
                 params: {
                     let mut params = OrderedMap::new();
                     params.insert(
@@ -2645,6 +2784,7 @@ mod tests {
                     capabilities: Vec::new(),
                     conflicts_with: Vec::new(),
                 },
+                permission_plan: None,
                 params,
                 skip_if: Vec::new(),
                 verify: Vec::new(),

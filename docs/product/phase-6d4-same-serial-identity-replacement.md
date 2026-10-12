@@ -83,16 +83,18 @@ seam directly and are never recursively identity-checked.
 
 ## 4. Safe-boundary coverage
 
-The current `ExecutorDevice` interface has thirteen executor-visible
+The current `ExecutorDevice` interface has fourteen executor-visible
 operations implemented by `RealAdbDevice`: root revalidation, install, push,
 mkdir, remove-file, remove-tree, device copy, package predicate, path-exists
-predicate, path-is-directory predicate, plan command, launch, and force-stop.
+predicate, path-is-directory predicate, plan command, typed permission
+operation, launch, and force-stop.
 The identity configuration hook and fake-filesystem selector are lifecycle
 hooks, not operations. Every real operation receives one pre-check and one
 post-check around the complete executor-visible operation. Compound launcher
 resolution is included inside that single boundary. Root preflight is
-identity-guarded without adding repeated root authorization checks. Dry-run
-devices use the no-op configuration hook and issue zero identity probes.
+identity-guarded. Elevated permission operations also use the established
+per-command root revalidation. Dry-run devices use the no-op configuration
+hook and issue zero identity probes.
 
 ## 5. Precedence and typed outcomes
 

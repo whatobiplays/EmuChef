@@ -199,7 +199,23 @@ Purpose:
 
 ### 5.5 Permissions
 
-Permissions remain top-level and declarative.
+Legacy package-based permission declarations remain declarative in the
+`grant_permissions` step parameters until their compatibility cutover. New
+App Definition permission steps select one app-owned set directly on the
+step:
+
+```yaml
+- id: grant_retroarch_baseline
+  type: grant_permissions
+  app_ref: retroarch
+  params:
+    permission_set: baseline
+    policy:
+      on_failure: warn
+```
+
+The app-aware form does not author package names or duplicate runtime/app-op
+action arrays. The selected App Definition supplies those actions.
 
 Supported categories include:
 
@@ -579,15 +595,46 @@ Params:
 
 ### 13.9 `grant_permissions`
 
-Params:
+Legacy package-based steps retain their existing `runtime`, `appops`, and
+legacy policy parameters. App-aware steps require `app_ref`, a literal
+`permission_set` of `baseline` or `elevated`, and `policy.on_failure` of
+`warn` or `fail`.
 
-- none
+The app-aware permission step is planned into the step-local typed
+`ExecutionStep.permission_plan`. This plan is the sole executable source for
+new-form permission actions. `ExecutionStep.params` contains no duplicate
+action arrays. The plan retains the App Definition package, action identity,
+API bounds, resolved applicability, permission set, and failure policy. The
+canonical plan digest covers the complete step-local plan. Review, execution,
+and reporting consume the same retained plan and app snapshot.
 
 Behavior:
 
-- implicitly consumes the permission plan
-- valid even when there are no local permission declarations or no applicable actions
-- succeeds cleanly as a no-op in that case
+- planning resolves every selected App Definition action before capability
+  pruning and validates the action package against the selected app snapshot
+- bounded actions require a known Android API level; unknown API applicability
+  is a planning error with the action identity and bounds, while unbounded
+  actions remain applicable with an unknown API level
+- when a selected target supplies an API level, planning uses it ahead of
+  profile context and retains it in the plan's device context for review
+- a known API outside an inclusive action bound retains a `not_applicable`
+  result with its confirmed reason
+- `baseline` requires `shell_command` and uses ordinary ADB shell execution
+- `elevated` requires both `shell_command` and `root_shell` and is omitted
+  when either capability is unavailable
+- elevated execution requires reviewed root authorization and a fresh
+  per-command root revalidation; the actual operation uses only typed runtime
+  grants and app-op `allow` updates
+- a retained step with no applicable actions is skipped before shell execution
+  or root preflight and preserves every action's applicability reason;
+  capability-pruned steps do not appear in the plan
+- ordinary action failures do not stop other independent applicable actions;
+  `warn` records failed actions as warnings and yields
+  `succeeded_with_warnings`, while `fail` fails the step and adds a report error
+- root-authority, identity, transport, and interruption failures remain
+  immediate safety fail-stops
+- legacy package-based steps preserve their existing behavior until the
+  compatibility cutover
 
 ## 14. Planner Responsibilities
 
@@ -639,56 +686,65 @@ Current defaults:
 
 ## 15. Permission Plan Model
 
-### 15.1 Planner output
+### 15.1 App Definition execution plan
 
-The permission plan contains structured intent only.
+For a new-form permission step, the planner emits one typed permission plan on
+that `ExecutionStep`. No top-level permission plan or alternate executable
+action collection exists. The retained app snapshot binds the action package to
+the selected App Definition. The plan digest covers the action sequence and
+its resolved facts.
 
-It does not contain:
+The plan does not contain arbitrary command strings. Each closed action maps to
+one fixed adapter operation:
 
-- ADB command tuples
-- shell command details
+- runtime permission grant through `pm grant`
+- app-op update through `appops set <package> <operation> allow`
 
-Permission plan actions carry fields such as:
+The action sequence carries:
 
-- action kind
-- package name
-- permission/op/manual type
-- requiredness
-- source metadata
-- reason
-- status
+- selected permission set and `warn`/`fail` policy
+- action kind and app snapshot package identity
+- runtime permission or app-op identity
+- authored API bounds and planner-resolved applicability
+- a confirmed reason when the target API is outside those bounds
 
-### 15.2 Action statuses
+### 15.2 Applicability and execution outcomes
 
-- `applicable`
-- `not_applicable`
-- `manual`
+- bounded actions with an unknown target API block planning with actionable
+  diagnostics; actions without bounds do not require the API level
+- an action outside a known inclusive API range remains in the plan with a
+  `not_applicable` reason
+- a selected step with no applicable actions is skipped with action reasons
+  preserved and no device shell/root preflight; a capability-pruned step is
+  absent from the selected plan
+- each attempted action receives an `executed` or `failed` result. Ordinary
+  failures continue through independent actions before applying the step
+  policy. Immediate safety failures stop at once.
 
-### 15.3 Action kinds
+### 15.3 Capability and root authority
 
-Minimal v1 kinds:
+- `baseline` requires `shell_command` and executes without `su`.
+- `elevated` requires both `shell_command` and `root_shell` and is pruned when
+  either capability is unavailable.
+- The shared Rust/Tauri root-work contract classifies a new-form elevated
+  permission step as root-dependent. Legacy permission steps remain outside
+  this new root classification.
+- Capability eligibility, reviewed root authorization, root preflight,
+  per-command root revalidation, and actual command privilege are separate
+  checks. An elevated command uses the existing guarded `su -c` adapter only
+  after the plan grants reviewed root authority and the fresh root probe passes.
 
-- `runtime_permission`
-- `appop`
+RetroArch's `MANAGE_EXTERNAL_STORAGE` action belongs to `elevated`, so it runs
+only on rooted devices. Its baseline runtime grants remain available on
+unrooted devices. The launch step depends on baseline; with both permission
+steps selected, stable topological ordering keeps baseline, elevated, then
+launch in that order.
 
-Compatibility exception:
+### 15.4 Legacy compatibility
 
-- existing `manual_requirement` may remain only if needed to represent `permissions.manual`
-
-### 15.4 `grant_permissions` execution logic
-
-Executor behavior:
-
-- execute applicable actions
-- record `not_applicable`
-- record `manual`
-- no-op cleanly when no actions apply
-
-Policy behavior:
-
-- applicable `required=true` failures are hard failures
-- `require_all=true` upgrades any applicable failure to hard failure
-- otherwise non-required failures may warn/continue per policy
+Package-based permission steps retain the legacy parameter contract and
+execution behavior until the designated compatibility cutover. Their action
+arrays are not copied into the new-form `permission_plan`.
 
 ## 16. Executor Responsibilities
 
@@ -700,7 +756,7 @@ It owns:
 - artifact download and cache handling
 - ZIP extraction
 - file copy mechanics
-- runtime permission command generation
+- typed baseline and elevated permission-operation dispatch
 - ADB launch/install/force-stop
 - verify checks
 

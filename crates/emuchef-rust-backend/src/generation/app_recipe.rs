@@ -1458,6 +1458,7 @@ mod tests {
                 capabilities: generated.constraints.capabilities,
                 conflicts_with: generated.constraints.conflicts_with,
             },
+            permission_plan: None,
             params,
             skip_if: Vec::new(),
             verify: Vec::new(),

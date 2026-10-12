@@ -556,6 +556,13 @@ impl ExecutorDevice for InstallFailureDevice {
         <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
     }
 
+    fn apply_permission_operation(
+        &mut self,
+        operation: crate::executor::PermissionOperation,
+    ) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::apply_permission_operation(&mut self.inner, operation)
+    }
+
     fn launch_app(
         &mut self,
         package_name: &str,

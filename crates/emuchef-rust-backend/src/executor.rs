@@ -28,7 +28,8 @@ use crate::model::OrderedMap;
 use crate::owned_process::ProcessCleanup;
 use crate::planner::{
     ExecutionArtifactAppProvenance, ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan,
-    ExecutionStep, ExecutionStepCondition, RuntimeValue, TargetDeviceBinding,
+    ExecutionStep, ExecutionStepCondition, PermissionActionApplicability, PermissionFailurePolicy,
+    PermissionPlan, PermissionPlanAction, PermissionSetKind, RuntimeValue, TargetDeviceBinding,
 };
 use crate::remote_release_resolver::{
     resolve_github_latest, resolve_remote_latest, ResolvedRemoteRelease,
@@ -515,9 +516,9 @@ pub struct ExecutionProgressEvent {
     pub message: Option<String>,
 }
 
-/// Device boundary used by the executor. The operation surface intentionally
-/// remains the current thirteen executor-visible methods; identity setup and
-/// fake-filesystem selection are lifecycle/configuration hooks, not operations.
+/// Device boundary used by the executor. Its fourteen typed operations cover
+/// bounded install, file, package, permission, and app lifecycle work; identity
+/// setup and fake-filesystem selection are lifecycle/configuration hooks.
 pub trait ExecutorDevice: std::fmt::Debug {
     /// Configure private real-device identity evidence from the reviewed plan.
     /// Dry-run devices intentionally keep the default no-op implementation.
@@ -567,12 +568,76 @@ pub trait ExecutorDevice: std::fmt::Debug {
     fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError>;
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError>;
     fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError>;
+    /// Apply one planned permission action through the adapter's fixed command
+    /// mapping. The operation contains no caller-supplied shell command.
+    /// Baseline actions use ordinary ADB shell execution. Elevated actions use
+    /// reviewed root authorization and the adapter's guarded root path; an
+    /// adapter unable to perform an elevated action must return a fail-stop
+    /// root-authority error.
+    fn apply_permission_operation(
+        &mut self,
+        operation: PermissionOperation,
+    ) -> Result<(), DeviceOperationError>;
     fn launch_app(
         &mut self,
         package_name: &str,
         activity: Option<&str>,
     ) -> Result<(), DeviceOperationError>;
     fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError>;
+}
+
+/// Closed ADB permission action accepted by the executor device boundary.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum PermissionOperation {
+    GrantRuntimePermission {
+        package_name: String,
+        permission: String,
+        permission_set: PermissionSetKind,
+    },
+    AllowAppOp {
+        package_name: String,
+        operation: String,
+        permission_set: PermissionSetKind,
+    },
+}
+
+impl PermissionOperation {
+    fn permission_set(&self) -> PermissionSetKind {
+        match self {
+            Self::GrantRuntimePermission { permission_set, .. }
+            | Self::AllowAppOp { permission_set, .. } => *permission_set,
+        }
+    }
+
+    fn is_elevated(&self) -> bool {
+        self.permission_set() == PermissionSetKind::Elevated
+    }
+
+    fn adb_shell_arguments(&self) -> Vec<String> {
+        match self {
+            Self::GrantRuntimePermission {
+                package_name,
+                permission,
+                ..
+            } => vec![
+                "pm".to_string(),
+                "grant".to_string(),
+                package_name.clone(),
+                permission.clone(),
+            ],
+            Self::AllowAppOp {
+                package_name,
+                operation,
+                ..
+            } => vec![
+                "appops".to_string(),
+                "set".to_string(),
+                package_name.clone(),
+                operation.clone(),
+                "allow".to_string(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -785,6 +850,66 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     OrderedMap::new(),
                 ));
                 continue;
+            }
+
+            if step.type_name == "grant_permissions"
+                && (step.permission_plan.is_some() || step.app_id.is_some())
+            {
+                match crate::planner::validated_plan_permission_plan(plan, step) {
+                    Err(reason) => {
+                        let message = format!(
+                            "The reviewed permission plan is invalid: {reason}. Prepare a fresh review before execution."
+                        );
+                        state.steps.insert(
+                            step.id.clone(),
+                            StepRuntimeState {
+                                status: StepRuntimeStatus::Failed,
+                                outputs: OrderedMap::new(),
+                            },
+                        );
+                        progress_callback(progress_event(
+                            step,
+                            total_steps,
+                            plan,
+                            ProgressPhase::Finished,
+                            Some(ProgressStatus::Failed),
+                            Some(message.clone()),
+                        ));
+                        records.push(record_with_failure(
+                            step,
+                            StepRunStatus::Failed,
+                            Some(message),
+                            OrderedMap::new(),
+                            None,
+                            None,
+                        ));
+                        break;
+                    }
+                    Ok((_, permission_plan)) if !permission_plan.has_applicable_actions() => {
+                        let outputs = permission_not_applicable_outputs(step, permission_plan);
+                        let message =
+                            "No actions in the selected permission set apply to this Android API level."
+                                .to_string();
+                        state.steps.insert(
+                            step.id.clone(),
+                            StepRuntimeState {
+                                status: StepRuntimeStatus::Skipped,
+                                outputs: outputs.clone(),
+                            },
+                        );
+                        progress_callback(progress_event(
+                            step,
+                            total_steps,
+                            plan,
+                            ProgressPhase::Finished,
+                            Some(ProgressStatus::Skipped),
+                            Some(message.clone()),
+                        ));
+                        records.push(record(step, StepRunStatus::Skipped, Some(message), outputs));
+                        continue;
+                    }
+                    Ok((_, _)) => {}
+                }
             }
 
             if plan_step_root_requirements(plan, step).any() {
@@ -1173,6 +1298,16 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        if step.permission_plan.is_some() || step.app_id.is_some() {
+            let (_, permission_plan) = crate::planner::validated_plan_permission_plan(plan, step)
+                .map_err(|reason| {
+                DeviceOperationError::other(format!(
+                    "The reviewed permission plan is invalid: {reason}."
+                ))
+            })?;
+            return self.execute_planned_permission_actions(step, permission_plan);
+        }
+
         let policy = permission_policy(resolved_params.get("policy"));
         let mut action_results = Vec::new();
         let mut failure = None;
@@ -1231,6 +1366,70 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             let mut failure: StepFailure = error.into();
             failure.outputs = outputs;
             return Err(failure);
+        }
+        Ok(outputs)
+    }
+
+    fn execute_planned_permission_actions(
+        &mut self,
+        step: &ExecutionStep,
+        permission_plan: &PermissionPlan,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let mut action_results = Vec::with_capacity(permission_plan.actions.len());
+        let mut ordinary_failure = None;
+        let mut safety_failure = None;
+
+        for action in &permission_plan.actions {
+            if !matches!(
+                action.applicability(),
+                PermissionActionApplicability::Applicable
+            ) {
+                action_results.push(permission_plan_action_result(
+                    step,
+                    permission_plan,
+                    action,
+                    "not_applicable",
+                    None,
+                ));
+                continue;
+            }
+
+            let operation = permission_operation(permission_plan.permission_set, action);
+            match self.adapters.device.apply_permission_operation(operation) {
+                Ok(()) => action_results.push(permission_plan_action_result(
+                    step,
+                    permission_plan,
+                    action,
+                    "executed",
+                    None,
+                )),
+                Err(error) => {
+                    action_results.push(permission_plan_action_result(
+                        step,
+                        permission_plan,
+                        action,
+                        "failed",
+                        Some(error.message.clone()),
+                    ));
+                    if error.kind.requires_device_fail_stop() {
+                        safety_failure = Some(error);
+                        break;
+                    }
+                    if ordinary_failure.is_none() {
+                        ordinary_failure = Some(error);
+                    }
+                }
+            }
+        }
+
+        let outputs = permission_action_outputs(action_results);
+        if let Some(error) = safety_failure {
+            return Err(step_failure_with_outputs(error, outputs));
+        }
+        if permission_plan.on_failure == PermissionFailurePolicy::Fail {
+            if let Some(error) = ordinary_failure {
+                return Err(step_failure_with_outputs(error, outputs));
+            }
         }
         Ok(outputs)
     }
@@ -2312,6 +2511,13 @@ fn plan_step_root_requirements(
         operation,
         root_shell_constraint,
         app_data_write_constraint,
+        permission_plan_requires_root: step.permission_plan.as_ref().is_some_and(
+            |permission_plan| {
+                permission_plan.permission_set == PermissionSetKind::Elevated
+                    && (permission_plan.actions.is_empty()
+                        || permission_plan.has_applicable_actions())
+            },
+        ),
         condition_requires_root,
         source_requires_root,
         destination_requires_root,
@@ -2845,6 +3051,9 @@ pub struct FakeDryRunDevice {
     remote_dirs: HashSet<String>,
     commands: Vec<Vec<String>>,
     run_plan_failures: HashMap<Vec<String>, String>,
+    permission_failures: HashMap<PermissionOperation, String>,
+    #[cfg(test)]
+    permission_operation_errors: HashMap<PermissionOperation, DeviceOperationError>,
     install_failures: HashMap<(String, bool), String>,
     launch_failures: HashMap<(String, String), String>,
     force_stop_failures: HashMap<String, String>,
@@ -2886,6 +3095,21 @@ impl FakeDryRunDevice {
     #[cfg(test)]
     pub fn fail_run_plan_command(&mut self, command: Vec<String>, message: &str) {
         self.run_plan_failures.insert(command, message.to_string());
+    }
+
+    #[cfg(test)]
+    pub fn fail_permission_operation(&mut self, operation: PermissionOperation, message: &str) {
+        self.permission_failures
+            .insert(operation, message.to_string());
+    }
+
+    #[cfg(test)]
+    pub fn fail_permission_operation_with_error(
+        &mut self,
+        operation: PermissionOperation,
+        error: DeviceOperationError,
+    ) {
+        self.permission_operation_errors.insert(operation, error);
     }
 
     #[cfg(test)]
@@ -2942,6 +3166,23 @@ impl FakeDryRunDevice {
         recorded.extend(command.iter().cloned());
         self.commands.push(recorded);
         if let Some(message) = self.run_plan_failures.get(&command) {
+            return Err(message.clone());
+        }
+        Ok(())
+    }
+
+    fn apply_permission_operation(&mut self, operation: PermissionOperation) -> Result<(), String> {
+        let permission_set = match operation.permission_set() {
+            PermissionSetKind::Baseline => "baseline",
+            PermissionSetKind::Elevated => "elevated",
+        };
+        let mut recorded = vec![
+            "permission_operation".to_string(),
+            permission_set.to_string(),
+        ];
+        recorded.extend(operation.adb_shell_arguments());
+        self.commands.push(recorded);
+        if let Some(message) = self.permission_failures.get(&operation) {
             return Err(message.clone());
         }
         Ok(())
@@ -3075,6 +3316,18 @@ impl ExecutorDevice for FakeDryRunDevice {
 
     fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
         FakeDryRunDevice::run_plan_command(self, command).map_err(DeviceOperationError::from)
+    }
+
+    fn apply_permission_operation(
+        &mut self,
+        operation: PermissionOperation,
+    ) -> Result<(), DeviceOperationError> {
+        #[cfg(test)]
+        if let Some(error) = self.permission_operation_errors.get(&operation) {
+            return Err(error.clone());
+        }
+        FakeDryRunDevice::apply_permission_operation(self, operation)
+            .map_err(DeviceOperationError::from)
     }
 
     fn launch_app(
@@ -3252,6 +3505,14 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
 
     fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::run_plan_command(self, command)
+            .map_err(|message| real_adb_error(self, message))
+    }
+
+    fn apply_permission_operation(
+        &mut self,
+        operation: PermissionOperation,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::apply_permission_operation(self, operation)
             .map_err(|message| real_adb_error(self, message))
     }
 
@@ -4423,6 +4684,145 @@ fn string_field(item: &serde_json::Map<String, Value>, field: &str) -> String {
         .unwrap_or_else(|| item.get(field).map_or_else(String::new, Value::to_string))
 }
 
+fn permission_operation(
+    permission_set: PermissionSetKind,
+    action: &PermissionPlanAction,
+) -> PermissionOperation {
+    match action {
+        PermissionPlanAction::RuntimePermission {
+            package_name,
+            permission,
+            ..
+        } => PermissionOperation::GrantRuntimePermission {
+            package_name: package_name.clone(),
+            permission: permission.clone(),
+            permission_set,
+        },
+        PermissionPlanAction::AppOp {
+            package_name,
+            op,
+            mode: crate::authored_models::AppOpMode::Allow,
+            ..
+        } => PermissionOperation::AllowAppOp {
+            package_name: package_name.clone(),
+            operation: op.clone(),
+            permission_set,
+        },
+    }
+}
+
+fn permission_not_applicable_outputs(
+    step: &ExecutionStep,
+    permission_plan: &PermissionPlan,
+) -> OrderedMap<RuntimeValue> {
+    let action_results = permission_plan
+        .actions
+        .iter()
+        .map(|action| {
+            permission_plan_action_result(step, permission_plan, action, "not_applicable", None)
+        })
+        .collect();
+    permission_action_outputs(action_results)
+}
+
+fn permission_plan_action_result(
+    step: &ExecutionStep,
+    permission_plan: &PermissionPlan,
+    action: &PermissionPlanAction,
+    status: &str,
+    message: Option<String>,
+) -> Value {
+    let mut result = serde_json::Map::new();
+    result.insert("step_id".to_string(), json!(step.id));
+    result.insert(
+        "kind".to_string(),
+        json!(match action {
+            PermissionPlanAction::RuntimePermission { .. } => "runtime_permission",
+            PermissionPlanAction::AppOp { .. } => "appop",
+        }),
+    );
+    result.insert("package_name".to_string(), json!(action.package_name()));
+    result.insert("source_recipe_id".to_string(), json!(step.recipe_ref));
+    result.insert("source_section".to_string(), json!(action.source_section()));
+    result.insert(
+        "permission_set".to_string(),
+        json!(permission_plan.permission_set),
+    );
+    result.insert("on_failure".to_string(), json!(permission_plan.on_failure));
+    result.insert("status".to_string(), json!(status));
+    result.insert(
+        "applicability".to_string(),
+        serde_json::to_value(action.applicability())
+            .expect("permission applicability is serializable"),
+    );
+    match action {
+        PermissionPlanAction::RuntimePermission {
+            permission,
+            android_api_min,
+            android_api_max,
+            applicability,
+            ..
+        } => {
+            result.insert("permission".to_string(), json!(permission));
+            if let Some(minimum) = android_api_min {
+                result.insert("android_api_min".to_string(), json!(minimum));
+            }
+            if let Some(maximum) = android_api_max {
+                result.insert("android_api_max".to_string(), json!(maximum));
+            }
+            if let PermissionActionApplicability::NotApplicable { reason } = applicability {
+                result.insert("reason".to_string(), json!(reason.description()));
+            }
+        }
+        PermissionPlanAction::AppOp {
+            op,
+            mode: crate::authored_models::AppOpMode::Allow,
+            android_api_min,
+            android_api_max,
+            applicability,
+            ..
+        } => {
+            result.insert("op".to_string(), json!(op));
+            result.insert("mode".to_string(), json!("allow"));
+            if let Some(minimum) = android_api_min {
+                result.insert("android_api_min".to_string(), json!(minimum));
+            }
+            if let Some(maximum) = android_api_max {
+                result.insert("android_api_max".to_string(), json!(maximum));
+            }
+            if let PermissionActionApplicability::NotApplicable { reason } = applicability {
+                result.insert("reason".to_string(), json!(reason.description()));
+            }
+        }
+    }
+    if let Some(message) = message {
+        result.insert("message".to_string(), json!(message));
+    }
+    Value::Object(result)
+}
+
+fn permission_action_outputs(actions: Vec<Value>) -> OrderedMap<RuntimeValue> {
+    let mut outputs = OrderedMap::new();
+    outputs.insert(
+        "permission_results".to_string(),
+        RuntimeValue {
+            type_name: "object".to_string(),
+            value: json!({ "actions": actions }),
+            location: None,
+        },
+    );
+    outputs
+}
+
+fn step_failure_with_outputs(
+    error: DeviceOperationError,
+    outputs: OrderedMap<RuntimeValue>,
+) -> StepFailure {
+    let mut failure: StepFailure = error.into();
+    failure.outputs = outputs;
+    failure
+}
+
 fn permission_command(action: &PermissionAction) -> Vec<String> {
     match action.kind {
         PermissionActionKind::RuntimePermission => vec![
@@ -4640,6 +5040,7 @@ mod phase_5b10_tests {
                 capabilities: vec!["shell_command".to_string()],
                 conflicts_with: Vec::new(),
             },
+            permission_plan: None,
             params,
             skip_if: Vec::new(),
             verify: Vec::new(),

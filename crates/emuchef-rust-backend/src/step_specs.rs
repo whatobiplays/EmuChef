@@ -385,16 +385,16 @@ pub fn step_specs_result() -> StepSpecsResult {
                 "Grant Permissions",
                 None,
                 vec![],
-                vec!["runtime", "appops", "policy"],
+                vec!["permission_set", "policy"],
                 map(vec![
                     (
-                        "appops",
+                        "permission_set",
                         param(
                             &["literal"],
-                            &["object"],
-                            false,
-                            vec![],
-                            Some(appops_shape()),
+                            &["string"],
+                            true,
+                            vec!["baseline", "elevated"],
+                            None,
                         ),
                     ),
                     (
@@ -402,19 +402,9 @@ pub fn step_specs_result() -> StepSpecsResult {
                         param(
                             &["literal"],
                             &["object"],
-                            false,
+                            true,
                             vec![],
-                            Some(policy_shape()),
-                        ),
-                    ),
-                    (
-                        "runtime",
-                        param(
-                            &["literal"],
-                            &["object"],
-                            false,
-                            vec![],
-                            Some(runtime_permissions_shape()),
+                            Some(permission_policy_shape()),
                         ),
                     ),
                 ]),
@@ -466,10 +456,49 @@ pub fn step_spec_for(type_name: &str) -> Option<StepSpecDto> {
 /// steps retain a separate contract until their Recipes are migrated.
 pub(crate) fn authored_step_spec_for(step: &Step) -> Option<StepSpecDto> {
     let mut spec = step_spec_for(&step.type_name)?;
-    if step.app_ref.is_some() || !step.params.contains_key("package_name") {
+    if step.app_ref.is_some() || step.params.contains_key("permission_set") {
         return Some(spec);
     }
     match step.type_name.as_str() {
+        "grant_permissions" => {
+            spec.param_order = vec![
+                "runtime".to_string(),
+                "appops".to_string(),
+                "policy".to_string(),
+            ];
+            spec.params = map(vec![
+                (
+                    "appops",
+                    param(
+                        &["literal"],
+                        &["object"],
+                        false,
+                        vec![],
+                        Some(appops_shape()),
+                    ),
+                ),
+                (
+                    "policy",
+                    param(
+                        &["literal"],
+                        &["object"],
+                        false,
+                        vec![],
+                        Some(legacy_policy_shape()),
+                    ),
+                ),
+                (
+                    "runtime",
+                    param(
+                        &["literal"],
+                        &["object"],
+                        false,
+                        vec![],
+                        Some(runtime_permissions_shape()),
+                    ),
+                ),
+            ]);
+        }
         "launch_app" => {
             spec.param_order = vec!["package_name".to_string(), "activity".to_string()];
             spec.params = map(vec![
@@ -691,7 +720,22 @@ fn appops_shape() -> Value {
     })
 }
 
-fn policy_shape() -> Value {
+fn permission_policy_shape() -> Value {
+    json!({
+        "fields": {
+            "on_failure": {
+                "enumValues": ["warn", "fail"],
+                "kind": "string",
+                "required": true,
+            },
+        },
+        "kind": "object",
+        "ordered": false,
+        "unique": false,
+    })
+}
+
+fn legacy_policy_shape() -> Value {
     json!({
         "fields": {
             "on_failure": {
@@ -716,6 +760,33 @@ fn policy_shape() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn permission_step(app_ref: Option<&str>, permission_set: Option<&str>) -> Step {
+        let mut params = crate::model::OrderedMap::new();
+        if let Some(permission_set) = permission_set {
+            params.insert(
+                "permission_set".to_string(),
+                ParamValue::Literal(json!(permission_set)),
+            );
+        }
+        Step {
+            id: "grant".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "Grant permissions".to_string(),
+            description: None,
+            progress_note: None,
+            user_toggleable: false,
+            app_ref: app_ref.map(str::to_string),
+            dependencies: Vec::new(),
+            constraints: crate::model::StepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params,
+            verify: Vec::new(),
+        }
+    }
 
     #[test]
     fn app_context_requirement_is_typed_and_exposed_in_step_specs() {
@@ -768,5 +839,48 @@ mod tests {
                 "{step_type} orders identity params"
             );
         }
+    }
+
+    #[test]
+    fn permission_step_spec_exposes_the_closed_app_definition_form() {
+        let spec = step_spec_for("grant_permissions").expect("permission step spec");
+
+        assert_eq!(spec.param_order, ["permission_set", "policy"]);
+        assert_eq!(
+            spec.params.keys().cloned().collect::<Vec<_>>(),
+            spec.param_order
+        );
+        assert_eq!(
+            spec.params["permission_set"].enum_values,
+            ["baseline", "elevated"]
+        );
+        assert!(spec.params["permission_set"].required);
+        assert!(spec.params["policy"].required);
+        assert_eq!(spec.defaults.len(), 0);
+    }
+
+    #[test]
+    fn existing_permission_steps_keep_their_legacy_editor_contract() {
+        let spec = authored_step_spec_for(&permission_step(None, None))
+            .expect("legacy permission step contract");
+
+        assert_eq!(spec.param_order, ["runtime", "appops", "policy"]);
+        assert!(spec.params.contains_key("runtime"));
+        assert!(spec.params.contains_key("appops"));
+        assert!(!spec.params.contains_key("permission_set"));
+        assert!(spec.params["policy"].shape.as_ref().unwrap()["fields"]
+            .get("require_all")
+            .is_some());
+    }
+
+    #[test]
+    fn app_definition_permission_steps_use_the_public_permission_set_contract() {
+        let spec = authored_step_spec_for(&permission_step(Some("armsx1"), Some("elevated")))
+            .expect("App Definition permission step contract");
+
+        assert_eq!(spec.param_order, ["permission_set", "policy"]);
+        assert!(spec.params.contains_key("permission_set"));
+        assert!(!spec.params.contains_key("runtime"));
+        assert!(!spec.params.contains_key("appops"));
     }
 }

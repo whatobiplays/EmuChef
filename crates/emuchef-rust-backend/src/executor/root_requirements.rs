@@ -68,6 +68,7 @@ pub(crate) struct RootRequirementStep {
     pub(crate) operation: RootWorkOperation,
     pub(crate) root_shell_constraint: bool,
     pub(crate) app_data_write_constraint: bool,
+    pub(crate) permission_plan_requires_root: bool,
     pub(crate) condition_requires_root: bool,
     pub(crate) source_requires_root: bool,
     pub(crate) destination_requires_root: bool,
@@ -86,6 +87,9 @@ pub(crate) fn classify_root_requirement_step(step: RootRequirementStep) -> RootR
         }
     }
     if step.condition_requires_root {
+        requirements.root_shell = true;
+    }
+    if step.permission_plan_requires_root {
         requirements.root_shell = true;
     }
     match step.operation {
@@ -140,6 +144,7 @@ fn json_step_root_requirements(step: &Value, inputs: &[Value]) -> RootRequiremen
         .map(root_work_operation)
         .unwrap_or(RootWorkOperation::Other);
     let (root_shell_constraint, app_data_write_constraint) = json_constraint_requirements(step);
+    let permission_plan_requires_root = json_permission_plan_requires_root(step);
     let condition_requires_root = step
         .get("skip_if")
         .and_then(Value::as_array)
@@ -164,11 +169,36 @@ fn json_step_root_requirements(step: &Value, inputs: &[Value]) -> RootRequiremen
         operation,
         root_shell_constraint,
         app_data_write_constraint,
+        permission_plan_requires_root,
         condition_requires_root,
         source_requires_root,
         destination_requires_root,
         extracts_to_device,
     })
+}
+
+fn json_permission_plan_requires_root(step: &Value) -> bool {
+    let Some(permission_plan) = step.get("permission_plan") else {
+        return false;
+    };
+    if permission_plan
+        .get("permission_set")
+        .and_then(Value::as_str)
+        != Some("elevated")
+    {
+        return false;
+    }
+    let Some(actions) = permission_plan.get("actions").and_then(Value::as_array) else {
+        return true;
+    };
+    actions.is_empty()
+        || actions.iter().any(|action| {
+            action
+                .get("applicability")
+                .and_then(|applicability| applicability.get("status"))
+                .and_then(Value::as_str)
+                != Some("not_applicable")
+        })
 }
 
 #[allow(dead_code)] // Reached by the retained-JSON entry point in Tauri.
@@ -270,7 +300,8 @@ pub(crate) fn is_app_private_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::condition_requires_root;
+    use super::{condition_requires_root, reviewed_plan_requires_root_json};
+    use serde_json::json;
 
     #[test]
     fn shared_condition_classifier_requires_root_only_for_private_device_predicates() {
@@ -290,5 +321,69 @@ mod tests {
             "package_installed",
             Some("/data/data/com.example.app/files")
         ));
+    }
+
+    #[test]
+    fn shared_root_contract_authorizes_new_elevated_permission_plans_only() {
+        let legacy = json!({
+            "steps": [{
+                "type": "grant_permissions",
+                "constraints": { "capabilities": ["root_shell"] },
+                "params": { "appops": { "value": [{ "op": "MANAGE_EXTERNAL_STORAGE" }] } }
+            }]
+        });
+        let baseline = json!({
+            "steps": [{
+                "type": "grant_permissions",
+                "permission_plan": { "permission_set": "baseline", "actions": [] }
+            }]
+        });
+        let elevated_empty = json!({
+            "steps": [{
+                "type": "grant_permissions",
+                "permission_plan": { "permission_set": "elevated", "actions": [] }
+            }]
+        });
+        let elevated_applicable = json!({
+            "steps": [{
+                "type": "grant_permissions",
+                "permission_plan": {
+                    "permission_set": "elevated",
+                    "actions": [{
+                        "kind": "runtime_permission",
+                        "package_name": "com.example.app",
+                        "permission": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                        "applicability": { "status": "applicable" }
+                    }]
+                }
+            }]
+        });
+        let elevated_inapplicable = json!({
+            "steps": [{
+                "type": "grant_permissions",
+                "permission_plan": {
+                    "permission_set": "elevated",
+                    "actions": [{
+                        "kind": "runtime_permission",
+                        "package_name": "com.example.app",
+                        "permission": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                        "applicability": {
+                            "status": "not_applicable",
+                            "reason": {
+                                "reason": "android_api_below_minimum",
+                                "actual": 29,
+                                "minimum": 30
+                            }
+                        }
+                    }]
+                }
+            }]
+        });
+
+        assert!(!reviewed_plan_requires_root_json(&legacy));
+        assert!(!reviewed_plan_requires_root_json(&baseline));
+        assert!(reviewed_plan_requires_root_json(&elevated_empty));
+        assert!(reviewed_plan_requires_root_json(&elevated_applicable));
+        assert!(!reviewed_plan_requires_root_json(&elevated_inapplicable));
     }
 }

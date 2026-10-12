@@ -14,6 +14,7 @@ use crate::planner::TargetDeviceBinding;
 use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
 use super::root_authority::{self, DeviceCommandEffect};
 use super::root_requirements::is_app_private_path;
+use super::PermissionOperation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdbCommandResult {
@@ -736,6 +737,24 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     pub fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
         self.guarded(DeviceCommandEffect::Mutating, |device| {
             device.runner.run_plan_command(command)
+        })
+    }
+
+    pub(crate) fn apply_permission_operation(
+        &mut self,
+        operation: PermissionOperation,
+    ) -> Result<(), String> {
+        let privileged = operation.is_elevated();
+        let args = operation.adb_shell_arguments();
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
+            device
+                .run_shell_with_privilege_unchecked(
+                    args,
+                    true,
+                    privileged,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
         })
     }
 
