@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use serde_json::{json, Value};
 
-use crate::authored_models::AppDefinitionV1;
+use crate::authored_models::{AppDefinitionV1, AppOpMode};
 use crate::catalog_source::CatalogIdentity;
 use crate::model::{OrderedMap, ParamValue, Recipe, RecipeArtifact, Step, StepConstraints};
 #[cfg(test)]
@@ -25,6 +25,7 @@ use crate::validation::normalize_expected_sha256;
 use crate::yaml;
 
 mod app_authority;
+mod app_permissions;
 mod app_targets;
 
 pub(crate) use app_authority::validate_recipe_app_authority;
@@ -295,9 +296,129 @@ pub struct ExecutionStep {
     pub note: String,
     pub dependencies: Vec<String>,
     pub constraints: ExecutionStepConstraints,
+    /// App Definition actions resolved for a new-form permission step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_plan: Option<PermissionPlan>,
     pub params: OrderedMap<ExecutionParamValue>,
     pub skip_if: Vec<ExecutionStepCondition>,
     pub verify: Vec<ExecutionStepCondition>,
+}
+
+/// The App Definition permission set selected by one Recipe step.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionSetKind {
+    Baseline,
+    Elevated,
+}
+
+/// Recipe-owned outcome policy for ordinary permission command failures.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionFailurePolicy {
+    Warn,
+    Fail,
+}
+
+/// Applicability resolved once from the reviewed target API level.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PermissionActionApplicability {
+    Applicable,
+    NotApplicable {
+        reason: PermissionNotApplicableReason,
+    },
+}
+
+/// A confirmed inclusive Android API bound that excludes an action.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PermissionNotApplicableReason {
+    AndroidApiBelowMinimum { actual: i64, minimum: i64 },
+    AndroidApiAboveMaximum { actual: i64, maximum: i64 },
+}
+
+impl PermissionNotApplicableReason {
+    pub(crate) fn description(&self) -> String {
+        match self {
+            Self::AndroidApiBelowMinimum { actual, minimum } => {
+                format!("Android API level {actual} is below the action minimum of {minimum}.")
+            }
+            Self::AndroidApiAboveMaximum { actual, maximum } => {
+                format!("Android API level {actual} is above the action maximum of {maximum}.")
+            }
+        }
+    }
+}
+
+/// One immutable App Definition permission action and its planned applicability.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PermissionPlanAction {
+    RuntimePermission {
+        package_name: String,
+        permission: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        android_api_min: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        android_api_max: Option<i64>,
+        applicability: PermissionActionApplicability,
+    },
+    AppOp {
+        package_name: String,
+        op: String,
+        mode: AppOpMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        android_api_min: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        android_api_max: Option<i64>,
+        applicability: PermissionActionApplicability,
+    },
+}
+
+impl PermissionPlanAction {
+    pub(crate) fn package_name(&self) -> &str {
+        match self {
+            Self::RuntimePermission { package_name, .. } | Self::AppOp { package_name, .. } => {
+                package_name
+            }
+        }
+    }
+
+    pub(crate) fn applicability(&self) -> &PermissionActionApplicability {
+        match self {
+            Self::RuntimePermission { applicability, .. } | Self::AppOp { applicability, .. } => {
+                applicability
+            }
+        }
+    }
+
+    pub(crate) fn source_section(&self) -> &'static str {
+        match self {
+            Self::RuntimePermission { .. } => "runtime",
+            Self::AppOp { .. } => "app_ops",
+        }
+    }
+}
+
+/// One step-local permission authority snapshot consumed by review and execution.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionPlan {
+    pub permission_set: PermissionSetKind,
+    pub on_failure: PermissionFailurePolicy,
+    pub actions: Vec<PermissionPlanAction>,
+}
+
+impl PermissionPlan {
+    pub(crate) fn has_applicable_actions(&self) -> bool {
+        self.actions.iter().any(|action| {
+            matches!(
+                action.applicability(),
+                PermissionActionApplicability::Applicable
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -377,6 +498,59 @@ pub(crate) fn validated_plan_lifecycle_target(
         }
         _ => Err("step is not an app lifecycle operation"),
     }
+}
+
+/// Validate new-form permission authority against the retained App snapshot.
+/// Executors and review projections use this helper without reopening catalog
+/// files or reconstructing actions from Recipe parameters.
+pub(crate) fn validated_plan_permission_plan<'a>(
+    plan: &'a ExecutionPlan,
+    step: &'a ExecutionStep,
+) -> Result<(&'a ExecutionAppSnapshot, &'a PermissionPlan), &'static str> {
+    if step.type_name != "grant_permissions" {
+        return Err("step is not a permission operation");
+    }
+    let permission_plan = step
+        .permission_plan
+        .as_ref()
+        .ok_or("permission plan is missing")?;
+    if !step.params.is_empty() {
+        return Err("permission step contains parameters outside its plan");
+    }
+    if permission_plan.actions.is_empty() {
+        return Err("permission plan contains no App Definition actions");
+    }
+    let app_id = step.app_id.as_deref().ok_or("app identity is missing")?;
+    let mut matching = plan.apps.iter().filter(|app| app.id == app_id);
+    let app = matching.next().ok_or("app snapshot is missing")?;
+    if matching.next().is_some() {
+        return Err("app snapshot is ambiguous");
+    }
+    if !crate::authored_models::is_valid_identifier(&app.id)
+        || !crate::authored_models::is_valid_package_id(&app.package_id)
+    {
+        return Err("app snapshot identity is invalid");
+    }
+    for action in &permission_plan.actions {
+        if action.package_name() != app.package_id
+            || !crate::authored_models::is_valid_package_id(action.package_name())
+        {
+            return Err("permission action package differs from the app snapshot");
+        }
+        match action {
+            PermissionPlanAction::RuntimePermission { permission, .. }
+                if permission.trim().is_empty() =>
+            {
+                return Err("runtime permission identity is empty");
+            }
+            PermissionPlanAction::AppOp { op, .. } if op.trim().is_empty() => {
+                return Err("app-op identity is empty");
+            }
+            PermissionPlanAction::RuntimePermission { .. } | PermissionPlanAction::AppOp { .. } => {
+            }
+        }
+    }
+    Ok((app, permission_plan))
 }
 
 #[cfg(test)]
@@ -597,9 +771,19 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
 /// App Definitions are copied into the resulting plan as immutable snapshots;
 /// review and execution use those snapshots without reopening the catalog.
 pub fn plan_execution_with_app_definitions(
-    input: PlannerInput,
+    mut input: PlannerInput,
     app_definitions: &[AppDefinitionV1],
 ) -> PlanningResult {
+    // A selected target carries the device's observed API level. Retain that
+    // fact in the plan context so permission applicability and review agree.
+    if let Some(android_api_level) = input
+        .target_device
+        .as_ref()
+        .and_then(|target| target.android_api_level)
+    {
+        input.device_context.android_api_level = Some(android_api_level);
+    }
+    let permission_android_api_level = input.device_context.android_api_level;
     let app_definitions = match index_app_definitions(app_definitions) {
         Ok(apps) => apps,
         Err(errors) => return error_result(errors),
@@ -645,7 +829,7 @@ pub fn plan_execution_with_app_definitions(
 
     // Validate all expanded authored target uses before capability pruning can
     // hide a malformed or cross-app reference.
-    let target_usage = match app_targets::resolve_usage(
+    let mut target_usage = match app_targets::resolve_usage(
         &recipes,
         &expanded_recipe_refs,
         &app_definitions,
@@ -654,6 +838,32 @@ pub fn plan_execution_with_app_definitions(
         Ok(usage) => usage,
         Err(errors) => return error_result(errors),
     };
+
+    // Resolve every new-form permission reference before capability selection
+    // so an unavailable elevated set cannot hide malformed authored authority.
+    let permission_form_errors =
+        app_permissions::validate_app_permission_step_contracts(&recipes, &expanded_recipe_refs);
+    if !permission_form_errors.is_empty() {
+        return error_result(permission_form_errors);
+    }
+    let permission_plans = match app_permissions::resolve_app_permission_plans(
+        &recipes,
+        &expanded_recipe_refs,
+        &app_definitions,
+        permission_android_api_level,
+    ) {
+        Ok(plans) => plans,
+        Err(errors) => return error_result(errors),
+    };
+    for (step_id, permission_plan) in &permission_plans {
+        let Some(usage) = target_usage.get_mut(step_id) else {
+            continue;
+        };
+        app_permissions::add_derived_step_capability(&mut usage.capabilities, "shell_command");
+        if permission_plan.permission_set == PermissionSetKind::Elevated {
+            app_permissions::add_derived_step_capability(&mut usage.capabilities, "root_shell");
+        }
+    }
 
     let (selected_step_ids, selection_errors) = selected_step_ids(
         &recipes,
@@ -743,6 +953,7 @@ pub fn plan_execution_with_app_definitions(
             .into_iter()
             .filter_map(|(step_id, recipe_id, step)| {
                 let recipe = recipes.get(&recipe_id)?;
+                let permission_plan = permission_plans.get(&step_id).cloned();
                 Some(ExecutionStep {
                     id: step_id,
                     recipe_ref: recipe_id,
@@ -768,6 +979,7 @@ pub fn plan_execution_with_app_definitions(
                         &step.constraints,
                         &recipe.id,
                     ),
+                    permission_plan,
                     params: normalize_step_params_for_execution(
                         recipe,
                         &step,
@@ -2708,6 +2920,9 @@ fn validate_grant_permissions_param_values(
     step: &Step,
     normalized: &OrderedMap<ParamValue>,
 ) -> Vec<PlannerMessage> {
+    if app_permissions::is_app_permission_step(step) {
+        return app_permissions::validate_app_permission_param_values(recipe_id, step, normalized);
+    }
     let mut errors = Vec::new();
     errors.extend(validate_permission_items(
         recipe_id,
@@ -3580,6 +3795,9 @@ fn normalize_step_params_for_execution(
     resolved_dest: Option<&str>,
     resolved_dest_kind: Option<crate::authored_models::AppTargetKind>,
 ) -> OrderedMap<ExecutionParamValue> {
+    if app_permissions::is_app_permission_step(step) {
+        return OrderedMap::new();
+    }
     if matches!(step.type_name.as_str(), "launch_app" | "force_stop_app") {
         if let Some(app_ref) = step.app_ref.as_deref() {
             let app = app_definitions

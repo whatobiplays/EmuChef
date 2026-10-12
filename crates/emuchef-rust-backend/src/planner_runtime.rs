@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn product_planning_without_probe_uses_current_plan_id() {
+    fn product_planning_without_probe_rejects_bounded_permissions_without_api_level() {
         let runner = FakeRunner {
             calls: RefCell::new(Vec::new()),
             result: Err(DeviceProbeError::Unavailable {
@@ -276,15 +276,13 @@ mod tests {
             }),
         };
 
-        let result = plan_with_adb_runner(request(None), &runner).expect("planning should pass");
+        let result = plan_with_adb_runner(request(None), &runner).expect("planning should run");
 
-        assert_eq!(
-            result
-                .execution_plan
-                .expect("execution plan should exist")
-                .id,
-            "plan.ayaneo.pocket_s_mini.base.001"
-        );
+        assert!(result.execution_plan.is_none());
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.code == "permission_api_level_unknown"));
         assert!(runner.calls.borrow().is_empty());
     }
 

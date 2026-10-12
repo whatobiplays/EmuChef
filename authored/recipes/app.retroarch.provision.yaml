@@ -226,10 +226,11 @@ steps:
   skip_if: []
   params: {}
   verify: []
-- id: grant_retroarch_permissions
+- id: grant_retroarch_baseline
   type: grant_permissions
-  name: Grant RetroArch permissions
-  description: Apply this step's declared RetroArch permissions.
+  app_ref: retroarch
+  name: Grant RetroArch baseline permissions
+  description: Apply the App Definition's baseline runtime permissions.
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_bootstrap
@@ -238,50 +239,26 @@ steps:
     conflicts_with: []
   skip_if: []
   params:
-    runtime:
-    - package_name: com.retroarch.aarch64
-      name: android.permission.POST_NOTIFICATIONS
-      required: false
-      when:
-        android_api_min: 33
-    - package_name: com.retroarch.aarch64
-      name: android.permission.READ_EXTERNAL_STORAGE
-      required: false
-      when:
-        android_api_min: 33
-    - package_name: com.retroarch.aarch64
-      name: android.permission.READ_MEDIA_IMAGES
-      required: false
-      when:
-        android_api_min: 33
-    - package_name: com.retroarch.aarch64
-      name: android.permission.READ_MEDIA_AUDIO
-      required: false
-      when:
-        android_api_min: 33
-    - package_name: com.retroarch.aarch64
-      name: android.permission.READ_MEDIA_VIDEO
-      required: false
-      when:
-        android_api_min: 33
-    - package_name: com.retroarch.aarch64
-      name: android.permission.WRITE_EXTERNAL_STORAGE
-      required: false
-      when:
-        android_api_min: 33
-    - package_name: com.retroarch.aarch64
-      name: android.permission.ACCESS_MEDIA_LOCATION
-      required: false
-      when:
-        android_api_min: 33
-    appops:
-    - package_name: com.retroarch.aarch64
-      op: MANAGE_EXTERNAL_STORAGE
-      mode: allow
-      required: true
+    permission_set: baseline
     policy:
       on_failure: warn
-      require_all: false
+  verify: []
+- id: grant_retroarch_elevated
+  type: grant_permissions
+  app_ref: retroarch
+  name: Grant RetroArch elevated permissions
+  description: Apply elevated all-files access on rooted devices; this step is omitted on unrooted devices.
+  user_toggleable: false
+  dependencies:
+  - grant_retroarch_baseline
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    permission_set: elevated
+    policy:
+      on_failure: warn
   verify: []
 - id: launch_retroarch_permissions
   type: launch_app
@@ -290,7 +267,7 @@ steps:
   description: Launch RetroArch once so it can initialize its storage and defaults.
   user_toggleable: false
   dependencies:
-  - grant_retroarch_permissions
+  - grant_retroarch_baseline
   constraints:
     capabilities:
     - app_launch

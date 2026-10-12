@@ -7,7 +7,7 @@
       "sourceKind": "recipe",
       "id": "app.retroarch.provision",
       "path": "authored/recipes/app.retroarch.provision.yaml",
-      "sha256": "3715bb47eabcb8750c737d42ecbfd464ef08324d48d317be6a510b058abf3831"
+      "sha256": "5407ce02462214c0c5e5bb10d03dde4f133e69ebd43d873c3163660f51566c2d"
     },
     {
       "sourceKind": "appDefinition",
@@ -60,7 +60,9 @@
     "apk_install",
     "app_launch",
     "app_data_write",
-    "shared_storage_write"
+    "shared_storage_write",
+    "shell_command",
+    "root_shell"
   ],
   "qualificationContextCapabilities": [
     "adb_available",
@@ -71,6 +73,7 @@
     "root_shell",
     "app_data_write"
   ],
+  "permissionAndroidApiLevel": 35,
   "requiredInputs": [
     "feature.copy_bios/bios_source_dir"
   ],

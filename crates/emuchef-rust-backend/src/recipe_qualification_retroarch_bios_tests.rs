@@ -38,6 +38,7 @@ struct CombinedQualificationContract {
     expanded_recipes: Vec<String>,
     recipe_constraint_capabilities: Vec<String>,
     qualification_context_capabilities: Vec<String>,
+    permission_android_api_level: i64,
     required_inputs: Vec<String>,
     optional_inputs: Vec<String>,
     required_operation_families: Vec<String>,
@@ -99,6 +100,7 @@ fn load_contract() -> CombinedQualificationContract {
     assert_eq!(contract.device_profile, KONKR_DEVICE_PROFILE);
     assert_eq!(contract.selected_recipes, contract.expanded_recipes);
     assert_eq!(contract.selected_recipes.len(), 2);
+    assert_eq!(contract.permission_android_api_level, 35);
     assert_eq!(contract.required_inputs, vec![BIOS_INPUT_KEY]);
     assert_eq!(contract.optional_inputs, vec![RETROARCH_INPUT_KEY]);
     assert!(!contract.fake_storage_aliases_qualified);
@@ -126,7 +128,9 @@ fn plan_configuration_for(
     retroarch_config: Option<&Path>,
 ) -> PlanConfigurationResult {
     use crate::catalog_source::CatalogSnapshot;
-    use crate::runtime_configuration::{plan_configuration, ConfigurationContextRequest};
+    use crate::runtime_configuration::{
+        plan_configuration, ConfigurationContextRequest, DeviceContextOverride,
+    };
 
     let catalog = CatalogSnapshot::legacy_local(authored_root())
         .expect("real authored catalog should be admitted");
@@ -151,7 +155,10 @@ fn plan_configuration_for(
         device_plan: Some(device_plan.to_string()),
         selected_recipes,
         explicit_bindings,
-        device_context: None,
+        device_context: Some(DeviceContextOverride {
+            android_api_level: Some(35),
+            ..DeviceContextOverride::default()
+        }),
         target_device: None,
         runtime_capability_availability: None,
     })
@@ -291,6 +298,55 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
             .collect::<HashSet<_>>(),
         HashSet::from([RETROARCH_RECIPE, BIOS_RECIPE])
     );
+    let baseline = plan
+        .steps
+        .iter()
+        .position(|step| step.id.ends_with("/grant_retroarch_baseline"))
+        .expect("combined plan should retain baseline permissions");
+    let elevated = plan
+        .steps
+        .iter()
+        .position(|step| step.id.ends_with("/grant_retroarch_elevated"))
+        .expect("rooted qualification plan should retain elevated permissions");
+    assert!(baseline < elevated);
+    let baseline_step = &plan.steps[baseline];
+    assert_eq!(baseline_step.params.len(), 0);
+    assert_eq!(
+        baseline_step
+            .permission_plan
+            .as_ref()
+            .unwrap()
+            .permission_set,
+        crate::planner::PermissionSetKind::Baseline
+    );
+    let elevated_step = &plan.steps[elevated];
+    assert_eq!(elevated_step.params.len(), 0);
+    assert_eq!(
+        elevated_step
+            .permission_plan
+            .as_ref()
+            .unwrap()
+            .permission_set,
+        crate::planner::PermissionSetKind::Elevated
+    );
+    assert!(elevated_step
+        .constraints
+        .capabilities
+        .iter()
+        .any(|capability| capability == "root_shell"));
+    let permission_launch = plan
+        .steps
+        .iter()
+        .find(|step| step.id.ends_with("/launch_retroarch_permissions"))
+        .expect("permission bootstrap launch should be retained");
+    assert!(permission_launch
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.ends_with("/grant_retroarch_baseline")));
+    assert!(!permission_launch
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.ends_with("/grant_retroarch_elevated")));
     let bios_step = plan
         .steps
         .iter()
@@ -793,6 +849,13 @@ impl ExecutorDevice for CombinedVerificationFailDevice {
 
     fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
         <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
+    }
+
+    fn apply_permission_operation(
+        &mut self,
+        operation: crate::executor::PermissionOperation,
+    ) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::apply_permission_operation(&mut self.inner, operation)
     }
 
     fn launch_app(

@@ -157,7 +157,18 @@ fn assert_step_specs_surface(result: &Value) {
         .shape
         .as_ref()
         .expect("policy param should expose shape metadata");
-    assert_eq!(policy_shape["fields"]["on_failure"]["default"], "warn");
+    assert_eq!(
+        policy_shape["fields"]["on_failure"]["enumValues"],
+        json!(["warn", "fail"])
+    );
+    assert_eq!(policy_shape["fields"]["on_failure"]["required"], true);
+    assert!(policy_shape["fields"]["on_failure"]
+        .get("default")
+        .is_none());
+    assert_eq!(
+        grant_permissions.params["permission_set"].enum_values,
+        vec!["baseline", "elevated"]
+    );
 }
 
 fn assert_step_specs_response(response: &Value) {

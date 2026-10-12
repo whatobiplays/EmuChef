@@ -97,6 +97,49 @@ execution plan retains concrete paths and effective capability constraints;
 review and execution do not resolve authored target IDs. Generic copy
 destinations and the user-configured ROM-copy Recipe retain their existing
 literal or input-reference behavior.
+
+App-aware `grant_permissions` steps name an App Definition with `app_ref` and
+select exactly one `permission_set`: `baseline` or `elevated`. Their
+`policy.on_failure` is `warn` or `fail`. The planner resolves the selected
+App Definition actions and target API applicability into the step-local
+`ExecutionStep.permission_plan`; that plan is the only executable action
+source, contains the reviewed package identity and per-action applicability,
+and is covered by the canonical execution-plan digest. New-form `params` do
+not contain duplicate runtime or app-op action arrays. Review, execution, and
+reporting read the same retained plan and app snapshot.
+
+Bounded actions cannot be planned when the Android API level is unknown;
+planning reports the action and bounds that need resolution. An action without
+API bounds remains applicable with an unknown API level. A confirmed API level
+outside an action's inclusive bounds retains that action with a
+`not_applicable` reason. A selected permission step whose actions are all
+inapplicable is reported as skipped, with each reason retained and no shell
+execution or root preflight. A capability-pruned step is absent from the plan.
+When the selected target supplies an Android API level, that target fact takes
+precedence over profile context and is retained in the plan's device context
+for review.
+
+`baseline` requires `shell_command` and executes through ordinary ADB shell.
+`elevated` requires both `shell_command` and `root_shell` and is omitted when
+either capability is unavailable. Reviewed root authorization is required only
+when an elevated plan has at least one applicable action; an all-inapplicable
+plan skips without root qualification or execution preflight. The real adapter
+separately checks authorization and revalidates root immediately before each
+privileged command. The fixed command surface grants runtime permissions or
+sets app-ops to `allow`; it does not accept authored shell commands.
+Ordinary action failures continue across independent applicable actions. Under
+`warn`, each failed action is reported as a warning and the step succeeds with
+warnings; under `fail`, the step fails with an execution error. Root-authority,
+identity, transport, and interruption failures stop execution immediately.
+Legacy permission steps keep their existing package-based behavior until the
+compatibility cutover.
+
+RetroArch places `MANAGE_EXTERNAL_STORAGE` in its App Definition's `elevated`
+set, so all-files access automation runs only on rooted devices. Unrooted
+devices still run its applicable baseline runtime permission actions and
+continue through launch because the launch depends on the baseline step only.
+When both permission steps are selected, the stable topological sort preserves
+their authored baseline-then-elevated order before launch.
 Configuration discovery reports the union of effective step capabilities for
 each valid Recipe. A Recipe with an unresolved App Target is unavailable, has
 unknown required capabilities, and carries a diagnostic identifying the

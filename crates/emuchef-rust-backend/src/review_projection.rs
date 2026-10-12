@@ -13,7 +13,8 @@ use serde_json::Value;
 use crate::model::{InputDeclaration, Recipe};
 use crate::planner::{
     ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, ExecutionStep,
-    ResolvedInputBinding,
+    PermissionActionApplicability, PermissionFailurePolicy, PermissionPlanAction,
+    PermissionSetKind, ResolvedInputBinding,
 };
 use crate::runtime_configuration::{PreparedConfiguration, RuntimeConfigurationDiagnostic};
 
@@ -165,6 +166,13 @@ pub(crate) fn project_review(
             {
                 unsupported_action = true;
             }
+            if feature_steps.iter().any(|step| {
+                step.type_name == "grant_permissions"
+                    && (step.permission_plan.is_some() || step.app_id.is_some())
+                    && crate::planner::validated_plan_permission_plan(plan, step).is_err()
+            }) {
+                unsupported_action = true;
+            }
             Some(ReviewFeature {
                 name: non_blank(&authored.name)
                     .unwrap_or("Selected feature")
@@ -282,7 +290,19 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
         .as_ref()
         .filter(|_| matches!(step.type_name.as_str(), "launch_app" | "force_stop_app"))
         .map(|_| crate::planner::validated_plan_lifecycle_target(plan, step));
-    let title = if step.type_name == "install_apk" {
+    let permission_plan = (step.type_name == "grant_permissions")
+        .then(|| crate::planner::validated_plan_permission_plan(plan, step).ok())
+        .flatten();
+    let title = if let Some((app, permission_plan)) = permission_plan {
+        Some(format!(
+            "Grant {} permissions to {}",
+            match permission_plan.permission_set {
+                PermissionSetKind::Baseline => "baseline",
+                PermissionSetKind::Elevated => "elevated",
+            },
+            app.name
+        ))
+    } else if step.type_name == "install_apk" {
         app.map(|app| format!("Install {}", app.name))
     } else {
         None
@@ -290,7 +310,13 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     .or_else(|| non_blank(&step.name).map(str::to_string))
     .or_else(|| non_blank(&step.note).map(str::to_string))
     .unwrap_or_else(|| neutral_action_title(section).to_string());
-    let description = if let Some(target) = lifecycle_target {
+    let description = if let Some((app, permission_plan)) = permission_plan {
+        Some(permission_plan_description(app, step, permission_plan))
+    } else if step.type_name == "grant_permissions"
+        && (step.permission_plan.is_some() || step.app_id.is_some())
+    {
+        Some("The reviewed permission plan or its App Definition identity is invalid.".to_string())
+    } else if let Some(target) = lifecycle_target {
         let target = match target {
             Ok((package, Some(activity))) => format!("Target: {package}/{activity}."),
             Ok((package, None)) => format!("Target package: {package}."),
@@ -345,6 +371,64 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
         },
         device_location: device_destination(step),
     }
+}
+
+fn permission_plan_description(
+    app: &crate::planner::ExecutionAppSnapshot,
+    step: &ExecutionStep,
+    permission_plan: &crate::planner::PermissionPlan,
+) -> String {
+    let set_name = match permission_plan.permission_set {
+        PermissionSetKind::Baseline => "baseline",
+        PermissionSetKind::Elevated => "elevated",
+    };
+    let mut lines = vec![format!(
+        "Permission set: {set_name}. Target package: {}.",
+        app.package_id
+    )];
+    lines.push(format!(
+        "Effective capabilities: {}.",
+        step.constraints.capabilities.join(", ")
+    ));
+    if permission_plan.permission_set == PermissionSetKind::Elevated {
+        lines.push("This set requires reviewed root authorization.".to_string());
+    }
+    lines.push("Planned actions:".to_string());
+    for action in &permission_plan.actions {
+        let action_name = match action {
+            PermissionPlanAction::RuntimePermission { permission, .. } => {
+                format!("grant runtime permission {permission}")
+            }
+            PermissionPlanAction::AppOp { op, .. } => format!("allow app-op {op}"),
+        };
+        let applicability = match action.applicability() {
+            PermissionActionApplicability::Applicable => "applicable".to_string(),
+            PermissionActionApplicability::NotApplicable { reason } => {
+                format!("not applicable: {}", reason.description())
+            }
+        };
+        lines.push(format!("- {action_name} ({applicability})"));
+    }
+    if !permission_plan.actions.is_empty()
+        && permission_plan.actions.iter().all(|action| {
+            matches!(
+                action.applicability(),
+                PermissionActionApplicability::NotApplicable { .. }
+            )
+        })
+    {
+        lines.push(
+            "Step disposition: skipped because no planned permission actions apply.".to_string(),
+        );
+    }
+    lines.push(format!(
+        "Ordinary action failures {} the step.",
+        match permission_plan.on_failure {
+            PermissionFailurePolicy::Warn => "produce warnings without failing",
+            PermissionFailurePolicy::Fail => "fail",
+        }
+    ));
+    lines.join("\n")
 }
 
 fn install_apk_artifact<'a>(
@@ -579,6 +663,7 @@ mod tests {
                 capabilities: Vec::new(),
                 conflicts_with: Vec::new(),
             },
+            permission_plan: None,
             params: OrderedMap::new(),
             skip_if: Vec::new(),
             verify: Vec::new(),
@@ -705,5 +790,184 @@ mod tests {
         assert!(description.contains("does not guarantee immutable bytes"));
         assert!(description.contains("not publisher authentication"));
         assert!(!description.contains("private"));
+    }
+
+    #[test]
+    fn permission_review_uses_planned_actions_app_identity_and_applicability() {
+        use crate::authored_models::AppOpMode;
+        use crate::planner::{
+            DeviceContext, ExecutionAppSnapshot, ExecutionPlanSource, ExecutionStepConstraints,
+            PermissionActionApplicability, PermissionNotApplicableReason, PermissionPlan,
+            PermissionPlanAction, RuntimeCapabilities,
+        };
+
+        let step = ExecutionStep {
+            id: "app.armsx1.install/grant_elevated".to_string(),
+            recipe_ref: "app.armsx1.install".to_string(),
+            app_id: Some("armsx1".to_string()),
+            type_name: "grant_permissions".to_string(),
+            name: "Authored permission note".to_string(),
+            note: "Authored note does not define permission actions".to_string(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: vec!["shell_command".to_string(), "root_shell".to_string()],
+                conflicts_with: Vec::new(),
+            },
+            permission_plan: Some(PermissionPlan {
+                permission_set: PermissionSetKind::Elevated,
+                on_failure: PermissionFailurePolicy::Warn,
+                actions: vec![
+                    PermissionPlanAction::RuntimePermission {
+                        package_name: "com.nanodata.armsx".to_string(),
+                        permission: "android.permission.POST_NOTIFICATIONS".to_string(),
+                        android_api_min: None,
+                        android_api_max: None,
+                        applicability: PermissionActionApplicability::Applicable,
+                    },
+                    PermissionPlanAction::AppOp {
+                        package_name: "com.nanodata.armsx".to_string(),
+                        op: "MANAGE_EXTERNAL_STORAGE".to_string(),
+                        mode: AppOpMode::Allow,
+                        android_api_min: None,
+                        android_api_max: Some(34),
+                        applicability: PermissionActionApplicability::NotApplicable {
+                            reason: PermissionNotApplicableReason::AndroidApiAboveMaximum {
+                                actual: 35,
+                                maximum: 34,
+                            },
+                        },
+                    },
+                ],
+            }),
+            params: OrderedMap::new(),
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        let mut plan = ExecutionPlan {
+            id: "plan.permission-review".to_string(),
+            source: ExecutionPlanSource {
+                device_profile_ref: "profile.example".to_string(),
+                device_plan_ref: "plan.example".to_string(),
+                selected_recipe_refs: vec![step.recipe_ref.clone()],
+                expanded_recipe_refs: vec![step.recipe_ref.clone()],
+                catalog: None,
+            },
+            recipes: Vec::new(),
+            apps: vec![ExecutionAppSnapshot {
+                id: "armsx1".to_string(),
+                name: "ARMSX1".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.nanodata.armsx".to_string(),
+            }],
+            target_device: None,
+            device_context: DeviceContext {
+                manufacturer: "Example".to_string(),
+                model: "Example".to_string(),
+                android_version: 15,
+                android_api_level: Some(35),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: true,
+                shared_storage_write: false,
+                app_launch: false,
+                shell_command: true,
+                package_remove_for_user: false,
+                root_shell: true,
+                app_data_write: false,
+            },
+            inputs: Vec::new(),
+            artifacts: Vec::new(),
+            steps: vec![step.clone()],
+            schema_version: 1,
+            kind: "execution_plan",
+        };
+
+        let action = project_action(&plan, &step, "permissions");
+
+        assert_eq!(action.title, "Grant elevated permissions to ARMSX1");
+        let description = action.description.expect("permission plan is reviewed");
+        assert!(description.contains("Target package: com.nanodata.armsx."));
+        assert!(description.contains("Effective capabilities: shell_command, root_shell."));
+        assert!(description.contains("requires reviewed root authorization"));
+        assert!(
+            description.contains("grant runtime permission android.permission.POST_NOTIFICATIONS")
+        );
+        assert!(description.contains("allow app-op MANAGE_EXTERNAL_STORAGE"));
+        assert!(description.contains("Android API level 35 is above the action maximum of 34."));
+        assert!(description.contains("Ordinary action failures produce warnings without failing"));
+        assert!(!description.contains("Authored note does not define"));
+
+        plan.apps[0].package_id = "com.nanodata.changed".to_string();
+        let invalid_action = project_action(&plan, &step, "permissions");
+        assert!(invalid_action
+            .description
+            .as_deref()
+            .is_some_and(|description| description
+                .contains("permission plan or its App Definition identity is invalid")));
+        plan.apps[0].package_id = "com.nanodata.armsx".to_string();
+
+        let baseline_step = ExecutionStep {
+            id: "app.armsx1.install/grant_baseline".to_string(),
+            recipe_ref: step.recipe_ref.clone(),
+            app_id: step.app_id.clone(),
+            type_name: step.type_name.clone(),
+            name: step.name.clone(),
+            note: step.note.clone(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: vec!["shell_command".to_string()],
+                conflicts_with: Vec::new(),
+            },
+            permission_plan: Some(PermissionPlan {
+                permission_set: PermissionSetKind::Baseline,
+                on_failure: PermissionFailurePolicy::Fail,
+                actions: vec![PermissionPlanAction::RuntimePermission {
+                    package_name: "com.nanodata.armsx".to_string(),
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                    applicability: PermissionActionApplicability::Applicable,
+                }],
+            }),
+            params: OrderedMap::new(),
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        plan.steps = vec![baseline_step.clone()];
+        let baseline_action = project_action(&plan, &baseline_step, "permissions");
+        let baseline_description = baseline_action
+            .description
+            .expect("baseline permission plan is reviewed");
+        assert!(baseline_description.contains("Effective capabilities: shell_command."));
+        assert!(baseline_description.contains("Target package: com.nanodata.armsx."));
+        assert!(baseline_description.contains("Ordinary action failures fail"));
+
+        let mut skipped_step = step.clone();
+        skipped_step.id = "app.armsx1.install/grant_all_inapplicable".to_string();
+        if let Some(PermissionPlanAction::RuntimePermission { applicability, .. }) = skipped_step
+            .permission_plan
+            .as_mut()
+            .and_then(|permission_plan| permission_plan.actions.first_mut())
+        {
+            *applicability = PermissionActionApplicability::NotApplicable {
+                reason: PermissionNotApplicableReason::AndroidApiBelowMinimum {
+                    actual: 28,
+                    minimum: 30,
+                },
+            };
+        }
+        plan.steps = vec![skipped_step.clone()];
+        let skipped_action = project_action(&plan, &skipped_step, "permissions");
+        let skipped_description = skipped_action
+            .description
+            .expect("inapplicable permission plan is reviewed");
+        assert!(skipped_description
+            .contains("Step disposition: skipped because no planned permission actions apply."));
+        assert!(
+            skipped_description.contains("Android API level 28 is below the action minimum of 30.")
+        );
     }
 }

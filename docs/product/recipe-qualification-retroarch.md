@@ -52,6 +52,19 @@ in the immutable plan, including the external app-data config file path.
   All three launches and two force stops select `retroarch` by `app_ref`.
   Planning records the concrete package and launcher in the reviewed plan;
   review text and deterministic device commands show the same target.
+- Permission automation follows the App Definition authority model. Applicable
+  baseline runtime grants run on rooted and unrooted devices. The
+  `MANAGE_EXTERNAL_STORAGE` app-op is in the elevated set, so it requires both
+  `shell_command` and `root_shell` and is omitted when either capability is
+  unavailable. This is an explicit contract
+  change from the earlier qualification assertion that expected non-root
+  all-files access automation; the accepted App Definition and product
+  permission policy require root for this action.
+- Rooted planning and execution verify baseline actions, then the elevated
+  action, then permission launch. The launch depends on baseline only, so an
+  omitted elevated step does not block unrooted continuation. The rooted order
+  relies on the planner's stable topological sort to preserve authored order
+  between the elevated step and the now-ready launch step.
 - Artifact definitions enter the production resolution model at their exact
   default-cache filenames with authored URLs unchanged.
 - The generated workflow completes successfully through the deterministic

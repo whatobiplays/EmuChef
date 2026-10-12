@@ -4,12 +4,16 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
-use crate::executor::adb::RealAdbDevice;
-use crate::executor::{ExecutorAdapters, ExecutorRunner};
+use crate::authored_models::AppOpMode;
+use crate::executor::adb::{AdbCommandError, FakeAdbCommandExecutor, RealAdbDevice};
+use crate::executor::PermissionOperation;
+use crate::executor::{ExecutorAdapters, ExecutorRunner, StepFailureKind};
 use crate::model::OrderedMap;
 use crate::planner::{
-    DeviceContext, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep,
-    ExecutionStepCondition, ExecutionStepConstraints, RuntimeCapabilities,
+    DeviceContext, ExecutionAppSnapshot, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource,
+    ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints, PermissionActionApplicability,
+    PermissionFailurePolicy, PermissionPlan, PermissionPlanAction, PermissionSetKind,
+    RuntimeCapabilities,
 };
 
 mod physical_interruption_qualification;
@@ -505,6 +509,258 @@ fn run_executor_plan(
     runner.run(&plan)
 }
 
+fn permission_executor_plan(
+    permission_set: PermissionSetKind,
+    root_available: bool,
+    actions: Vec<PermissionPlanAction>,
+) -> ExecutionPlan {
+    ExecutionPlan {
+        id: "plan.permission-operation-test".to_string(),
+        source: ExecutionPlanSource {
+            device_profile_ref: "fixture.permission".to_string(),
+            device_plan_ref: "fixture.permission".to_string(),
+            selected_recipe_refs: vec!["fixture.permission".to_string()],
+            expanded_recipe_refs: vec!["fixture.permission".to_string()],
+            catalog: None,
+        },
+        recipes: Vec::new(),
+        apps: vec![ExecutionAppSnapshot {
+            id: "permission-app".to_string(),
+            name: "Permission App".to_string(),
+            description: None,
+            category: None,
+            package_id: "com.example.permission".to_string(),
+        }],
+        target_device: None,
+        device_context: DeviceContext {
+            manufacturer: "Qualification fixture".to_string(),
+            model: "Permission adapter fixture".to_string(),
+            android_version: 15,
+            android_api_level: Some(35),
+            device_tags: Vec::new(),
+        },
+        runtime_capabilities: RuntimeCapabilities {
+            adb_available: true,
+            apk_install: true,
+            shared_storage_write: true,
+            app_launch: true,
+            shell_command: true,
+            package_remove_for_user: false,
+            root_shell: root_available,
+            app_data_write: false,
+        },
+        inputs: Vec::new(),
+        artifacts: Vec::new(),
+        steps: vec![ExecutionStep {
+            id: "fixture.permission/grant".to_string(),
+            recipe_ref: "fixture.permission".to_string(),
+            app_id: Some("permission-app".to_string()),
+            type_name: "grant_permissions".to_string(),
+            name: "Grant app permissions".to_string(),
+            note: "Grant app permissions".to_string(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: vec!["shell_command".to_string()],
+                conflicts_with: Vec::new(),
+            },
+            permission_plan: Some(PermissionPlan {
+                permission_set,
+                on_failure: PermissionFailurePolicy::Fail,
+                actions,
+            }),
+            params: OrderedMap::new(),
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        }],
+        schema_version: 1,
+        kind: "execution_plan",
+    }
+}
+
+fn runtime_permission_action(permission: &str) -> PermissionPlanAction {
+    PermissionPlanAction::RuntimePermission {
+        package_name: "com.example.permission".to_string(),
+        permission: permission.to_string(),
+        android_api_min: None,
+        android_api_max: None,
+        applicability: PermissionActionApplicability::Applicable,
+    }
+}
+
+#[test]
+fn real_adb_baseline_permission_actions_use_unprivileged_shell_commands() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "", "");
+    command_executor.push_completed(0, "", "");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let actions = vec![
+        runtime_permission_action("android.permission.CAMERA"),
+        PermissionPlanAction::AppOp {
+            package_name: "com.example.permission".to_string(),
+            op: "MANAGE_EXTERNAL_STORAGE".to_string(),
+            mode: AppOpMode::Allow,
+            android_api_min: None,
+            android_api_max: None,
+            applicability: PermissionActionApplicability::Applicable,
+        },
+    ];
+    let plan = permission_executor_plan(PermissionSetKind::Baseline, false, actions);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&plan);
+
+    assert!(result.success);
+    let calls = runner.adapters().device().command_executor().calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0],
+        [
+            "adb",
+            "-s",
+            "reviewed-serial",
+            "shell",
+            "pm grant com.example.permission android.permission.CAMERA",
+        ]
+    );
+    assert_eq!(
+        calls[1],
+        [
+            "adb",
+            "-s",
+            "reviewed-serial",
+            "shell",
+            "appops set com.example.permission MANAGE_EXTERNAL_STORAGE allow",
+        ]
+    );
+    assert!(calls
+        .iter()
+        .all(|call| !call.iter().any(|part| part == "su")));
+}
+
+#[test]
+fn real_adb_baseline_permission_operation_uses_complete_adb_command_without_root() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "", "");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let plan = permission_executor_plan(
+        PermissionSetKind::Baseline,
+        false,
+        vec![runtime_permission_action("android.permission.CAMERA")],
+    );
+    assert!(!crate::executor::reviewed_plan_requires_root(&plan));
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&plan);
+
+    assert!(result.success);
+    let calls = runner.adapters().device().command_executor().calls();
+    assert_eq!(
+        calls,
+        [vec![
+            "adb",
+            "-s",
+            "reviewed-serial",
+            "shell",
+            "pm grant com.example.permission android.permission.CAMERA",
+        ]],
+        "baseline permissions use a complete ADB command and no privilege escalation"
+    );
+    assert!(calls
+        .iter()
+        .all(|call| !call.iter().any(|part| part == "su")));
+}
+
+#[test]
+fn real_adb_elevated_permission_operation_uses_reviewed_root_and_revalidates_per_command() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "", "");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let plan = permission_executor_plan(
+        PermissionSetKind::Elevated,
+        true,
+        vec![runtime_permission_action("android.permission.CAMERA")],
+    );
+    assert!(crate::executor::reviewed_plan_requires_root(&plan));
+    assert!(crate::executor::reviewed_root_authorized(&plan));
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&plan);
+
+    assert!(result.success);
+    let calls = runner.adapters().device().command_executor().calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "per-command root check followed by mutation"
+    );
+    assert_eq!(
+        calls[0],
+        ["adb", "-s", "reviewed-serial", "shell", "su", "-c", "id",]
+    );
+    assert_eq!(
+        calls[1],
+        [
+            "adb",
+            "-s",
+            "reviewed-serial",
+            "shell",
+            "su -c 'pm grant com.example.permission android.permission.CAMERA'",
+        ]
+    );
+}
+
+#[test]
+fn real_adb_elevated_permission_rejects_missing_reviewed_root_authority_before_adb() {
+    let command_executor = FakeAdbCommandExecutor::default();
+    let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+
+    let error = device
+        .apply_permission_operation(PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Elevated,
+        })
+        .unwrap_err();
+
+    assert_eq!(error, AdbCommandError::RootAuthorityUnverified.to_string());
+    assert_eq!(
+        device.take_last_error(),
+        Some(AdbCommandError::RootAuthorityUnverified)
+    );
+    assert!(device.command_executor().calls().is_empty());
+}
+
+#[test]
+fn real_adb_root_revalidation_revocation_is_classified_and_stops_the_step() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(1, "", "su: permission denied");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let plan = permission_executor_plan(
+        PermissionSetKind::Elevated,
+        true,
+        vec![runtime_permission_action("android.permission.CAMERA")],
+    );
+    assert!(crate::executor::reviewed_plan_requires_root(&plan));
+    assert!(crate::executor::reviewed_root_authorized(&plan));
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&plan);
+
+    assert!(!result.success);
+    assert_eq!(
+        result.steps[0].failure_kind,
+        Some(StepFailureKind::RootAuthorityRevoked)
+    );
+    assert!(result.steps[0]
+        .failure_kind
+        .is_some_and(StepFailureKind::requires_device_fail_stop));
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        1
+    );
+}
+
 fn executor_step(id: &str, type_name: &str) -> ExecutionStep {
     ExecutionStep {
         id: id.to_string(),
@@ -518,6 +774,7 @@ fn executor_step(id: &str, type_name: &str) -> ExecutionStep {
             capabilities: Vec::new(),
             conflicts_with: Vec::new(),
         },
+        permission_plan: None,
         params: OrderedMap::new(),
         skip_if: Vec::new(),
         verify: Vec::new(),

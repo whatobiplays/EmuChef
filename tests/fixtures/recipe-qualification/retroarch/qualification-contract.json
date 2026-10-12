@@ -4,7 +4,7 @@
   "planningDevicePlan": "ayaneo.konkr_pocket_fit.base",
   "authoredSource": {
     "path": "authored/recipes/app.retroarch.provision.yaml",
-    "sha256": "3715bb47eabcb8750c737d42ecbfd464ef08324d48d317be6a510b058abf3831"
+    "sha256": "5407ce02462214c0c5e5bb10d03dde4f133e69ebd43d873c3163660f51566c2d"
   },
   "appSource": {
     "path": "authored/apps/retroarch.yaml",
@@ -34,7 +34,9 @@
     "apk_install",
     "app_launch",
     "app_data_write",
-    "shared_storage_write"
+    "shared_storage_write",
+    "shell_command",
+    "root_shell"
   ],
   "qualificationContextCapabilities": [
     "adb_available",
@@ -93,10 +95,14 @@
     ],
     [
       "stop_retroarch_after_bootstrap",
-      "grant_retroarch_permissions"
+      "grant_retroarch_baseline"
     ],
     [
-      "grant_retroarch_permissions",
+      "grant_retroarch_baseline",
+      "grant_retroarch_elevated"
+    ],
+    [
+      "grant_retroarch_baseline",
       "launch_retroarch_permissions"
     ],
     [
@@ -119,5 +125,6 @@
   "liveNetworkRequiredForAutomatedQualification": false,
   "automatedStatus": "foundation",
   "physicalStatus": "deferred",
-  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
+  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification",
+  "permissionAndroidApiLevel": 35
 }
