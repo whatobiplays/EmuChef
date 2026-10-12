@@ -1,0 +1,94 @@
+crates/emuchef-rust-backend/src/recipe_qualification_bios_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 519-525
+CONTEXT.md
+  s_30c799487f98ff::t_39c7090f3c19f5 124-129
+  s_30c799487f98ff::t_00e2fb0c277c29 100-123,130-142
+crates/emuchef-rust-backend/src/step_specs.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 388,391,394-397,405,407,459,463-501,723-738,764-790,843-885
+tests/fixtures/recipe-qualification/retroarch-bios/qualification-contract.json
+  s_30c799487f98ff::t_00e2fb0c277c29 10,63-65,76
+crates/emuchef-rust-backend/tests/protocol_contract.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 160-171
+tests/fixtures/recipe-qualification/retroarch/qualification-contract.json
+  s_30c799487f98ff::t_00e2fb0c277c29 7,37-39,98-102,105,128-129
+docs/product/phase-6d5-root-authority-revalidation.md
+  s_30c799487f98ff::t_6ccba200703a25 46-53,57-63,108-122
+crates/emuchef-rust-backend/src/recipe_qualification_roms_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 722-728
+crates/emuchef-rust-backend/src/generation/app_recipe.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 1461
+crates/emuchef-rust-backend/src/planner_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 283,287-291,416,424-427,3858,3892,3922,3942,3950-3953,4682,4688-4689,4695-4699,4725-4731,6171-6176,6234-6259,6751-6880,6882
+  s_30c799487f98ff::t_48c63c57907e3d 6881,6883
+docs/recipe-execution-spec.md
+  s_30c799487f98ff::t_00e2fb0c277c29 202-218,598-601,603-609,613-637,689-747,759
+crates/emuchef-rust-backend/src/cli.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 1202-1205,1232,1241-1248,1506-1610,1619-1620
+docs/product/product-roadmap.md
+  s_30c799487f98ff::t_6ccba200703a25 811-821
+crates/emuchef-rust-backend/src/review_projection.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 16-17,169-175,293-305,313-319,376-433,666,794-972
+crates/emuchef-rust-backend/src/recipe_qualification_retroarch_bios_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 41,103,131-133,158-161,301-349,854-858
+  s_30c799487f98ff::t_da75e077f83a2f 859-860
+crates/emuchef-rust-backend/src/planner/app_permissions.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 1-421
+crates/emuchef-rust-backend/src/planner_runtime.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 271,279,281-285
+docs/product/recipe-qualification-retroarch.md
+  s_30c799487f98ff::t_00e2fb0c277c29 55-67
+crates/emuchef-rust-backend/src/executor.rs
+  s_30c799487f98ff::t_6b4ea3d2ca0f26 2515-2519
+  s_30c799487f98ff::t_00e2fb0c277c29 31-32,519-521,571-580,589-642,855-914,1301-1310,1373-1436,2514,2520,3054-3056,3100-3114,3174-3190,3321-3332,3511-3518,4687-4825,5043
+crates/emuchef-rust-backend/src/recipe_qualification_xaniteog_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 559-565
+crates/emuchef-rust-backend/src/planner.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 15,28,299-301,307-423,503-555,774,777-786,832,842-867,956,982,2923-2925,3798-3800
+docs/product/phase-6d4-same-serial-identity-replacement.md
+  s_30c799487f98ff::t_6ccba200703a25 86,89-90,95-97
+crates/emuchef-rust-backend/src/executor_tests.rs
+  s_30c799487f98ff::t_f888ce52e7ab1d 436-456
+  s_30c799487f98ff::t_00e2fb0c277c29 18,23-27,97-142,167,188,245,330,425-435,457-721,735,941,1444,1473,1545,1564,1717,1765,1815,1869,1883,1956,1970,2071,2125,2268,2291,2391,2447,2857,3128,3214,3819,4191,4205,4252,4362,4428,4861,4919,4988,5042,5100,5157,5285
+crates/emuchef-rust-backend/src/executor_real_adb_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 7-10,13-16,512-763,777
+authored/recipes/app.retroarch.provision.yaml
+  s_30c799487f98ff::t_00e2fb0c277c29 229,231-233,242-259,270
+crates/emuchef-rust-backend/src/executor/root_requirements.rs
+  s_30c799487f98ff::t_6b4ea3d2ca0f26 147,180-201,388
+  s_30c799487f98ff::t_f888ce52e7ab1d 341,347-381,385-387
+  s_30c799487f98ff::t_00e2fb0c277c29 71,92-94,172,303-304,325-340,342-346,382-384
+  s_ea8831b8e36fee::t_68c034d2f5436c 202-203
+crates/emuchef-rust-backend/src/recipe_qualification_obtainium_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 887-893
+crates/emuchef-rust-backend/src/executor/adb.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 17,743-757
+  s_30c799487f98ff::t_c25ff9c2c8396f 758-760
+crates/emuchef-rust-backend/src/execution_session.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 1230,1232-1236,1240-1244,1498,1500-1503,1589-1713,2058,2078,2787
+crates/emuchef-rust-backend/src/recipe_qualification_retroarch_tests.rs
+  s_30c799487f98ff::t_00e2fb0c277c29 28-30,60,128,136-147,169-172,174-179,422-476,478,480-503,505-507,510-511,514-521,523-553,555-626,928-934,1010-1011,1106-1107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e714392519cb73d85910d2bbf6f565765a3e29ec",
+  "prompts": {},
+  "sessions": {
+    "s_30c799487f98ff": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12a13-155f-70d3-8962-3a9c8a0841bb",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_ea8831b8e36fee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12a1d-66b3-7970-8e63-c143e20f8adf",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
