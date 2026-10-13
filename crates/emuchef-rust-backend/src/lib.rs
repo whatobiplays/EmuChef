@@ -10,6 +10,9 @@ pub(crate) mod android_permissions;
 pub(crate) mod apk_authoring_inspection;
 /// Production APK manifest inspection boundary for hostile APK input.
 pub(crate) mod apk_manifest;
+pub mod app_definition_admission;
+pub mod app_definition_document;
+pub mod app_definition_persistence;
 mod artifact_resolver;
 mod artifact_store;
 mod artifact_transport;

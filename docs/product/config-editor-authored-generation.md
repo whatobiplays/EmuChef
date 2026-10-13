@@ -12,10 +12,13 @@ Definitions and Recipes temporarily duplicate the same app facts. Extended
 device capability checks and authenticated/private source access remain later
 work.
 
-This document defines the Config Editor workflows for generating:
+This document defines the Config Editor workflows for generating authored
+content and editing App Definition documents:
 
-- a starter app definition and installation recipe from a GitHub source, remote APK, or local APK; and
-- a starter device profile from a connected ADB device.
+- a starter app definition and installation recipe from a GitHub source, remote
+  APK, or local APK;
+- a starter device profile from a connected ADB device; and
+- an existing catalog App Definition or a standalone App Definition YAML file.
 
 Rust is the sole product runtime. All analysis, validation, canonical generation, collision detection, and sidecar protocol behavior belong to `crates/emuchef-rust-backend`. Tauri owns native paths, trusted filesystem writes, configured external tools, and exact ADB serials. React owns presentation and explicit user choices.
 
@@ -23,7 +26,11 @@ Rust is the sole product runtime. All analysis, validation, canonical generation
 
 Generation creates reviewable authored drafts. It does not silently alter the catalog.
 
-The generated recipe becomes a normal recipe document and uses the existing recipe editor, validation, undo/redo, reference indexing, and canonical YAML path. App definitions and device profiles initially use dedicated draft forms and YAML previews rather than new persistent editor-session types.
+The generated recipe becomes a normal Recipe document and uses the existing
+recipe editor, validation, undo/redo, reference indexing, and canonical YAML
+path. App and device profile generation remain draft forms with YAML previews.
+App Definitions also have a separate persistent typed document session for
+direct editing; it does not change the generator draft or publication flow.
 
 Generation operations are side-effect free until an explicit save. Network analysis may retrieve bounded metadata and a selected APK into a generator-owned temporary workspace, but it does not install APKs, execute repository content, modify a device, or publish catalog files.
 
@@ -474,6 +481,12 @@ canonical YAML is byte-stable.
 
 Negotiated capabilities include:
 
+- `openAppDefinition`;
+- `applyAppDefinitionCommand`;
+- `saveAppDefinition`;
+- `saveAppDefinitionAs`;
+- `saveDocument`;
+- `saveDocumentAs`;
 - `analyzeAppSource`;
 - `inspectApk`;
 - `generateAppRecipeDraft`;
@@ -481,6 +494,8 @@ Negotiated capabilities include:
 - `checkGeneratedCatalogCollisions`.
 
 Existing `listAdbDevices` and `probeDevice` capabilities are reused.
+`saveDocument` and `saveDocumentAs` dispatch by document type alongside the
+App Definition-specific save operations.
 
 Analysis and draft generation return structured data and perform no
 authored-data writes. Backend responses use stable error codes and redact
@@ -491,12 +506,22 @@ network details from product-facing errors.
 
 Tauri owns:
 
+- native App Definition file selection and Save As destinations;
 - native local-APK selection;
 - session-scoped native APK handles and file identities;
 - exact ADB serials and device handles;
 - native save destinations;
 - final collision revalidation; and
 - trusted writes.
+
+The Rust sidecar owns typed App Definition drafts, diagnostics, canonical YAML,
+history, dependency admission, collision checks, stale-state detection, and
+single-file publication. Tauri supplies native paths and enforces trusted
+filesystem boundaries. The backend rechecks relevant disk inputs immediately
+before publication and rejects changes detected there. Atomic rename does not
+provide compare-and-swap protection against an external write racing after that
+check. App Definition publication is a single-file operation; the generator's
+existing app-and-recipe publication flow remains separate.
 
 Saving an app and recipe is one logical operation. Both drafts are validated before publication. Temporary files are written and synced before either final path is published. Existing files are never overwritten without explicit approval. If final publication partially fails, Tauri removes any newly published counterpart when safe and reports the incomplete outcome.
 
@@ -510,10 +535,125 @@ atomic create-new/no-clobber semantics.
 
 ## Config Editor workflow
 
+### App Definition documents
+
+The selected catalog and the catalog that owns an App document are distinct.
+The App document DTO always includes `owningAuthoredRoot`: the physical owner's
+canonical path for a catalog App, or `null` for a standalone document.
+`authoredRoot` is the currently selected catalog. Changing the selection does not
+move ownership, unlock identity, redirect Save, or change which owner-catalog
+Recipes participate in Save admission. Successful canonical Save As publication
+establishes ownership for a standalone document.
+
+The App-only `editRestrictions.canSaveAs` flag requires a standalone document
+and a canonical, existing selected root directory. Existing real-directory
+restrictions reject roots that are files and symlinked apps directories. An
+unavailable or invalid root requires catalog selection before the native Save
+As dialog can offer its canonical destination. Strict publication admission
+still validates identity, dependencies, destination safety, and no-clobber
+creation.
+
+Standalone App Save As defaults to the selected catalog's
+`apps/<app-id>.yaml` path. The native file dialog chooses a destination without
+selecting or changing the catalog root. An author must select a catalog before
+publication, and the destination must belong to that selected catalog. A catalog
+App cannot use Save As to move or clone its identity.
+
+Authors can open an App Definition from the Config Editor's native file actions
+and edit it as a persistent typed document. The editor presents Overview,
+Artifacts, Permissions, Targets, and Metadata sections, with canonical YAML and
+diagnostics alongside the form. Recipe editing and app/device profile
+generation remain separate workflows. Successfully opening an App Definition
+exits the user-configuration view.
+
+The sidecar accepts only bounded, tagged App Definition commands for defined
+fields and named collection operations. App, artifact, and target identifiers
+are not renameable through local edits. Catalog-backed documents keep their
+opened ID, package identity, canonical file path, and owner root for admission.
+Ownership is inferred from the physical `apps/` location independently of the
+selected authored-root context; changing that context does not change the
+document's owner root. Changing an identity that
+would require updating references is not supported by this editor. A different
+package identity requires a separate App Definition.
+Opening rejects symlinked `apps/` directories in either the selected authored
+root or the physical owner root.
+Metadata remains descriptive, carries no authority, and rejects reserved
+top-level keys and duplicate metadata keys.
+
+A structurally parseable schema-v1 App Definition opens even when semantic
+diagnostics are present. An incompatible kind or unsupported version is rejected
+with structured field diagnostics before a session is created; headers are not
+automatically converted. Malformed input cannot open as an App Definition
+document. Authors can retain incomplete form input locally and submit complete
+field or collection changes incrementally; a correction can succeed while
+unrelated semantic diagnostics remain. Malformed command payloads and invalid
+mutations to the field being changed are rejected without altering the draft or
+current diagnostics or undo/redo history; candidate rejection diagnostics are
+reported separately. Save is admitted only after the complete App Definition
+and its directly affected persisted Recipes pass validation in full. Admission
+combines shared local validation without device context, shared App authority
+validation against the candidate and relevant other Apps in the snapshot, and
+bounded static planning. Existing Ref and StepSpec rules for file outputs,
+multiple inputs, copy provenance, resolver ancestry, and required permission
+policy remain enforced. Errors anywhere in an affected Recipe block saving,
+including errors outside the edited app context. A device API level is not
+required; limited-context warnings are nonblocking, while static permission
+policy is still validated.
+
+Toolbar and native-menu Save and Save As actions follow the active document's
+effective save availability, including backend edit restrictions. Pending App
+form input counts as dirty work and disables both actions until it is applied or
+explicitly discarded.
+Undo/redo preserves pending local form fields while refreshing other fields
+from the current typed document. If undo removes an artifact or target with
+pending input, the form clears its backend identity and keeps the input
+available to add as a new entry.
+
+Dependency discovery covers typed App Artifact references, step app context,
+permission-set selection, launcher use, and App Target references in step
+parameters and conditions. If the backend cannot reliably classify every
+Recipe because a directory cannot be read or a Recipe cannot be parsed, Save
+fails with an actionable diagnostic. Admission checks only relevant App ID and
+package conflicts; known errors in unrelated catalog documents do not block a
+valid save, and source overlap remains advisory.
+
+The backend rechecks the opened App Definition, Recipe inventory and affected
+Recipe files, and competing App identity files immediately before publication.
+Changes detected by that recheck produce a stale-state diagnostic. Publication
+replaces one file atomically or creates the canonical Save As destination
+without clobbering an existing file. Replacement saves preserve the existing
+Unix file mode; a detected mode change causes stale-state rejection.
+Filesystem publication is not an atomic compare-and-swap operation, so an
+external write racing after the final recheck
+is outside the stale-state guarantee. Rejected saves preserve disk contents and
+the editable draft. Save failures refresh only the active document's diagnostics
+panel with file and object locations without changing document content or
+history. This editor does not rename identities or rewrite
+cross-document references.
+App Definition diagnostics use normalized object locations across document
+operations.
+
+Saving a standalone document updates its opened external file. Save As requires
+a selected authored root and publishes it once to `apps/<id>.yaml` there; the
+file-dialog destination cannot infer or change that authority. The session adopts
+that canonical identity only after publication succeeds and removes undo/redo
+history entries incompatible with the newly locked identity. Catalog-backed
+documents cannot use Save As to move or rename their identity.
+Other-root destinations, dot-segment paths, and symlink escapes are rejected.
+Canonical filesystem aliases such as `/var` and `/private/var` are accepted.
+
+Document-kind-aware actions route Save, undo/redo, validation, YAML preview, and
+dirty-state prompts to the active document. Dirty work is protected when
+switching document kinds, opening a generator, closing a window, or recovering
+from a sidecar restart. A canceled or failed open preserves the active session.
+Parseable but semantically invalid App Definitions remain available for repair;
+Save remains blocked until admission succeeds.
+
 Top-level actions:
 
 ```text
 File
+  Open App Definition...
   Generate App and Recipe...
   Generate Device Profile...
 ```

@@ -12,14 +12,20 @@ const SUPPORTED_PROTOCOL_VERSION: i64 = 1;
 const REQUIRED_CAPABILITIES: &[&str] = &[
     "listStepSpecs",
     "openRecipe",
+    "openAppDefinition",
     "getDocument",
     "applyRecipeCommand",
+    "applyAppDefinitionCommand",
     "undo",
     "redo",
     "saveRecipe",
     // The Tauri command is registered, so compatibility must fail before any
     // command can forward to a backend that does not support it.
     "saveRecipeAs",
+    "saveAppDefinition",
+    "saveAppDefinitionAs",
+    "saveDocument",
+    "saveDocumentAs",
     "validate",
     "emitYaml",
     "getRefIndex",

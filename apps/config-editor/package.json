@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "npm run check:rust-runtime",
+    "test:dom": "vitest run --config tests/vitest.config.ts",
     "sidecar:dev": "node scripts/prepare-rust-sidecar.mjs --profile debug",
     "sidecar:build": "node scripts/prepare-rust-sidecar.mjs --profile release",
     "test:sidecar-packaging": "node --test scripts/sidecar-packaging.test.mjs",
@@ -27,9 +28,9 @@
     "check:macos-bundle": "node scripts/check-macos-bundle.mjs",
     "smoke:macos-packaged-app": "node scripts/smoke-macos-packaged-app.mjs",
     "smoke:packaged-runtime-network": "node scripts/smoke-packaged-runtime-network.mjs",
-    "check:rust-runtime": "npm run test:sidecar-packaging && npm run test:sidecar-bundle-inspection && npm run test:macos-packaging && npm run check:tauri-csp && npm run check:python-runtime-retirement && npm run typecheck && npm run test:logic",
+    "check:rust-runtime": "npm run test:sidecar-packaging && npm run test:sidecar-bundle-inspection && npm run test:macos-packaging && npm run check:tauri-csp && npm run check:python-runtime-retirement && npm run typecheck && npm run test:logic && npm run test:dom",
     "dev": "vite",
-    "test:logic": "node -e \"require('node:fs').rmSync('/tmp/emuchef-config-editor-tests',{recursive:true,force:true})\" && tsc --ignoreConfig --module NodeNext --moduleResolution NodeNext --target ES2022 --outDir /tmp/emuchef-config-editor-tests --rootDir . --types node --skipLibCheck --strict tests/advancedStepInternals.logic.test.ts tests/appGenerator.logic.test.ts tests/deviceProfileGenerator.logic.test.ts tests/editorState.logic.test.ts tests/resizableEditorLayout.logic.test.ts tests/runtimeConfiguration.logic.test.ts tests/stepDependencies.logic.test.ts tests/stepParams.logic.test.ts tests/textInputGuards.logic.test.ts tests/userConfiguration.logic.test.ts src/components/advancedStepInternals.logic.ts src/components/appGenerator.logic.ts src/components/deviceProfileGenerator.logic.ts src/components/editorState.logic.ts src/components/resizableEditorLayout.logic.ts src/components/runtimeConfiguration.logic.ts src/components/stepDependencies.logic.ts src/components/stepParams.logic.ts src/components/textInputGuards.logic.ts src/components/userConfiguration.logic.ts src/api/runtimeConfiguration.ts src/api/types.ts src/api/commands.ts && node --test /tmp/emuchef-config-editor-tests/tests/*.test.js",
+    "test:logic": "node -e \"require('node:fs').rmSync('/tmp/emuchef-config-editor-tests',{recursive:true,force:true})\" && tsc --ignoreConfig --module NodeNext --moduleResolution NodeNext --target ES2022 --outDir /tmp/emuchef-config-editor-tests --rootDir . --types node --skipLibCheck --strict tests/advancedStepInternals.logic.test.ts tests/appDefinitionEditor.logic.test.ts tests/appGenerator.logic.test.ts tests/deviceProfileGenerator.logic.test.ts tests/editorState.logic.test.ts tests/resizableEditorLayout.logic.test.ts tests/runtimeConfiguration.logic.test.ts tests/stepDependencies.logic.test.ts tests/stepParams.logic.test.ts tests/textInputGuards.logic.test.ts tests/userConfiguration.logic.test.ts src/components/advancedStepInternals.logic.ts src/components/appDefinitionEditor.logic.ts src/components/appGenerator.logic.ts src/components/deviceProfileGenerator.logic.ts src/components/editorState.logic.ts src/components/resizableEditorLayout.logic.ts src/components/runtimeConfiguration.logic.ts src/components/stepDependencies.logic.ts src/components/stepParams.logic.ts src/components/textInputGuards.logic.ts src/components/userConfiguration.logic.ts src/api/runtimeConfiguration.ts src/api/types.ts src/api/commands.ts && node --test /tmp/emuchef-config-editor-tests/tests/*.test.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests",
     "build": "tsc && vite build",
@@ -43,6 +44,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@tauri-apps/cli": "^2.11.0",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
@@ -53,11 +56,13 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",
     "esbuild": "^0.28.0",
+    "jsdom": "^29.1.1",
     "globals": "^17.7.0",
     "postcss": "^8.5.13",
     "tailwindcss": "^3.4.19",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.63.0",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "vitest": "^4.1.10"
   }
 }

@@ -16,6 +16,7 @@ import {
   resolveOpenAttempt,
   resolveReopenAttempt,
   resolveRestartSuccess,
+  saveFailureDiagnosticsForActiveDocument,
   type ActionAvailabilityState,
   type CommandName,
 } from "../src/components/editorState.logic.js";
@@ -81,7 +82,7 @@ test("restart success invalidates displayed document sessions and enables recove
     {
       sessionValid: false,
       message:
-        "The sidecar was restarted. The displayed recipe is a stale read-only reference; reopen it from disk to create a new document session.",
+        "The sidecar was restarted. The displayed document is a stale read-only reference; reopen it from disk to create a new document session.",
       sidecarUsable: true,
       stepSpecsRefreshAllowed: true,
     },
@@ -103,7 +104,7 @@ test("restart success invalidates displayed document sessions and enables recove
     {
       sessionValid: false,
       message:
-        "Backend is missing required capabilities. The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
+        "Backend is missing required capabilities. The editor session is no longer valid. Restart the sidecar and reopen the document.",
       sidecarUsable: false,
       stepSpecsRefreshAllowed: false,
     },
@@ -169,6 +170,63 @@ test("action availability disables restart during any in-flight command", () => 
     ).restartSidecar,
     false,
   );
+});
+
+test("pending App Definition form input blocks both Save actions while retaining truthful dirty state", () => {
+  const availability = buildActionAvailability(
+    recoveryState({
+      dirty: true,
+      pendingAppDefinitionInput: true,
+      canSaveAs: true,
+      documentSessionValid: true,
+      backendCompatible: true,
+      sidecarRunning: true,
+    }),
+  );
+
+  assert.equal(availability.saveRecipe, false);
+  assert.equal(availability.saveRecipeAs, false);
+});
+
+test("document Save As permission gates action availability", () => {
+  const availability = buildActionAvailability(
+    recoveryState({
+      dirty: true,
+      pendingAppDefinitionInput: false,
+      canSaveAs: false,
+      documentSessionValid: true,
+      backendCompatible: true,
+      sidecarRunning: true,
+    }),
+  );
+
+  assert.equal(availability.saveRecipe, true);
+  assert.equal(availability.saveRecipeAs, false);
+});
+
+test("save failure diagnostics normalize backend fields only for the matching active document", () => {
+  const diagnostics = [{
+    severity: "error",
+    code: "app_definition_recipe_reference",
+    message: "An affected Recipe still refers to this App Definition.",
+    file: "authored/recipes/affected.yaml",
+    object_kind: "recipe",
+    object_id: "affectedRecipe",
+    field: "app_ref",
+  }];
+  const details = { documentId: "app-1", diagnostics };
+
+  assert.deepEqual(saveFailureDiagnosticsForActiveDocument(details, "app-1", "app-1"), [{
+    severity: "error",
+    code: "app_definition_recipe_reference",
+    message: "An affected Recipe still refers to this App Definition.",
+    file: "authored/recipes/affected.yaml",
+    objectKind: "recipe",
+    objectId: "affectedRecipe",
+    field: "app_ref",
+  }]);
+  assert.equal(saveFailureDiagnosticsForActiveDocument(details, "app-1", "app-2"), null);
+  assert.equal(saveFailureDiagnosticsForActiveDocument({ ...details, documentId: "app-2" }, "app-1", "app-1"), null);
 });
 
 test("reopen resolution replaces stale state only after successful reopen", () => {
@@ -598,7 +656,7 @@ test("classifyOperationFailure distinguishes api errors from fatal sidecar trans
     classifyOperationFailure({ kind: "transport-error", message: "Rust sidecar exited unexpectedly" }, "Save failed."),
     {
       message:
-        "Save failed. Rust sidecar exited unexpectedly The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
+        "Save failed. Rust sidecar exited unexpectedly The editor session is no longer valid. Restart the sidecar and reopen the document.",
       sessionInvalid: true,
     },
   );
@@ -633,7 +691,7 @@ test("classifyOperationFailure invalidates only unknown_document errors for the 
     }),
     {
       message:
-        "Save failed. unknown_document: Document was closed. The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
+        "Save failed. unknown_document: Document was closed. The editor session is no longer valid. Restart the sidecar and reopen the document.",
       sessionInvalid: true,
     },
   );
@@ -679,7 +737,7 @@ test("classifySidecarStatus invalidates only exited error or incompatible states
     {
       sessionInvalid: true,
       message:
-        "Backend hello response was malformed. The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
+        "Backend hello response was malformed. The editor session is no longer valid. Restart the sidecar and reopen the document.",
     },
   );
 });

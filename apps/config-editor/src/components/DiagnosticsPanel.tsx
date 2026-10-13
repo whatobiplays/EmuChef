@@ -27,6 +27,8 @@ export function DiagnosticsPanel({ diagnostics }: DiagnosticsPanelProps) {
 }
 
 function DiagnosticItem({ diagnostic, index }: { diagnostic: DiagnosticDto; index: number }) {
+  const objectLocation = [diagnostic.objectKind, diagnostic.objectId, diagnostic.field].filter(Boolean).join(" / ");
+
   return (
     <article className="rounded border border-slate-200 bg-white p-3 text-sm">
       <div className="flex items-center gap-2">
@@ -35,10 +37,11 @@ function DiagnosticItem({ diagnostic, index }: { diagnostic: DiagnosticDto; inde
       </div>
       <p className="mt-2 text-slate-800">{diagnostic.message}</p>
       <p className="mt-2 text-xs text-slate-500">
-        {[diagnostic.objectKind, diagnostic.objectId, diagnostic.field].filter(Boolean).join(" / ") ||
-          diagnostic.file ||
-          "No location"}
+        {objectLocation || diagnostic.file || "No location"}
       </p>
+      {objectLocation && diagnostic.file ? (
+        <p className="mt-1 text-xs text-slate-500">File: {diagnostic.file}</p>
+      ) : null}
     </article>
   );
 }
