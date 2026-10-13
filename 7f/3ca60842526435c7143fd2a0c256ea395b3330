@@ -1,0 +1,115 @@
+crates/emuchef-rust-backend/tests/editor_step_internals.rs
+  s_26abde04a306f1::t_4b5f03da863da0 192,197-200,203
+apps/config-editor/src/api/types.ts
+  s_26abde04a306f1::t_4b5f03da863da0 133-159,229-232,234,242-250
+  s_26abde04a306f1::t_eaddacc26d2113 251
+apps/config-editor/src/components/AppDefinitionEditor.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 1-842
+apps/config-editor/tests/vitest.config.ts
+  s_26abde04a306f1::t_4b5f03da863da0 1-10
+docs/product/config-editor-authored-generation.md
+  s_26abde04a306f1::t_4b5f03da863da0 15-16,18-21,29-33,484-489,497-498,509,517-525,538-651,656
+crates/emuchef-rust-backend/tests/sidecar_protocol.rs
+  s_26abde04a306f1::t_4b5f03da863da0 210,215-218,221,291,296-299,302,372,377-380,383,453,458-461,464
+apps/config-editor/src/api/editorApi.ts
+  s_26abde04a306f1::t_4b5f03da863da0 3,11-12,20,81-87,128-136,139-140,147-151,159-166,567,572-577
+apps/config-editor/src-tauri/src/sidecar_client.rs
+  s_26abde04a306f1::t_4b5f03da863da0 15,18,25-28
+apps/config-editor/src/App.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 5,7,13,17-18,31,33,38,41-47,72,93-100,115-117,135-139,153-238,312-354,362-364,376,390-392,404,457,462,467,474,499,515-518,552,589,626-629,631,652-654,668,674-676,680-681,687-689,708-710,738-820,826,867,870,879-880,885-887,900-903,967,1192-1197,1202-1204,1208-1210,1217,1238-1254,1257-1260,1268-1276,1295-1297,1308,1327-1330,1352-1395,1402,1443-1466,1484-1486,1488-1497,1557-1573,1646-1655,1698-1702,1706-1707,1718
+apps/config-editor/src/components/DiagnosticsPanel.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 30-31,40,42-44
+apps/config-editor/src/components/editorState.logic.ts
+  s_26abde04a306f1::t_4b5f03da863da0 1-60,64,80-83,198,201,221-223,263,265,423,433,441-442
+apps/config-editor/tests/App.integration.dom.test.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 1-865
+apps/config-editor/tests/editorApi.dom.test.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 1-27
+apps/config-editor/tests/editorState.logic.test.ts
+  s_26abde04a306f1::t_4b5f03da863da0 19,85,107,175-231,659,694,740
+apps/config-editor/src/api/commands.ts
+  s_26abde04a306f1::t_4b5f03da863da0 1-2,36-58
+  s_26abde04a306f1::t_f9bd37e4f9e5fd 59
+crates/emuchef-rust-backend/tests/app_definition_save_admission.rs
+  s_26abde04a306f1::t_4b5f03da863da0 1-964
+apps/config-editor/src/components/Toolbar.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 7,9-11,15-16,26,28-30,34-35,47,49-53,66-88
+crates/emuchef-rust-backend/tests/catalog_validation.rs
+  s_26abde04a306f1::t_4b5f03da863da0 224,229-232,235
+crates/emuchef-rust-backend/src/lib.rs
+  s_26abde04a306f1::t_4b5f03da863da0 13-15
+crates/emuchef-rust-backend/src/protocol.rs
+  s_26abde04a306f1::t_4b5f03da863da0 52,57-60,63
+crates/emuchef-rust-backend/src/app_definition_document.rs
+  s_26abde04a306f1::t_4b5f03da863da0 1-1006
+apps/config-editor/src-tauri/src/commands.rs
+  s_26abde04a306f1::t_4b5f03da863da0 28-40,368-380,407,422,430-453
+  s_26abde04a306f1::t_c90d57d8b37ddc 454
+crates/emuchef-rust-backend/tests/planner_contract.rs
+  s_26abde04a306f1::t_4b5f03da863da0 68,73-76,79
+apps/config-editor/README.md
+  s_26abde04a306f1::t_4b5f03da863da0 23,33-36
+apps/config-editor/src/components/MenuEventBridge.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 6
+apps/config-editor/src/components/appDefinitionEditor.logic.ts
+  s_26abde04a306f1::t_4b5f03da863da0 1-822
+apps/config-editor/tests/appDefinitionEditor.logic.test.ts
+  s_26abde04a306f1::t_4b5f03da863da0 1-700
+crates/emuchef-rust-backend/src/dto.rs
+  s_26abde04a306f1::t_4b5f03da863da0 1,3-5,9,31-81,195,197,227-243
+  s_26abde04a306f1::t_1fa72b719074f4 244
+apps/config-editor/src/components/Sidebar.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 1,7,13-27,32-37
+crates/emuchef-rust-backend/src/request.rs
+  s_26abde04a306f1::t_4b5f03da863da0 139,144-147,149,1205-1216,1264-1307,1320-1330
+  s_26abde04a306f1::t_f13609755f82ae 1331
+crates/emuchef-rust-backend/src/session.rs
+  s_26abde04a306f1::t_4b5f03da863da0 8-10,14-16,28,64-115,142-146,179-318,339-346,356-363,373-375,381-386,393-395,407-413,422-424,606-612,616-618,624-635,655-763
+  s_26abde04a306f1::t_5cf5227fdbad27 764
+crates/emuchef-rust-backend/src/app_definition_persistence.rs
+  s_26abde04a306f1::t_4b5f03da863da0 1-770
+apps/config-editor/tests/AppDefinitionEditor.dom.test.tsx
+  s_26abde04a306f1::t_4b5f03da863da0 1-340
+crates/emuchef-rust-backend/src/app_definition_admission.rs
+  s_26abde04a306f1::t_4b5f03da863da0 1-1190
+crates/emuchef-rust-backend/tests/app_definition_documents.rs
+  s_26abde04a306f1::t_4b5f03da863da0 1-1362
+crates/emuchef-rust-backend/src/planner.rs
+  s_26abde04a306f1::t_4b5f03da863da0 33-151
+apps/config-editor/package.json
+  s_26abde04a306f1::t_4b5f03da863da0 8,31,33,47-48,59,65-66
+apps/config-editor/src-tauri/src/menu.rs
+  s_26abde04a306f1::t_4b5f03da863da0 8,33-36,53-54,100-102,140-141,157-163,205,212,223-265,373-452
+apps/config-editor/tests/vitest.setup.ts
+  s_26abde04a306f1::t_4b5f03da863da0 1-7
+crates/emuchef-rust-backend/tests/authored_validation.rs
+  s_26abde04a306f1::t_4b5f03da863da0 252,257-260,263
+crates/emuchef-rust-backend/tests/protocol_contract.rs
+  s_26abde04a306f1::t_4b5f03da863da0 223,228-231,234
+CONTEXT.md
+  s_26abde04a306f1::t_4b5f03da863da0 74-77,755-871
+crates/emuchef-rust-backend/tests/cli_contract.rs
+  s_26abde04a306f1::t_4b5f03da863da0 242,247-250,253
+apps/config-editor/src-tauri/src/lib.rs
+  s_26abde04a306f1::t_4b5f03da863da0 23,70,75-76
+crates/emuchef-rust-backend/tests/editor_step_commands.rs
+  s_26abde04a306f1::t_4b5f03da863da0 199,204-207,210
+apps/config-editor/package-lock.json
+  s_26abde04a306f1::t_f1aa43c21cca06 19-20,31,36-37,53-103,296-305,354-506,1111-1128,1594-1600,1852-1914,1926-1951,2272-2384,2425-2449,2478-2498,2559-2568,2673-2682,2753-2766,2787-2800,2819-2825,2833-2843,2868-2875,2883-2895,2906-2912,3153-3162,3173-3182,3413-3425,3508-3514,3539-3589,3980-4007,4130-4143,4194-4206,4234-4240,4454-4469,4522-4529,4553-4562,4661-4673,4713-4719,4730-4743,4780-4786,4848-4864,4913-4942,4956-4981,5061-5070,5217-5367,5384-5400,5411-5427
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7f3ca60842526435c7143fd2a0c256ea395b3330",
+  "prompts": {},
+  "sessions": {
+    "s_26abde04a306f1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a131ce-1e26-7802-8a30-01c45e6cf13c",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
