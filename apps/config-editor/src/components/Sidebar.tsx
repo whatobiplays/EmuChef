@@ -1,30 +1,40 @@
-import type { RecipeDocumentDto } from "../api/types";
+import { isAppDefinitionDocument, type EditorDocumentDto } from "../api/types";
 
 export type EditorView = "overview" | "inputs" | "artifacts" | "artifactGroups" | "steps" | "stepSpecs";
 
 interface SidebarProps {
   activeView: EditorView;
-  document: RecipeDocumentDto | null;
+  document: EditorDocumentDto | null;
   stepSpecsCount: number | null;
   onSelectView: (view: EditorView) => void;
 }
 
 export function Sidebar({ activeView, document, stepSpecsCount, onSelectView }: SidebarProps) {
-  const recipe = document?.recipe;
-  const rows = [
-    ["overview", "Overview", recipe ? 1 : 0],
-    ["inputs", "Inputs", recipe ? Object.keys(recipe.inputs).length : 0],
-    ["artifacts", "Artifacts", recipe ? Object.keys(recipe.artifacts).length : 0],
-    ["artifactGroups", "Artifact Groups", recipe ? Object.keys(recipe.artifactGroups).length : 0],
-    ["steps", "Steps", recipe ? recipe.steps.length : 0],
-    ["stepSpecs", "Step Specs", stepSpecsCount ?? 0],
-  ] as const;
+  const appDefinitionDocument = document !== null && isAppDefinitionDocument(document);
+  const recipe = document !== null && !appDefinitionDocument ? document.recipe : null;
+  const rows = appDefinitionDocument
+    ? [
+        ["overview", "App Definition", 1],
+        ["stepSpecs", "Step Specs", stepSpecsCount ?? 0],
+      ] as const
+    : [
+        ["overview", "Overview", recipe ? 1 : 0],
+        ["inputs", "Inputs", recipe ? Object.keys(recipe.inputs).length : 0],
+        ["artifacts", "Artifacts", recipe ? Object.keys(recipe.artifacts).length : 0],
+        ["artifactGroups", "Artifact Groups", recipe ? Object.keys(recipe.artifactGroups).length : 0],
+        ["steps", "Steps", recipe ? recipe.steps.length : 0],
+        ["stepSpecs", "Step Specs", stepSpecsCount ?? 0],
+      ] as const;
 
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-slate-200 p-4">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recipe</h2>
-        <p className="mt-1 truncate text-sm font-medium text-slate-900">{recipe?.id ?? "None"}</p>
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          {appDefinitionDocument ? "App Definition" : "Recipe"}
+        </h2>
+        <p className="mt-1 truncate text-sm font-medium text-slate-900">
+          {appDefinitionDocument ? document.appDefinition.id : recipe?.id ?? "None"}
+        </p>
       </div>
       <nav className="min-h-0 flex-1 overflow-y-auto p-2">
         {rows.map(([view, label, count]) => (

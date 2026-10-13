@@ -30,6 +30,125 @@ mod app_targets;
 
 pub(crate) use app_authority::validate_recipe_app_authority;
 
+/// Validate device-independent authored step contracts for one loaded Recipe.
+///
+/// Every authored step is checked, including steps that device capability
+/// selection might exclude during planning. Catalog callers combine these
+/// diagnostics with loaded-Recipe and App authority validation; this adapter
+/// neither resolves device applicability nor emits an execution plan.
+pub(crate) fn validate_recipe_static_contracts(recipe: &Recipe) -> Vec<PlannerMessage> {
+    let recipes = HashMap::from([(recipe.id.clone(), recipe.clone())]);
+    let steps = recipe
+        .steps
+        .iter()
+        .map(|step| {
+            (
+                make_execution_step_id(&recipe.id, &step.id),
+                recipe.id.clone(),
+                step.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut errors = validate_artifact_selections(&recipes, &steps);
+    errors.extend(validate_step_param_contracts(&recipes, &steps));
+    // App-aware permission contracts overlap the emitted-step parameter pass.
+    // Retain their additional checks without reporting identical errors twice.
+    for error in app_permissions::validate_app_permission_step_contracts(
+        &recipes,
+        std::slice::from_ref(&recipe.id),
+    ) {
+        if !errors.contains(&error) {
+            errors.push(error);
+        }
+    }
+    errors
+}
+
+#[cfg(test)]
+mod static_contract_tests {
+    use super::*;
+
+    fn recipe(body: &str) -> Recipe {
+        let mut raw: serde_yaml::Mapping = serde_yaml::from_str(&format!(
+            "schema_version: 1\nkind: recipe\nid: static.test\nname: Static test\n{body}"
+        ))
+        .unwrap();
+        for step in raw["steps"].as_sequence_mut().unwrap() {
+            step.as_mapping_mut().unwrap().insert(
+                serde_yaml::Value::String("name".to_string()),
+                serde_yaml::Value::String("Static test step".to_string()),
+            );
+            step.as_mapping_mut().unwrap().insert(
+                serde_yaml::Value::String("user_toggleable".to_string()),
+                serde_yaml::Value::Bool(false),
+            );
+        }
+        yaml::parse_recipe_mapping(&raw, Path::new("static.test.yaml")).unwrap()
+    }
+
+    #[test]
+    fn static_adapter_checks_artifact_selection_without_device_selection() {
+        let recipe = recipe(
+            "artifact_groups:\n  broken: [missing]\nsteps:\n  - id: resolve\n    type: resolve_artifacts\n    constraints:\n      capabilities: [unavailable]\n    params:\n      artifacts: [missing]\n      artifact_groups: [broken, absent]\n",
+        );
+        let errors = validate_recipe_static_contracts(&recipe);
+        for code in [
+            "unknown_artifact_ref",
+            "unknown_artifact_group_ref",
+            "duplicate_artifact_selection",
+        ] {
+            assert!(errors.iter().any(|error| error.code == code), "{errors:?}");
+        }
+        assert!(errors
+            .iter()
+            .all(|error| error.details["recipe_ref"] == recipe.id));
+    }
+
+    #[test]
+    fn static_adapter_checks_copy_policy_source_type_and_literal_contracts() {
+        let recipe = recipe(
+            "inputs:\n  text:\n    type: string\nsteps:\n  - id: copy\n    type: copy_files\n    params:\n      source: {ref: inputs.text}\n      dest: {ref: artifacts.missing.path}\n      copy_policy: unsafe\n  - id: wait\n    type: wait\n    params:\n      duration_ms: -1\n",
+        );
+        let errors = validate_recipe_static_contracts(&recipe);
+        for (step, param) in [
+            ("copy", "source"),
+            ("copy", "dest"),
+            ("copy", "copy_policy"),
+            ("wait", "duration_ms"),
+        ] {
+            assert!(
+                errors.iter().any(|error| {
+                    error.details["step_id"] == step && error.details["param"] == param
+                }),
+                "missing {step}.{param}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_adapter_checks_permission_contracts_without_a_device_or_app_catalog() {
+        let recipe = recipe(
+            "steps:\n  - id: permissions\n    type: grant_permissions\n    params:\n      permission_set: baseline\n",
+        );
+        let errors = validate_recipe_static_contracts(&recipe);
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "permission_app_ref_required"));
+        assert!(errors
+            .iter()
+            .enumerate()
+            .all(|(index, error)| !errors[..index].contains(error)));
+    }
+
+    #[test]
+    fn static_adapter_accepts_valid_contracts_without_resolving_recipe_dependencies() {
+        let recipe = recipe(
+            "recipe_dependencies: [another.recipe]\ninputs:\n  source:\n    type: file\nsteps:\n  - id: copy\n    type: copy_files\n    params:\n      source: {ref: inputs.source}\n      dest: /sdcard/output\n      copy_policy: merge\n  - id: wait\n    type: wait\n    params:\n      duration_ms: 1\n  - id: permissions\n    type: grant_permissions\n    app_ref: sample.app\n    params:\n      permission_set: baseline\n      policy: {on_failure: warn}\n",
+        );
+        assert_eq!(validate_recipe_static_contracts(&recipe), vec![]);
+    }
+}
+
 /// Report the same per-step capability requirements that planning uses for
 /// target-aware selection. Resolution errors are retained so callers cannot
 /// accidentally substitute authored constraints for unresolved App Targets.

@@ -130,6 +130,33 @@ export interface RecipeDocumentDto {
   refIndex: RefIndexDto;
 }
 
+export interface AppDefinitionDocumentDto {
+  documentKind: "app_definition";
+  documentId: string;
+  path: string;
+  authoredRoot: string | null;
+  /** Physical catalog owner, independent of the selected root; null for a standalone document. */
+  owningAuthoredRoot: string | null;
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  appDefinition: AppDefinitionV1Dto;
+  yaml: string;
+  diagnostics: DiagnosticDto[];
+  editRestrictions: {
+    identityLocked: boolean;
+    canEditIdentity: boolean;
+    canSaveAs: boolean;
+  };
+}
+
+/** A Recipe or App Definition document managed by the shared editor session. */
+export type EditorDocumentDto = RecipeDocumentDto | AppDefinitionDocumentDto;
+
+export function isAppDefinitionDocument(document: EditorDocumentDto): document is AppDefinitionDocumentDto {
+  return "documentKind" in document && document.documentKind === "app_definition";
+}
+
 export interface StepSpecDto {
   type: string;
   label: string;
@@ -199,13 +226,27 @@ export interface OpenRecipeResult {
   document: RecipeDocumentDto;
 }
 
+export interface OpenAppDefinitionResult {
+  document: AppDefinitionDocumentDto;
+}
+
 export interface DocumentResult {
-  document: RecipeDocumentDto;
+  document: EditorDocumentDto;
 }
 
 export interface ApplyRecipeCommandResult {
   commandResult: CommandResultDto;
   document: RecipeDocumentDto;
+}
+
+export interface ApplyEditorCommandResult {
+  commandResult: CommandResultDto;
+  document: EditorDocumentDto;
+}
+
+export interface ApplyAppDefinitionCommandResult {
+  commandResult: CommandResultDto;
+  document: AppDefinitionDocumentDto;
 }
 
 export interface ValidateRecipePathResult {

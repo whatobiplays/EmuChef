@@ -2,16 +2,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as nativeConfirm, open, save as saveFile } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { EditorCommand } from "./api/commands";
+import type { AppDefinitionCommand, EditorCommand } from "./api/commands";
 import {
+  applyAppDefinitionCommand as applyAppDefinitionCommandApi,
   applyRecipeCommand,
   emitYaml,
   getConfigEditorAuthoredRoot,
   openUserConfiguration as openUserConfigurationDocument,
   listStepSpecs,
+  openAppDefinition as openAppDefinitionDocument,
   openRecipe as openRecipeDocument,
   redo as redoDocument,
   sidecarRestart,
+  saveAppDefinition as saveAppDefinitionDocument,
+  saveAppDefinitionAs as saveAppDefinitionDocumentAs,
   saveRecipe as saveRecipeDocument,
   saveRecipeAs as saveRecipeDocumentAs,
   setConfigEditorAuthoredRoot,
@@ -24,14 +28,23 @@ import {
 } from "./api/editorApi";
 import type {
   DiagnosticDto,
+  AppDefinitionV1Dto,
   AppRecipeSaveResult,
-  RecipeDocumentDto,
+  EditorDocumentDto,
   SidecarStatusResult,
   StepSpecDto,
   UserConfigurationDocumentDto,
 } from "./api/types";
+import { isAppDefinitionDocument } from "./api/types";
 import { AppShell } from "./components/AppShell";
 import { AppGenerator } from "./components/AppGenerator";
+import { AppDefinitionEditor } from "./components/AppDefinitionEditor";
+import {
+  createAppDefinitionEditorDraft,
+  isAppDefinitionEditorDraftDirty,
+  rebasePendingAppDefinitionEditorDraft,
+  type AppDefinitionEditorDraft,
+} from "./components/appDefinitionEditor.logic";
 import { ArtifactGroupsEditor } from "./components/ArtifactGroupsEditor";
 import { ArtifactsEditor } from "./components/ArtifactsEditor";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
@@ -56,6 +69,7 @@ import {
   resolveOpenAttempt,
   resolveReopenAttempt,
   resolveRestartSuccess,
+  saveFailureDiagnosticsForActiveDocument,
   type CommandName,
 } from "./components/editorState.logic";
 import { TextPromptDialog } from "./components/PromptDialog";
@@ -76,6 +90,14 @@ interface TextPromptRequest {
   resolve: (value: string | null) => void;
 }
 
+function documentName(document: EditorDocumentDto): string {
+  return isAppDefinitionDocument(document) ? document.appDefinition.id : document.recipe.id;
+}
+
+function documentCanSaveAs(document: EditorDocumentDto | null): boolean {
+  return document !== null && (!isAppDefinitionDocument(document) || document.editRestrictions.canSaveAs);
+}
+
 interface ConfirmActionOptions {
   confirmLabel?: string;
   destructive?: boolean;
@@ -90,7 +112,9 @@ export default function App() {
   const [stepSpecs, setStepSpecs] = useState<StepSpecDto[]>([]);
   const [stepSpecsLoaded, setStepSpecsLoaded] = useState(false);
   const [stepSpecsLoading, setStepSpecsLoading] = useState(true);
-  const [currentDocument, setCurrentDocument] = useState<RecipeDocumentDto | null>(null);
+  const [currentDocument, setCurrentDocument] = useState<EditorDocumentDto | null>(null);
+  const [appDefinitionEditorDraft, setAppDefinitionEditorDraft] = useState<AppDefinitionEditorDraft | null>(null);
+  const [appDefinitionDraftDirty, setAppDefinitionDraftDirty] = useState(false);
   const [userConfigurationDocument, setUserConfigurationDocument] = useState<UserConfigurationDocumentDto | null>(null);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [selectedAuthoredRoot, setSelectedAuthoredRoot] = useState<string | null>(null);
@@ -108,7 +132,11 @@ export default function App() {
   const [deviceProfileGeneratorOpen, setDeviceProfileGeneratorOpen] = useState(false);
   const [appGeneratorOpen, setAppGeneratorOpen] = useState(false);
 
-  const currentDocumentRef = useRef<RecipeDocumentDto | null>(null);
+  const currentDocumentRef = useRef<EditorDocumentDto | null>(null);
+  const userConfigurationDocumentRef = useRef<UserConfigurationDocumentDto | null>(null);
+  const userConfigurationOpenRequestRef = useRef(0);
+  const appDefinitionEditorDraftRef = useRef<AppDefinitionEditorDraft | null>(null);
+  const appDefinitionDraftDirtyRef = useRef(false);
   const selectedAuthoredRootRef = useRef<string | null>(null);
   const sidecarStateRef = useRef<SidecarStatusResult | null>(null);
   const commandInFlightRef = useRef<CommandName | null>(null);
@@ -121,6 +149,92 @@ export default function App() {
   // This guard lets only that intentional second event pass without reopening the confirmation.
   const allowCloseRef = useRef(false);
   const closePromptOpenRef = useRef(false);
+
+  const localDraftIsDirty = useCallback(
+    (document: EditorDocumentDto | null): boolean =>
+      document !== null &&
+      isAppDefinitionDocument(document) &&
+      currentDocumentRef.current?.documentId === document.documentId &&
+      appDefinitionDraftDirtyRef.current,
+    [],
+  );
+
+  const documentHasUnsavedChanges = useCallback(
+    (document: EditorDocumentDto | null): boolean =>
+      (document?.dirty ?? false) || localDraftIsDirty(document),
+    [localDraftIsDirty],
+  );
+
+  const currentActionAvailability = useCallback(
+    (
+      document: EditorDocumentDto | null,
+      sessionValid: boolean = documentSessionValidRef.current,
+      command: CommandName | null = commandInFlightRef.current,
+    ) => {
+      const status = sidecarStateRef.current;
+      return buildActionAvailability({
+        hasDocument: document !== null,
+        hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
+        hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
+        hasDocumentPath: Boolean(document?.path),
+        dirty: documentHasUnsavedChanges(document),
+        pendingAppDefinitionInput: localDraftIsDirty(document),
+        canSaveAs: documentCanSaveAs(document),
+        canUndo: document?.canUndo ?? false,
+        canRedo: document?.canRedo ?? false,
+        commandInFlight: command,
+        documentSessionValid: sessionValid,
+        backendCompatible: status?.compatible ?? null,
+        sidecarRunning: status?.running ?? null,
+      });
+    },
+    [documentHasUnsavedChanges, localDraftIsDirty],
+  );
+
+  const syncMenuState = useCallback(
+    async (
+      document: EditorDocumentDto | null,
+      menuCommandInFlight: CommandName | null = commandInFlightRef.current,
+      menuDocumentSessionValid: boolean = documentSessionValidRef.current,
+    ) => {
+      try {
+        const status = sidecarStateRef.current;
+        const availability = currentActionAvailability(
+          document,
+          menuDocumentSessionValid,
+          menuCommandInFlight,
+        );
+        await updateMenuState({
+          documentKind: document === null ? null : isAppDefinitionDocument(document) ? "app_definition" : "recipe",
+          hasDocument: document !== null,
+          hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
+          hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
+          hasDocumentPath: Boolean(document?.path),
+          dirty: documentHasUnsavedChanges(document),
+          canSave: availability.saveRecipe,
+          canSaveAs: availability.saveRecipeAs,
+          pendingAppDefinitionInput: localDraftIsDirty(document),
+          canUndo: document?.canUndo ?? false,
+          canRedo: document?.canRedo ?? false,
+          commandInFlight: menuCommandInFlight !== null,
+          documentSessionValid: menuDocumentSessionValid,
+          backendCompatible: status?.compatible ?? null,
+          sidecarRunning: status?.running ?? null,
+          generatorActive: deviceProfileGeneratorOpenRef.current || appGeneratorOpenRef.current,
+        });
+      } catch (error) {
+        setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
+      }
+    },
+    [currentActionAvailability, documentHasUnsavedChanges, localDraftIsDirty],
+  );
+
+  function installAppDefinitionDraft(draft: AppDefinitionEditorDraft | null, dirty = false) {
+    appDefinitionEditorDraftRef.current = draft;
+    appDefinitionDraftDirtyRef.current = dirty;
+    setAppDefinitionEditorDraft(draft);
+    setAppDefinitionDraftDirty(dirty);
+  }
 
   const markDocumentSessionInvalid = useCallback((message: string) => {
     documentSessionValidRef.current = false;
@@ -195,6 +309,49 @@ export default function App() {
     [confirmNativeAction],
   );
 
+  function currentViewHasUnsavedChanges(): boolean {
+    return documentHasUnsavedChanges(currentDocumentRef.current) ||
+      userConfigurationDocumentRef.current?.dirty === true;
+  }
+
+  function currentViewName(): string {
+    const document = currentDocumentRef.current;
+    if (document !== null) return documentName(document);
+    return userConfigurationDocumentRef.current?.configuration.name ?? "the open document";
+  }
+
+  async function confirmDiscardCurrentViewChanges(message: string): Promise<boolean> {
+    if (!currentViewHasUnsavedChanges()) return true;
+    return confirmAction("Discard unsaved changes", message, {
+      confirmLabel: "Discard",
+      destructive: true,
+    });
+  }
+
+  function installUserConfigurationDocument(document: UserConfigurationDocumentDto) {
+    userConfigurationDocumentRef.current = document;
+    setUserConfigurationDocument(document);
+  }
+
+  function clearUserConfigurationDocument() {
+    userConfigurationOpenRequestRef.current += 1;
+    userConfigurationDocumentRef.current = null;
+    setUserConfigurationDocument(null);
+  }
+
+  function updateUserConfigurationDocument(document: UserConfigurationDocumentDto) {
+    if (
+      currentDocumentRef.current !== null ||
+      userConfigurationDocumentRef.current?.documentId !== document.documentId
+    ) {
+      return;
+    }
+    installUserConfigurationDocument(document);
+  }
+
+  const pendingAppDefinitionInput =
+    currentDocument !== null && isAppDefinitionDocument(currentDocument) && appDefinitionDraftDirty;
+
   const actionAvailability = useMemo(
     () =>
       buildActionAvailability({
@@ -202,7 +359,9 @@ export default function App() {
         hasSelectedAuthoredRoot: selectedAuthoredRoot !== null,
         hasDocumentAuthoredRoot: currentDocument?.authoredRoot !== null && currentDocument?.authoredRoot !== undefined,
         hasDocumentPath: Boolean(currentDocument?.path),
-        dirty: currentDocument?.dirty ?? false,
+        dirty: (currentDocument?.dirty ?? false) || pendingAppDefinitionInput,
+        pendingAppDefinitionInput,
+        canSaveAs: documentCanSaveAs(currentDocument),
         canUndo: currentDocument?.canUndo ?? false,
         canRedo: currentDocument?.canRedo ?? false,
         commandInFlight,
@@ -214,6 +373,7 @@ export default function App() {
       commandInFlight,
       currentDocument,
       documentSessionValid,
+      pendingAppDefinitionInput,
       selectedAuthoredRoot,
       sidecarState?.compatible,
       sidecarState?.running,
@@ -227,7 +387,9 @@ export default function App() {
         hasSelectedAuthoredRoot: selectedAuthoredRoot !== null,
         hasDocumentAuthoredRoot: currentDocument?.authoredRoot !== null && currentDocument?.authoredRoot !== undefined,
         hasDocumentPath: Boolean(currentDocument?.path),
-        dirty: currentDocument?.dirty ?? false,
+        dirty: (currentDocument?.dirty ?? false) || pendingAppDefinitionInput,
+        pendingAppDefinitionInput,
+        canSaveAs: documentCanSaveAs(currentDocument),
         canUndo: currentDocument?.canUndo ?? false,
         canRedo: currentDocument?.canRedo ?? false,
         commandInFlight,
@@ -239,6 +401,7 @@ export default function App() {
       commandInFlight,
       currentDocument,
       documentSessionValid,
+      pendingAppDefinitionInput,
       selectedAuthoredRoot,
       sidecarState?.compatible,
       sidecarState?.running,
@@ -291,22 +454,24 @@ export default function App() {
   useEffect(() => {
     deviceProfileGeneratorOpenRef.current = deviceProfileGeneratorOpen;
     void syncMenuState(currentDocumentRef.current);
-  }, [deviceProfileGeneratorOpen]);
+  }, [deviceProfileGeneratorOpen, syncMenuState]);
 
   useEffect(() => {
     appGeneratorOpenRef.current = appGeneratorOpen;
     void syncMenuState(currentDocumentRef.current);
-  }, [appGeneratorOpen]);
+  }, [appGeneratorOpen, syncMenuState]);
 
   useEffect(() => {
     void syncMenuState(currentDocument, commandInFlight, documentSessionValid);
   }, [
+    appDefinitionDraftDirty,
     commandInFlight,
     currentDocument,
     documentSessionValid,
     selectedAuthoredRoot,
     sidecarState?.compatible,
     sidecarState?.running,
+    syncMenuState,
   ]);
 
   useEffect(() => {
@@ -331,7 +496,7 @@ export default function App() {
       const document = currentDocumentRef.current;
       const decision = decideCloseRequest({
         commandInFlight: commandInFlightRef.current,
-        dirty: document?.dirty ?? false,
+        dirty: documentHasUnsavedChanges(document),
         promptInFlight: closePromptOpenRef.current || promptActiveRef.current,
       });
 
@@ -347,7 +512,10 @@ export default function App() {
 
       closePromptOpenRef.current = true;
       try {
-        const copy = buildCloseConfirmationCopy(decision.reason, document?.recipe.id ?? null);
+        const copy = buildCloseConfirmationCopy(
+          decision.reason,
+          document === null ? null : documentName(document),
+        );
         const confirmed = await confirmAction(copy.title, copy.message, {
           destructive: decision.reason !== "command-in-flight",
         });
@@ -381,7 +549,7 @@ export default function App() {
       disposed = true;
       cleanup?.();
     };
-  }, [confirmAction]);
+  }, [confirmAction, documentHasUnsavedChanges]);
 
   useEffect(() => {
     let cancelled = false;
@@ -418,6 +586,7 @@ export default function App() {
 
   const menuHandlers: Record<MenuAction, () => void> = {
     openRecipe: () => void openRecipe(),
+    openAppDefinition: () => void openAppDefinition(),
     openUserConfiguration: () => void openUserConfiguration(),
     generateAppRecipe: () => void openAppGenerator(),
     generateDeviceProfile: () => {
@@ -454,23 +623,17 @@ export default function App() {
     ) {
       return;
     }
-    const document = currentDocumentRef.current;
-    if (document?.dirty) {
-      const confirmed = await confirmAction(
-        "Discard unsaved changes",
-        `Generating and opening a recipe will replace the unsaved ${document.recipe.id} document. Discard those changes?`,
-        { confirmLabel: "Discard", destructive: true },
-      );
-      if (!confirmed) {
-        return;
-      }
+    if (!await confirmDiscardCurrentViewChanges(
+      `Generating and opening a recipe will replace the unsaved ${currentViewName()}. Discard those changes?`,
+    )) {
+      return;
     }
+    userConfigurationOpenRequestRef.current += 1;
     setAppGeneratorOpen(true);
   }
 
   function handleGeneratedAppRecipeSaved(result: AppRecipeSaveResult) {
     setAppGeneratorOpen(false);
-    setUserConfigurationDocument(null);
     applyDocument(result.openedRecipe.document);
     documentSessionValidRef.current = true;
     setDocumentSessionValid(true);
@@ -486,16 +649,9 @@ export default function App() {
     if (commandInFlightRef.current !== null) {
       return;
     }
-    const recipeDocument = currentDocumentRef.current;
-    if (recipeDocument?.dirty) {
-      const confirmed = await confirmAction(
-        "Discard unsaved changes",
-        `Discard unsaved changes to ${recipeDocument.recipe.id}?`,
-        { confirmLabel: "Discard", destructive: true },
-      );
-      if (!confirmed) {
-        return;
-      }
+    const requestId = ++userConfigurationOpenRequestRef.current;
+    if (!await confirmDiscardCurrentViewChanges(`Discard unsaved changes to ${currentViewName()}?`)) {
+      return;
     }
     let selected: string | string[] | null;
     try {
@@ -509,22 +665,28 @@ export default function App() {
       return;
     }
     const path = Array.isArray(selected) ? selected[0] : selected;
-    if (!path) {
+    if (!path || requestId !== userConfigurationOpenRequestRef.current) {
       return;
     }
     setLoadingLabel("Opening user configuration");
     try {
       const response = await openUserConfigurationDocument(path, selectedAuthoredRootRef.current);
+      if (requestId !== userConfigurationOpenRequestRef.current || currentDocumentRef.current !== null) {
+        return;
+      }
       if (response.kind === "success") {
         currentDocumentRef.current = null;
         setCurrentDocument(null);
-        setUserConfigurationDocument(response.result.document);
+        installAppDefinitionDraft(null);
+        installUserConfigurationDocument(response.result.document);
         setErrorMessage(null);
       } else {
         handleOperationFailure(response, "User configuration failed to open.");
       }
     } finally {
-      setLoadingLabel(null);
+      if (requestId === userConfigurationOpenRequestRef.current) {
+        setLoadingLabel(null);
+      }
     }
   }
 
@@ -543,16 +705,9 @@ export default function App() {
       return;
     }
 
-    if (current?.dirty) {
-      const confirmed = await confirmAction(
-        "Discard unsaved changes",
-        `Discard unsaved changes to ${current.recipe.id}?`,
-        { confirmLabel: "Discard", destructive: true },
-      );
-      if (!confirmed) {
-        await syncMenuState(currentDocumentRef.current);
-        return;
-      }
+    if (!await confirmDiscardCurrentViewChanges(`Discard unsaved changes to ${currentViewName()}?`)) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
     }
 
     let selected: string | string[] | null;
@@ -580,11 +735,95 @@ export default function App() {
     await openRecipeAtPath(path);
   }
 
+  async function openAppDefinition() {
+    if (commandInFlightRef.current !== null) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    const current = currentDocumentRef.current;
+    if (!currentActionAvailability(current).openRecipe) {
+      if (!documentSessionValidRef.current) {
+        showInvalidSessionMessage();
+      }
+      await syncMenuState(current);
+      return;
+    }
+
+    if (!await confirmDiscardCurrentViewChanges(`Discard unsaved changes to ${currentViewName()}?`)) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "YAML App Definitions", extensions: ["yaml", "yml"] }],
+      });
+    } catch (error) {
+      setErrorMessage(`File dialog failed: ${errorMessageFromUnknown(error)}`);
+      setStatusMessage(null);
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (path) {
+      await openAppDefinitionAtPath(path);
+    } else {
+      await syncMenuState(currentDocumentRef.current);
+    }
+  }
+
+  async function openAppDefinitionAtPath(path: string): Promise<boolean> {
+    if (!beginAppCommand("openAppDefinition", "Opening App Definition")) {
+      await syncMenuState(currentDocumentRef.current);
+      return false;
+    }
+    userConfigurationOpenRequestRef.current += 1;
+    try {
+      const response = await openAppDefinitionDocument(path, selectedAuthoredRootRef.current);
+      if (response.kind === "success") {
+        applyDocument(response.result.document, path);
+        documentSessionValidRef.current = true;
+        setDocumentSessionValid(true);
+        sessionInvalidReasonRef.current = null;
+        setSessionInvalidReason(null);
+        setActiveView("overview");
+        setErrorMessage(null);
+        setStatusMessage(null);
+        await syncMenuState(response.result.document, commandInFlightRef.current, true);
+        return true;
+      }
+
+      const classification = handleOperationFailure(response, "App Definition failed to open.");
+      const resolution = resolveOpenAttempt(currentDocumentRef.current, {
+        kind: "open-failed",
+        sessionInvalid: classification.sessionInvalid,
+      });
+      if (!resolution.sessionValid) {
+        markDocumentSessionInvalid(classification.message);
+      }
+      await refreshSidecarStatus();
+      await syncMenuState(
+        resolution.document,
+        commandInFlightRef.current,
+        documentSessionValidRef.current && resolution.sessionValid,
+      );
+      return false;
+    } finally {
+      finishAppCommand();
+    }
+  }
+
   async function openRecipeAtPath(path: string): Promise<boolean> {
     if (!beginAppCommand("openRecipe", "Opening recipe")) {
       await syncMenuState(currentDocumentRef.current);
       return false;
     }
+    userConfigurationOpenRequestRef.current += 1;
     try {
       const response = await openRecipeDocument(path, selectedAuthoredRootRef.current);
       if (response.kind === "success") {
@@ -625,10 +864,10 @@ export default function App() {
       return;
     }
 
-    if (document.dirty) {
+    if (documentHasUnsavedChanges(document)) {
       const confirmed = await confirmAction(
         "Reopen saved file",
-        `Reopen ${document.recipe.id} from disk? The stale in-memory edits cannot be saved through the invalid sidecar session and will not be replayed.`,
+        `Reopen ${documentName(document)} from disk? The stale in-memory edits cannot be saved through the invalid sidecar session and will not be replayed.`,
         { confirmLabel: "Reopen", destructive: true },
       );
       if (!confirmed) {
@@ -637,12 +876,15 @@ export default function App() {
       }
     }
 
-    if (!beginAppCommand("openRecipe", "Reopening recipe")) {
+    const appDefinitionDocument = isAppDefinitionDocument(document);
+    if (!beginAppCommand(appDefinitionDocument ? "openAppDefinition" : "openRecipe", "Reopening document")) {
       await syncMenuState(currentDocumentRef.current);
       return;
     }
     try {
-      const response = await openRecipeDocument(path, selectedAuthoredRootRef.current);
+      const response = appDefinitionDocument
+        ? await openAppDefinitionDocument(path, selectedAuthoredRootRef.current)
+        : await openRecipeDocument(path, selectedAuthoredRootRef.current);
       if (response.kind === "success") {
         const resolution = resolveReopenAttempt(document, { kind: "opened", document: response.result.document });
         applyDocument(response.result.document, path);
@@ -655,7 +897,10 @@ export default function App() {
         setStatusMessage(null);
         await syncMenuState(response.result.document, commandInFlightRef.current, resolution.sessionValid);
       } else {
-        const classification = handleOperationFailure(response, "Recipe failed to reopen.");
+        const classification = handleOperationFailure(
+          response,
+          appDefinitionDocument ? "App Definition failed to reopen." : "Recipe failed to reopen.",
+        );
         const resolution = resolveReopenAttempt(document, {
           kind: "open-failed",
           sessionInvalid: classification.sessionInvalid,
@@ -719,7 +964,7 @@ export default function App() {
       const specsRefreshed = await refreshStepSpecsAfterRestart();
       if (specsRefreshed) {
         setErrorMessage(null);
-        setStatusMessage(document === null ? "Sidecar restarted." : "Sidecar restarted. Reopen the stale recipe from disk to edit it.");
+        setStatusMessage(document === null ? "Sidecar restarted." : "Sidecar restarted. Reopen the stale document from disk to edit it.");
       }
       await syncMenuState(document, commandInFlightRef.current, restartResolution.sessionValid);
     } finally {
@@ -944,22 +1189,32 @@ export default function App() {
   }
 
   async function saveRecipe() {
-    const document = beginDocumentCommand("saveRecipe", "Saving recipe", "saveRecipe");
+    if (localDraftIsDirty(currentDocumentRef.current)) {
+      setErrorMessage("Apply or discard the pending App Definition form input before saving the document.");
+      setStatusMessage(null);
+      return;
+    }
+    const document = beginDocumentCommand("saveRecipe", "Saving document", "saveRecipe");
     if (document === null) {
       return;
     }
     try {
-      const response = await saveRecipeDocument(document.documentId);
+      const response = isAppDefinitionDocument(document)
+        ? await saveAppDefinitionDocument(document.documentId)
+        : await saveRecipeDocument(document.documentId);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
-        setStatusMessage("Saved the current sidecar document.");
+        setStatusMessage(
+          isAppDefinitionDocument(response.result.document) ? "Saved the current App Definition." : "Saved the current recipe.",
+        );
         await syncMenuState(response.result.document);
       } else {
         handleOperationFailure(response, "Save failed.", {
           commandDocumentId: document.documentId,
           currentDocumentId: currentDocumentRef.current?.documentId ?? null,
         });
+        applySaveFailureDiagnostics(document.documentId, response);
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -980,8 +1235,29 @@ export default function App() {
       return;
     }
 
+    if (localDraftIsDirty(document)) {
+      setErrorMessage("Apply or discard the pending App Definition form input before saving the document.");
+      setStatusMessage(null);
+      await syncMenuState(document);
+      return;
+    }
+
+    // A standalone App Definition is published into the selected catalog, never beside its source file.
+    if (isAppDefinitionDocument(document) && document.owningAuthoredRoot === null && (
+      !document.editRestrictions.canSaveAs || !document.authoredRoot || !document.authoredRoot.startsWith("/")
+    )) {
+      setErrorMessage("Select an authored root before saving this standalone App Definition. Then choose Save As again.");
+      setStatusMessage(null);
+      await setAuthoredRootFromDialog();
+      return;
+    }
+
     const availability = currentActionAvailability(document);
     if (!availability.saveRecipeAs) {
+      if (isAppDefinitionDocument(document) && !document.editRestrictions.canSaveAs) {
+        setErrorMessage("Save As is not available for this App Definition document.");
+        setStatusMessage(null);
+      }
       await syncMenuState(document);
       return;
     }
@@ -989,8 +1265,15 @@ export default function App() {
     let selectedPath: string | null;
     try {
       selectedPath = await saveFile({
-        defaultPath: document.path || `${document.recipe.id || "recipe"}.yaml`,
-        filters: [{ name: "YAML recipes", extensions: ["yaml", "yml"] }],
+        defaultPath: isAppDefinitionDocument(document) && document.owningAuthoredRoot === null
+          ? `${document.authoredRoot?.replace(/\/$/, "")}/apps/${document.appDefinition.id}.yaml`
+          : document.path || `${documentName(document) || "document"}.yaml`,
+        filters: [
+          {
+            name: isAppDefinitionDocument(document) ? "YAML App Definitions" : "YAML recipes",
+            extensions: ["yaml", "yml"],
+          },
+        ],
       });
     } catch (error) {
       setErrorMessage(`File dialog failed: ${errorMessageFromUnknown(error)}`);
@@ -1009,7 +1292,9 @@ export default function App() {
       return;
     }
     try {
-      const response = await saveRecipeDocumentAs(document.documentId, selectedPath);
+      const response = isAppDefinitionDocument(document)
+        ? await saveAppDefinitionDocumentAs(document.documentId, selectedPath)
+        : await saveRecipeDocumentAs(document.documentId, selectedPath);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
@@ -1020,6 +1305,7 @@ export default function App() {
           commandDocumentId: document.documentId,
           currentDocumentId: currentDocumentRef.current?.documentId ?? null,
         });
+        applySaveFailureDiagnostics(document.documentId, response);
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -1036,6 +1322,10 @@ export default function App() {
   async function applyCommandDetailed(command: EditorCommand): Promise<CommandApplyOutcome> {
     const document = beginDocumentCommand("mutation", "Applying edit", "editDocument");
     if (document === null) {
+      return { ok: false, changed: false };
+    }
+    if (isAppDefinitionDocument(document)) {
+      finishAppCommand();
       return { ok: false, changed: false };
     }
     try {
@@ -1059,32 +1349,57 @@ export default function App() {
     }
   }
 
-  function currentActionAvailability(
-    document: RecipeDocumentDto | null,
-    sessionValid: boolean = documentSessionValidRef.current,
-    command: CommandName | null = commandInFlightRef.current,
-  ) {
-    const status = sidecarStateRef.current;
-    return buildActionAvailability({
-      hasDocument: document !== null,
-      hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
-      hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
-      hasDocumentPath: Boolean(document?.path),
-      dirty: document?.dirty ?? false,
-      canUndo: document?.canUndo ?? false,
-      canRedo: document?.canRedo ?? false,
-      commandInFlight: command,
-      documentSessionValid: sessionValid,
-      backendCompatible: status?.compatible ?? null,
-      sidecarRunning: status?.running ?? null,
-    });
+  async function applyAppDefinitionEditorCommand(command: AppDefinitionCommand): Promise<AppDefinitionV1Dto> {
+    const document = beginDocumentCommand("mutation", "Applying App Definition edit", "editDocument");
+    if (document === null) {
+      throw new Error("No editable App Definition document is open.");
+    }
+    if (!isAppDefinitionDocument(document)) {
+      finishAppCommand();
+      throw new Error("The open document is not an App Definition.");
+    }
+
+    try {
+      const response = await applyAppDefinitionCommandApi(document.documentId, command);
+      if (response.kind === "success") {
+        applyDocument(response.result.document);
+        setErrorMessage(null);
+        await syncMenuState(response.result.document);
+        return response.result.document.appDefinition;
+      }
+
+      const classification = handleOperationFailure(response, "App Definition edit failed.", {
+        commandDocumentId: document.documentId,
+        currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+      });
+      await refreshSidecarStatus();
+      await syncMenuState(currentDocumentRef.current);
+      throw new Error(classification.message);
+    } finally {
+      finishAppCommand();
+    }
+  }
+
+  function acceptAppDefinitionEditorDocument(appDefinition: AppDefinitionV1Dto) {
+    const document = currentDocumentRef.current;
+    if (document === null || !isAppDefinitionDocument(document)) {
+      return;
+    }
+    const next = { ...document, appDefinition };
+    currentDocumentRef.current = next;
+    setCurrentDocument(next);
+    installAppDefinitionDraft(
+      appDefinitionEditorDraftRef.current,
+      appDefinitionEditorDraftRef.current !== null &&
+        isAppDefinitionEditorDraftDirty(appDefinitionEditorDraftRef.current, appDefinition),
+    );
   }
 
   function beginDocumentCommand(
     command: CommandName,
     label: string,
     action: keyof ReturnType<typeof buildActionAvailability>,
-  ): RecipeDocumentDto | null {
+  ): EditorDocumentDto | null {
     const document = currentDocumentRef.current;
     if (document === null) {
       void syncMenuState(null);
@@ -1125,7 +1440,30 @@ export default function App() {
     setLoadingLabel(null);
   }
 
-  function applyDocument(document: RecipeDocumentDto, fallbackPath: string | null = null) {
+  function applyDocument(document: EditorDocumentDto, fallbackPath: string | null = null) {
+    const previousDocument = currentDocumentRef.current;
+    clearUserConfigurationDocument();
+
+    if (isAppDefinitionDocument(document)) {
+      const previousAppDefinition =
+        previousDocument !== null &&
+        isAppDefinitionDocument(previousDocument) &&
+        previousDocument.documentId === document.documentId
+          ? previousDocument.appDefinition
+          : null;
+      if (appDefinitionDraftDirtyRef.current && appDefinitionEditorDraftRef.current !== null && previousAppDefinition !== null) {
+        const rebasedDraft = rebasePendingAppDefinitionEditorDraft(
+          appDefinitionEditorDraftRef.current,
+          previousAppDefinition,
+          document.appDefinition,
+        );
+        installAppDefinitionDraft(rebasedDraft, isAppDefinitionEditorDraftDirty(rebasedDraft, document.appDefinition));
+      } else {
+        installAppDefinitionDraft(createAppDefinitionEditorDraft(document.appDefinition));
+      }
+    } else {
+      installAppDefinitionDraft(null);
+    }
     currentDocumentRef.current = document;
     setCurrentDocument(document);
     setCurrentPath(document.path || fallbackPath || null);
@@ -1143,29 +1481,20 @@ export default function App() {
     setStatusMessage(null);
   }
 
-  async function syncMenuState(
-    document: RecipeDocumentDto | null,
-    menuCommandInFlight: CommandName | null = commandInFlightRef.current,
-    menuDocumentSessionValid: boolean = documentSessionValidRef.current,
+  function applySaveFailureDiagnostics<T>(
+    requestDocumentId: string,
+    response: Exclude<EditorApiResult<T>, { kind: "success" }>,
   ) {
-    try {
-      const status = sidecarStateRef.current;
-      await updateMenuState({
-        hasDocument: document !== null,
-        hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
-        hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
-        hasDocumentPath: Boolean(document?.path),
-        dirty: document?.dirty ?? false,
-        canUndo: document?.canUndo ?? false,
-        canRedo: document?.canRedo ?? false,
-        commandInFlight: menuCommandInFlight !== null,
-        documentSessionValid: menuDocumentSessionValid,
-        backendCompatible: status?.compatible ?? null,
-        sidecarRunning: status?.running ?? null,
-        generatorActive: deviceProfileGeneratorOpenRef.current || appGeneratorOpenRef.current,
-      });
-    } catch (error) {
-      setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
+    if (response.kind !== "api-error") {
+      return;
+    }
+    const diagnostics = saveFailureDiagnosticsForActiveDocument(
+      response.error.details,
+      requestDocumentId,
+      currentDocumentRef.current?.documentId ?? null,
+    );
+    if (diagnostics !== null) {
+      setDiagnostics(diagnostics);
     }
   }
 
@@ -1222,6 +1551,23 @@ export default function App() {
         <EmptyState
           sidecarAvailable={documentSessionValid}
           sidecarMessage={sessionInvalidReason}
+        />
+      );
+    }
+    if (isAppDefinitionDocument(currentDocument)) {
+      return (
+        <AppDefinitionEditor
+          key={currentDocument.documentId}
+          appDefinition={currentDocument.appDefinition}
+          draft={appDefinitionEditorDraft ?? createAppDefinitionEditorDraft(currentDocument.appDefinition)}
+          identityEditable={
+            currentDocument.editRestrictions.canEditIdentity &&
+            !currentDocument.editRestrictions.identityLocked
+          }
+          disabled={!actionAvailability.editDocument}
+          onDraftChange={installAppDefinitionDraft}
+          onApply={applyAppDefinitionEditorCommand}
+          onDocumentAccepted={acceptAppDefinitionEditorDocument}
         />
       );
     }
@@ -1297,9 +1643,16 @@ export default function App() {
         {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
         <UserConfigurationEditor
           document={userConfigurationDocument}
-          onClose={() => setUserConfigurationDocument(null)}
-          onDocument={setUserConfigurationDocument}
-          onError={(message) => setErrorMessage(message)}
+          onClose={clearUserConfigurationDocument}
+          onDocument={updateUserConfigurationDocument}
+          onError={(message) => {
+            if (
+              currentDocumentRef.current === null &&
+              userConfigurationDocumentRef.current?.documentId === userConfigurationDocument.documentId
+            ) {
+              setErrorMessage(message);
+            }
+          }}
         />
       </>
     );
@@ -1342,10 +1695,16 @@ export default function App() {
             <Toolbar
               currentPath={currentPath}
               documentAuthoredRoot={currentDocument?.authoredRoot ?? null}
-              dirty={currentDocument?.dirty ?? false}
+              appDefinitionOwningRoot={currentDocument && isAppDefinitionDocument(currentDocument) ? currentDocument.owningAuthoredRoot : undefined}
+              dirty={documentHasUnsavedChanges(currentDocument)}
+              pendingAppDefinitionInput={pendingAppDefinitionInput}
+              canSave={actionAvailability.saveRecipe}
+              canSaveAs={actionAvailability.saveRecipeAs}
               documentSessionValid={documentSessionValid}
               hasDocument={currentDocument !== null}
               loadingLabel={loadingLabel}
+              onSave={() => void saveRecipe()}
+              onSaveAs={() => void saveRecipeAs()}
               selectedAuthoredRoot={selectedAuthoredRoot}
               sidecarStatus={sidecarState}
               stepSpecsCount={stepSpecsCount}
@@ -1356,7 +1715,7 @@ export default function App() {
                 <div className="flex flex-wrap items-center gap-3">
                   <p className="min-w-0 flex-1">
                     {invalidSessionRecovery.message ??
-                      "The displayed recipe is a stale read-only reference. Restart the sidecar, then reopen the recipe from disk to create a new document session."}
+                      "The displayed document is a stale read-only reference. Restart the sidecar, then reopen it from disk to create a new document session."}
                   </p>
                   {invalidSessionRecovery.reopenFromDisk ? (
                     <button

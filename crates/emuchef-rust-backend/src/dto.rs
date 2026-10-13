@@ -1,11 +1,12 @@
-//! JSON DTO projection for recipe documents.
+//! JSON DTO projections for Recipe and App Definition editor documents.
 //!
-//! These projections preserve the editor protocol shape for the authored recipe
-//! fields modeled by the authored recipe schema. Fields outside that model are intentionally left
-//! out of scope instead of adding new semantics.
+//! Recipe projections preserve the editor protocol shape for authored Recipe
+//! fields. App Definition diagnostics use camel-case object locations expected
+//! by the Config Editor without changing Recipe diagnostic compatibility.
 
 use serde_json::{json, Map, Value};
 
+use crate::app_definition_document::AppDefinitionDocument;
 use crate::document::RecipeDocument;
 use crate::model::{InputDeclaration, ParamValue, Recipe, RecipeArtifact, Step, StepCondition};
 use crate::ref_index;
@@ -24,6 +25,57 @@ pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
         "yaml": document.yaml(),
         "diagnostics": document.diagnostics(),
         "refIndex": ref_index::ref_index_to_dto(document.recipe()),
+    })
+}
+
+/// Project App Definition diagnostic locations into the editor's camel-case DTO.
+/// Recipe diagnostics retain their existing projection for protocol compatibility.
+pub(crate) fn app_diagnostics_to_dto(diagnostics: &[Value]) -> Vec<Value> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let Some(object) = diagnostic.as_object() else {
+                return diagnostic.clone();
+            };
+            let mut projected = object.clone();
+            for (source, destination) in [("object_kind", "objectKind"), ("object_id", "objectId")]
+            {
+                if let Some(value) = projected.remove(source) {
+                    projected.entry(destination.to_string()).or_insert(value);
+                }
+            }
+            Value::Object(projected)
+        })
+        .collect()
+}
+
+/// Convert an App Definition editor session into its stable sidecar DTO.
+pub fn app_definition_document_to_dto(
+    document: &AppDefinitionDocument,
+    document_id: &str,
+) -> Value {
+    let identity_locked = document.catalog_identity().is_some();
+    json!({
+        "documentKind": "app_definition",
+        "owningAuthoredRoot": document
+            .owning_authored_root()
+            .map(|root| root.to_string_lossy().to_string()),
+        "documentId": document_id,
+        "path": document.path().to_string_lossy(),
+        "authoredRoot": document
+            .authored_root()
+            .map(|path| path.to_string_lossy().to_string()),
+        "dirty": document.is_dirty(),
+        "canUndo": document.can_undo(),
+        "canRedo": document.can_redo(),
+        "appDefinition": document.app_definition(),
+        "yaml": document.yaml(),
+        "diagnostics": app_diagnostics_to_dto(document.diagnostics()),
+        "editRestrictions": {
+            "identityLocked": identity_locked,
+            "canEditIdentity": !identity_locked,
+            "canSaveAs": document.can_save_as(),
+        },
     })
 }
 
@@ -140,8 +192,9 @@ fn map_values<'a>(values: impl IntoIterator<Item = (&'a String, Value)>) -> Valu
 
 #[cfg(test)]
 mod tests {
-    use super::step_to_dto;
+    use super::{app_diagnostics_to_dto, step_to_dto};
     use crate::model::{OrderedMap, Step, StepConstraints};
+    use serde_json::json;
 
     fn step(app_ref: Option<&str>) -> Step {
         Step {
@@ -170,5 +223,23 @@ mod tests {
 
         let migrated = step_to_dto(&step(Some("armsx1")));
         assert_eq!(migrated["appRef"], "armsx1");
+    }
+
+    #[test]
+    fn app_diagnostic_projection_camelizes_only_app_location_keys() {
+        let raw = json!({
+            "severity": "error",
+            "code": "app_target_unknown",
+            "object_kind": "step",
+            "object_id": "install",
+        });
+        let projected = app_diagnostics_to_dto(std::slice::from_ref(&raw));
+
+        assert_eq!(projected[0]["objectKind"], "step");
+        assert_eq!(projected[0]["objectId"], "install");
+        assert!(projected[0].get("object_kind").is_none());
+        assert!(projected[0].get("object_id").is_none());
+        assert_eq!(raw["object_kind"], "step");
+        assert_eq!(raw["object_id"], "install");
     }
 }

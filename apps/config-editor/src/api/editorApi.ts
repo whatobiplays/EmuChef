@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { EditorCommand } from "./commands";
+import type { AppDefinitionCommand, EditorCommand } from "./commands";
 import {
   runtimeConfigurationInvokeArgs,
   type RuntimeConfigurationRequest,
@@ -8,6 +8,8 @@ import {
 import type {
   ApiEnvelope,
   ApiError,
+  ApplyAppDefinitionCommandResult,
+  ApplyEditorCommandResult,
   ApplyRecipeCommandResult,
   DocumentResult,
   EmitRecipeYamlFromPathResult,
@@ -15,6 +17,7 @@ import type {
   GetRefIndexResult,
   ListStepSpecsResult,
   OpenRecipeResult,
+  OpenAppDefinitionResult,
   SidecarPingResult,
   SidecarRestartResult,
   SidecarStatusResult,
@@ -75,6 +78,13 @@ export async function openRecipe(
   return callApi<OpenRecipeResult>("open_recipe", { path, authoredRoot });
 }
 
+export async function openAppDefinition(
+  path: string,
+  authoredRoot: string | null = null,
+): Promise<EditorApiResult<OpenAppDefinitionResult>> {
+  return callApi<OpenAppDefinitionResult>("open_app_definition", { path, authoredRoot });
+}
+
 export async function validateRecipePath(
   path: string,
   authoredRoot: string | null = null,
@@ -115,16 +125,28 @@ export async function applyRecipeCommand(
   return callApi<ApplyRecipeCommandResult>("apply_recipe_command", { documentId, command });
 }
 
-export async function undo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
-  return callApi<ApplyRecipeCommandResult>("undo", { documentId });
+export async function applyAppDefinitionCommand(
+  documentId: string,
+  command: AppDefinitionCommand,
+): Promise<EditorApiResult<ApplyAppDefinitionCommandResult>> {
+  return callApi<ApplyAppDefinitionCommandResult>("apply_app_definition_command", { documentId, command });
 }
 
-export async function redo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
-  return callApi<ApplyRecipeCommandResult>("redo", { documentId });
+export async function undo(documentId: string): Promise<EditorApiResult<ApplyEditorCommandResult>> {
+  return callApi<ApplyEditorCommandResult>("undo", { documentId });
+}
+
+export async function redo(documentId: string): Promise<EditorApiResult<ApplyEditorCommandResult>> {
+  return callApi<ApplyEditorCommandResult>("redo", { documentId });
 }
 
 export async function saveRecipe(documentId: string): Promise<EditorApiResult<DocumentResult>> {
   return callApi<DocumentResult>("save_recipe", { documentId });
+}
+
+/** Saves the active App Definition through its typed document-session route. */
+export async function saveAppDefinition(documentId: string): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("save_app_definition", { documentId });
 }
 
 export async function saveRecipeAs(
@@ -132,6 +154,14 @@ export async function saveRecipeAs(
   path: string,
 ): Promise<EditorApiResult<DocumentResult>> {
   return callApi<DocumentResult>("save_recipe_as", { documentId, path });
+}
+
+/** Saves an App Definition to a new path through its typed document-session route. */
+export async function saveAppDefinitionAs(
+  documentId: string,
+  path: string,
+): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("save_app_definition_as", { documentId, path });
 }
 
 export async function validate(documentId: string): Promise<EditorApiResult<ValidateResult>> {
@@ -534,10 +564,17 @@ export async function cancelAppGenerator(
 }
 
 export interface MenuState {
+  documentKind: "recipe" | "app_definition" | null;
   hasDocument: boolean;
   hasSelectedAuthoredRoot: boolean;
   hasDocumentAuthoredRoot: boolean;
   dirty: boolean;
+  /** Effective Save availability after document, session, and local-draft checks. */
+  canSave: boolean;
+  /** Effective Save As availability after permission, session, and local-draft checks. */
+  canSaveAs: boolean;
+  /** True while App Definition form values remain unapplied in the frontend. */
+  pendingAppDefinitionInput: boolean;
   canUndo: boolean;
   canRedo: boolean;
   hasDocumentPath: boolean;

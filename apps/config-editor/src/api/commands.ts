@@ -1,3 +1,5 @@
+import type { AppArtifactV1Dto, AppPermissionSetDto, AppTargetV1Dto } from "./types.js";
+
 export type EditorCommand =
   | { type: "SetOverviewField"; field: "name" | "description"; value: string | null }
   | { type: "AddInput"; inputId: string }
@@ -30,6 +32,30 @@ export type EditorCommand =
   | { type: "UpdateStepConstraints"; stepId: string; constraints: Record<string, unknown> }
   | { type: "UpdateStepSkipIf"; stepId: string; skipIf: unknown[] }
   | { type: "UpdateStepVerify"; stepId: string; verify: unknown[] };
+
+/** Exact tagged commands accepted by the schema-v1 App Definition document session. */
+export type AppDefinitionCommand =
+  | { readonly type: "SetId"; readonly id: string }
+  | { readonly type: "SetName"; readonly name: string }
+  | { readonly type: "SetDescription"; readonly description: string | null }
+  | { readonly type: "SetCategory"; readonly category: string | null }
+  | { readonly type: "SetPackageId"; readonly packageId: string }
+  | { readonly type: "SetLauncherActivity"; readonly launcherActivity: string | null }
+  | { readonly type: "AddArtifact"; readonly artifactId: string; readonly artifact: AppArtifactV1Dto }
+  | { readonly type: "ReplaceArtifact"; readonly artifactId: string; readonly artifact: AppArtifactV1Dto }
+  | { readonly type: "RemoveArtifact"; readonly artifactId: string }
+  | { readonly type: "ReorderArtifact"; readonly artifactId: string; readonly toIndex: number }
+  | {
+      readonly type: "SetPermissionSet";
+      readonly permissionSet: "baseline" | "elevated";
+      readonly value: AppPermissionSetDto | null;
+    }
+  | { readonly type: "AddTarget"; readonly targetId: string; readonly target: AppTargetV1Dto }
+  | { readonly type: "ReplaceTarget"; readonly targetId: string; readonly target: AppTargetV1Dto }
+  | { readonly type: "RemoveTarget"; readonly targetId: string }
+  | { readonly type: "ReorderTarget"; readonly targetId: string; readonly toIndex: number }
+  | { readonly type: "SetMetadataEntry"; readonly key: string; readonly value: unknown }
+  | { readonly type: "RemoveMetadataEntry"; readonly key: string };
 
 export type InputEditableField =
   | "type"

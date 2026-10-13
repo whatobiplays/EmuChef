@@ -5,6 +5,7 @@ use tauri::{
 };
 
 const ACTION_OPEN_RECIPE: &str = "openRecipe";
+const ACTION_OPEN_APP_DEFINITION: &str = "openAppDefinition";
 const ACTION_OPEN_USER_CONFIGURATION: &str = "openUserConfiguration";
 const ACTION_GENERATE_APP_RECIPE: &str = "generateAppRecipe";
 const ACTION_GENERATE_DEVICE_PROFILE: &str = "generateDeviceProfile";
@@ -29,6 +30,10 @@ pub struct EditorMenuState {
     can_redo: bool,
     command_in_flight: bool,
     document_session_valid: bool,
+    #[serde(default)]
+    can_save: Option<bool>,
+    #[serde(default)]
+    can_save_as: Option<bool>,
     backend_compatible: Option<bool>,
     sidecar_running: Option<bool>,
     generator_active: bool,
@@ -45,6 +50,8 @@ impl Default for EditorMenuState {
             can_redo: false,
             command_in_flight: false,
             document_session_valid: true,
+            can_save: None,
+            can_save_as: None,
             backend_compatible: None,
             sidecar_running: None,
             generator_active: false,
@@ -90,25 +97,10 @@ pub fn build_editor_menu<R: Runtime>(
 }
 
 pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
-    match action {
-        ACTION_OPEN_RECIPE
-        | ACTION_OPEN_USER_CONFIGURATION
-        | ACTION_GENERATE_APP_RECIPE
-        | ACTION_GENERATE_DEVICE_PROFILE
-        | ACTION_SAVE_RECIPE
-        | ACTION_SAVE_RECIPE_AS
-        | ACTION_RESTART_SIDECAR
-        | ACTION_UNDO
-        | ACTION_REDO
-        | ACTION_VALIDATE
-        | ACTION_REFRESH_YAML
-        | ACTION_SET_AUTHORED_ROOT
-        | ACTION_CLEAR_AUTHORED_ROOT => {
-            if let Err(err) = app.emit("menu-action", MenuActionPayload { action }) {
-                eprintln!("Failed to emit menu action {action}: {err}");
-            }
+    if emits_menu_action(action) {
+        if let Err(err) = app.emit("menu-action", MenuActionPayload { action }) {
+            eprintln!("Failed to emit menu action {action}: {err}");
         }
-        _ => {}
     }
 }
 
@@ -143,12 +135,10 @@ fn build_file_menu<R: Runtime>(
 ) -> tauri::Result<Submenu<R>> {
     let command_idle = !state.command_in_flight;
     let editor_idle = command_idle && !state.generator_active;
-    let backend_ready = state.backend_compatible != Some(false);
     let backend_usable =
         state.backend_compatible == Some(true) && state.sidecar_running == Some(true);
-    let session_ready = editor_idle && state.document_session_valid && backend_ready;
-    let open_recipe_ready =
-        editor_idle && backend_ready && (state.document_session_valid || backend_usable);
+    let session_ready = session_ready(state);
+    let open_recipe_ready = open_document_ready(state);
     let generator_ready = editor_idle && backend_usable;
     let has_root_to_clear = state.has_selected_authored_root
         || (state.has_document && state.has_document_authored_root);
@@ -163,6 +153,13 @@ fn build_file_menu<R: Runtime>(
                 "Open Recipe",
                 open_recipe_ready,
                 Some("CmdOrCtrl+O"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                ACTION_OPEN_APP_DEFINITION,
+                "Open App Definition…",
+                open_recipe_ready,
+                Some("CmdOrCtrl+Shift+O"),
             )?,
             &MenuItem::with_id(
                 app,
@@ -205,14 +202,14 @@ fn build_file_menu<R: Runtime>(
                 app,
                 ACTION_SAVE_RECIPE,
                 "Save",
-                session_ready && state.has_document && state.dirty,
+                save_enabled(state),
                 Some("CmdOrCtrl+S"),
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_SAVE_RECIPE_AS,
                 "Save As…",
-                session_ready && state.has_document,
+                save_as_enabled(state),
                 None::<&str>,
             )?,
             #[cfg(not(target_os = "macos"))]
@@ -220,6 +217,49 @@ fn build_file_menu<R: Runtime>(
             #[cfg(not(target_os = "macos"))]
             &PredefinedMenuItem::quit(app, None)?,
         ],
+    )
+}
+
+fn session_ready(state: EditorMenuState) -> bool {
+    !state.command_in_flight
+        && !state.generator_active
+        && state.document_session_valid
+        && state.backend_compatible != Some(false)
+}
+
+fn open_document_ready(state: EditorMenuState) -> bool {
+    let editor_idle = !state.command_in_flight && !state.generator_active;
+    let backend_ready = state.backend_compatible != Some(false);
+    let backend_usable =
+        state.backend_compatible == Some(true) && state.sidecar_running == Some(true);
+    editor_idle && backend_ready && (state.document_session_valid || backend_usable)
+}
+
+fn save_enabled(state: EditorMenuState) -> bool {
+    session_ready(state) && state.has_document && state.dirty && state.can_save.unwrap_or(true)
+}
+
+fn save_as_enabled(state: EditorMenuState) -> bool {
+    session_ready(state) && state.has_document && state.can_save_as.unwrap_or(true)
+}
+
+fn emits_menu_action(action: &str) -> bool {
+    matches!(
+        action,
+        ACTION_OPEN_RECIPE
+            | ACTION_OPEN_APP_DEFINITION
+            | ACTION_OPEN_USER_CONFIGURATION
+            | ACTION_GENERATE_APP_RECIPE
+            | ACTION_GENERATE_DEVICE_PROFILE
+            | ACTION_SAVE_RECIPE
+            | ACTION_SAVE_RECIPE_AS
+            | ACTION_RESTART_SIDECAR
+            | ACTION_UNDO
+            | ACTION_REDO
+            | ACTION_VALIDATE
+            | ACTION_REFRESH_YAML
+            | ACTION_SET_AUTHORED_ROOT
+            | ACTION_CLEAR_AUTHORED_ROOT
     )
 }
 
@@ -328,5 +368,85 @@ fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
             .clone()
             .map(|publisher| vec![publisher]),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn menu_state() -> EditorMenuState {
+        EditorMenuState {
+            has_document: true,
+            dirty: true,
+            ..EditorMenuState::default()
+        }
+    }
+
+    #[test]
+    fn omitted_save_availability_preserves_existing_recipe_menu_behavior() {
+        let state: EditorMenuState = serde_json::from_value(json!({
+            "hasDocument": true,
+            "hasSelectedAuthoredRoot": false,
+            "hasDocumentAuthoredRoot": false,
+            "dirty": true,
+            "canUndo": false,
+            "canRedo": false,
+            "commandInFlight": false,
+            "documentSessionValid": true,
+            "generatorActive": false
+        }))
+        .expect("legacy menu state without App availability fields should deserialize");
+
+        assert!(save_enabled(state));
+        assert!(save_as_enabled(state));
+    }
+
+    #[test]
+    fn camel_case_effective_save_availability_gates_native_menu_actions() {
+        let state: EditorMenuState = serde_json::from_value(json!({
+            "hasDocument": true,
+            "hasSelectedAuthoredRoot": false,
+            "hasDocumentAuthoredRoot": false,
+            "dirty": true,
+            "canUndo": false,
+            "canRedo": false,
+            "commandInFlight": false,
+            "documentSessionValid": true,
+            "canSave": false,
+            "canSaveAs": false,
+            "generatorActive": false
+        }))
+        .expect("effective menu availability should use the shared camelCase keys");
+
+        assert!(!save_enabled(state));
+        assert!(!save_as_enabled(state));
+    }
+
+    #[test]
+    fn save_actions_still_require_an_idle_valid_document_and_save_requires_changes() {
+        let mut state = menu_state();
+        state.can_save = Some(true);
+        state.can_save_as = Some(true);
+        assert!(save_enabled(state));
+        assert!(save_as_enabled(state));
+
+        state.dirty = false;
+        assert!(!save_enabled(state));
+        assert!(save_as_enabled(state));
+
+        state.dirty = true;
+        state.command_in_flight = true;
+        assert!(!save_enabled(state));
+        assert!(!save_as_enabled(state));
+    }
+
+    #[test]
+    fn open_app_definition_action_is_in_the_native_menu_event_allowlist() {
+        assert!(emits_menu_action(ACTION_OPEN_APP_DEFINITION));
+        assert!(emits_menu_action("openRecipe"));
+        assert!(!emits_menu_action("unregisteredAction"));
     }
 }

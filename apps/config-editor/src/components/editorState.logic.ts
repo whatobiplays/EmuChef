@@ -1,7 +1,67 @@
-import type { ApiError, SidecarStatusResult } from "../api/types.js";
+import type { ApiError, DiagnosticDto, SidecarStatusResult } from "../api/types.js";
+
+/** Accept save diagnostics only for the still-active document that initiated the request. */
+export function saveFailureDiagnosticsForActiveDocument(
+  details: Record<string, unknown>,
+  requestDocumentId: string,
+  activeDocumentId: string | null,
+): DiagnosticDto[] | null {
+  if (activeDocumentId !== requestDocumentId) {
+    return null;
+  }
+  if ("documentId" in details && details.documentId !== requestDocumentId) {
+    return null;
+  }
+  const rawDiagnostics = details.diagnostics;
+  if (!Array.isArray(rawDiagnostics) || rawDiagnostics.length === 0) {
+    return null;
+  }
+
+  const diagnostics: DiagnosticDto[] = [];
+  for (const value of rawDiagnostics) {
+    if (!isRecord(value)) {
+      return null;
+    }
+    const { severity, code, message } = value;
+    const file = nullableStringValue(value, "file");
+    const objectKind = nullableStringValue(value, "objectKind", "object_kind");
+    const objectId = nullableStringValue(value, "objectId", "object_id");
+    const field = nullableStringValue(value, "field");
+    if (
+      typeof severity !== "string" ||
+      typeof code !== "string" ||
+      typeof message !== "string" ||
+      file === undefined ||
+      objectKind === undefined ||
+      objectId === undefined ||
+      field === undefined
+    ) {
+      return null;
+    }
+    diagnostics.push({ severity, code, message, file, objectKind, objectId, field });
+  }
+  return diagnostics;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nullableStringValue(
+  record: Record<string, unknown>,
+  key: string,
+  alternateKey?: string,
+): string | null | undefined {
+  const value = key in record ? record[key] : alternateKey === undefined ? null : record[alternateKey] ?? null;
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return typeof value === "string" ? value : undefined;
+}
 
 export type CommandName =
   | "openRecipe"
+  | "openAppDefinition"
   | "saveRecipe"
   | "saveRecipeAs"
   | "restartSidecar"
@@ -17,6 +77,10 @@ export interface ActionAvailabilityState {
   hasSelectedAuthoredRoot: boolean;
   hasDocumentAuthoredRoot: boolean;
   dirty: boolean;
+  /** Local App Definition form values that have not been applied to the document session. */
+  pendingAppDefinitionInput?: boolean;
+  /** Document-level permission to save a copy, independent of transient form input. */
+  canSaveAs?: boolean;
   canUndo: boolean;
   canRedo: boolean;
   hasDocumentPath?: boolean;
@@ -131,10 +195,10 @@ export interface CloseConfirmationCopy {
 }
 
 const INVALID_SESSION_GUIDANCE =
-  "The editor session is no longer valid. Restart the sidecar and reopen the recipe.";
+  "The editor session is no longer valid. Restart the sidecar and reopen the document.";
 
 const SIDECAR_RESTARTED_MESSAGE =
-  "The sidecar was restarted. The displayed recipe is a stale read-only reference; reopen it from disk to create a new document session.";
+  "The sidecar was restarted. The displayed document is a stale read-only reference; reopen it from disk to create a new document session.";
 
 export function buildActionAvailability(state: ActionAvailabilityState): ActionAvailability {
   const commandIdle = state.commandInFlight === null;
@@ -154,8 +218,9 @@ export function buildActionAvailability(state: ActionAvailabilityState): ActionA
     openRecipe: openRecipeReady,
     restartSidecar: commandIdle,
     reopenFromDisk: reopenFromDiskReady,
-    saveRecipe: documentReady && state.dirty,
-    saveRecipeAs: documentReady,
+    saveRecipe: documentReady && state.dirty && state.pendingAppDefinitionInput !== true,
+    saveRecipeAs:
+      documentReady && state.canSaveAs !== false && state.pendingAppDefinitionInput !== true,
     undo: documentReady && state.canUndo,
     redo: documentReady && state.canRedo,
     validate: documentReady,
@@ -195,9 +260,9 @@ export function resolveClosePromptResult(confirmed: boolean): CloseRequestDecisi
 
 export function buildCloseConfirmationCopy(
   reason: ClosePromptReason,
-  recipeId: string | null = null,
+  documentId: string | null = null,
 ): CloseConfirmationCopy {
-  const target = recipeId ?? "the open recipe";
+  const target = documentId ?? "the open document";
   if (reason === "dirty-and-command-in-flight") {
     return {
       title: "Discard changes and close",
@@ -355,7 +420,7 @@ export function buildInvalidSessionRecovery(state: ActionAvailabilityState): Inv
       reopenFromDisk: false,
       reopenRequiresConfirmation: false,
       message:
-        "The displayed recipe is a stale read-only reference. It has no disk path, so use Open Recipe after sidecar recovery to create a new document session.",
+        "The displayed document is a stale read-only reference. It has no disk path, so open it again after sidecar recovery to create a new document session.",
     };
   }
 
@@ -365,7 +430,7 @@ export function buildInvalidSessionRecovery(state: ActionAvailabilityState): Inv
       reopenFromDisk: availability.reopenFromDisk,
       reopenRequiresConfirmation: availability.reopenFromDisk,
       message:
-        "The displayed recipe is a stale read-only reference with unsaved in-memory edits. Reopen from Disk loads the saved file and does not save or replay those stale edits.",
+        "The displayed document is a stale read-only reference with unsaved in-memory edits. Reopen from Disk loads the saved file and does not save or replay those stale edits.",
     };
   }
 
@@ -373,8 +438,8 @@ export function buildInvalidSessionRecovery(state: ActionAvailabilityState): Inv
     readOnly: true,
     reopenFromDisk: availability.reopenFromDisk,
     reopenRequiresConfirmation: false,
-    message:
-      "The displayed recipe is a stale read-only reference. Reopen from Disk creates a fresh document session from the saved file.",
+      message:
+        "The displayed document is a stale read-only reference. Reopen from Disk creates a fresh document session from the saved file.",
   };
 }
 

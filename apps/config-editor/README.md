@@ -20,6 +20,7 @@ script builds the Rust binary and writes the target-triple-suffixed Tauri
 ```bash
 npm run typecheck
 npm run test:logic
+npm run test:dom
 npm run lint
 npm run build
 npm run check:rust-runtime
@@ -29,7 +30,10 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-f
 
 `check:rust-runtime` validates sidecar packaging metadata, rejects Python
 product/runtime code and alternate-backend surfaces through the repository-wide
-retirement guard, typechecks the frontend, and runs frontend logic tests.
+retirement guard, typechecks the frontend, and runs the registered frontend
+logic and DOM interaction test scripts.
+
+`test:dom` runs React interaction tests in Vitest with jsdom and Testing Library.
 
 ```bash
 npm run check:python-runtime-retirement

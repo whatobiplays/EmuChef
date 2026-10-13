@@ -136,11 +136,17 @@ fn handle_validated_sidecar_object(
         "cancelExecution" => handle_cancel_execution(object, sessions),
         "launchExecutionApp" => handle_launch_execution_app(object, sessions),
         "openRecipe" => handle_open_recipe(object, sessions),
+        "openAppDefinition" => handle_open_app_definition(object, sessions),
         "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
         "saveRecipe" => handle_save_recipe(object, sessions),
         "saveRecipeAs" => handle_save_recipe_as(object, sessions),
+        "saveAppDefinition" => handle_save_app_definition(object, sessions),
+        "saveAppDefinitionAs" => handle_save_app_definition_as(object, sessions),
+        "saveDocument" => handle_save_document(object, sessions),
+        "saveDocumentAs" => handle_save_document_as(object, sessions),
         "applyRecipeCommand" => handle_apply_recipe_command(object, sessions),
+        "applyAppDefinitionCommand" => handle_apply_app_definition_command(object, sessions),
         "undo" => handle_undo(object, sessions),
         "redo" => handle_redo(object, sessions),
         "emitYaml" => handle_emit_yaml(object, sessions),
@@ -1196,6 +1202,18 @@ fn handle_open_recipe(
     ))
 }
 
+fn handle_open_app_definition(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = required_path(payload)?;
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    Ok(envelope::success(
+        sessions.open_app_definition(path, authored_root)?,
+    ))
+}
+
 fn handle_create_recipe_from_template(
     object: &Map<String, Value>,
     sessions: &mut DocumentSessionManager,
@@ -1243,6 +1261,50 @@ fn handle_save_recipe_as(
     ))
 }
 
+fn handle_save_app_definition(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(
+        sessions.save_app_definition(document_id)?,
+    ))
+}
+
+fn handle_save_app_definition_as(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let path = required_path(payload)?;
+    Ok(envelope::success(
+        sessions.save_app_definition_as(document_id, path)?,
+    ))
+}
+
+fn handle_save_document(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.save_document(document_id)?))
+}
+
+fn handle_save_document_as(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let path = required_path(payload)?;
+    Ok(envelope::success(
+        sessions.save_document_as(document_id, path)?,
+    ))
+}
+
 fn handle_apply_recipe_command(
     object: &Map<String, Value>,
     sessions: &mut DocumentSessionManager,
@@ -1252,6 +1314,18 @@ fn handle_apply_recipe_command(
     let command = payload.get("command").unwrap_or(&Value::Null);
     Ok(envelope::success(
         sessions.apply_recipe_command(document_id, command)?,
+    ))
+}
+
+fn handle_apply_app_definition_command(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let command = payload.get("command").unwrap_or(&Value::Null);
+    Ok(envelope::success(
+        sessions.apply_app_definition_command(document_id, command)?,
     ))
 }
 

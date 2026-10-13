@@ -26,6 +26,19 @@ pub fn open_recipe(
 }
 
 #[tauri::command]
+pub fn open_app_definition(
+    state: State<'_, SidecarState>,
+    path: String,
+    authored_root: Option<String>,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "openAppDefinition",
+        Some(json!({ "path": path, "authoredRoot": authored_root })),
+    )
+}
+
+#[tauri::command]
 pub fn validate_recipe_path(
     state: State<'_, SidecarState>,
     path: String,
@@ -353,6 +366,19 @@ pub fn apply_recipe_command(
 }
 
 #[tauri::command]
+pub fn apply_app_definition_command(
+    state: State<'_, SidecarState>,
+    document_id: String,
+    command: Value,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "applyAppDefinitionCommand",
+        Some(json!({ "documentId": document_id, "command": command })),
+    )
+}
+
+#[tauri::command]
 pub fn undo(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
     request_without_transport_id(
         &state,
@@ -378,7 +404,7 @@ pub fn redo(state: State<'_, SidecarState>, document_id: String) -> Result<Value
 pub fn save_recipe(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
     request_without_transport_id(
         &state,
-        "saveRecipe",
+        "saveDocument",
         Some(json!({
             "documentId": document_id,
         })),
@@ -393,11 +419,36 @@ pub fn save_recipe_as(
 ) -> Result<Value, String> {
     request_without_transport_id(
         &state,
-        "saveRecipeAs",
+        "saveDocumentAs",
         Some(json!({
             "documentId": document_id,
             "path": path,
         })),
+    )
+}
+
+#[tauri::command]
+pub fn save_app_definition(
+    state: State<'_, SidecarState>,
+    document_id: String,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "saveAppDefinition",
+        Some(json!({ "documentId": document_id })),
+    )
+}
+
+#[tauri::command]
+pub fn save_app_definition_as(
+    state: State<'_, SidecarState>,
+    document_id: String,
+    path: String,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "saveAppDefinitionAs",
+        Some(json!({ "documentId": document_id, "path": path })),
     )
 }
 
