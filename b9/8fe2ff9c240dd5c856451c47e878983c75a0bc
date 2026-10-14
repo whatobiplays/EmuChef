@@ -1,0 +1,14 @@
+.serena/project.yml
+  h_2e7f3207901880 135-150,159,164-165,177-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b98fe2ff9c240dd5c856451c47e878983c75a0bc",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
