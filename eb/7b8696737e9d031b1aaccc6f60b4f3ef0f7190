@@ -1,0 +1,22 @@
+docs/adr/0005-app-definitions-own-intrinsic-app-facts.md
+  s_01e982d476df40::t_f09e2e758bcc7e 1-11
+docs/architecture/app-definition-recipe-authority.md
+  s_01e982d476df40::t_1c33e7c835eab7 580,586,676
+  s_01e982d476df40::t_f09e2e758bcc7e 1-579,581-585,587-675,677-736
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eb7b8696737e9d031b1aaccc6f60b4f3ef0f7190",
+  "prompts": {},
+  "sessions": {
+    "s_01e982d476df40": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13ae0-f7bb-7db0-a1c0-f1ab86662856",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
