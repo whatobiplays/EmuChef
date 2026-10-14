@@ -154,27 +154,41 @@ This replaced the older list-based input model.
 
 ### 5.3 Artifacts
 
-`artifacts` is a map keyed by artifact ID.
+`artifacts` is a map keyed by artifact ID. Schema-v1 Recipes declare either a
+Recipe-owned `remote_file` or a reference to an App Definition-owned
+`app_artifact`.
 
-V1 artifact type:
+`remote_file` requires a literal `url` and does not accept `input.ref`. A
+Recipe input used by an App Artifact is bound through the `user_provided`
+source strategy. Both declaration types may set the Recipe-owned `cache`
+field to `default` or `none`; it defaults to `default`.
 
-- `remote_file`
+`app_artifact` requires `app_ref` and `artifact`. Its source strategy is
+defined by that named App Definition artifact. A `user_provided` artifact
+requires an `input` mapping with `ref: inputs.<id>`; the reference must identify
+one `file` input with `multiple: false` declared by the same Recipe. Other
+source strategies do not accept `input`; `direct_url` and `latest_release`
+artifacts use their App Definition source policy.
 
-Fields:
+A `user_provided` App Artifact is represented in the execution plan as a
+`local_input` source. Its cache setting is validated and retained as Recipe
+policy, but the supplied bytes are copied to a guarded execution-scoped
+snapshot and are never persisted to or reused from the shared artifact cache.
 
-- `type`: required, must be `remote_file`
-- `url`: required
-- `cache`: optional
-  - `default`
-  - `none`
-
-Example:
+Examples:
 
 ```yaml
 artifacts:
   retroarch_apk:
     type: remote_file
     url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
+    cache: default
+  user_supplied_asset:
+    type: app_artifact
+    app_ref: example_app
+    artifact: user_asset
+    input:
+      ref: inputs.user_asset_file
     cache: default
 ```
 
@@ -900,29 +914,34 @@ This keeps the schema clean while still allowing app-private core seeding, such 
 
 ## 21. RetroArch Reference Flow
 
-The intended RetroArch flow now looks like this conceptually:
+The RetroArch provisioning flow uses App Definition ownership for its reusable
+file sources while keeping installation and procedural setup in the Recipe:
 
-1. declare top-level remote artifacts for:
-   - RetroArch APK
-   - frontend assets ZIP
-   - selected system ZIPs
-   - selected core ZIPs
-2. declare grouped core selection in `artifact_groups`
-3. run:
+1. keep the Recipe's legacy `remote_file` artifact for the RetroArch APK
+2. declare seven frontend archives, thirteen selected core archives, and
+   three system-resource archives as named `kind: file` App Definition
+   artifacts with HTTPS direct-URL sources
+3. reference those App Definition artifacts with the Recipe's existing
+   `app_artifact` IDs and retain the three existing `artifact_groups`
+4. let the Recipe select cache policy, archive extraction, step dependencies,
+   and app-aware copy destinations
+5. run:
    - `resolve_artifacts`
    - `install_apk`
    - `launch_app`
    - `wait`
    - `force_stop_app`
    - `grant_permissions`
-   - `extract_artifacts` for selected cores
+   - `extract_artifacts` for selected cores and system-resource groups
    - `copy_files` to `/data/user/0/com.retroarch.aarch64/cores`
-   - `extract_archive` or `extract_artifacts` for frontend/system assets
-   - `copy_files` into destination directories
+   - `extract_archive` for frontend assets
+   - `copy_files` into the App Definition's named targets
    - optional config copy via `copy_files`
    - final launch
 
-This replaces the older local-sample-artifact model with a real artifact-centric provisioning path.
+The APK installation behavior remains the legacy Recipe artifact flow. All
+other RetroArch archive sources are app-owned, and they use the ordinary
+artifact resolution, cache, extraction, and local-path workflow.
 
 ## 22. Known Current Gaps / Intentional V1 Limits
 

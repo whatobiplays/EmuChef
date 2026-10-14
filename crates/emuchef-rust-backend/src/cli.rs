@@ -473,7 +473,29 @@ where
                 .to_string(),
         };
     }
+    if let Err(artifact_code) = crate::planner::validate_execution_plan_local_input_bindings(&plan)
+    {
+        return ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("Error: {artifact_code}: Local input binding is invalid.\n"),
+        };
+    }
     let workspace = apply_workspace(&plan_path, &plan);
+    let admission_sandbox = crate::executor::SandboxRoots {
+        runtime_root: workspace.runtime_root.clone(),
+        cache_root: workspace.cache_root.clone(),
+        fake_device_root: workspace.fake_device_root.clone(),
+        read_only_roots: workspace.read_only_roots.clone(),
+    };
+    if let Err(artifact_code) = crate::executor::admit_plan_local_inputs(&plan, &admission_sandbox)
+    {
+        return ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("Error: {artifact_code}: Local input admission failed.\n"),
+        };
+    }
     if config.dry_run {
         let adapters = ExecutorAdapters::with_sandbox_roots(
             workspace.runtime_root,
@@ -612,7 +634,8 @@ fn apply_workspace(plan_path: &Path, plan: &ExecutionPlan) -> ApplyWorkspace {
             .iter()
             .filter_map(|artifact| match &artifact.source {
                 ExecutionArtifactSource::RemoteFile { url } => file_url_to_path(url),
-                ExecutionArtifactSource::DirectUrl { .. }
+                ExecutionArtifactSource::LocalInput { .. }
+                | ExecutionArtifactSource::DirectUrl { .. }
                 | ExecutionArtifactSource::RemoteRelease { .. } => None,
             }),
     );
@@ -1110,6 +1133,9 @@ fn parse_artifacts(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionArtifact>,
                             ),
                         },
                     },
+                    "local_input" => ExecutionArtifactSource::LocalInput {
+                        input_id: required_string(source, "input_id")?,
+                    },
                     "remote_release" => {
                         let asset_pattern = match source.get(yaml_key("asset_pattern")) {
                             None | Some(YamlValue::Null) => None,
@@ -1468,9 +1494,9 @@ fn cli_usage() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::TempDir;
 
     use super::*;
@@ -1501,6 +1527,98 @@ mod tests {
             .expect("repo authored root should resolve")
             .to_string_lossy()
             .into_owned()
+    }
+
+    fn input_value(id: &str, path: &Path) -> Value {
+        json!({
+            "id": id,
+            "value": {
+                "type": "file_path",
+                "value": path,
+                "location": "host"
+            }
+        })
+    }
+
+    fn write_apply_plan(temp: &TempDir, inputs: Vec<Value>, source: Value) -> PathBuf {
+        let plan_path = temp.path().join("plan.yaml");
+        let plan = json!({
+            "schema_version": 1,
+            "kind": "execution_plan",
+            "id": "plan.local-input-admission",
+            "source": {
+                "device_profile_ref": "example.profile",
+                "device_plan_ref": "example.plan",
+                "selected_recipe_refs": ["example.recipe"],
+                "expanded_recipe_refs": ["example.recipe"]
+            },
+            "device_context": {
+                "manufacturer": "Example",
+                "model": "Example",
+                "android_version": 13,
+                "android_api_level": 33,
+                "device_tags": []
+            },
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": true,
+                "app_data_write": true
+            },
+            "inputs": inputs,
+            "artifacts": [{
+                "id": "example.recipe/resource",
+                "type": "remote_file",
+                "source": source,
+                "cache": "default",
+                "app_provenance": {
+                    "app_id": "example-app",
+                    "artifact_id": "configuration",
+                    "kind": "file"
+                }
+            }],
+            "steps": []
+        });
+        fs::write(
+            &plan_path,
+            serde_yaml::to_string(&plan).expect("apply plan should serialize as YAML"),
+        )
+        .expect("apply plan should be written");
+        plan_path
+    }
+
+    fn local_input_apply_plan(temp: &TempDir, input_ids: &[&str], binding_id: &str) -> PathBuf {
+        let source_path = temp.path().join("user-config.cfg");
+        fs::write(&source_path, b"user-provided configuration")
+            .expect("user-provided input should be written");
+        let inputs = input_ids
+            .iter()
+            .map(|input_id| input_value(input_id, &source_path))
+            .collect();
+        write_apply_plan(
+            temp,
+            inputs,
+            json!({ "kind": "local_input", "input_id": binding_id }),
+        )
+    }
+
+    /// Write an apply plan whose local-input artifact binds to an explicit host
+    /// file, so a test can point admission at a missing, unreadable, or
+    /// out-of-sandbox source.
+    fn local_input_apply_plan_with_source(
+        temp: &TempDir,
+        binding_id: &str,
+        source_path: &Path,
+    ) -> PathBuf {
+        write_apply_plan(
+            temp,
+            vec![input_value(binding_id, source_path)],
+            json!({ "kind": "local_input", "input_id": binding_id }),
+        )
     }
 
     #[test]
@@ -1835,5 +1953,216 @@ steps:
         assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
         assert!(output.stdout.contains("Execution: success"));
         assert!(!output.stderr.contains("supports only --dry-run"));
+    }
+
+    #[test]
+    fn dry_run_apply_rejects_cross_recipe_local_input_binding() {
+        let temp = TempDir::new().expect("apply temp dir should be created");
+        let plan_path = local_input_apply_plan(
+            &temp,
+            &["other.recipe/user_config"],
+            "other.recipe/user_config",
+        );
+        let output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                plan_path.to_string_lossy().into_owned(),
+                "--dry-run".to_string(),
+            ],
+            |adb, serial| {
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("app_artifact_input_binding_invalid"));
+        assert!(!output.stderr.contains("other.recipe"));
+        assert!(!output.stderr.contains("user-config.cfg"));
+    }
+
+    #[test]
+    fn real_apply_rejects_cross_recipe_local_input_before_constructing_device() {
+        let temp = TempDir::new().expect("apply temp dir should be created");
+        let plan_path = local_input_apply_plan(
+            &temp,
+            &["other.recipe/user_config"],
+            "other.recipe/user_config",
+        );
+        let factory_calls = Cell::new(0);
+        let output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                plan_path.to_string_lossy().into_owned(),
+            ],
+            |adb, serial| {
+                factory_calls.set(factory_calls.get() + 1);
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("app_artifact_input_binding_invalid"));
+        assert!(!output.stderr.contains("other.recipe"));
+        assert!(!output.stderr.contains("user-config.cfg"));
+        assert_eq!(factory_calls.get(), 0);
+    }
+
+    #[test]
+    fn apply_rejects_missing_or_duplicate_local_input_ids() {
+        let temp = TempDir::new().expect("apply temp dir should be created");
+        for inputs in [
+            Vec::new(),
+            vec!["example.recipe/user_config", "example.recipe/user_config"],
+        ] {
+            let plan_path = local_input_apply_plan(&temp, &inputs, "example.recipe/user_config");
+            let output = run_apply_with_real_device_factory(
+                &[
+                    "--plan-file".to_string(),
+                    plan_path.to_string_lossy().into_owned(),
+                    "--dry-run".to_string(),
+                ],
+                |adb, serial| {
+                    RealAdbDevice::with_executor(
+                        adb,
+                        serial.as_deref(),
+                        FakeAdbCommandExecutor::default(),
+                    )
+                },
+            );
+
+            assert_eq!(output.exit_code, 1);
+            assert!(output.stderr.contains("app_artifact_input_binding_invalid"));
+            assert!(!output.stderr.contains("user-config.cfg"));
+        }
+    }
+
+    #[test]
+    fn real_apply_rejects_missing_local_input_before_constructing_device() {
+        let temp = TempDir::new().expect("apply temp dir should be created");
+        let source_path = temp.path().join("absent.cfg");
+        let plan_path =
+            local_input_apply_plan_with_source(&temp, "example.recipe/user_config", &source_path);
+        let factory_calls = Cell::new(0);
+        let output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                plan_path.to_string_lossy().into_owned(),
+            ],
+            |adb, serial| {
+                factory_calls.set(factory_calls.get() + 1);
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("artifact_source_not_found"));
+        assert!(!output.stderr.contains("absent.cfg"));
+        assert_eq!(factory_calls.get(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_apply_rejects_unreadable_local_input_before_constructing_device() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("apply temp dir should be created");
+        let source_path = temp.path().join("unreadable.cfg");
+        fs::write(&source_path, b"user-provided configuration")
+            .expect("user-provided input should be written");
+        fs::set_permissions(&source_path, fs::Permissions::from_mode(0o000))
+            .expect("user-provided input permissions should be set");
+        let plan_path =
+            local_input_apply_plan_with_source(&temp, "example.recipe/user_config", &source_path);
+        let factory_calls = Cell::new(0);
+        let output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                plan_path.to_string_lossy().into_owned(),
+            ],
+            |adb, serial| {
+                factory_calls.set(factory_calls.get() + 1);
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("artifact_source_unreadable"));
+        assert!(!output.stderr.contains("unreadable.cfg"));
+        assert_eq!(factory_calls.get(), 0);
+    }
+
+    #[test]
+    fn apply_accepts_same_recipe_user_file_and_generic_remote_file_inputs() {
+        let temp = TempDir::new().expect("apply temp dir should be created");
+        let source_path = temp.path().join("user-config.cfg");
+        fs::write(&source_path, b"user-provided configuration")
+            .expect("user-provided input should be written");
+        let local_plan = write_apply_plan(
+            &temp,
+            vec![input_value("example.recipe/user_config", &source_path)],
+            json!({
+                "kind": "local_input",
+                "input_id": "example.recipe/user_config"
+            }),
+        );
+        let local_output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                local_plan.to_string_lossy().into_owned(),
+                "--dry-run".to_string(),
+            ],
+            |adb, serial| {
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+        assert_eq!(local_output.exit_code, 0, "{}", local_output.stderr);
+
+        let generic_remote_plan = write_apply_plan(
+            &temp,
+            vec![input_value("example.recipe/unrelated_input", &source_path)],
+            json!({
+                "kind": "remote_file",
+                "url": "https://example.com/configuration.cfg"
+            }),
+        );
+        let generic_remote_output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                generic_remote_plan.to_string_lossy().into_owned(),
+                "--dry-run".to_string(),
+            ],
+            |adb, serial| {
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+        assert_eq!(
+            generic_remote_output.exit_code, 0,
+            "{}",
+            generic_remote_output.stderr
+        );
     }
 }

@@ -4,11 +4,11 @@
   "planningDevicePlan": "ayaneo.konkr_pocket_fit.base",
   "authoredSource": {
     "path": "authored/recipes/app.retroarch.provision.yaml",
-    "sha256": "5407ce02462214c0c5e5bb10d03dde4f133e69ebd43d873c3163660f51566c2d"
+    "sha256": "bf10874d72be73dc8a5255101403bbe025f6e073f1891a7146a9aa812ed173a2"
   },
   "appSource": {
     "path": "authored/apps/retroarch.yaml",
-    "sha256": "691844be13d81e8c3033bb94074348274d0e8c4ce65c2c1d325ef9d2bdd8d3dc"
+    "sha256": "795e26f79d6f1eb2edccd76a0774a7ce5dbaa18fdcb13bad0572734640aac263"
   },
   "appLifecycle": {
     "appId": "retroarch",

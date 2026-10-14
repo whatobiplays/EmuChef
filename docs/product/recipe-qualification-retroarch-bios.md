@@ -26,10 +26,15 @@ The strict contract is
 `tests/fixtures/recipe-qualification/retroarch-bios/qualification-contract.json`.
 It binds the raw authored sources as follows:
 
+The RetroArch App Definition supplies the seven frontend, thirteen core, and
+three system-resource archives as named `kind: file` artifacts. Its Recipe
+keeps the APK `remote_file`, cache selection, artifact groups, extraction, and
+copy behavior; the BIOS Recipe and its input-owned content remain unchanged.
+
 | Source | SHA-256 |
 |---|---|
-| `authored/recipes/app.retroarch.provision.yaml` | `3715bb47eabcb8750c737d42ecbfd464ef08324d48d317be6a510b058abf3831` |
-| `authored/apps/retroarch.yaml` | `691844be13d81e8c3033bb94074348274d0e8c4ce65c2c1d325ef9d2bdd8d3dc` |
+| `authored/recipes/app.retroarch.provision.yaml` | `bf10874d72be73dc8a5255101403bbe025f6e073f1891a7146a9aa812ed173a2` |
+| `authored/apps/retroarch.yaml` | `795e26f79d6f1eb2edccd76a0774a7ce5dbaa18fdcb13bad0572734640aac263` |
 | `authored/recipes/feature.copy_bios.yaml` | `4f4471aacb0cacebffcebb4785b12f0e7ef43d306526031540d0496957840fbc` |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `3da268bf1ce2dca8600baa47d7663a5d6542c0b5cd8c9a41510f2e9d71a3a969` |
 | `authored/device_profiles/ayaneo.konkr_pocket_fit.yaml` | `c1cef00eacf96760f1e21f405621b08e8b6070b983cfa5ec064209caf61a2db9` |

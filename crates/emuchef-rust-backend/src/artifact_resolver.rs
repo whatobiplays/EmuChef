@@ -3,8 +3,12 @@
 //! The resolver is crate-private because execution plans remain the product
 //! interface. It preserves the original URL bytes when deriving cache keys.
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -45,6 +49,7 @@ pub(crate) enum ArtifactResolveError {
     TypeUnsupported,
     CacheModeUnsupported,
     UrlInvalid,
+    LocalInputPathInvalid,
     SchemeUnsupported { scheme: String },
     SourceNotFound,
     SourceWrongKind,
@@ -76,6 +81,7 @@ impl ArtifactResolveError {
             Self::TypeUnsupported => "artifact_type_unsupported",
             Self::CacheModeUnsupported => "artifact_cache_mode_unsupported",
             Self::UrlInvalid => "artifact_url_invalid",
+            Self::LocalInputPathInvalid => "artifact_local_input_path_invalid",
             Self::SchemeUnsupported { .. } => "artifact_scheme_unsupported",
             Self::SourceNotFound => "artifact_source_not_found",
             Self::SourceWrongKind => "artifact_source_wrong_kind",
@@ -118,6 +124,7 @@ impl ArtifactResolveError {
             Self::TypeUnsupported => "uses an unsupported artifact type".to_string(),
             Self::CacheModeUnsupported => "uses an unsupported cache mode".to_string(),
             Self::UrlInvalid => "has an invalid artifact URL".to_string(),
+            Self::LocalInputPathInvalid => "requires an absolute local input path".to_string(),
             Self::SchemeUnsupported { scheme } => {
                 format!("uses unsupported URL scheme {scheme:?}")
             }
@@ -186,6 +193,12 @@ pub(crate) struct AdmittedArtifact {
 
 type SourceReadabilityCheck = fn(&Path) -> io::Result<()>;
 
+#[cfg(test)]
+type LocalInputBeforeOpen = fn(&Path) -> io::Result<()>;
+
+#[cfg(test)]
+type LocalInputAfterValidation = fn(&Path) -> io::Result<()>;
+
 /// Resolve and admit artifacts within the executor's authoritative sandbox roots.
 #[derive(Debug)]
 pub(crate) struct ArtifactResolver<'a> {
@@ -193,6 +206,10 @@ pub(crate) struct ArtifactResolver<'a> {
     local_transport: LocalFileTransport,
     http_transport: Option<HttpArtifactTransport>,
     source_readability_check: SourceReadabilityCheck,
+    #[cfg(test)]
+    local_input_before_open: Option<LocalInputBeforeOpen>,
+    #[cfg(test)]
+    local_input_after_validation: Option<LocalInputAfterValidation>,
 }
 
 impl<'a> ArtifactResolver<'a> {
@@ -202,6 +219,10 @@ impl<'a> ArtifactResolver<'a> {
             local_transport: LocalFileTransport,
             http_transport: None,
             source_readability_check: check_source_readable,
+            #[cfg(test)]
+            local_input_before_open: None,
+            #[cfg(test)]
+            local_input_after_validation: None,
         }
     }
 
@@ -214,6 +235,26 @@ impl<'a> ArtifactResolver<'a> {
             source_readability_check,
             ..Self::new(sandbox)
         }
+    }
+
+    #[cfg(test)]
+    fn with_local_input_before_open(
+        sandbox: &'a SandboxRoots,
+        local_input_before_open: LocalInputBeforeOpen,
+    ) -> Self {
+        Self {
+            local_input_before_open: Some(local_input_before_open),
+            ..Self::new(sandbox)
+        }
+    }
+
+    #[cfg(test)]
+    fn with_local_input_after_validation(
+        mut self,
+        local_input_after_validation: LocalInputAfterValidation,
+    ) -> Self {
+        self.local_input_after_validation = Some(local_input_after_validation);
+        self
     }
 
     /// Classify one artifact without network access or filesystem mutation.
@@ -240,6 +281,68 @@ impl<'a> ArtifactResolver<'a> {
             request,
             ArtifactResolvePolicy::DirectUrl { expected_sha256 },
         )
+    }
+
+    /// Validate one user-provided file without network access or mutation.
+    /// Local input bytes never enter the shared artifact cache.
+    pub(crate) fn admit_local_input(
+        &self,
+        type_name: &str,
+        cache_mode: &str,
+        source_path: &Path,
+    ) -> Result<(), ArtifactResolveError> {
+        self.open_local_input_file(type_name, cache_mode, source_path)
+            .map(|_| ())
+    }
+
+    fn open_local_input_file(
+        &self,
+        type_name: &str,
+        cache_mode: &str,
+        source_path: &Path,
+    ) -> Result<File, ArtifactResolveError> {
+        validate_artifact_definition(ArtifactResolveRequest {
+            artifact_id: "local-input",
+            type_name,
+            url: "",
+            cache_mode,
+        })?;
+        validate_local_input_source(
+            source_path,
+            self.sandbox,
+            #[cfg(test)]
+            self.local_input_before_open,
+            #[cfg(test)]
+            self.local_input_after_validation,
+        )
+    }
+
+    /// Copy user-provided bytes into a guarded, execution-scoped snapshot.
+    /// The authored cache policy is validated, but local input bytes are never
+    /// persisted or reused across executions.
+    pub(crate) fn resolve_local_input(
+        &mut self,
+        request: ArtifactResolveRequest<'_>,
+        source_path: &Path,
+    ) -> Result<ResolvedArtifact, ArtifactResolveError> {
+        let source_file =
+            self.open_local_input_file(request.type_name, request.cache_mode, source_path)?;
+        let filename = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("user-input.bin")
+            .to_string();
+        let (verified_path_guard, calculated_sha256) =
+            snapshot_verified_file_from_handle(source_path, source_file, self.sandbox, None)?;
+        Ok(ResolvedArtifact {
+            local_path: verified_path_guard.to_path_buf(),
+            filename,
+            cache_hit: false,
+            calculated_sha256: Some(calculated_sha256),
+            redacted_final_url: None,
+            verified_path_guard: Some(verified_path_guard),
+        })
     }
 
     fn admit_with_policy(
@@ -617,6 +720,21 @@ fn snapshot_verified_file(
     sandbox: &SandboxRoots,
     expected_sha256: Option<&str>,
 ) -> Result<(Arc<TempPath>, String), ArtifactResolveError> {
+    let source_metadata =
+        fs::symlink_metadata(source_path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err(ArtifactResolveError::SandboxRejected);
+    }
+    let source = File::open(source_path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+    snapshot_verified_file_from_handle(source_path, source, sandbox, expected_sha256)
+}
+
+fn snapshot_verified_file_from_handle(
+    source_path: &Path,
+    mut source: File,
+    sandbox: &SandboxRoots,
+    expected_sha256: Option<&str>,
+) -> Result<(Arc<TempPath>, String), ArtifactResolveError> {
     let verified_root = sandbox.runtime_root.join("verified-artifacts");
     sandbox
         .ensure_runtime_or_cache_write(&verified_root)
@@ -637,16 +755,10 @@ fn snapshot_verified_file(
         .ensure_runtime_or_cache_write(&verified_root)
         .map_err(|_| ArtifactResolveError::SandboxRejected)?;
 
-    let source_metadata =
-        fs::symlink_metadata(source_path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
-        return Err(ArtifactResolveError::SandboxRejected);
-    }
-    let mut source =
-        File::open(source_path).map_err(|_| ArtifactResolveError::Sha256Unavailable)?;
+    let suffix = safe_path_suffix(source_path);
     let mut snapshot = TempFileBuilder::new()
         .prefix(".emuchef-verified-")
-        .suffix(".apk")
+        .suffix(&suffix)
         .tempfile_in(&verified_root)
         .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
     let mut buffer = [0u8; 64 * 1024];
@@ -673,6 +785,132 @@ fn snapshot_verified_file(
     let calculated_sha256 = calculate_file_sha256(snapshot.path())?;
     verify_expected_sha256(expected_sha256, &calculated_sha256)?;
     Ok((Arc::new(snapshot.into_temp_path()), calculated_sha256))
+}
+
+/// Identifies the filesystem object approved during local-input preflight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalInputFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+/// Returns a stable file identity where the standard library exposes one.
+/// Platforms without that identity fail closed rather than relying on a path check.
+fn local_input_file_identity(
+    metadata: &fs::Metadata,
+) -> Result<LocalInputFileIdentity, ArtifactResolveError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(LocalInputFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(ArtifactResolveError::SourceUnreadable)
+    }
+}
+
+fn local_input_io_error(error: io::Error) -> ArtifactResolveError {
+    if error.kind() == io::ErrorKind::NotFound {
+        ArtifactResolveError::SourceNotFound
+    } else {
+        ArtifactResolveError::SourceUnreadable
+    }
+}
+
+fn validate_local_input_source(
+    path: &Path,
+    sandbox: &SandboxRoots,
+    #[cfg(test)] local_input_before_open: Option<LocalInputBeforeOpen>,
+    #[cfg(test)] local_input_after_validation: Option<LocalInputAfterValidation>,
+) -> Result<File, ArtifactResolveError> {
+    if !path.is_absolute() {
+        return Err(ArtifactResolveError::LocalInputPathInvalid);
+    }
+    sandbox
+        .ensure_read_allowed(path)
+        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+    let source_metadata = fs::symlink_metadata(path).map_err(local_input_io_error)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err(ArtifactResolveError::SourceWrongKind);
+    }
+
+    let canonical_path = fs::canonicalize(path).map_err(local_input_io_error)?;
+    sandbox
+        .ensure_read_allowed(&canonical_path)
+        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+    let canonical_metadata = fs::symlink_metadata(&canonical_path).map_err(local_input_io_error)?;
+    if canonical_metadata.file_type().is_symlink() || !canonical_metadata.is_file() {
+        return Err(ArtifactResolveError::SourceWrongKind);
+    }
+    let authorized_identity = local_input_file_identity(&canonical_metadata)?;
+
+    #[cfg(test)]
+    if let Some(before_open) = local_input_before_open {
+        before_open(path).map_err(|_| ArtifactResolveError::SourceUnreadable)?;
+    }
+    #[cfg(unix)]
+    let source_file = {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        options
+            .open(&canonical_path)
+            .map_err(local_input_io_error)?
+    };
+    #[cfg(not(unix))]
+    let source_file = File::open(&canonical_path).map_err(local_input_io_error)?;
+    let opened_metadata = source_file
+        .metadata()
+        .map_err(|_| ArtifactResolveError::SourceUnreadable)?;
+    if !opened_metadata.is_file() {
+        return Err(ArtifactResolveError::SourceWrongKind);
+    }
+    let opened_identity = local_input_file_identity(&opened_metadata)?;
+    if opened_identity != authorized_identity {
+        return Err(ArtifactResolveError::SandboxRejected);
+    }
+
+    let current_canonical_path = fs::canonicalize(&canonical_path).map_err(local_input_io_error)?;
+    if current_canonical_path != canonical_path {
+        return Err(ArtifactResolveError::SandboxRejected);
+    }
+    sandbox
+        .ensure_read_allowed(&current_canonical_path)
+        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+    let current_path_metadata =
+        fs::symlink_metadata(&canonical_path).map_err(local_input_io_error)?;
+    if current_path_metadata.file_type().is_symlink() || !current_path_metadata.is_file() {
+        return Err(ArtifactResolveError::SourceWrongKind);
+    }
+    if local_input_file_identity(&current_path_metadata)? != opened_identity {
+        return Err(ArtifactResolveError::SandboxRejected);
+    }
+
+    #[cfg(test)]
+    if let Some(after_validation) = local_input_after_validation {
+        after_validation(path).map_err(|_| ArtifactResolveError::SourceUnreadable)?;
+    }
+    Ok(source_file)
+}
+
+fn safe_path_suffix(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_else(|| ".bin".to_string())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -926,6 +1164,7 @@ fn redacted_download_url(metadata: &DownloadMetadata) -> Option<String> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -1197,6 +1436,59 @@ mod tests {
                 .is_file());
         }
         assert_eq!(fixture.request_count(), 2);
+    }
+
+    #[test]
+    fn direct_https_file_artifact_verifies_hash_and_preserves_redacted_url_and_cache_truth() {
+        const ARTIFACT_ID: &str = "app.retroarch.provision/retroarch_cfg";
+        let body = b"RetroArch configuration bytes";
+        let fixture = HttpsFixture::spawn(move |_| tls_response("200 OK", "", body));
+        let expected_sha256 = sha256(body);
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let url = fixture.url("/retroarch.cfg?token=secret");
+        let mut resolver = fixture.resolver(&roots, public_test_address());
+        let request = ArtifactResolveRequest {
+            artifact_id: ARTIFACT_ID,
+            type_name: "remote_file",
+            url: &url,
+            cache_mode: "default",
+        };
+
+        let resolved = resolver
+            .resolve_direct_url(request, Some(&expected_sha256))
+            .expect("direct URL file should pass the ordinary verified download path");
+        let redacted_final_url = format!(
+            "https://downloads.example.test:{}/retroarch.cfg",
+            fixture.address.port()
+        );
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), body);
+        assert_eq!(
+            resolved.local_path.extension().and_then(|ext| ext.to_str()),
+            Some("cfg")
+        );
+        assert!(!resolved.cache_hit);
+        assert_eq!(
+            resolved.calculated_sha256.as_deref(),
+            Some(expected_sha256.as_str())
+        );
+        assert_eq!(
+            resolved.redacted_final_url.as_deref(),
+            Some(redacted_final_url.as_str())
+        );
+        assert!(!resolved
+            .redacted_final_url
+            .as_deref()
+            .unwrap()
+            .contains("secret"));
+
+        let cached = resolver
+            .resolve_direct_url(request, Some(&expected_sha256))
+            .expect("verified file cache entry should be reusable");
+        assert!(cached.cache_hit);
+        assert_eq!(cached.calculated_sha256, resolved.calculated_sha256);
+        assert!(cached.redacted_final_url.is_none());
+        assert_eq!(fixture.request_count(), 1);
     }
 
     #[test]
@@ -1877,6 +2169,302 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code(), "artifact_sandbox_rejected");
         assert!(!roots.runtime_root.exists());
+        assert!(!roots.cache_root.exists());
+    }
+
+    #[test]
+    fn local_input_is_admitted_and_materialized_as_fresh_execution_scoped_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let source = temp.path().join("user-config.cfg");
+        fs::write(&source, b"first version").unwrap();
+        let mut resolver = ArtifactResolver::new(&roots);
+        resolver
+            .admit_local_input("remote_file", "default", &source)
+            .unwrap();
+
+        let request = ArtifactResolveRequest {
+            artifact_id: "app.example.install/config",
+            type_name: "remote_file",
+            url: "",
+            cache_mode: "default",
+        };
+        let first = resolver
+            .resolve_local_input(request, &source)
+            .expect("user-provided file should materialize");
+        assert_eq!(fs::read(&first.local_path).unwrap(), b"first version");
+        assert_eq!(first.filename, "user-config.cfg");
+        assert_eq!(
+            first.calculated_sha256.as_deref(),
+            Some(sha256(b"first version").as_str())
+        );
+        assert!(!first.cache_hit);
+        assert!(first.redacted_final_url.is_none());
+        assert!(first.verified_path_guard.is_some());
+
+        fs::write(&source, b"second version").unwrap();
+        assert_eq!(fs::read(&first.local_path).unwrap(), b"first version");
+        let second = resolver
+            .resolve_local_input(
+                ArtifactResolveRequest {
+                    cache_mode: "none",
+                    ..request
+                },
+                &source,
+            )
+            .expect("each execution should snapshot the current input bytes");
+        assert_eq!(fs::read(&second.local_path).unwrap(), b"second version");
+        assert_eq!(
+            second.calculated_sha256.as_deref(),
+            Some(sha256(b"second version").as_str())
+        );
+        assert!(!second.cache_hit);
+        assert_ne!(first.local_path, second.local_path);
+        assert!(!roots.cache_root.exists());
+    }
+
+    fn replace_local_input_path(path: &Path) -> io::Result<()> {
+        let validated_path = path.with_extension("validated");
+        fs::rename(path, &validated_path)?;
+        fs::write(path, b"replacement bytes")
+    }
+
+    #[test]
+    fn local_input_snapshot_uses_the_validated_file_after_path_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let source = temp.path().join("user-config.cfg");
+        fs::write(&source, b"validated bytes").unwrap();
+        let mut resolver = ArtifactResolver::new(&roots)
+            .with_local_input_after_validation(replace_local_input_path);
+        let request = ArtifactResolveRequest {
+            artifact_id: "app.example.install/config",
+            type_name: "remote_file",
+            url: "",
+            cache_mode: "default",
+        };
+
+        let resolved = resolver.resolve_local_input(request, &source).unwrap();
+
+        assert_eq!(fs::read(&source).unwrap(), b"replacement bytes");
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), b"validated bytes");
+    }
+
+    #[cfg(unix)]
+    static LOCAL_INPUT_READABILITY_CHECKS: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    fn count_local_input_readability_check(path: &Path) -> io::Result<()> {
+        LOCAL_INPUT_READABILITY_CHECKS.fetch_add(1, Ordering::SeqCst);
+        File::open(path).map(drop)
+    }
+
+    #[cfg(unix)]
+    fn replace_local_input_path_with_dangling_symlink(path: &Path) -> io::Result<()> {
+        let replacement = path.with_extension("missing");
+        fs::remove_file(path)?;
+        std::os::unix::fs::symlink(replacement, path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_input_snapshot_does_not_reopen_path_replaced_with_dangling_symlink_after_validation() {
+        LOCAL_INPUT_READABILITY_CHECKS.store(0, Ordering::SeqCst);
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let source = temp.path().join("user-config.cfg");
+        fs::write(&source, b"validated bytes").unwrap();
+        let mut resolver = ArtifactResolver::with_source_readability_check(
+            &roots,
+            count_local_input_readability_check,
+        )
+        .with_local_input_after_validation(replace_local_input_path_with_dangling_symlink);
+        let request = ArtifactResolveRequest {
+            artifact_id: "app.example.install/config",
+            type_name: "remote_file",
+            url: "",
+            cache_mode: "default",
+        };
+
+        let resolved = resolver.resolve_local_input(request, &source).unwrap();
+
+        assert_eq!(LOCAL_INPUT_READABILITY_CHECKS.load(Ordering::SeqCst), 0);
+        assert!(fs::symlink_metadata(&source)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let dangling_target = fs::read_link(&source).unwrap();
+        assert_eq!(dangling_target, source.with_extension("missing"));
+        assert!(!dangling_target.exists());
+        assert_eq!(fs::read(&resolved.local_path).unwrap(), b"validated bytes");
+    }
+
+    #[cfg(unix)]
+    fn replace_local_input_path_with_fifo(path: &Path) -> io::Result<()> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        fs::remove_file(path)?;
+        let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "FIFO path contains a NUL byte")
+        })?;
+
+        // SAFETY: `path` is a valid NUL-terminated path for the duration of this call.
+        let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_input_fifo_replacement_before_open_returns_without_snapshotting_fifo() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("user-config.cfg");
+        fs::write(&source, b"validated bytes").unwrap();
+        let source = fs::canonicalize(source).unwrap();
+
+        let source_for_thread = source.clone();
+        let workspace_for_thread = temp.path().to_path_buf();
+        let request = ArtifactResolveRequest {
+            artifact_id: "app.example.install/config",
+            type_name: "remote_file",
+            url: "",
+            cache_mode: "default",
+        };
+
+        let (result_sender, result_receiver) = mpsc::channel();
+        let resolver_thread = thread::spawn(move || {
+            let roots = sandbox(&workspace_for_thread);
+            let mut resolver = ArtifactResolver::with_local_input_before_open(
+                &roots,
+                replace_local_input_path_with_fifo,
+            );
+            let result = resolver.resolve_local_input(request, &source_for_thread);
+            let no_snapshot = !roots.runtime_root.join("verified-artifacts").exists();
+            let _ = result_sender.send((result, no_snapshot));
+        });
+
+        let (result, no_snapshot) = result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("opening a replacement FIFO must not block artifact resolution");
+        resolver_thread.join().unwrap();
+
+        assert!(matches!(result, Err(ArtifactResolveError::SourceWrongKind)));
+        assert!(fs::symlink_metadata(&source).unwrap().file_type().is_fifo());
+        assert!(
+            no_snapshot,
+            "a rejected FIFO must not produce an artifact snapshot"
+        );
+    }
+
+    #[cfg(unix)]
+    fn replace_local_input_ancestor_with_outside_symlink(path: &Path) -> io::Result<()> {
+        let source_directory = path
+            .parent()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let allowed_root = source_directory
+            .parent()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let workspace = allowed_root
+            .parent()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let outside_root = workspace.join("outside");
+        let moved_directory = allowed_root.join("nested-authorized");
+        fs::rename(source_directory, moved_directory)?;
+        std::os::unix::fs::symlink(outside_root, source_directory)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_input_rejects_ancestor_symlink_replacement_before_open() {
+        const OUTSIDE_SENTINEL: &[u8] = b"outside sentinel must never be returned";
+
+        let temp = tempfile::tempdir().unwrap();
+        let allowed_root = temp.path().join("allowed");
+        let source_directory = allowed_root.join("nested");
+        let outside_root = temp.path().join("outside");
+        fs::create_dir_all(&source_directory).unwrap();
+        fs::create_dir_all(&outside_root).unwrap();
+        let source = source_directory.join("user-input.cfg");
+        let outside_source = outside_root.join("user-input.cfg");
+        fs::write(&source, b"authorized bytes").unwrap();
+        fs::write(&outside_source, OUTSIDE_SENTINEL).unwrap();
+
+        let roots = SandboxRoots {
+            runtime_root: temp.path().join("runtime"),
+            cache_root: temp.path().join("cache"),
+            fake_device_root: temp.path().join("device"),
+            read_only_roots: vec![allowed_root],
+        };
+        let mut resolver = ArtifactResolver::with_local_input_before_open(
+            &roots,
+            replace_local_input_ancestor_with_outside_symlink,
+        );
+        let request = ArtifactResolveRequest {
+            artifact_id: "app.example.install/config",
+            type_name: "remote_file",
+            url: "",
+            cache_mode: "default",
+        };
+
+        let error = resolver
+            .resolve_local_input(request, &source)
+            .expect_err("an outside replacement must be rejected before snapshotting");
+
+        assert_eq!(error.code(), "artifact_sandbox_rejected");
+        assert_eq!(fs::read(outside_source).unwrap(), OUTSIDE_SENTINEL);
+    }
+
+    #[test]
+    fn local_input_admission_checks_type_existence_and_sandbox() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let resolver = ArtifactResolver::new(&roots);
+        let directory = temp.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        let missing = temp.path().join("missing.cfg");
+        assert_eq!(
+            resolver
+                .admit_local_input("remote_file", "default", &directory)
+                .unwrap_err()
+                .code(),
+            "artifact_source_wrong_kind"
+        );
+        assert_eq!(
+            resolver
+                .admit_local_input("remote_file", "default", &missing)
+                .unwrap_err()
+                .code(),
+            "artifact_source_not_found"
+        );
+        assert_eq!(
+            resolver
+                .admit_local_input("remote_file", "default", Path::new("relative.cfg"))
+                .unwrap_err()
+                .code(),
+            "artifact_local_input_path_invalid"
+        );
+
+        let source = temp.path().join("readable.cfg");
+        fs::write(&source, b"input").unwrap();
+        let denied_roots = SandboxRoots {
+            runtime_root: temp.path().join("denied/runtime"),
+            cache_root: temp.path().join("denied/cache"),
+            fake_device_root: temp.path().join("denied/device"),
+            read_only_roots: Vec::new(),
+        };
+        assert_eq!(
+            ArtifactResolver::new(&denied_roots)
+                .admit_local_input("remote_file", "default", &source)
+                .unwrap_err()
+                .code(),
+            "artifact_sandbox_rejected"
+        );
         assert!(!roots.cache_root.exists());
     }
 

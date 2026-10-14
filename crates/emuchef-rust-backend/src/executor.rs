@@ -38,6 +38,36 @@ use crate::validation::normalize_expected_sha256;
 
 const APK_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
+/// Materialization details resolved from one planned artifact source.
+enum MaterializedArtifactSource {
+    RemoteFile {
+        url: String,
+    },
+    DirectUrl {
+        url: String,
+        sha256: Option<String>,
+    },
+    LocalInput {
+        path: PathBuf,
+    },
+    RemoteRelease {
+        url: String,
+        provider: String,
+        release: ResolvedRemoteRelease,
+    },
+}
+
+impl MaterializedArtifactSource {
+    fn url(&self) -> &str {
+        match self {
+            Self::RemoteFile { url }
+            | Self::DirectUrl { url, .. }
+            | Self::RemoteRelease { url, .. } => url,
+            Self::LocalInput { .. } => "",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExecutionRunResult {
     pub success: bool,
@@ -670,6 +700,55 @@ impl Default for ExecutorRunner<FakeDryRunDevice> {
     }
 }
 
+/// Admit every user-provided local-input artifact source in a plan without
+/// mutating the device or materializing artifacts.
+///
+/// Structural binding validation runs first so the same-Recipe binding guard
+/// keeps reporting `app_artifact_input_binding_invalid`. Each bound source is
+/// then admitted through the authoritative local-input resolver, which checks
+/// existence, file kind, readability, and sandbox containment. The first
+/// failure is returned as a stable artifact error code so callers can fail
+/// closed before any device-mutating step or artifact materialization.
+pub(crate) fn admit_plan_local_inputs(
+    plan: &ExecutionPlan,
+    sandbox: &SandboxRoots,
+) -> Result<(), &'static str> {
+    crate::planner::validate_execution_plan_local_input_bindings(plan)?;
+    let resolver = ArtifactResolver::new(sandbox);
+    for artifact in &plan.artifacts {
+        let ExecutionArtifactSource::LocalInput { input_id } = &artifact.source else {
+            continue;
+        };
+        let path = crate::planner::validated_local_input_path(plan, input_id)
+            .map_err(|_| "app_artifact_input_binding_invalid")?;
+        resolver
+            .admit_local_input(&artifact.type_name, &artifact.cache, Path::new(path))
+            .map_err(|error| error.code())?;
+    }
+    Ok(())
+}
+
+/// Admit local-input artifacts when the executor has no sandbox roots.
+///
+/// Local-input artifacts are only admitted through the sandbox-backed
+/// resolver, so without sandbox roots their existence, file kind, readability,
+/// and sandbox containment cannot be checked. This fails closed with the
+/// stable sandbox-rejection code so a plan that declares any local-input
+/// artifact is rejected before a device-mutating step or artifact
+/// materialization. Plans that declare no local-input artifacts are admitted
+/// unchanged.
+fn admit_plan_local_inputs_without_sandbox_roots(plan: &ExecutionPlan) -> Result<(), &'static str> {
+    crate::planner::validate_execution_plan_local_input_bindings(plan)?;
+    let has_local_input = plan
+        .artifacts
+        .iter()
+        .any(|artifact| matches!(&artifact.source, ExecutionArtifactSource::LocalInput { .. }));
+    if has_local_input {
+        return Err("artifact_sandbox_rejected");
+    }
+    Ok(())
+}
+
 impl<D: ExecutorDevice> ExecutorRunner<D> {
     pub fn new(adapters: ExecutorAdapters<D>) -> Self {
         Self {
@@ -751,6 +830,41 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         mut operation_observer: impl FnMut(OperationLifecycle),
     ) -> ExecutionRunResult {
         let total_steps = plan.steps.len();
+        self.root_preflight = RootPreflightState::NotRun;
+        self.root_preflight_failure = None;
+        let local_input_admission_code = match self.adapters.sandbox() {
+            Ok(sandbox) => admit_plan_local_inputs(plan, sandbox).err(),
+            Err(_) => admit_plan_local_inputs_without_sandbox_roots(plan).err(),
+        };
+        if let Some(artifact_code) = local_input_admission_code {
+            let steps = plan
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| {
+                    let (status, message) = if index == 0 {
+                        (
+                            StepRunStatus::Failed,
+                            format!("{artifact_code}: Local input admission failed."),
+                        )
+                    } else {
+                        (
+                            StepRunStatus::Blocked,
+                            "execution blocked after plan admission failed".to_string(),
+                        )
+                    };
+                    record(step, status, Some(message), OrderedMap::new())
+                })
+                .collect();
+            return ExecutionRunResult {
+                success: false,
+                cancelled: false,
+                total_steps,
+                steps,
+                resolved_releases: Vec::new(),
+                resolved_artifacts: Vec::new(),
+            };
+        }
         let step_ids_in_plan = plan
             .steps
             .iter()
@@ -760,8 +874,6 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let mut records = Vec::new();
         let mut cancelled = false;
         let mut aborted = false;
-        self.root_preflight = RootPreflightState::NotRun;
-        self.root_preflight_failure = None;
         self.adapters
             .device
             .configure_identity_guard(plan.target_device.as_ref());
@@ -1628,10 +1740,24 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             } else {
                 None
             };
-            let result = (|| {
-                let (resolved_url, selected_release) = match &artifact.source {
-                    ExecutionArtifactSource::RemoteFile { url } => (url.clone(), None),
-                    ExecutionArtifactSource::DirectUrl { url, .. } => (url.clone(), None),
+            let result: Result<_, StepFailure> = (|| {
+                let materialized_source = match &artifact.source {
+                    ExecutionArtifactSource::RemoteFile { url } => {
+                        MaterializedArtifactSource::RemoteFile { url: url.clone() }
+                    }
+                    ExecutionArtifactSource::DirectUrl { url, sha256 } => {
+                        MaterializedArtifactSource::DirectUrl {
+                            url: url.clone(),
+                            sha256: sha256.clone(),
+                        }
+                    }
+                    ExecutionArtifactSource::LocalInput { input_id } => {
+                        let path = crate::planner::validated_local_input_path(plan, input_id)
+                            .map_err(|message| StepFailure::new(message.to_string()))?;
+                        MaterializedArtifactSource::LocalInput {
+                            path: PathBuf::from(path),
+                        }
+                    }
                     ExecutionArtifactSource::RemoteRelease {
                         provider,
                         service_origin,
@@ -1724,22 +1850,24 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             )
                             .map_err(StepFailure::new)?
                         };
-                        (
-                            release.download_url.clone(),
-                            Some((provider.clone(), release)),
-                        )
+                        MaterializedArtifactSource::RemoteRelease {
+                            url: release.download_url.clone(),
+                            provider: provider.clone(),
+                            release,
+                        }
                     }
                 };
-                let direct_provenance = if matches!(
+                let reported_provenance = if matches!(
                     &artifact.source,
                     ExecutionArtifactSource::DirectUrl { .. }
+                        | ExecutionArtifactSource::LocalInput { .. }
                 ) {
                     Some(
                         artifact
                             .app_provenance
                             .as_ref()
                             .filter(|provenance| {
-                                provenance.kind == "apk"
+                                matches!(provenance.kind.as_str(), "apk" | "file")
                                     && crate::authored_models::is_valid_identifier(
                                         &provenance.app_id,
                                     )
@@ -1751,7 +1879,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             })
                             .ok_or_else(|| {
                                 StepFailure::new(
-                                    "app_artifact_provenance_invalid: Direct APK source is missing App Definition provenance.".to_string(),
+                                    "app_artifact_provenance_invalid: App Artifact source is missing consistent App Definition provenance.".to_string(),
                                 )
                             })?,
                     )
@@ -1761,26 +1889,29 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 let request = ArtifactResolveRequest {
                     artifact_id: &artifact.id,
                     type_name: &artifact.type_name,
-                    url: &resolved_url,
+                    url: materialized_source.url(),
                     cache_mode: &artifact.cache,
                 };
-                let resolved = match &artifact.source {
-                    ExecutionArtifactSource::DirectUrl { sha256, .. } => {
+                let resolved = match &materialized_source {
+                    MaterializedArtifactSource::DirectUrl { sha256, .. } => {
                         resolver.resolve_direct_url(request, sha256.as_deref())
                     }
-                    ExecutionArtifactSource::RemoteRelease { .. } => {
+                    MaterializedArtifactSource::LocalInput { path } => {
+                        resolver.resolve_local_input(request, path)
+                    }
+                    MaterializedArtifactSource::RemoteRelease { .. } => {
                         resolver.resolve_app_release(request)
                     }
-                    ExecutionArtifactSource::RemoteFile { .. } => resolver.resolve(request),
+                    MaterializedArtifactSource::RemoteFile { .. } => resolver.resolve(request),
                 }
                 .map_err(|error| StepFailure::new(error.executor_message(request)))?;
-                let resolved_artifact = if let Some(provenance) = direct_provenance {
+                let resolved_artifact = if let Some(provenance) = reported_provenance {
                     let calculated_sha256 = resolved
                         .calculated_sha256
                         .clone()
                         .ok_or_else(|| {
                             StepFailure::new(
-                                "artifact_sha256_unavailable: Direct APK materialization did not produce a calculated SHA-256.".to_string(),
+                                "artifact_sha256_unavailable: App Artifact materialization did not produce a calculated SHA-256.".to_string(),
                             )
                         })?;
                     Some(ExecutionResolvedArtifact {
@@ -1795,21 +1926,32 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 } else {
                     None
                 };
-                let resolved_release = selected_release.as_ref().and_then(|(provider, release)| {
-                    app_release_details(
-                        artifact.app_provenance.as_ref(),
-                        &artifact.id,
-                        provider,
-                        release,
-                        &resolved,
-                    )
-                });
-                if selected_release.is_some() && resolved_release.is_none() {
-                    return Err(StepFailure::new(
-                        "artifact_sha256_unavailable: Release materialization did not produce verifiable bytes.".to_string(),
-                    ));
-                }
-                Ok((resolved_url, resolved, resolved_artifact, resolved_release))
+                let resolved_release = match &materialized_source {
+                    MaterializedArtifactSource::RemoteRelease {
+                        provider, release, ..
+                    } => Some(
+                        app_release_details(
+                            artifact.app_provenance.as_ref(),
+                            &artifact.id,
+                            provider,
+                            release,
+                            &resolved,
+                        )
+                        .ok_or_else(|| {
+                            StepFailure::new(
+                                "artifact_sha256_unavailable: Release materialization did not produce verifiable bytes."
+                                    .to_string(),
+                            )
+                        })?,
+                    ),
+                    _ => None,
+                };
+                Ok((
+                    materialized_source.url().to_string(),
+                    resolved,
+                    resolved_artifact,
+                    resolved_release,
+                ))
             })();
             let artifact_state = state
                 .artifacts
@@ -1824,6 +1966,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     artifact_state.resolved_url = if matches!(
                         &artifact.source,
                         ExecutionArtifactSource::DirectUrl { .. }
+                            | ExecutionArtifactSource::LocalInput { .. }
                             | ExecutionArtifactSource::RemoteRelease { .. }
                     ) {
                         None

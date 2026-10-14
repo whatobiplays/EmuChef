@@ -329,8 +329,9 @@ impl ExecutionArtifact {
     /// Return the concrete URL for legacy direct-file artifacts.
     pub fn remote_file_url(&self) -> Option<&str> {
         match &self.source {
-            ExecutionArtifactSource::RemoteFile { url } => Some(url),
-            ExecutionArtifactSource::DirectUrl { .. }
+            ExecutionArtifactSource::RemoteFile { url }
+            | ExecutionArtifactSource::DirectUrl { url, .. } => Some(url),
+            ExecutionArtifactSource::LocalInput { .. }
             | ExecutionArtifactSource::RemoteRelease { .. } => None,
         }
     }
@@ -350,6 +351,7 @@ impl Serialize for ExecutionArtifact {
         match &self.source {
             ExecutionArtifactSource::RemoteFile { url } => artifact.serialize_field("url", url)?,
             ExecutionArtifactSource::DirectUrl { .. }
+            | ExecutionArtifactSource::LocalInput { .. }
             | ExecutionArtifactSource::RemoteRelease { .. } => {
                 artifact.serialize_field("source", &self.source)?
             }
@@ -372,6 +374,9 @@ pub enum ExecutionArtifactSource {
     RemoteFile {
         url: String,
     },
+    LocalInput {
+        input_id: String,
+    },
     DirectUrl {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,6 +392,62 @@ pub enum ExecutionArtifactSource {
         #[serde(skip_serializing_if = "is_false")]
         invert_asset_pattern: bool,
     },
+}
+
+/// Return the unique host file path bound to a local-input artifact.
+pub(crate) fn validated_local_input_path<'a>(
+    plan: &'a ExecutionPlan,
+    input_id: &str,
+) -> Result<&'a str, &'static str> {
+    let mut inputs = plan.inputs.iter().filter(|input| input.id == input_id);
+    let input = inputs.next().ok_or(
+        "app_artifact_input_binding_invalid: Local input binding is missing or duplicated.",
+    )?;
+    if inputs.next().is_some() {
+        return Err(
+            "app_artifact_input_binding_invalid: Local input binding is missing or duplicated.",
+        );
+    }
+    if input.value.type_name != "file_path" || input.value.location.as_deref() != Some("host") {
+        return Err(
+            "app_artifact_input_binding_invalid: Local input binding must reference one host file input.",
+        );
+    }
+    input
+        .value
+        .value
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .ok_or("app_artifact_input_binding_invalid: Local input path is missing.")
+}
+
+/// Validate the structural bindings of every user-provided artifact in a plan.
+/// Filesystem and sandbox checks remain the responsibility of artifact admission.
+pub(crate) fn validate_execution_plan_local_input_bindings(
+    plan: &ExecutionPlan,
+) -> Result<(), &'static str> {
+    for artifact in &plan.artifacts {
+        if let ExecutionArtifactSource::LocalInput { input_id } = &artifact.source {
+            if !local_input_binding_matches_recipe(&artifact.id, input_id) {
+                return Err("app_artifact_input_binding_invalid");
+            }
+            validated_local_input_path(plan, input_id)
+                .map_err(|_| "app_artifact_input_binding_invalid")?;
+        }
+    }
+    Ok(())
+}
+
+fn local_input_binding_matches_recipe(artifact_id: &str, input_id: &str) -> bool {
+    fn recipe_id(qualified_id: &str) -> Option<&str> {
+        let (recipe_id, local_id) = qualified_id.split_once('/')?;
+        (!recipe_id.is_empty() && !local_id.is_empty()).then_some(recipe_id)
+    }
+
+    matches!(
+        (recipe_id(artifact_id), recipe_id(input_id)),
+        (Some(artifact_recipe), Some(input_recipe)) if artifact_recipe == input_recipe
+    )
 }
 
 fn is_false(value: &bool) -> bool {
@@ -994,8 +1055,14 @@ pub fn plan_execution_with_app_definitions(
     if !selection_errors.is_empty() {
         return error_result(selection_errors);
     }
-    let selected_input_ids =
-        selected_input_ids(&recipes, &expanded_recipe_refs, &selected_step_ids);
+    let selected_artifact_ids =
+        selected_artifact_ids(&recipes, &expanded_recipe_refs, &selected_step_ids);
+    let selected_input_ids = selected_input_ids(
+        &recipes,
+        &expanded_recipe_refs,
+        &selected_step_ids,
+        &selected_artifact_ids,
+    );
     let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
     let app_authority_errors = app_authority::validate_app_authority(
         &recipes,
@@ -1005,6 +1072,15 @@ pub fn plan_execution_with_app_definitions(
     );
     if !app_authority_errors.is_empty() {
         return error_result(app_authority_errors);
+    }
+    let app_artifact_input_errors = app_authority::validate_selected_user_provided_inputs(
+        &recipes,
+        &selected_artifact_ids,
+        &app_definitions,
+        &effective_input_bindings,
+    );
+    if !app_artifact_input_errors.is_empty() {
+        return error_result(app_artifact_input_errors);
     }
     let step_param_errors = validate_step_param_contracts(&recipes, &authored_steps);
     if !step_param_errors.is_empty() {
@@ -1067,7 +1143,12 @@ pub fn plan_execution_with_app_definitions(
         device_context: input.device_context,
         runtime_capabilities: input.runtime_capabilities,
         inputs: emit_execution_inputs(&recipes, &selected_input_ids, &effective_input_bindings),
-        artifacts: emit_execution_artifacts(&recipes, &expanded_recipe_refs, &app_definitions),
+        artifacts: emit_execution_artifacts(
+            &recipes,
+            &expanded_recipe_refs,
+            &app_definitions,
+            &selected_artifact_ids,
+        ),
         steps: ordered_steps
             .into_iter()
             .filter_map(|(step_id, recipe_id, step)| {
@@ -1868,10 +1949,47 @@ fn dependent_step_ids(recipe: &Recipe, dependency_id: &str) -> HashSet<String> {
     dependents
 }
 
+fn selected_artifact_ids(
+    recipes: &HashMap<String, Recipe>,
+    expanded_recipe_refs: &[String],
+    selected_step_ids: &HashSet<String>,
+) -> HashSet<String> {
+    let mut artifact_ids = HashSet::new();
+    for recipe_id in expanded_recipe_refs {
+        let Some(recipe) = recipes.get(recipe_id) else {
+            continue;
+        };
+        for step in &recipe.steps {
+            let step_id = make_execution_step_id(recipe_id, &step.id);
+            if !selected_step_ids.contains(&step_id) {
+                continue;
+            }
+            for artifact_id in expand_artifact_selection(
+                recipe,
+                step.params.get("artifacts"),
+                step.params.get("artifact_groups"),
+            ) {
+                artifact_ids.insert(make_execution_artifact_id(recipe_id, &artifact_id));
+            }
+            for value in step.params.values() {
+                let ParamValue::Ref(reference) = value else {
+                    continue;
+                };
+                if let Ok(RuntimeRef::ArtifactField { target_id, .. }) = parse_reference(reference)
+                {
+                    artifact_ids.insert(make_execution_artifact_id(recipe_id, &target_id));
+                }
+            }
+        }
+    }
+    artifact_ids
+}
+
 fn selected_input_ids(
     recipes: &HashMap<String, Recipe>,
     expanded_recipe_refs: &[String],
     selected_step_ids: &HashSet<String>,
+    selected_artifact_ids: &HashSet<String>,
 ) -> Vec<String> {
     let mut input_ids = Vec::new();
     for recipe_id in expanded_recipe_refs {
@@ -1885,6 +2003,21 @@ fn selected_input_ids(
             }
             for input_id in referenced_input_ids(recipe_id, step) {
                 if !input_ids.iter().any(|existing| existing == &input_id) {
+                    input_ids.push(input_id);
+                }
+            }
+        }
+        for (artifact_id, artifact) in &recipe.artifacts {
+            if !selected_artifact_ids.contains(&make_execution_artifact_id(recipe_id, artifact_id))
+            {
+                continue;
+            }
+            let RecipeArtifact::AppArtifact(reference) = artifact else {
+                continue;
+            };
+            if let Some(binding) = &reference.input {
+                let input_id = make_execution_input_id(recipe_id, &binding.input_id);
+                if !input_ids.contains(&input_id) {
                     input_ids.push(input_id);
                 }
             }
@@ -2389,6 +2522,7 @@ fn emit_execution_artifacts(
     recipes: &HashMap<String, Recipe>,
     expanded_recipe_refs: &[String],
     app_definitions: &HashMap<String, AppDefinitionV1>,
+    selected_artifact_ids: &HashSet<String>,
 ) -> Vec<ExecutionArtifact> {
     let mut artifacts = Vec::new();
     for recipe_id in expanded_recipe_refs {
@@ -2408,11 +2542,18 @@ fn emit_execution_artifacts(
                     let Some((source, app_provenance)) =
                         app_authority::execution_app_artifact_projection(
                             reference,
+                            recipe_id,
                             app_definitions,
                         )
                     else {
                         continue;
                     };
+                    let execution_id = make_execution_artifact_id(recipe_id, artifact_id);
+                    if matches!(source, ExecutionArtifactSource::LocalInput { .. })
+                        && !selected_artifact_ids.contains(&execution_id)
+                    {
+                        continue;
+                    }
                     (source, Some(app_provenance), reference.cache.clone())
                 }
             };

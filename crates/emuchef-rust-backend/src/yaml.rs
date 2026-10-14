@@ -11,9 +11,9 @@ use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::model::{
-    AppArtifactReference, InputDeclaration, InputOption, InputValidation, OrderedMap, ParamValue,
-    Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
-    StepConstraints,
+    AppArtifactInputBinding, AppArtifactReference, InputDeclaration, InputOption, InputValidation,
+    OrderedMap, ParamValue, Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step,
+    StepCondition, StepConstraints,
 };
 use crate::step_specs;
 
@@ -462,7 +462,7 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RecipeArtifac
             "app_artifact" => {
                 reject_unknown_artifact_fields(
                     artifact_map,
-                    &["type", "app_ref", "artifact", "cache"],
+                    &["type", "app_ref", "artifact", "input", "cache"],
                     "app_artifact",
                 )?;
                 let app_ref = required_yaml_string(artifact_map, "app_ref")?;
@@ -485,9 +485,33 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RecipeArtifac
                     }
                     Some(_) => return Err("app_artifact cache must be a string".into()),
                 };
+                let input = match get_yaml(artifact_map, "input") {
+                    None => None,
+                    Some(YamlValue::Mapping(input_map)) => {
+                        reject_unknown_artifact_fields(input_map, &["ref"], "app_artifact input")?;
+                        let input_ref = required_yaml_string(input_map, "ref")?;
+                        let Some(input_id) = input_ref.strip_prefix("inputs.") else {
+                            return Err(
+                        "app_artifact input.ref must reference a Recipe input as inputs.<id>"
+                            .into(),
+                    );
+                        };
+                        if !crate::authored_models::is_valid_identifier(input_id) {
+                            return Err(
+                        "app_artifact input.ref must reference a Recipe input as inputs.<id>"
+                            .into(),
+                    );
+                        }
+                        Some(AppArtifactInputBinding {
+                            input_id: input_id.to_string(),
+                        })
+                    }
+                    Some(_) => return Err("app_artifact input must be a mapping".into()),
+                };
                 RecipeArtifact::AppArtifact(AppArtifactReference {
                     app_ref,
                     artifact: artifact_name,
+                    input,
                     cache,
                 })
             }
@@ -901,6 +925,15 @@ fn artifacts_to_yaml(artifacts: &OrderedMap<RecipeArtifact>) -> YamlValue {
                     "artifact",
                     YamlValue::String(artifact.artifact.clone()),
                 );
+                if let Some(input) = &artifact.input {
+                    let mut input_mapping = Mapping::new();
+                    insert(
+                        &mut input_mapping,
+                        "ref",
+                        YamlValue::String(format!("inputs.{}", input.input_id)),
+                    );
+                    insert(&mut payload, "input", YamlValue::Mapping(input_mapping));
+                }
                 insert(
                     &mut payload,
                     "cache",
@@ -1325,6 +1358,48 @@ mod tests {
             panic!("fixture should contain an App Artifact reference");
         };
         assert_eq!(reference.cache, "default");
+    }
+
+    #[test]
+    fn app_artifact_user_input_binding_round_trips_canonically() {
+        let recipe = parse_test_recipe(
+        "    app_ref: retroarch\n    artifact: custom_config\n    input:\n      ref: inputs.custom_config\n",
+    )
+    .expect("a typed App Artifact input binding should parse");
+        let canonical = emit_recipe_yaml(&recipe).expect("recipe YAML should emit");
+        assert!(canonical.contains("ref: inputs.custom_config"));
+        let reparsed = parse_recipe_mapping(
+            yaml_value(&canonical)
+                .as_mapping()
+                .expect("canonical recipe should be a mapping"),
+            Path::new("test.recipe.yaml"),
+        )
+        .expect("canonical recipe YAML should parse again");
+        assert_eq!(reparsed, recipe);
+    }
+
+    #[test]
+    fn app_artifact_input_binding_rejects_non_input_and_malformed_refs() {
+        for binding in [
+            "input: {ref: steps.download}",
+            "input: {ref: inputs.}",
+            "input: {ref: inputs.config, extra: value}",
+            "input: inputs.config",
+        ] {
+            let error = parse_test_recipe(&format!(
+                "    app_ref: retroarch\n    artifact: custom_config\n    {binding}\n"
+            ))
+            .expect_err("malformed App Artifact input bindings must be rejected");
+            let message = error
+                .issue
+                .as_deref()
+                .map(|issue| issue.message.as_str())
+                .unwrap_or(&error.message);
+            assert!(
+                message.contains("app_artifact") || message.contains("input"),
+                "unexpected diagnostic for {binding}: {message}"
+            );
+        }
     }
 
     #[test]

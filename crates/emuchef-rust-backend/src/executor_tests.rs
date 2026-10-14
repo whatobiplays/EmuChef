@@ -205,6 +205,573 @@ fn app_context_install_plan(
     plan
 }
 
+fn app_file_resolve_plan(source: crate::planner::ExecutionArtifactSource) -> ExecutionPlan {
+    let artifact_id = "example.recipe/resource";
+    let artifact = ExecutionArtifact {
+        id: artifact_id.to_string(),
+        type_name: "remote_file".to_string(),
+        source,
+        cache: "default".to_string(),
+        app_provenance: Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "configuration".to_string(),
+            kind: "file".to_string(),
+        }),
+    };
+    let mut params = OrderedMap::new();
+    params.insert("artifacts".to_string(), literal(json!([artifact_id])));
+    let step = ExecutionStep {
+        id: "example.recipe/resolve".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "resolve_artifacts".to_string(),
+        name: "Resolve App File".to_string(),
+        note: "Resolve App File".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        permission_plan: None,
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let mut plan = plan_with_artifacts(vec![artifact], vec![step]);
+    plan.apps.push(crate::planner::ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.app".to_string(),
+    });
+    plan
+}
+
+#[test]
+fn direct_url_file_artifact_resolves_and_reports_hash_cache_and_provenance() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let url = "https://downloads.example.com/configuration.cfg".to_string();
+    let bytes = b"file resource, not an APK";
+    let execution_plan =
+        app_file_resolve_plan(crate::planner::ExecutionArtifactSource::DirectUrl {
+            url: url.clone(),
+            sha256: Some(sha256(bytes).to_ascii_lowercase()),
+        });
+    let cache_root = workspace.path().join("cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    fs::write(
+        cache_root.join(artifact_local_filename(
+            "example.recipe/resource",
+            &url,
+            "default",
+        )),
+        bytes,
+    )
+    .expect("file artifact cache fixture should be written");
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &cache_root,
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], true, "{actual:#}");
+    let reported = &actual["resolved_artifacts"][0];
+    assert_eq!(reported["appId"], "example-app");
+    assert_eq!(reported["appArtifactId"], "configuration");
+    assert_eq!(
+        reported["calculatedSha256"],
+        sha256(bytes).to_ascii_lowercase()
+    );
+    assert_eq!(reported["cacheHit"], true);
+    assert!(reported["redactedFinalUrl"].is_null());
+    assert_eq!(
+        execution_plan.artifacts[0]
+            .app_provenance
+            .as_ref()
+            .unwrap()
+            .kind,
+        "file"
+    );
+}
+
+#[test]
+fn direct_executor_rejects_cross_recipe_binding_before_device_or_artifact_work() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let source = workspace.path().join("configuration.zip");
+    write_zip(&source, &[("settings.cfg", "user-provided configuration")]);
+    let input_id = "other.recipe/user_file";
+    let mut execution_plan =
+        app_file_resolve_plan(crate::planner::ExecutionArtifactSource::LocalInput {
+            input_id: input_id.to_string(),
+        });
+    execution_plan.inputs.push(ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!(source),
+            location: Some("host".to_string()),
+        },
+    });
+    let mut extraction_params = OrderedMap::new();
+    extraction_params.insert(
+        "artifacts".to_string(),
+        literal(json!(["example.recipe/resource"])),
+    );
+    extraction_params.insert("extract_on".to_string(), literal(json!("host")));
+    execution_plan.steps.push(ExecutionStep {
+        id: "example.recipe/extract".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "extract_artifacts".to_string(),
+        name: "Extract user archive".to_string(),
+        note: "Extract user archive".to_string(),
+        dependencies: vec!["example.recipe/resolve".to_string()],
+        constraints: constraints(),
+        permission_plan: None,
+        params: extraction_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    });
+    let mut copy_params = OrderedMap::new();
+    copy_params.insert(
+        "source".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.example.recipe/extract.outputs.extracted_paths".to_string(),
+        },
+    );
+    copy_params.insert(
+        "dest".to_string(),
+        literal(json!("/sdcard/EmuChef/local-input")),
+    );
+    copy_params.insert("copy_policy".to_string(), literal(json!("sync")));
+    execution_plan.steps.push(ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Copy extracted user file".to_string(),
+        note: "Copy extracted user file".to_string(),
+        dependencies: vec!["example.recipe/extract".to_string()],
+        constraints: constraints(),
+        permission_plan: None,
+        params: copy_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    });
+
+    let runtime_root = workspace.path().join("runtime");
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_sandbox_roots(
+        runtime_root.clone(),
+        workspace.path().join("cache"),
+        workspace.path().join("device"),
+        vec![workspace.path().to_path_buf()],
+    ));
+    let result = serde_json::to_value(runner.run(&execution_plan))
+        .expect("execution result should serialize");
+
+    assert_eq!(result["success"], false);
+    let message = result["steps"][0]["message"]
+        .as_str()
+        .expect("admission failure should be reported");
+    assert!(message.contains("app_artifact_input_binding_invalid"));
+    assert!(!message.contains("other.recipe"));
+    assert!(!message.contains(workspace.path().to_string_lossy().as_ref()));
+    assert!(runner.adapters().device().commands().is_empty());
+    assert!(!runtime_root.join("verified-artifacts").exists());
+}
+
+#[test]
+fn local_input_apk_app_artifact_is_admitted_and_package_verified() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &workspace,
+        "com.example.expected",
+    );
+    let input_id = "example.recipe/user_apk";
+    let mut execution_plan = app_context_install_plan(
+        String::new(),
+        "com.example.expected",
+        Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        }),
+    );
+    execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::LocalInput {
+        input_id: input_id.to_string(),
+    };
+    execution_plan.inputs = vec![ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!(apk),
+            location: Some("host".to_string()),
+        },
+    }];
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], true, "{actual:#}");
+    assert_eq!(actual["steps"][1]["status"], "executed");
+    let install_command = runner
+        .adapters()
+        .device()
+        .commands()
+        .iter()
+        .find(|command| command.first().is_some_and(|value| value == "install_apk"))
+        .expect("install_apk should receive the user-provided APK");
+    let installed_path = PathBuf::from(&install_command[1]);
+    assert_eq!(
+        installed_path.extension().and_then(|value| value.to_str()),
+        Some("apk")
+    );
+}
+
+#[test]
+fn local_input_apk_package_mismatch_blocks_install_after_resolution() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &workspace,
+        "com.example.actual",
+    );
+    let input_id = "example.recipe/user_apk";
+    let mut execution_plan = app_context_install_plan(
+        String::new(),
+        "com.example.expected",
+        Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        }),
+    );
+    execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::LocalInput {
+        input_id: input_id.to_string(),
+    };
+    execution_plan.inputs = vec![ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!(apk),
+            location: Some("host".to_string()),
+        },
+    }];
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &workspace.path().join("runtime"),
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(actual["steps"][1]["status"], "failed");
+    assert!(actual["steps"][1]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("apk_package_mismatch:"));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+/// Build the app-install plan used to prove local-input admission runs before
+/// any device-mutating step. The app APK artifact is bound to a user-provided
+/// host file at `source`; resolving it precedes the device-mutating install
+/// step, so a late admission failure would be observable as install commands.
+fn local_input_install_plan(source: &Path) -> ExecutionPlan {
+    let input_id = "example.recipe/user_apk";
+    let mut execution_plan = app_context_install_plan(
+        String::new(),
+        "com.example.expected",
+        Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        }),
+    );
+    execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::LocalInput {
+        input_id: input_id.to_string(),
+    };
+    execution_plan.inputs = vec![ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!(source),
+            location: Some("host".to_string()),
+        },
+    }];
+    execution_plan
+}
+
+#[test]
+fn direct_executor_rejects_missing_local_input_before_device_or_artifact_work() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let source = workspace.path().join("missing.apk");
+    let execution_plan = local_input_install_plan(&source);
+    let runtime_root = workspace.path().join("runtime");
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifact_source_not_found:"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert!(runner.adapters().device().commands().is_empty());
+    assert!(!runtime_root.join("verified-artifacts").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_executor_rejects_unreadable_local_input_before_device_or_artifact_work() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let source = workspace.path().join("unreadable.apk");
+    fs::write(&source, b"user-provided apk").expect("user input should be written");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o000))
+        .expect("user input permissions should be set");
+    let execution_plan = local_input_install_plan(&source);
+    let runtime_root = workspace.path().join("runtime");
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifact_source_unreadable:"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert!(runner.adapters().device().commands().is_empty());
+    assert!(!runtime_root.join("verified-artifacts").exists());
+}
+
+#[test]
+fn direct_executor_rejects_out_of_sandbox_local_input_before_device_or_artifact_work() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let source = workspace.path().join("outside-sandbox.apk");
+    fs::write(&source, b"user-provided apk").expect("user input should be written");
+    let execution_plan = local_input_install_plan(&source);
+    let runtime_root = workspace.path().join("runtime");
+
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &workspace.path().join("cache"),
+            &workspace.path().join("device"),
+            Vec::new(),
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifact_sandbox_rejected:"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert!(runner.adapters().device().commands().is_empty());
+    assert!(!runtime_root.join("verified-artifacts").exists());
+}
+
+#[test]
+fn direct_executor_rejects_local_input_without_sandbox_before_device_or_artifact_work() {
+    // The user-provided APK exists and is bound to a same-Recipe local-input
+    // artifact, so the only reason admission can fail is the absent sandbox.
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let source = workspace.path().join("user.apk");
+    fs::write(&source, b"user-provided apk").expect("user input should be written");
+    let execution_plan = local_input_install_plan(&source);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifact_sandbox_rejected:"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn direct_executor_admits_plan_without_local_input_when_sandbox_roots_absent() {
+    // A plan that declares no local-input artifact keeps its current behavior
+    // when the executor has no sandbox roots.
+    let execution_plan = plan(vec![wait_step("example.recipe/wait", "Wait", 1)]);
+
+    let (actual, _) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], true, "{actual:#}");
+    assert_eq!(actual["steps"][0]["status"], "executed");
+}
+
+#[test]
+fn direct_executor_reports_binding_error_without_sandbox_roots() {
+    // Structural binding validation still runs before the sandbox check, so a
+    // cross-Recipe binding reports the binding code rather than the sandbox
+    // rejection code even when sandbox roots are absent.
+    let input_id = "other.recipe/user_file";
+    let mut execution_plan =
+        app_file_resolve_plan(crate::planner::ExecutionArtifactSource::LocalInput {
+            input_id: input_id.to_string(),
+        });
+    execution_plan.inputs.push(ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!("/host/unused.zip"),
+            location: Some("host".to_string()),
+        },
+    });
+
+    let (actual, _) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("app_artifact_input_binding_invalid"));
+}
+
+#[test]
+fn local_input_app_artifact_is_consumed_by_extract_and_copy_without_persistent_cache() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let source = workspace.path().join("configuration.cfg");
+    write_zip(&source, &[("settings.cfg", "user-provided configuration")]);
+    let bytes = fs::read(&source).expect("user archive should be readable");
+    let input_id = "example.recipe/user_file";
+    let mut execution_plan =
+        app_file_resolve_plan(crate::planner::ExecutionArtifactSource::LocalInput {
+            input_id: input_id.to_string(),
+        });
+    execution_plan.inputs = vec![ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!(source),
+            location: Some("host".to_string()),
+        },
+    }];
+
+    let mut extraction_params = OrderedMap::new();
+    extraction_params.insert(
+        "artifacts".to_string(),
+        literal(json!(["example.recipe/resource"])),
+    );
+    extraction_params.insert("extract_on".to_string(), literal(json!("host")));
+    execution_plan.steps.push(ExecutionStep {
+        id: "example.recipe/extract".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "extract_artifacts".to_string(),
+        name: "Extract User Archive".to_string(),
+        note: "Extract User Archive".to_string(),
+        dependencies: vec!["example.recipe/resolve".to_string()],
+        constraints: constraints(),
+        permission_plan: None,
+        params: extraction_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    });
+
+    let mut copy_params = OrderedMap::new();
+    copy_params.insert(
+        "source".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.example.recipe/extract.outputs.extracted_paths".to_string(),
+        },
+    );
+    copy_params.insert(
+        "dest".to_string(),
+        literal(json!("/sdcard/EmuChef/local-input")),
+    );
+    copy_params.insert("copy_policy".to_string(), literal(json!("sync")));
+    execution_plan.steps.push(ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Copy Extracted User File".to_string(),
+        note: "Copy Extracted User File".to_string(),
+        dependencies: vec!["example.recipe/extract".to_string()],
+        constraints: constraints(),
+        permission_plan: None,
+        params: copy_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    });
+
+    let runtime_root = workspace.path().join("runtime");
+    let cache_root = workspace.path().join("cache");
+    let fake_device_root = workspace.path().join("device");
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![workspace.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], true, "{actual:#}");
+    let reported = &actual["resolved_artifacts"][0];
+    assert_eq!(
+        reported["calculatedSha256"],
+        sha256(&bytes).to_ascii_lowercase()
+    );
+    assert_eq!(reported["cacheHit"], false);
+    assert!(reported["redactedFinalUrl"].is_null());
+    assert!(
+        !cache_root.exists(),
+        "user-provided bytes must not be persisted"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/EmuChef/local-input/settings.cfg"))
+            .expect("downstream copy should consume the execution snapshot"),
+        "user-provided configuration"
+    );
+    let snapshots = fs::read_dir(runtime_root.join("verified-artifacts"))
+        .expect("execution snapshot directory should be created")
+        .count();
+    assert_eq!(snapshots, 0, "execution-scoped bytes should be cleaned up");
+}
+
 fn plan_for_reviewed_target(mut execution_plan: ExecutionPlan) -> ExecutionPlan {
     execution_plan.target_device = Some(TargetDeviceBinding {
         serial: "serial-a".to_string(),

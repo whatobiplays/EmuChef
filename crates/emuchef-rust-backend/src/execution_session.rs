@@ -633,6 +633,16 @@ fn eligible_launch_candidate(
 /// direct-URL parsing, and static release-policy validation; it must never
 /// acquire execution state or perform network or filesystem mutation.
 fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(), ApiError> {
+    if let Err(artifact_code) = crate::planner::validate_execution_plan_local_input_bindings(plan) {
+        return Err(ApiError::new(
+            ApiErrorCode::ExecutionStartFailed,
+            "Execution artifacts are not ready.",
+            json!({
+                "code": "artifact_not_ready",
+                "artifactCode": artifact_code,
+            }),
+        ));
+    }
     let resolver = ArtifactResolver::new(&sandbox);
     for artifact in &plan.artifacts {
         if validate_artifact_provenance(plan, artifact).is_err() {
@@ -667,6 +677,15 @@ fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(
                 )
                 .err()
                 .map(|error| error.code()),
+            ExecutionArtifactSource::LocalInput { input_id } => {
+                match crate::planner::validated_local_input_path(plan, input_id) {
+                    Ok(path) => resolver
+                        .admit_local_input(&artifact.type_name, &artifact.cache, Path::new(path))
+                        .err()
+                        .map(|error| error.code()),
+                    Err(_) => Some("app_artifact_input_binding_invalid"),
+                }
+            }
             ExecutionArtifactSource::RemoteRelease {
                 provider,
                 service_origin,
@@ -725,6 +744,7 @@ fn validate_artifact_provenance(
             }
         }
         ExecutionArtifactSource::DirectUrl { .. }
+        | ExecutionArtifactSource::LocalInput { .. }
         | ExecutionArtifactSource::RemoteRelease { .. } => {
             let provenance = artifact.app_provenance.as_ref().ok_or(())?;
             if artifact.type_name != "remote_file"
@@ -737,11 +757,6 @@ fn validate_artifact_provenance(
                     .filter(|app| app.id == provenance.app_id)
                     .count()
                     != 1
-            {
-                return Err(());
-            }
-            if matches!(&artifact.source, ExecutionArtifactSource::DirectUrl { .. })
-                && provenance.kind != "apk"
             {
                 return Err(());
             }
@@ -1449,7 +1464,8 @@ fn read_only_roots(plan: &ExecutionPlan) -> Vec<PathBuf> {
             ExecutionArtifactSource::RemoteFile { url } => url
                 .strip_prefix("file://")
                 .map(|path| Path::new(path).to_path_buf()),
-            ExecutionArtifactSource::DirectUrl { .. }
+            ExecutionArtifactSource::LocalInput { .. }
+            | ExecutionArtifactSource::DirectUrl { .. }
             | ExecutionArtifactSource::RemoteRelease { .. } => None,
         }
     }));
@@ -2163,6 +2179,71 @@ mod tests {
         assert_eq!(started["execution"]["executionId"], "execution-1");
         let report = wait_for_terminal(&manager, "execution-1");
         assert_eq!(report["status"], "succeeded");
+    }
+
+    #[test]
+    fn local_input_artifact_admission_rejects_cross_recipe_binding_before_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("user-config.cfg");
+        std::fs::write(&source_path, b"authorized user input").unwrap();
+        let input_id = "recipe.other/user_config";
+        let mut plan = test_plan("plan.cross-recipe-local-input");
+        plan.apps.push(crate::planner::ExecutionAppSnapshot {
+            id: "example".to_string(),
+            name: "Example App".to_string(),
+            description: None,
+            category: None,
+            package_id: "com.example.app".to_string(),
+        });
+        plan.inputs.push(crate::planner::ExecutionInputValue {
+            id: input_id.to_string(),
+            value: RuntimeValue {
+                type_name: "file_path".to_string(),
+                value: json!(source_path.to_string_lossy().to_string()),
+                location: Some("host".to_string()),
+            },
+        });
+        plan.artifacts.push(crate::planner::ExecutionArtifact {
+            id: "recipe.example/config".to_string(),
+            type_name: "remote_file".to_string(),
+            source: ExecutionArtifactSource::LocalInput {
+                input_id: input_id.to_string(),
+            },
+            cache: "default".to_string(),
+            app_provenance: Some(crate::planner::ExecutionArtifactAppProvenance {
+                app_id: "example".to_string(),
+                artifact_id: "config".to_string(),
+                kind: "file".to_string(),
+            }),
+        });
+
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let manager = manager(temp.path());
+        let error = manager
+            .start(plan.clone(), digest, ExecutionMode::DryRun, None)
+            .expect_err("cross-Recipe local input binding must fail during admission");
+        assert_eq!(
+            error.details["artifactCode"],
+            "app_artifact_input_binding_invalid"
+        );
+        assert_eq!(
+            manager.get("execution-1").unwrap_err().code,
+            ApiErrorCode::UnknownExecution
+        );
+        assert!(!temp.path().join("runtime").exists());
+        assert!(!temp.path().join("cache").exists());
+
+        plan.inputs[0].id = "recipe.example/user_config".to_string();
+        plan.artifacts[0].source = ExecutionArtifactSource::LocalInput {
+            input_id: "recipe.example/user_config".to_string(),
+        };
+        let sandbox = SandboxRoots {
+            runtime_root: temp.path().join("runtime"),
+            cache_root: temp.path().join("cache"),
+            fake_device_root: temp.path().join("fake-device"),
+            read_only_roots: vec![temp.path().to_path_buf()],
+        };
+        assert!(admit_plan_artifacts(&plan, sandbox).is_ok());
     }
 
     #[test]

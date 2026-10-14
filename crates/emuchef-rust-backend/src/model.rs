@@ -121,7 +121,14 @@ pub enum RecipeArtifact {
 pub struct AppArtifactReference {
     pub app_ref: String,
     pub artifact: String,
+    /// Recipe-local file input used by a `user_provided` App Artifact source.
+    pub input: Option<AppArtifactInputBinding>,
     pub cache: String,
+}
+/// Binds a user-provided App Artifact source to one Recipe input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppArtifactInputBinding {
+    pub input_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
