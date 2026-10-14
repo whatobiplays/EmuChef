@@ -451,6 +451,7 @@ dependencies = [
  "async-process",
  "futures-lite",
  "indexmap",
+ "libc",
  "rcgen",
  "regex",
  "reqwest",

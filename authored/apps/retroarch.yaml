@@ -13,6 +13,144 @@ artifacts:
     source:
       strategy: direct_url
       url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
+  asset_assets_zip:
+    kind: file
+    name: RetroArch frontend assets archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/assets.zip
+  asset_autoconfig_zip:
+    kind: file
+    name: RetroArch autoconfig archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/autoconfig.zip
+  asset_cheats_zip:
+    kind: file
+    name: RetroArch cheats archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/cheats.zip
+  asset_database_rdb_zip:
+    kind: file
+    name: RetroArch database archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/database-rdb.zip
+  asset_info_zip:
+    kind: file
+    name: RetroArch information archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/info.zip
+  asset_overlays_zip:
+    kind: file
+    name: RetroArch overlays archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/overlays.zip
+  asset_shaders_glsl_zip:
+    kind: file
+    name: RetroArch GLSL shaders archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/frontend/shaders_glsl.zip
+  core_dolphin_zip:
+    kind: file
+    name: Dolphin core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/dolphin_libretro_android.so.zip
+  core_fbneo_zip:
+    kind: file
+    name: FinalBurn Neo core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fbneo_libretro_android.so.zip
+  core_fceumm_zip:
+    kind: file
+    name: FCEUmm core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fceumm_libretro_android.so.zip
+  core_flycast_zip:
+    kind: file
+    name: Flycast core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/flycast_libretro_android.so.zip
+  core_gambatte_zip:
+    kind: file
+    name: Gambatte core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/gambatte_libretro_android.so.zip
+  core_genesis_plus_gx_zip:
+    kind: file
+    name: Genesis Plus GX core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/genesis_plus_gx_libretro_android.so.zip
+  core_handy_zip:
+    kind: file
+    name: Handy core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/handy_libretro_android.so.zip
+  core_mednafen_saturn_zip:
+    kind: file
+    name: Mednafen Saturn core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mednafen_saturn_libretro_android.so.zip
+  core_melondsds_zip:
+    kind: file
+    name: melonDS DS core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/melondsds_libretro_android.so.zip
+  core_mupen64plus_next_gles3_zip:
+    kind: file
+    name: Mupen64Plus Next GLES3 core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mupen64plus_next_gles3_libretro_android.so.zip
+  core_pokemini_zip:
+    kind: file
+    name: Pokémon Mini core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/pokemini_libretro_android.so.zip
+  core_ppsspp_zip:
+    kind: file
+    name: PPSSPP core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/ppsspp_libretro_android.so.zip
+  core_snes9x_zip:
+    kind: file
+    name: Snes9x core archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/nightly/android/latest/arm64-v8a/snes9x_libretro_android.so.zip
+  core_files_dolphin_zip:
+    kind: file
+    name: Dolphin system files archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/system/Dolphin.zip
+  core_files_fbneo_zip:
+    kind: file
+    name: FinalBurn Neo system files archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/system/FinalBurn%20Neo%20%28hiscore%29.zip
+  core_files_ppsspp_zip:
+    kind: file
+    name: PPSSPP system files archive
+    source:
+      strategy: direct_url
+      url: https://buildbot.libretro.com/assets/system/PPSSPP.zip
 permission_sets:
   baseline:
     runtime:

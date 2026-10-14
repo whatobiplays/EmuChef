@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use crate::authored_models::{load_app_definition, AppArtifactKind, AppArtifactSource};
+use crate::authored_models::{
+    load_app_definition, AppArtifactKind, AppArtifactSource, AppArtifactV1,
+};
 use crate::device_probe::{DetectedDeviceFacts, DeviceProbe, FakeDeviceProbe};
 use crate::device_profile_match::build_detected_device_profile_mismatch_warning;
 use crate::model::{
-    OrderedMap, ParamValue, Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step,
-    StepCondition, StepConstraints,
+    AppArtifactInputBinding, AppArtifactReference, InputDeclaration, InputValidation, OrderedMap,
+    ParamValue, Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
+    StepConstraints,
 };
 use crate::planner::{
     build_permission_intent, normalized_plan_step_note, plan_execution_with_app_definitions,
@@ -6346,6 +6349,324 @@ fn assert_app_planning_error(
         "expected planner error {expected_code}, got {:?}",
         result.errors
     );
+}
+
+fn user_provided_artifact_planner_case(
+    binding: Option<&str>,
+    input_type: Option<&str>,
+    multiple: bool,
+    selected: bool,
+) -> (PlannerInput, crate::authored_models::AppDefinitionV1) {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "artifacts".to_string(),
+        ParamValue::Literal(json!(if selected {
+            ["user_config"]
+        } else {
+            ["archive_zip"]
+        })),
+    );
+    let mut input = param_contract_input(vec![param_contract_step(
+        "resolve",
+        "resolve_artifacts",
+        Vec::new(),
+        params,
+    )]);
+    let recipe = &mut input.recipes[0];
+    if let Some(input_type) = input_type {
+        recipe.inputs.insert(
+            "user_file".to_string(),
+            InputDeclaration {
+                type_name: input_type.to_string(),
+                role: "source".to_string(),
+                label: "User file".to_string(),
+                description: None,
+                required: true,
+                multiple,
+                validation: InputValidation {
+                    must_exist: false,
+                    allowed_extensions: Vec::new(),
+                    path_kind: None,
+                    allowed_prefixes: Vec::new(),
+                },
+                default: Value::Null,
+                options: Vec::new(),
+                sensitive: false,
+                advanced: false,
+                metadata: OrderedMap::new(),
+            },
+        );
+        input.explicit_input_bindings.insert(
+            "planner.param_contract/user_file".to_string(),
+            if multiple {
+                json!(["/tmp/user.cfg"])
+            } else {
+                json!("/tmp/user.cfg")
+            },
+        );
+    }
+    recipe.artifacts.insert(
+        "user_config".to_string(),
+        RecipeArtifact::AppArtifact(AppArtifactReference {
+            app_ref: "armsx1".to_string(),
+            artifact: "user_config".to_string(),
+            input: binding.map(|input_id| AppArtifactInputBinding {
+                input_id: input_id.to_string(),
+            }),
+            cache: "default".to_string(),
+        }),
+    );
+    let mut app = armsx1_app_definition();
+    app.artifacts.insert(
+        "user_config".to_string(),
+        AppArtifactV1 {
+            kind: AppArtifactKind::File,
+            name: None,
+            description: None,
+            source: AppArtifactSource::UserProvided,
+        },
+    );
+    (input, app)
+}
+
+#[test]
+fn selected_user_provided_artifact_emits_its_recipe_input_in_the_immutable_plan() {
+    let (input, app) =
+        user_provided_artifact_planner_case(Some("user_file"), Some("file"), false, true);
+    let result = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.expect("user input plan should emit");
+    assert!(plan
+        .inputs
+        .iter()
+        .any(|input| input.id == "planner.param_contract/user_file"));
+    let artifact = plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "planner.param_contract/user_config")
+        .expect("selected user-provided artifact should emit");
+    assert_eq!(
+        artifact.source,
+        crate::planner::ExecutionArtifactSource::LocalInput {
+            input_id: "planner.param_contract/user_file".to_string(),
+        }
+    );
+}
+
+#[test]
+fn selected_user_provided_apk_artifact_emits_its_recipe_input_in_the_immutable_plan() {
+    let (input, mut app) =
+        user_provided_artifact_planner_case(Some("user_file"), Some("file"), false, true);
+    app.artifacts.get_mut("user_config").unwrap().kind =
+        crate::authored_models::AppArtifactKind::Apk;
+
+    let result = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result
+        .execution_plan
+        .expect("user-provided APK plan should emit");
+    assert!(plan
+        .inputs
+        .iter()
+        .any(|input| input.id == "planner.param_contract/user_file"));
+    let artifact = plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "planner.param_contract/user_config")
+        .expect("selected user-provided APK should emit");
+    assert!(matches!(
+        artifact.source,
+        crate::planner::ExecutionArtifactSource::LocalInput { .. }
+    ));
+    assert_eq!(
+        artifact
+            .app_provenance
+            .as_ref()
+            .map(|provenance| provenance.kind.as_str()),
+        Some("apk")
+    );
+}
+
+#[test]
+fn selected_user_provided_artifact_rejects_missing_or_non_single_file_bindings() {
+    let (missing, app) = user_provided_artifact_planner_case(None, None, false, true);
+    assert_app_planning_error(missing, &[app], "app_artifact_input_binding_required");
+
+    let (directory, app) =
+        user_provided_artifact_planner_case(Some("user_file"), Some("directory"), false, true);
+    assert_app_planning_error(directory, &[app], "app_artifact_input_binding_invalid");
+
+    let (multiple, app) =
+        user_provided_artifact_planner_case(Some("user_file"), Some("file"), true, true);
+    assert_app_planning_error(multiple, &[app], "app_artifact_input_binding_invalid");
+}
+
+#[test]
+fn unused_optional_user_provided_artifact_needs_no_input_binding() {
+    let (input, app) = user_provided_artifact_planner_case(None, None, false, false);
+    let result = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result
+        .execution_plan
+        .expect("unused optional artifact should be harmless");
+    assert!(plan.inputs.is_empty());
+    assert!(!plan
+        .artifacts
+        .iter()
+        .any(|artifact| { artifact.id == "planner.param_contract/user_config" }));
+}
+
+#[test]
+fn direct_url_file_app_artifact_is_planned_with_file_provenance() {
+    let (input, mut app) = user_provided_artifact_planner_case(None, None, false, true);
+    app.artifacts.get_mut("user_config").unwrap().source = AppArtifactSource::DirectUrl {
+        url: "https://downloads.example.com/retroarch.cfg".to_string(),
+        sha256: None,
+    };
+    let result = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.expect("direct file plan should emit");
+    let artifact = plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "planner.param_contract/user_config")
+        .expect("selected direct URL file should emit");
+    assert_eq!(
+        artifact.source,
+        crate::planner::ExecutionArtifactSource::DirectUrl {
+            url: "https://downloads.example.com/retroarch.cfg".to_string(),
+            sha256: None,
+        }
+    );
+    assert_eq!(
+        artifact
+            .app_provenance
+            .as_ref()
+            .map(|provenance| provenance.kind.as_str()),
+        Some("file")
+    );
+}
+
+#[test]
+fn latest_release_file_app_artifact_is_planned_and_resolved_offline() {
+    let (input, mut app) = user_provided_artifact_planner_case(None, None, false, true);
+    let selected_url = "https://github.com/owner/repo/releases/download/v1.2.3/configuration.zip";
+    let bytes = b"an app-owned archive, not an APK";
+    app.artifacts.get_mut("user_config").unwrap().source = AppArtifactSource::LatestRelease {
+        provider: crate::authored_models::ReleaseProvider::Github,
+        base_url: "https://api.github.com".to_string(),
+        repository: "owner/repo".to_string(),
+        asset_pattern: Some("^configuration\\.zip$".to_string()),
+        invert_asset_pattern: None,
+        prerelease: false,
+    };
+
+    let planning = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        planning.status,
+        PlanningStatus::Success,
+        "{:?}",
+        planning.errors
+    );
+    let execution_plan = planning
+        .execution_plan
+        .expect("latest-release file plan should be emitted");
+    let artifact = execution_plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == "planner.param_contract/user_config")
+        .expect("selected file artifact should be in the execution plan");
+    assert!(matches!(
+        &artifact.source,
+        crate::planner::ExecutionArtifactSource::RemoteRelease {
+            provider,
+            service_origin,
+            repository,
+            asset_pattern: Some(pattern),
+            ..
+        } if provider == "github"
+            && service_origin == "https://api.github.com"
+            && repository == "owner/repo"
+            && pattern == "^configuration\\.zip$"
+    ));
+    assert_eq!(
+        artifact
+            .app_provenance
+            .as_ref()
+            .map(|provenance| provenance.kind.as_str()),
+        Some("file")
+    );
+
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let cache_root = workspace.path().join("cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let artifact_cache_path = cache_root.join(crate::artifact_resolver::artifact_local_filename(
+        "planner.param_contract/user_config",
+        selected_url,
+        "default",
+    ));
+    fs::write(&artifact_cache_path, bytes)
+        .expect("selected release cache fixture should be written");
+
+    let mut runner = crate::executor::ExecutorRunner::new(
+        crate::executor::DryRunExecutorAdapters::with_sandbox_roots(
+            workspace.path().join("runtime"),
+            cache_root,
+            workspace.path().join("device"),
+            Vec::new(),
+        ),
+    );
+    runner.set_github_release_metadata_fixtures(vec![json!([{
+        "tag_name": "v1.2.3",
+        "prerelease": false,
+        "published_at": "2026-02-01T00:00:00Z",
+        "assets": [
+            {
+                "name": "configuration.zip",
+                "browser_download_url": selected_url
+            },
+            {
+                "name": "application.apk",
+                "browser_download_url": "https://github.com/owner/repo/releases/download/v1.2.3/application.apk"
+            }
+        ]
+    }])]);
+
+    let execution = serde_json::to_value(runner.run(&execution_plan))
+        .expect("execution result should serialize");
+    assert_eq!(execution["success"], true, "{execution:#}");
+    let release = &execution["resolved_releases"][0];
+    assert_eq!(
+        release["recipeArtifactId"],
+        "planner.param_contract/user_config"
+    );
+    assert_eq!(release["appId"], "armsx1");
+    assert_eq!(release["artifactId"], "user_config");
+    assert_eq!(release["kind"], "file");
+    assert_eq!(release["releaseTag"], "v1.2.3");
+    assert_eq!(release["assetName"], "configuration.zip");
+    assert_eq!(release["cacheHit"], true);
+    assert_eq!(release["calculatedSha256"].as_str().unwrap().len(), 64);
 }
 
 fn lifecycle_planner_input(

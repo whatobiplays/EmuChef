@@ -23,7 +23,8 @@ use crate::executor::{
     StepRunStatus,
 };
 use crate::planner::{
-    BindingSource, ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionStep,
+    BindingSource, ExecutionArtifact, ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan,
+    ExecutionStep,
 };
 use crate::runtime_configuration::{
     DeviceContextOverride, PlanConfigurationResult, RuntimeCapabilityAvailability,
@@ -781,14 +782,16 @@ impl QualificationWorkspace {
     }
 }
 
+/// Compute a deterministic cache path from a concrete URL in the execution plan.
 fn artifact_cache_path(cache_root: &Path, artifact: &ExecutionArtifact) -> PathBuf {
-    cache_root.join(artifact_local_filename(
-        &artifact.id,
-        artifact
-            .remote_file_url()
-            .expect("legacy artifact has a direct URL"),
-        &artifact.cache,
-    ))
+    let url = match &artifact.source {
+        ExecutionArtifactSource::RemoteFile { url }
+        | ExecutionArtifactSource::DirectUrl { url, .. } => url,
+        source => {
+            panic!("offline RetroArch qualification requires a concrete URL source, got {source:?}")
+        }
+    };
+    cache_root.join(artifact_local_filename(&artifact.id, url, &artifact.cache))
 }
 
 fn write_zip(path: &Path, entries: &[&str]) {
@@ -810,6 +813,14 @@ fn seed_artifact_cache(cache_root: &Path, plan: &ExecutionPlan, system_mode: Sys
             artifact.cache, "default",
             "every qualified artifact must use the default cache mode"
         );
+        if let Some(provenance) = &artifact.app_provenance {
+            assert_eq!(provenance.app_id, "retroarch");
+            assert_eq!(provenance.kind, "file");
+            assert!(matches!(
+                &artifact.source,
+                ExecutionArtifactSource::DirectUrl { .. }
+            ));
+        }
         let path = artifact_cache_path(cache_root, artifact);
         let leaf = artifact
             .id

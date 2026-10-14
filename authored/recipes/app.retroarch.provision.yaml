@@ -28,96 +28,119 @@ artifacts:
     url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
     cache: default
   asset_assets_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/assets.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_assets_zip
     cache: default
   asset_autoconfig_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/autoconfig.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_autoconfig_zip
     cache: default
   asset_cheats_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/cheats.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_cheats_zip
     cache: default
   asset_database_rdb_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/database-rdb.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_database_rdb_zip
     cache: default
   asset_info_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/info.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_info_zip
     cache: default
   asset_overlays_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/overlays.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_overlays_zip
     cache: default
   asset_shaders_glsl_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/frontend/shaders_glsl.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: asset_shaders_glsl_zip
     cache: default
   core_dolphin_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/dolphin_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_dolphin_zip
     cache: default
   core_fbneo_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fbneo_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_fbneo_zip
     cache: default
   core_fceumm_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fceumm_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_fceumm_zip
     cache: default
   core_flycast_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/flycast_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_flycast_zip
     cache: default
   core_gambatte_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/gambatte_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_gambatte_zip
     cache: default
   core_genesis_plus_gx_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/genesis_plus_gx_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_genesis_plus_gx_zip
     cache: default
   core_handy_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/handy_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_handy_zip
     cache: default
   core_mednafen_saturn_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mednafen_saturn_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_mednafen_saturn_zip
     cache: default
   core_melondsds_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/melondsds_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_melondsds_zip
     cache: default
   core_mupen64plus_next_gles3_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mupen64plus_next_gles3_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_mupen64plus_next_gles3_zip
     cache: default
   core_pokemini_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/pokemini_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_pokemini_zip
     cache: default
   core_ppsspp_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/ppsspp_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_ppsspp_zip
     cache: default
   core_snes9x_zip:
-    type: remote_file
-    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/snes9x_libretro_android.so.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_snes9x_zip
     cache: default
   core_files_dolphin_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/system/Dolphin.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_files_dolphin_zip
     cache: default
   core_files_fbneo_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/system/FinalBurn%20Neo%20%28hiscore%29.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_files_fbneo_zip
     cache: default
   core_files_ppsspp_zip:
-    type: remote_file
-    url: https://buildbot.libretro.com/assets/system/PPSSPP.zip
+    type: app_artifact
+    app_ref: retroarch
+    artifact: core_files_ppsspp_zip
     cache: default
 artifact_groups:
   retroarch_assets:

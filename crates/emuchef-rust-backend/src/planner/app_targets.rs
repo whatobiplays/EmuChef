@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_source_from_other_app_is_rejected_even_with_valid_destination() {
+    fn source_provenance_rejects_direct_cross_app_artifact() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
         let mut recipe =
             load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
@@ -437,6 +437,7 @@ mod tests {
             RecipeArtifact::AppArtifact(AppArtifactReference {
                 app_ref: "other_app".to_string(),
                 artifact: "file".to_string(),
+                input: None,
                 cache: "default".to_string(),
             }),
         );
@@ -444,6 +445,176 @@ mod tests {
             "source".to_string(),
             ParamValue::Ref("artifacts.other_file.local_path".to_string()),
         );
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+        let errors =
+            resolve_usage(&recipes, &["feature.copy_bios".to_string()], &apps, None).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "app_source_provenance_mismatch"));
+    }
+
+    #[test]
+    fn source_provenance_allows_same_app_artifact() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let mut recipe =
+            load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        recipe.artifacts.insert(
+            "same_app_file".to_string(),
+            RecipeArtifact::AppArtifact(AppArtifactReference {
+                app_ref: "retroarch".to_string(),
+                artifact: "file".to_string(),
+                input: None,
+                cache: "default".to_string(),
+            }),
+        );
+        recipe.steps[0].params.insert(
+            "source".to_string(),
+            ParamValue::Ref("artifacts.same_app_file.local_path".to_string()),
+        );
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+
+        let usage =
+            resolve_usage(&recipes, &["feature.copy_bios".to_string()], &apps, None).unwrap();
+        assert!(usage.contains_key("feature.copy_bios/copy_bios_dir"));
+    }
+
+    #[test]
+    fn source_provenance_allows_generic_input_for_app_aware_consumer() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let recipe = load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+
+        let usage =
+            resolve_usage(&recipes, &["feature.copy_bios".to_string()], &apps, None).unwrap();
+        assert!(usage.contains_key("feature.copy_bios/copy_bios_dir"));
+    }
+
+    #[test]
+    fn source_provenance_rejects_cross_app_artifact_group_through_extraction_output() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let mut recipe =
+            load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        recipe.artifacts.insert(
+            "foreign_file".to_string(),
+            RecipeArtifact::AppArtifact(AppArtifactReference {
+                app_ref: "other_app".to_string(),
+                artifact: "file".to_string(),
+                input: None,
+                cache: "default".to_string(),
+            }),
+        );
+        recipe.artifact_groups.insert(
+            "foreign_group".to_string(),
+            vec!["foreign_file".to_string()],
+        );
+
+        let mut extraction = recipe.steps[0].clone();
+        extraction.id = "extract_foreign_group".to_string();
+        extraction.type_name = "extract_artifacts".to_string();
+        extraction.app_ref = None;
+        extraction.params.clear();
+        extraction.params.insert(
+            "artifact_groups".to_string(),
+            ParamValue::Literal(json!(["foreign_group"])),
+        );
+
+        let mut consumer = recipe.steps[0].clone();
+        consumer.params.insert(
+            "source".to_string(),
+            ParamValue::Ref("steps.extract_foreign_group.outputs.files".to_string()),
+        );
+        recipe.steps = vec![extraction, consumer];
+
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+        let errors =
+            resolve_usage(&recipes, &["feature.copy_bios".to_string()], &apps, None).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "app_source_provenance_mismatch"));
+    }
+
+    #[test]
+    fn source_provenance_rejects_cross_app_artifact_through_extraction_output() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let mut recipe =
+            load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        recipe.artifacts.insert(
+            "foreign_file".to_string(),
+            RecipeArtifact::AppArtifact(AppArtifactReference {
+                app_ref: "other_app".to_string(),
+                artifact: "file".to_string(),
+                input: None,
+                cache: "default".to_string(),
+            }),
+        );
+
+        let mut extraction = recipe.steps[0].clone();
+        extraction.id = "extract_foreign_file".to_string();
+        extraction.type_name = "extract_artifacts".to_string();
+        extraction.app_ref = None;
+        extraction.params.clear();
+        extraction.params.insert(
+            "artifacts".to_string(),
+            ParamValue::Literal(json!(["foreign_file"])),
+        );
+
+        let mut consumer = recipe.steps[0].clone();
+        consumer.params.insert(
+            "source".to_string(),
+            ParamValue::Ref("steps.extract_foreign_file.outputs.files".to_string()),
+        );
+        recipe.steps = vec![extraction, consumer];
+
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+        let errors =
+            resolve_usage(&recipes, &["feature.copy_bios".to_string()], &apps, None).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "app_source_provenance_mismatch"));
+    }
+
+    #[test]
+    fn source_provenance_rejects_cross_app_artifact_through_extract_archive_output() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let mut recipe =
+            load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        recipe.artifacts.insert(
+            "foreign_archive".to_string(),
+            RecipeArtifact::AppArtifact(AppArtifactReference {
+                app_ref: "other_app".to_string(),
+                artifact: "file".to_string(),
+                input: None,
+                cache: "default".to_string(),
+            }),
+        );
+
+        let mut extraction = recipe.steps[0].clone();
+        extraction.id = "extract_foreign_archive".to_string();
+        extraction.type_name = "extract_archive".to_string();
+        extraction.app_ref = None;
+        extraction.params.clear();
+        extraction.params.insert(
+            "archive".to_string(),
+            ParamValue::Ref("artifacts.foreign_archive.local_path".to_string()),
+        );
+
+        let mut consumer = recipe.steps[0].clone();
+        consumer.params.insert(
+            "source".to_string(),
+            ParamValue::Ref("steps.extract_foreign_archive.outputs.extracted_path".to_string()),
+        );
+        recipe.steps = vec![extraction, consumer];
+
         let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
         let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
         let apps = HashMap::from([(app.id.clone(), app)]);

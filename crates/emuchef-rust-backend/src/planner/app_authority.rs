@@ -11,7 +11,9 @@ use serde_json::{json, Value};
 use crate::authored_models::{
     AppArtifactKind, AppArtifactSource, AppDefinitionV1, ReleaseProvider,
 };
-use crate::model::{AppArtifactReference, ParamValue, Recipe, RecipeArtifact, Step, StepCondition};
+use crate::model::{
+    AppArtifactReference, OrderedMap, ParamValue, Recipe, RecipeArtifact, Step, StepCondition,
+};
 use crate::step_specs;
 
 use super::{
@@ -356,15 +358,14 @@ pub(super) fn app_authority_error(code: &str, message: &str, details: Value) -> 
 
 fn execution_artifact_source(
     artifact: &crate::authored_models::AppArtifactV1,
-) -> Result<ExecutionArtifactSource, ()> {
+) -> Result<Option<ExecutionArtifactSource>, ()> {
     match &artifact.source {
-        AppArtifactSource::DirectUrl { url, sha256 }
-            if artifact.kind == crate::authored_models::AppArtifactKind::Apk =>
-        {
-            Ok(ExecutionArtifactSource::DirectUrl {
+        AppArtifactSource::UserProvided => Ok(None),
+        AppArtifactSource::DirectUrl { url, sha256 } => {
+            Ok(Some(ExecutionArtifactSource::DirectUrl {
                 url: url.clone(),
                 sha256: sha256.clone(),
-            })
+            }))
         }
         AppArtifactSource::LatestRelease {
             provider,
@@ -392,17 +393,85 @@ fn execution_artifact_source(
                 invert_asset_pattern == &Some(true),
             )
             .map_err(|_| ())?;
-            Ok(ExecutionArtifactSource::RemoteRelease {
+            Ok(Some(ExecutionArtifactSource::RemoteRelease {
                 provider: provider.to_string(),
                 service_origin: base_url.clone(),
                 repository: repository.clone(),
                 include_prereleases: *prerelease,
                 asset_pattern: asset_pattern.clone(),
                 invert_asset_pattern: invert_asset_pattern == &Some(true),
-            })
+            }))
         }
-        _ => Err(()),
     }
+}
+
+pub(super) fn validate_selected_user_provided_inputs(
+    recipes: &HashMap<String, Recipe>,
+    selected_artifact_ids: &HashSet<String>,
+    app_definitions: &HashMap<String, AppDefinitionV1>,
+    effective_input_bindings: &OrderedMap<Value>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    for selected_id in selected_artifact_ids {
+        let Some((recipe_id, artifact_id)) = selected_id.split_once('/') else {
+            continue;
+        };
+        let Some(recipe) = recipes.get(recipe_id) else {
+            continue;
+        };
+        let Some(RecipeArtifact::AppArtifact(reference)) = recipe.artifacts.get(artifact_id) else {
+            continue;
+        };
+        let Some(app_artifact) = app_definitions
+            .get(&reference.app_ref)
+            .and_then(|app| app.artifacts.get(&reference.artifact))
+        else {
+            continue;
+        };
+        if matches!(&app_artifact.source, AppArtifactSource::UserProvided) {
+            let Some(binding) = reference.input.as_ref() else {
+                errors.push(app_authority_error(
+                    "app_artifact_input_binding_required",
+                    "A selected user-provided App Artifact must bind one Recipe file input.",
+                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
+                ));
+                continue;
+            };
+            let Some(declaration) = recipe.inputs.get(&binding.input_id) else {
+                errors.push(app_authority_error(
+                    "app_artifact_input_binding_invalid",
+                    "A selected user-provided App Artifact must bind an input declared by the same Recipe.",
+                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
+                ));
+                continue;
+            };
+            if declaration.type_name != "file" || declaration.multiple {
+                errors.push(app_authority_error(
+                    "app_artifact_input_binding_invalid",
+                    "A selected user-provided App Artifact must bind one single-file Recipe input.",
+                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
+                ));
+                continue;
+            }
+            let input_id = super::make_execution_input_id(recipe_id, &binding.input_id);
+            if !super::binding_value(declaration, &input_id, effective_input_bindings)
+                .is_some_and(|value| value.as_str().is_some_and(|path| !path.trim().is_empty()))
+            {
+                errors.push(app_authority_error(
+                    "app_artifact_input_binding_missing_value",
+                    "A selected user-provided App Artifact requires a value for its Recipe file input.",
+                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
+                ));
+            }
+        } else if reference.input.is_some() {
+            errors.push(app_authority_error(
+                "app_artifact_input_binding_unsupported",
+                "Only a user-provided App Artifact can bind a Recipe file input.",
+                json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
+            ));
+        }
+    }
+    errors
 }
 
 fn referenced_app_ids(
@@ -455,11 +524,20 @@ pub(super) fn execution_app_snapshots(
 /// Project a Recipe-owned App Artifact reference into its reviewed source and provenance.
 pub(super) fn execution_app_artifact_projection(
     reference: &AppArtifactReference,
+    recipe_id: &str,
     app_definitions: &HashMap<String, AppDefinitionV1>,
 ) -> Option<(ExecutionArtifactSource, ExecutionArtifactAppProvenance)> {
     let app = app_definitions.get(&reference.app_ref)?;
     let app_artifact = app.artifacts.get(&reference.artifact)?;
-    let source = execution_artifact_source(app_artifact).ok()?;
+    let source = match execution_artifact_source(app_artifact).ok()? {
+        Some(source) => source,
+        None => {
+            let binding = reference.input.as_ref()?;
+            ExecutionArtifactSource::LocalInput {
+                input_id: super::make_execution_input_id(recipe_id, &binding.input_id),
+            }
+        }
+    };
     let provenance = ExecutionArtifactAppProvenance {
         app_id: app.id.clone(),
         artifact_id: reference.artifact.clone(),

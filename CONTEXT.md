@@ -87,6 +87,14 @@ catalog. Existing Recipes that have not migrated retain their current
 form-based artifact, install, and package-condition behavior until their own
 migration.
 
+The RetroArch App Definition owns named `kind: file` direct-URL artifacts for
+seven frontend archives, thirteen core archives, and three core-system
+archives. Its provisioning Recipe references these resources through the
+existing Recipe artifact IDs and keeps cache selection, artifact groups,
+extraction, step dependencies, and app-aware copy destinations. The Recipe's
+`retroarch_apk` remote-file declaration and legacy APK installation remain
+unchanged.
+
 An App Definition target names a file or directory at `app_data`,
 `external_app_data`, `shared_storage`, or `absolute_device_path`. App-aware
 `copy_files.dest` and compatible `path_exists` or `file_exists` conditions use
@@ -167,16 +175,19 @@ the ID preserves any authored parameters so the author can clear them
 explicitly. An empty field removes `app_ref`, and Rust validation supplies
 diagnostics for incomplete forms.
 
-Direct-URL APK sources require a public HTTPS URL without credentials or a
-fragment; signed query parameters are allowed. A direct URL does not pin a
-release or guarantee immutable bytes. The App Definition may include an
-expected SHA-256, which the artifact resolver checks against the returned
+App Definition `direct_url` sources for `apk` and `file` artifacts require a
+public HTTPS URL without credentials or a fragment; signed query parameters
+are allowed. A direct URL does not pin a release or guarantee immutable bytes.
+The App Definition may include an expected SHA-256, which the artifact
+resolver checks against the returned
 artifact after validating source policy, including on cache hits. The resolver
 calculates the SHA-256 for every direct-URL resolution and gives execution a
 verified per-run snapshot so later cache changes cannot alter bytes passed to
-APK inspection or installation. Durable execution reports include Recipe and
-App Definition artifact identities, filename, calculated SHA-256, cache status,
-and a redacted observed final URL only for network transfers. A calculated
+APK inspection or installation, or file extraction and copy steps. APK
+package-identity verification applies only to `apk` artifacts; `file` artifacts
+are not package-verified. Durable execution reports include Recipe and App
+Definition artifact identities, filename, calculated SHA-256, cache status, and
+a redacted observed final URL only for network transfers. A calculated
 checksum without a trusted expected value is not publisher authentication.
 Hostname source addresses are resolved for each direct HTTPS request and
 redirect. Every resolved address must pass the public-address policy, and the

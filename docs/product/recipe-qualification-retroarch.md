@@ -65,8 +65,12 @@ in the immutable plan, including the external app-data config file path.
   omitted elevated step does not block unrooted continuation. The rooted order
   relies on the planner's stable topological sort to preserve authored order
   between the elevated step and the now-ready launch step.
-- Artifact definitions enter the production resolution model at their exact
-  default-cache filenames with authored URLs unchanged.
+- The APK remains a Recipe `remote_file`. Seven frontend archives, thirteen
+  core archives, and three system archives resolve through named RetroArch App
+  Definition `kind: file` artifacts. The Recipe retains the existing artifact
+  IDs and group memberships and owns default-cache selection, extraction,
+  dependencies, and app-aware copy destinations. The thirteen core sources use
+  the same buildbot paths over HTTPS.
 - The generated workflow completes successfully through the deterministic
   dry-run adapters with no Failed, Blocked, or Cancelled record, including
   successful execution records for all six first-launch lifecycle steps.
