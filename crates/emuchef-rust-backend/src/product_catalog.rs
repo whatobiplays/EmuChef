@@ -4,7 +4,6 @@
 //! and authoring commands. A future catalog source can therefore resolve the
 //! same snapshot contract without changing this end-user API.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,18 +23,12 @@ pub(crate) fn describe(snapshot: &CatalogSnapshot) -> Result<Value, ApiError> {
     let recipes = recipes
         .iter()
         .map(|recipe| {
-            let required_capabilities = recipe
-                .steps
-                .iter()
-                .flat_map(|step| step.constraints.capabilities.iter().cloned())
-                .collect::<BTreeSet<_>>();
             json!({
                 "id": recipe.id,
                 "name": recipe.name,
                 "description": recipe.description,
                 "recipeDependencies": recipe.recipe_dependencies,
                 "features": recipe.provides.features,
-                "requiredCapabilities": required_capabilities,
                 "inputs": recipe.inputs.iter().map(|(id, input)| {
                     crate::dto::input_to_dto(&recipe.id, id, input)
                 }).collect::<Vec<_>>(),
@@ -294,10 +287,7 @@ overrides: {}
         assert_eq!(result["devicePlans"][0]["name"], "Example Plan");
         assert_eq!(result["deviceProfiles"][0]["name"], "Example Profile");
         assert_eq!(result["recipes"][0]["name"], "Example Recipe");
-        assert_eq!(
-            result["recipes"][0]["requiredCapabilities"],
-            json!(["shell_command"])
-        );
+        assert!(result["recipes"][0].get("requiredCapabilities").is_none());
         assert!(result.get("root").is_none());
         assert!(result.get("documentId").is_none());
         assert!(result.get("yaml").is_none());

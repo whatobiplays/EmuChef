@@ -149,16 +149,37 @@ devices still run its applicable baseline runtime permission actions and
 continue through launch because the launch depends on the baseline step only.
 When both permission steps are selected, the stable topological sort preserves
 their authored baseline-then-elevated order before launch.
-Configuration discovery reports the union of effective step capabilities for
-each valid Recipe. A Recipe with an unresolved App Target is unavailable, has
-unknown required capabilities, and carries a diagnostic identifying the
-affected Recipe and step. Discovery does not substitute authored-only
-constraints when target resolution fails. Target-resolution diagnostics are
-blocking errors when the affected Recipe is selected or required by a selected
-Recipe. Diagnostics for unrelated unselected Recipes remain visible warnings.
-Unknown required capabilities are omitted from serialized Recipe options.
-Duplicate App Definition identities make capability requirements unknown and
-Recipes unavailable because planning cannot choose one definition safely.
+Configuration discovery derives each Recipe's availability through the Rust
+planner with the same device context, bindings, App Definitions, target
+resolution, and step dependency rules used for execution planning. The planner
+is the only authority for effective App Target and permission capabilities,
+Android API applicability, runtime capability masks, dependency pruning, and
+optional-input pruning. A Recipe with retained planner steps is available. A
+genuinely empty Recipe and a Recipe whose optional inputs omit all work retain
+their available status. If capability pruning removes all otherwise-valid
+executable work, the Recipe is unavailable and `unavailableCapabilities`
+contains only missing runtime capabilities that can restore valid candidate
+work. This flat list describes possible blockers: independent work paths can
+become runnable through different capabilities, so the list does not mean all
+entries are cumulative requirements. A Recipe with an unresolved App Target,
+invalid permission authority, invalid dependency graph, or ambiguous App
+Definitions is unavailable with a diagnostic identifying the affected
+Recipe and step; discovery never substitutes authored-only constraints when
+planner resolution fails. Target-resolution diagnostics block the affected
+selected or dependency-required Recipe, while unrelated unselected Recipe
+diagnostics remain warnings. An API-inapplicable permission action remains in
+the plan as a skipped no-op and contributes neither `shell_command` nor
+`root_shell`; applicable permission actions retain their existing capability
+gates.
+
+A Recipe step that names an unsupported runtime capability is pruned with a
+Recipe-keyed diagnostic. The Recipe remains available when other planner-retained
+work can run. If unsupported requirements leave no retained work, the Recipe is
+unavailable; unsupported names are not reported as missing device capabilities.
+A Recipe that selects a valid user-provided App Artifact remains available while
+its required file input is unbound, while `planConfiguration` continues to reject
+that missing binding. Malformed App Artifact references, invalid input
+declarations, and invalid App Definition authority fail closed.
 
 App-aware `launch_app` and `force_stop_app` steps require `app_ref` and no
 authored package or activity parameters. An App Definition launcher activity is

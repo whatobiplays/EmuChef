@@ -7069,6 +7069,274 @@ fn app_authority_rejects_unknown_step_app_reference() {
     assert_app_planning_error(input, &[armsx1_app_definition()], "app_definition_unknown");
 }
 
+fn issue19_permission_planner_case(
+    permission_set: &str,
+    actions: Vec<crate::authored_models::AppRuntimePermissionAction>,
+    context_api_level: Option<i64>,
+    target_api_level: Option<i64>,
+    include_dependent: bool,
+    authored_root_requirement: bool,
+) -> (PlannerInput, crate::authored_models::AppDefinitionV1) {
+    let mut recipe = recipe_expansion_recipe("issue19.permission", Vec::new());
+    let params = ref_params(vec![
+        ("permission_set", ParamValue::Literal(json!(permission_set))),
+        (
+            "policy",
+            ParamValue::Literal(json!({ "on_failure": "warn" })),
+        ),
+    ]);
+    let mut permission = param_contract_step("permission", "grant_permissions", Vec::new(), params);
+    permission.app_ref = Some("armsx1".to_string());
+    if authored_root_requirement {
+        permission
+            .constraints
+            .capabilities
+            .push("root_shell".to_string());
+    }
+    recipe.steps = vec![permission];
+    if include_dependent {
+        let mut dependent = recipe_expansion_wait_step();
+        dependent.id = "dependent".to_string();
+        dependent.dependencies.push("permission".to_string());
+        recipe.steps.push(dependent);
+    }
+
+    let mut input = recipe_expansion_input(vec![recipe], vec!["issue19.permission"]);
+    input.device_context.android_api_level = context_api_level;
+    input.target_device =
+        target_api_level.map(|android_api_level| crate::planner::TargetDeviceBinding {
+            serial: "issue19-target".to_string(),
+            manufacturer: None,
+            model: None,
+            android_api_level: Some(android_api_level),
+        });
+
+    let selected_permission_set = crate::authored_models::AppPermissionSet {
+        runtime: actions,
+        app_ops: Vec::new(),
+    };
+    let mut app = armsx1_app_definition();
+    app.permission_sets = Some(if permission_set == "baseline" {
+        crate::authored_models::AppPermissionSets {
+            baseline: Some(selected_permission_set),
+            elevated: None,
+        }
+    } else {
+        crate::authored_models::AppPermissionSets {
+            baseline: None,
+            elevated: Some(selected_permission_set),
+        }
+    });
+
+    (input, app)
+}
+
+fn issue19_runtime_permission_action(
+    permission: &str,
+    android_api_min: Option<i64>,
+    android_api_max: Option<i64>,
+) -> crate::authored_models::AppRuntimePermissionAction {
+    crate::authored_models::AppRuntimePermissionAction {
+        permission: permission.to_string(),
+        android_api_min,
+        android_api_max,
+    }
+}
+
+#[test]
+fn issue19_all_inapplicable_elevated_step_stays_selected_without_shell_or_root() {
+    let action =
+        issue19_runtime_permission_action("android.permission.POST_NOTIFICATIONS", Some(33), None);
+    let (mut input, app) =
+        issue19_permission_planner_case("elevated", vec![action], Some(35), Some(30), true, false);
+
+    for (root_shell, shell_command) in [(false, true), (true, false)] {
+        input.runtime_capabilities.root_shell = root_shell;
+        input.runtime_capabilities.shell_command = shell_command;
+
+        let result = plan_execution_with_app_definitions(input.clone(), &[app.clone()]);
+
+        assert_eq!(
+            result.status,
+            PlanningStatus::Success,
+            "permission action is outside the target API range: {:?}",
+            result.errors
+        );
+        let plan = result.execution_plan.expect("inapplicable permission plan");
+        assert_eq!(plan.device_context.android_api_level, Some(30));
+        let permission_step = plan
+            .steps
+            .iter()
+            .find(|step| step.id == "issue19.permission/permission")
+            .expect("all-inapplicable permission step remains selected");
+        let action = &permission_step.permission_plan.as_ref().unwrap().actions[0];
+        assert!(matches!(
+            action.applicability(),
+            crate::planner::PermissionActionApplicability::NotApplicable { .. }
+        ));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|step| step.id == "issue19.permission/dependent"));
+        assert!(permission_step.params.is_empty());
+
+        let plan_json = serde_json::to_value(&plan).unwrap();
+        assert!(!crate::executor::root_requirements::reviewed_plan_requires_root_json(&plan_json));
+        let mut runner = crate::executor::ExecutorRunner::new(
+            crate::executor::DryRunExecutorAdapters::default(),
+        );
+        let execution = runner.run(&plan);
+        assert!(execution.success);
+        assert_eq!(execution.steps[0].step_id, "issue19.permission/permission");
+        assert_eq!(
+            execution.steps[0].status,
+            crate::executor::StepRunStatus::Skipped
+        );
+        assert_eq!(runner.adapters().device().root_preflight_calls(), 0);
+        assert!(runner.adapters().device().commands().is_empty());
+    }
+}
+
+#[test]
+fn issue19_mixed_permission_actions_keep_existing_shell_and_root_gates() {
+    let actions = vec![
+        issue19_runtime_permission_action("android.permission.CAMERA", Some(30), None),
+        issue19_runtime_permission_action("android.permission.POST_NOTIFICATIONS", Some(33), None),
+    ];
+    let (mut input, app) =
+        issue19_permission_planner_case("elevated", actions, Some(30), None, false, false);
+    input.runtime_capabilities.root_shell = false;
+    input.runtime_capabilities.shell_command = true;
+
+    let result = plan_execution_with_app_definitions(input.clone(), &[app.clone()]);
+    assert_eq!(result.status, PlanningStatus::Error);
+    assert!(result
+        .errors
+        .iter()
+        .any(|error| error.code == "empty_execution_plan"));
+
+    input.runtime_capabilities.root_shell = true;
+    input.runtime_capabilities.shell_command = false;
+    let result = plan_execution_with_app_definitions(input.clone(), &[app.clone()]);
+    assert_eq!(result.status, PlanningStatus::Error);
+    assert!(result
+        .errors
+        .iter()
+        .any(|error| error.code == "empty_execution_plan"));
+
+    input.runtime_capabilities.root_shell = true;
+    input.runtime_capabilities.shell_command = true;
+    let result = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.unwrap();
+    assert!(
+        crate::executor::root_requirements::reviewed_plan_requires_root_json(
+            &serde_json::to_value(&plan).unwrap()
+        )
+    );
+    let actions = &plan.steps[0].permission_plan.as_ref().unwrap().actions;
+    assert!(matches!(
+        actions[0].applicability(),
+        crate::planner::PermissionActionApplicability::Applicable
+    ));
+    assert!(matches!(
+        actions[1].applicability(),
+        crate::planner::PermissionActionApplicability::NotApplicable { .. }
+    ));
+}
+
+#[test]
+fn issue19_all_inapplicable_actions_preserve_authored_root_requirement() {
+    let action =
+        issue19_runtime_permission_action("android.permission.POST_NOTIFICATIONS", Some(33), None);
+    let (mut input, app) =
+        issue19_permission_planner_case("elevated", vec![action], Some(35), Some(30), false, true);
+    input.runtime_capabilities.root_shell = false;
+    input.runtime_capabilities.shell_command = false;
+
+    let result = plan_execution_with_app_definitions(input, &[app]);
+
+    assert_eq!(result.status, PlanningStatus::Error);
+    assert!(result
+        .errors
+        .iter()
+        .any(|error| error.code == "empty_execution_plan"));
+}
+
+#[test]
+fn issue19_unknown_android_api_for_bounded_action_remains_fail_closed() {
+    let action =
+        issue19_runtime_permission_action("android.permission.POST_NOTIFICATIONS", Some(33), None);
+    let (mut input, app) =
+        issue19_permission_planner_case("elevated", vec![action], None, None, false, false);
+    input.runtime_capabilities.root_shell = false;
+    input.runtime_capabilities.shell_command = false;
+
+    assert_app_planning_error(input, &[app], "permission_api_level_unknown");
+}
+
+#[test]
+fn issue19_pre_change_applicable_and_unrelated_plan_fingerprints() {
+    let action = issue19_runtime_permission_action("android.permission.CAMERA", Some(30), None);
+    let (input, app) =
+        issue19_permission_planner_case("elevated", vec![action], Some(35), None, true, false);
+    let applicable = plan_execution_with_app_definitions(input, &[app]);
+    assert_eq!(
+        applicable.status,
+        PlanningStatus::Success,
+        "{:?}",
+        applicable.errors
+    );
+    let applicable = applicable.execution_plan.unwrap();
+    let applicable_steps = applicable
+        .steps
+        .iter()
+        .map(|step| format!("{}:{}", step.id, step.type_name))
+        .collect::<Vec<_>>();
+    let applicable_digest = crate::plan_digest::execution_plan_digest(&applicable).unwrap();
+
+    assert_eq!(
+        applicable_steps,
+        vec![
+            "issue19.permission/permission:grant_permissions",
+            "issue19.permission/dependent:wait",
+        ]
+    );
+    assert_eq!(
+        applicable_digest,
+        "a1597e4c3d5ad912b837ea4fa0518e0cc6aef27077c2ae2a296778cd935b0f78"
+    );
+
+    let unrelated = crate::planner::plan_execution(recipe_expansion_input(
+        vec![recipe_expansion_recipe("issue19.unrelated", Vec::new())],
+        vec!["issue19.unrelated"],
+    ));
+    assert_eq!(
+        unrelated.status,
+        PlanningStatus::Success,
+        "{:?}",
+        unrelated.errors
+    );
+    let unrelated = unrelated.execution_plan.unwrap();
+    let unrelated_steps = unrelated
+        .steps
+        .iter()
+        .map(|step| format!("{}:{}", step.id, step.type_name))
+        .collect::<Vec<_>>();
+    let unrelated_digest = crate::plan_digest::execution_plan_digest(&unrelated).unwrap();
+
+    assert_eq!(unrelated_steps, vec!["issue19.unrelated/wait:wait"]);
+    assert_eq!(
+        unrelated_digest,
+        "dd076985ceece7c47eda8b2c1b79fb0271124f51d8f79bf4f6462871e611ebbe"
+    );
+}
+
 #[test]
 fn unbounded_app_permission_actions_resolve_without_a_known_android_api_level() {
     let mut app = armsx1_app_definition();

@@ -724,7 +724,6 @@ describe("Phase 5B workflow surfaces", () => {
           available: true,
           recipeDependencies: ["recipe.copy-bios"],
           contentRequirements: ["network_download"],
-          requiredCapabilities: ["adb_available", "apk_install"],
           unavailableCapabilities: [],
         },
         {
@@ -747,8 +746,17 @@ describe("Phase 5B workflow surfaces", () => {
           recommended: false,
           dependencyRequired: false,
           available: false,
-          requiredCapabilities: ["root_shell"],
-          unavailableCapabilities: ["root_shell"],
+          unavailableCapabilities: ["root_shell", "app_data_write"],
+        },
+        {
+          id: "recipe.optional-root-enhancement",
+          name: "Optional root enhancement",
+          description: "Apply optional enhancements when root access is available.",
+          selected: false,
+          recommended: false,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
         },
       ],
       inputs: [],
@@ -762,26 +770,37 @@ describe("Phase 5B workflow surfaces", () => {
 
     expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
     expect(screen.getByText("RetroArch", { selector: ".recipe-selection-summary p" })).toBeTruthy();
-    expect(screen.getByText("Recipes · 3 of 3 shown")).toBeTruthy();
-    expect(screen.getByText("Device connection")).toBeTruthy();
-    expect(screen.getByText("App installation")).toBeTruthy();
+    expect(screen.getByText("Recipes · 4 of 4 shown")).toBeTruthy();
     expect(screen.getByText("Also includes: Copy BIOS files")).toBeTruthy();
     expect(screen.getByText("Downloads files")).toBeTruthy();
+    const optionalRootRecipe = screen.getByRole("checkbox", { name: /Optional root enhancement/ }) as HTMLInputElement;
+    expect(optionalRootRecipe.disabled).toBe(false);
+    expect(optionalRootRecipe.getAttribute("aria-describedby"))
+      .not.toContain("recipe.optional-root-enhancement-blockers");
+    expect(screen.queryByText("Possible blockers: Root access")).toBeNull();
 
     const search = screen.getByRole("searchbox", { name: "Search recipes" });
     await user.type(search, "firmware");
     expect(screen.getByRole("checkbox", { name: /Copy BIOS files/ })).toBeTruthy();
     expect(screen.getByText("BIOS files required")).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: /RetroArch/ })).toBeNull();
-    expect(screen.getByText("Recipes · 1 of 3 shown")).toBeTruthy();
+    expect(screen.getByText("Recipes · 1 of 4 shown")).toBeTruthy();
 
     await user.clear(search);
     await user.click(screen.getByRole("radio", { name: "Unavailable" }));
-    expect(screen.getByRole("checkbox", { name: /Root tools/ })).toBeTruthy();
+    const blockedRecipe = screen.getByRole("checkbox", { name: /Root tools/ }) as HTMLInputElement;
+    expect(blockedRecipe.disabled).toBe(true);
+    const blockedDescriptionIds = blockedRecipe.getAttribute("aria-describedby")?.split(/\s+/) ?? [];
+    const blockedDescription = blockedDescriptionIds
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ");
+    expect(blockedDescription).toContain("Unavailable on this device");
+    expect(blockedDescription).toContain("Possible blockers: Root access, App data access");
     expect(screen.getByText("APK file required")).toBeTruthy();
     expect(screen.getByText("ROM or content folder required")).toBeTruthy();
-    expect(screen.getByText("Root access unavailable")).toBeTruthy();
+    expect(screen.getByText("Possible blockers: Root access, App data access")).toBeTruthy();
     expect(screen.queryByText("root_shell")).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Optional root enhancement/ })).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Copy BIOS files/ })).toBeNull();
 
     await user.click(screen.getByRole("radio", { name: "Selected" }));

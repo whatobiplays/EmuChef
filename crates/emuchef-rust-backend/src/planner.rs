@@ -4,7 +4,7 @@
 //! exposing protocol requests, running executor operations, probing devices, or
 //! mutating authored files.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
@@ -149,32 +149,7 @@ mod static_contract_tests {
     }
 }
 
-/// Report the same per-step capability requirements that planning uses for
-/// target-aware selection. Resolution errors are retained so callers cannot
-/// accidentally substitute authored constraints for unresolved App Targets.
-/// Configuration descriptions retain their existing recipe-level union until
-/// Recipe availability is redesigned separately.
-pub(crate) fn effective_recipe_capabilities(
-    recipe: &Recipe,
-    app_definitions: &[AppDefinitionV1],
-) -> Result<Vec<Vec<String>>, Vec<PlannerMessage>> {
-    let recipes = HashMap::from([(recipe.id.clone(), recipe.clone())]);
-    let apps = index_app_definitions(app_definitions)?;
-    let usage =
-        app_targets::resolve_usage(&recipes, std::slice::from_ref(&recipe.id), &apps, None)?;
-    Ok(recipe
-        .steps
-        .iter()
-        .map(|step| {
-            usage[&make_execution_step_id(&recipe.id, &step.id)]
-                .capabilities
-                .clone()
-        })
-        .collect())
-}
-
-/// Reject duplicate App Definition identities before a catalog-backed caller
-/// can choose one definition arbitrarily for planning or capability reporting.
+/// Build an App Definition lookup and reject ambiguous identities before planning.
 fn index_app_definitions(
     app_definitions: &[AppDefinitionV1],
 ) -> Result<HashMap<String, AppDefinitionV1>, Vec<PlannerMessage>> {
@@ -300,6 +275,81 @@ pub struct RuntimeCapabilities {
     pub package_remove_for_user: bool,
     pub root_shell: bool,
     pub app_data_write: bool,
+}
+
+/// A runtime capability name recognized by planner selection.
+#[derive(Clone, Copy)]
+enum RuntimeCapability {
+    AdbAvailable,
+    ApkInstall,
+    SharedStorageWrite,
+    AppLaunch,
+    ShellCommand,
+    PackageRemoveForUser,
+    RootShell,
+    AppDataWrite,
+}
+
+impl RuntimeCapability {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "adb_available" => Some(Self::AdbAvailable),
+            "apk_install" => Some(Self::ApkInstall),
+            "shared_storage_write" => Some(Self::SharedStorageWrite),
+            "app_launch" => Some(Self::AppLaunch),
+            "shell_command" => Some(Self::ShellCommand),
+            "package_remove_for_user" => Some(Self::PackageRemoveForUser),
+            "root_shell" => Some(Self::RootShell),
+            "app_data_write" => Some(Self::AppDataWrite),
+            _ => None,
+        }
+    }
+
+    fn is_available(self, capabilities: &RuntimeCapabilities) -> bool {
+        match self {
+            Self::AdbAvailable => capabilities.adb_available,
+            Self::ApkInstall => capabilities.apk_install,
+            Self::SharedStorageWrite => capabilities.shared_storage_write,
+            Self::AppLaunch => capabilities.app_launch,
+            Self::ShellCommand => capabilities.shell_command,
+            Self::PackageRemoveForUser => capabilities.package_remove_for_user,
+            Self::RootShell => capabilities.root_shell,
+            Self::AppDataWrite => capabilities.app_data_write,
+        }
+    }
+
+    fn set_available(self, capabilities: &mut RuntimeCapabilities, available: bool) {
+        match self {
+            Self::AdbAvailable => capabilities.adb_available = available,
+            Self::ApkInstall => capabilities.apk_install = available,
+            Self::SharedStorageWrite => capabilities.shared_storage_write = available,
+            Self::AppLaunch => capabilities.app_launch = available,
+            Self::ShellCommand => capabilities.shell_command = available,
+            Self::PackageRemoveForUser => capabilities.package_remove_for_user = available,
+            Self::RootShell => capabilities.root_shell = available,
+            Self::AppDataWrite => capabilities.app_data_write = available,
+        }
+    }
+}
+
+pub(crate) fn runtime_capability_available(
+    capabilities: &RuntimeCapabilities,
+    capability: &str,
+) -> bool {
+    RuntimeCapability::from_name(capability)
+        .is_some_and(|capability| capability.is_available(capabilities))
+}
+
+pub(crate) fn set_runtime_capability(
+    capabilities: &mut RuntimeCapabilities,
+    name: &str,
+    available: bool,
+) -> bool {
+    let Some(capability) = RuntimeCapability::from_name(name) else {
+        return false;
+    };
+    capability.set_available(capabilities, available);
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -951,8 +1001,39 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
 /// App Definitions are copied into the resulting plan as immutable snapshots;
 /// review and execution use those snapshots without reopening the catalog.
 pub fn plan_execution_with_app_definitions(
+    input: PlannerInput,
+    app_definitions: &[AppDefinitionV1],
+) -> PlanningResult {
+    plan_execution_with_app_definitions_inner(input, app_definitions, false, false, false)
+}
+
+/// Select a Recipe graph for capability availability while leaving unresolved
+/// user bindings to their separate validation gate. Device context, raw
+/// bindings, target resolution, permission authority, capability pruning, and
+/// dependency pruning all use the same planner path as execution planning.
+pub(crate) fn plan_execution_for_recipe_availability(
+    input: PlannerInput,
+    app_definitions: &[AppDefinitionV1],
+) -> PlanningResult {
+    plan_execution_with_app_definitions_inner(input, app_definitions, true, false, true)
+}
+
+/// Select the planner's upper-bound graph, treating unrecognized capability
+/// names as satisfiable only for this diagnostic probe. Execution planning
+/// continues to treat those names as unavailable.
+pub(crate) fn plan_execution_for_recipe_availability_upper_bound(
+    input: PlannerInput,
+    app_definitions: &[AppDefinitionV1],
+) -> PlanningResult {
+    plan_execution_with_app_definitions_inner(input, app_definitions, true, true, false)
+}
+
+fn plan_execution_with_app_definitions_inner(
     mut input: PlannerInput,
     app_definitions: &[AppDefinitionV1],
+    ignore_binding_diagnostics: bool,
+    assume_unrecognized_capabilities_available: bool,
+    report_unrecognized_capability_warnings: bool,
 ) -> PlanningResult {
     // A selected target carries the device's observed API level. Retain that
     // fact in the plan context so permission applicability and review agree.
@@ -987,7 +1068,7 @@ pub fn plan_execution_with_app_definitions(
         &input.user_configuration_bindings,
         &input.device_plan_input_bindings,
     );
-    if !binding_resolution.diagnostics.is_empty() {
+    if !binding_resolution.diagnostics.is_empty() && !ignore_binding_diagnostics {
         return error_result(
             binding_resolution
                 .diagnostics
@@ -1039,21 +1120,34 @@ pub fn plan_execution_with_app_definitions(
         let Some(usage) = target_usage.get_mut(step_id) else {
             continue;
         };
-        app_permissions::add_derived_step_capability(&mut usage.capabilities, "shell_command");
-        if permission_plan.permission_set == PermissionSetKind::Elevated {
-            app_permissions::add_derived_step_capability(&mut usage.capabilities, "root_shell");
+        // API-inapplicable permission actions remain planned no-op steps and
+        // do not need the shell or root authority used by applicable actions.
+        if permission_plan.actions.iter().any(|action| {
+            matches!(
+                action.applicability(),
+                PermissionActionApplicability::Applicable
+            )
+        }) {
+            app_permissions::add_derived_step_capability(&mut usage.capabilities, "shell_command");
+            if permission_plan.permission_set == PermissionSetKind::Elevated {
+                app_permissions::add_derived_step_capability(&mut usage.capabilities, "root_shell");
+            }
         }
     }
 
-    let (selected_step_ids, selection_errors) = selected_step_ids(
+    let (selected_step_ids, selection_errors, selection_warnings) = selected_step_ids(
         &recipes,
         &expanded_recipe_refs,
         &effective_input_bindings,
         &input.runtime_capabilities,
         &target_usage,
+        assume_unrecognized_capabilities_available,
+        report_unrecognized_capability_warnings,
     );
     if !selection_errors.is_empty() {
-        return error_result(selection_errors);
+        let mut result = error_result(selection_errors);
+        result.warnings = selection_warnings;
+        return result;
     }
     let selected_artifact_ids =
         selected_artifact_ids(&recipes, &expanded_recipe_refs, &selected_step_ids);
@@ -1078,6 +1172,7 @@ pub fn plan_execution_with_app_definitions(
         &selected_artifact_ids,
         &app_definitions,
         &effective_input_bindings,
+        ignore_binding_diagnostics,
     );
     if !app_artifact_input_errors.is_empty() {
         return error_result(app_artifact_input_errors);
@@ -1103,11 +1198,13 @@ pub fn plan_execution_with_app_definitions(
         return error_result(step_errors);
     }
     if ordered_steps.is_empty() {
-        return error_result(vec![PlannerMessage {
+        let mut result = error_result(vec![PlannerMessage {
             code: "empty_execution_plan".to_string(),
             message: "Execution plan emission produced no runnable steps.".to_string(),
             details: json!({ "plan_id": input.plan_id }),
         }]);
+        result.warnings = selection_warnings;
+        return result;
     }
 
     let emit_product_contract = input.catalog_identity.is_some() || input.target_device.is_some();
@@ -1242,7 +1339,7 @@ pub fn plan_execution_with_app_definitions(
 
     PlanningResult {
         status: PlanningStatus::Success,
-        warnings: Vec::new(),
+        warnings: selection_warnings,
         errors: Vec::new(),
         execution_plan: Some(execution_plan),
         schema_version: SCHEMA_VERSION,
@@ -1678,10 +1775,13 @@ fn selected_step_ids(
     input_bindings: &OrderedMap<Value>,
     runtime_capabilities: &RuntimeCapabilities,
     target_usage: &HashMap<String, app_targets::ResolvedStepUsage>,
-) -> (HashSet<String>, Vec<PlannerMessage>) {
+    assume_unrecognized_capabilities_available: bool,
+    report_unrecognized_capability_warnings: bool,
+) -> (HashSet<String>, Vec<PlannerMessage>, Vec<PlannerMessage>) {
     let mut selected = HashSet::new();
     let mut availability_by_step_id = HashMap::new();
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
 
     for recipe_id in expanded_recipe_refs {
         let Some(recipe) = recipes.get(recipe_id) else {
@@ -1692,10 +1792,34 @@ fn selected_step_ids(
 
         for step in &recipe.steps {
             let step_id = make_execution_step_id(recipe_id, &step.id);
-            let available = target_usage[&step_id]
-                .capabilities
-                .iter()
-                .all(|capability| runtime_capability_available(runtime_capabilities, capability));
+            let step_capabilities = &target_usage[&step_id].capabilities;
+            if report_unrecognized_capability_warnings
+                && !assume_unrecognized_capabilities_available
+            {
+                let unsupported = step_capabilities
+                    .iter()
+                    .filter(|name| RuntimeCapability::from_name(name).is_none())
+                    .collect::<BTreeSet<_>>();
+                for capability in unsupported {
+                    warnings.push(PlannerMessage {
+                        code: "unsupported_runtime_capability".to_string(),
+                        message: format!(
+                            "The planner pruned this step because it requires unsupported runtime capability '{capability}'; update the Recipe to use a capability supported by the planner."
+                        ),
+                        details: json!({
+                            "recipe_ref": recipe_id,
+                            "step_id": step.id,
+                            "capability": capability,
+                        }),
+                    });
+                }
+            }
+            let available = step_capabilities.iter().all(|name| {
+                RuntimeCapability::from_name(name)
+                    .map_or(assume_unrecognized_capabilities_available, |capability| {
+                        capability.is_available(runtime_capabilities)
+                    })
+            });
             availability_by_step_id.insert(step_id, available);
             available_by_local_step_id.insert(step.id.clone(), available);
             if available {
@@ -1715,7 +1839,7 @@ fn selected_step_ids(
     }
 
     if !errors.is_empty() {
-        return (HashSet::new(), errors);
+        return (HashSet::new(), errors, warnings);
     }
 
     (
@@ -1727,21 +1851,8 @@ fn selected_step_ids(
             input_bindings,
         ),
         Vec::new(),
+        warnings,
     )
-}
-
-fn runtime_capability_available(capabilities: &RuntimeCapabilities, capability: &str) -> bool {
-    match capability {
-        "adb_available" => capabilities.adb_available,
-        "apk_install" => capabilities.apk_install,
-        "shared_storage_write" => capabilities.shared_storage_write,
-        "app_launch" => capabilities.app_launch,
-        "shell_command" => capabilities.shell_command,
-        "package_remove_for_user" => capabilities.package_remove_for_user,
-        "root_shell" => capabilities.root_shell,
-        "app_data_write" => capabilities.app_data_write,
-        _ => false,
-    }
 }
 
 fn select_local_step_ids(

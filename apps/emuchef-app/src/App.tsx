@@ -2925,6 +2925,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                         type="checkbox"
                         disabled={qualificationLocksIntent || recipeSelectionDisabled(recipe)}
                         checked={selectedRecipeIds.has(recipe.id) || recipe.dependencyRequired}
+                        aria-describedby={[
+                          `recipe-${recipe.id}-status`,
+                          ...(recipe.unavailableCapabilities.length > 0 ? [`recipe-${recipe.id}-blockers`] : []),
+                          ...(recipe.dependencyRequired ? [`recipe-${recipe.id}-dependency`] : []),
+                        ].join(" ")}
                         onChange={(event) => {
                           const selected = updateRecipeSelection(
                             workflow.selectedRecipes ?? [],
@@ -2936,7 +2941,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                       />
                       <span>
                         <strong>{recipe.name}</strong>
-                        <small>
+                        <small id={`recipe-${recipe.id}-status`}>
                           {recipe.dependencyRequired
                             ? "Required dependency"
                             : !recipe.available
@@ -2954,7 +2959,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                           </small>
                         )}
                         {recipe.dependencyRequired && (
-                          <small className="recipe-dependencies">Added automatically because another selected recipe requires it.</small>
+                          <small id={`recipe-${recipe.id}-dependency`} className="recipe-dependencies">Added automatically because another selected recipe requires it.</small>
                         )}
                         {(recipe.contentRequirements ?? []).length > 0 && (
                           <span className="recipe-requirements" aria-label="What you'll need">
@@ -2970,9 +2975,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                             ))}
                           </span>
                         )}
-                        {(recipe.requiredCapabilities ?? []).length > 0 && (
-                          <span className="recipe-requirements" aria-label="Requirements">
-                            {(recipe.requiredCapabilities ?? []).map((capability) => {
+                        {recipe.unavailableCapabilities.length > 0 && (
+                          <small id={`recipe-${recipe.id}-blockers`} className="recipe-dependencies">
+                            Possible blockers: {recipe.unavailableCapabilities.map((capability) => {
                               const label = ({
                                 adb_available: "Device connection",
                                 apk_install: "App installation",
@@ -2982,18 +2987,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                                 package_remove_for_user: "App removal",
                                 root_shell: "Root access",
                                 app_data_write: "App data access",
-                              } as Record<string, string>)[capability] ?? "Additional device requirement";
-                              const unavailable = recipe.unavailableCapabilities.includes(capability);
-                              return (
-                                <span
-                                  key={capability}
-                                  className={`recipe-requirement${unavailable ? " unavailable" : ""}`}
-                                >
-                                  {unavailable ? `${label} unavailable` : label}
-                                </span>
-                              );
-                            })}
-                          </span>
+                              } as Record<string, string>)[capability] ?? "Additional device capability";
+                              return label;
+                            }).join(", ")}
+                          </small>
                         )}
                       </span>
                     </label>
