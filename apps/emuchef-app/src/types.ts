@@ -91,7 +91,7 @@ export interface RecipeOption {
   available: boolean;
   recipeDependencies?: string[];
   contentRequirements?: Array<"apk_file" | "bios_files" | "rom_content" | "network_download">;
-  requiredCapabilities?: string[];
+  /** Unavailable device capabilities that may block this recipe. */
   unavailableCapabilities: string[];
 }
 

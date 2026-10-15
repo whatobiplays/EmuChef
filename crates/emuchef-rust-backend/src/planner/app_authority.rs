@@ -405,11 +405,15 @@ fn execution_artifact_source(
     }
 }
 
+/// Validate selected user-provided App Artifacts against their Recipe inputs.
+/// Availability may defer an absent value, but malformed bindings and present
+/// values with invalid shapes remain planning errors.
 pub(super) fn validate_selected_user_provided_inputs(
     recipes: &HashMap<String, Recipe>,
     selected_artifact_ids: &HashSet<String>,
     app_definitions: &HashMap<String, AppDefinitionV1>,
     effective_input_bindings: &OrderedMap<Value>,
+    allow_missing_value: bool,
 ) -> Vec<PlannerMessage> {
     let mut errors = Vec::new();
     for selected_id in selected_artifact_ids {
@@ -454,7 +458,11 @@ pub(super) fn validate_selected_user_provided_inputs(
                 continue;
             }
             let input_id = super::make_execution_input_id(recipe_id, &binding.input_id);
-            if !super::binding_value(declaration, &input_id, effective_input_bindings)
+            let value = super::binding_value(declaration, &input_id, effective_input_bindings);
+            if value.is_none() && allow_missing_value {
+                continue;
+            }
+            if !value
                 .is_some_and(|value| value.as_str().is_some_and(|path| !path.trim().is_empty()))
             {
                 errors.push(app_authority_error(

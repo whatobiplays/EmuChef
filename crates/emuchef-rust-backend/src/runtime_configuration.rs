@@ -4,7 +4,7 @@
 //! selection, recipe dependencies, and binding precedence. It performs no ADB,
 //! download, extraction, copy, device-write, or persistence operations.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -408,6 +408,383 @@ pub(crate) fn plan_prepared_input(
     crate::planner::plan_execution_with_app_definitions(input, &app_definitions)
 }
 
+#[derive(Debug)]
+struct RecipeAvailability {
+    available: bool,
+    unavailable_capabilities: Vec<String>,
+}
+
+/// Classify one Recipe by probing the planner with the same selected device,
+/// bindings, App Definitions, and dependency rules used by configuration
+/// planning. Counterfactual capability sets are used only to identify which
+/// missing capabilities can make a valid retained graph runnable.
+fn recipe_availability(
+    prepared: &PreparedConfiguration,
+    recipe: &Recipe,
+    app_definitions: &[crate::authored_models::AppDefinitionV1],
+) -> (RecipeAvailability, Vec<RuntimeConfigurationDiagnostic>) {
+    let severity = if prepared.expanded_recipe_refs.contains(&recipe.id) {
+        "error"
+    } else {
+        "warning"
+    };
+    let mut candidate = prepared.clone();
+    candidate.selected_recipe_refs = vec![recipe.id.clone()];
+    let plan_id = format!("plan.{}.001", candidate.effective_device_plan);
+    let Some(input) = candidate.planner_input(plan_id) else {
+        return (
+            RecipeAvailability {
+                available: false,
+                unavailable_capabilities: Vec::new(),
+            },
+            Vec::new(),
+        );
+    };
+
+    let actual =
+        crate::planner::plan_execution_for_recipe_availability(input.clone(), app_definitions);
+    let mut diagnostics = recipe_planner_diagnostics(&actual, &recipe.id, severity, false);
+    if planning_result_has_steps(&actual) {
+        return (
+            RecipeAvailability {
+                available: true,
+                unavailable_capabilities: Vec::new(),
+            },
+            diagnostics,
+        );
+    }
+    if !planning_result_is_empty_only(&actual) {
+        if diagnostics.is_empty() {
+            diagnostics.push(recipe_availability_diagnostic(
+                &recipe.id,
+                severity,
+                "recipe_availability_unresolved",
+                "The planner could not determine whether this Recipe has a runnable graph.",
+            ));
+        }
+        return (
+            RecipeAvailability {
+                available: false,
+                unavailable_capabilities: Vec::new(),
+            },
+            diagnostics,
+        );
+    }
+
+    // An upper-bound planner run distinguishes a genuinely empty or
+    // optional-input-only graph from executable work pruned by capabilities.
+    let mut upper_bound_input = input.clone();
+    upper_bound_input.runtime_capabilities = all_runtime_capabilities();
+    let upper_bound = crate::planner::plan_execution_for_recipe_availability_upper_bound(
+        upper_bound_input,
+        app_definitions,
+    );
+    if !planning_result_has_steps(&upper_bound) {
+        if planning_result_is_empty_only(&upper_bound) {
+            diagnostics.extend(recipe_planner_diagnostics(
+                &upper_bound,
+                &recipe.id,
+                severity,
+                false,
+            ));
+            return (
+                RecipeAvailability {
+                    available: true,
+                    unavailable_capabilities: Vec::new(),
+                },
+                diagnostics,
+            );
+        }
+        diagnostics.extend(recipe_planner_diagnostics(
+            &upper_bound,
+            &recipe.id,
+            severity,
+            false,
+        ));
+        if diagnostics.is_empty() {
+            diagnostics.push(recipe_availability_diagnostic(
+                &recipe.id,
+                severity,
+                "recipe_availability_unresolved",
+                "The planner could not validate this Recipe graph even with all device capabilities enabled.",
+            ));
+        }
+        return (
+            RecipeAvailability {
+                available: false,
+                unavailable_capabilities: Vec::new(),
+            },
+            diagnostics,
+        );
+    }
+
+    let candidate_capabilities = upper_bound
+        .execution_plan
+        .iter()
+        .flat_map(|plan| plan.steps.iter())
+        .flat_map(|step| step.constraints.capabilities.iter())
+        .filter(|capability| {
+            !crate::planner::runtime_capability_available(&input.runtime_capabilities, capability)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut missing_candidates = Vec::new();
+    let mut unsupported_capabilities = Vec::new();
+    for capability in candidate_capabilities {
+        let mut probe_capabilities = input.runtime_capabilities.clone();
+        if crate::planner::set_runtime_capability(&mut probe_capabilities, &capability, true) {
+            missing_candidates.push(capability);
+        } else {
+            unsupported_capabilities.push(capability);
+        }
+    }
+    if missing_candidates.is_empty() {
+        diagnostics.extend(recipe_planner_diagnostics(
+            &upper_bound,
+            &recipe.id,
+            severity,
+            false,
+        ));
+        if unsupported_capabilities.is_empty() {
+            diagnostics.push(recipe_availability_diagnostic(
+                &recipe.id,
+                severity,
+                "recipe_availability_unresolved",
+                "The planner pruned all work without identifying a missing runtime capability.",
+            ));
+        } else {
+            diagnostics.retain(|diagnostic| diagnostic.code != "unsupported_runtime_capability");
+            diagnostics.push(unsupported_capability_diagnostic(
+                &recipe.id,
+                severity,
+                &unsupported_capabilities,
+            ));
+        }
+        return (
+            RecipeAvailability {
+                available: false,
+                unavailable_capabilities: Vec::new(),
+            },
+            diagnostics,
+        );
+    }
+
+    let mut minimal_solutions = Vec::<Vec<String>>::new();
+    for subset in capability_subsets(&missing_candidates) {
+        if minimal_solutions.iter().any(|solution| {
+            solution
+                .iter()
+                .all(|capability| subset.contains(capability))
+        }) {
+            continue;
+        }
+        let mut probe_input = input.clone();
+        let mut unknown_capability = None;
+        for capability in &subset {
+            if !crate::planner::set_runtime_capability(
+                &mut probe_input.runtime_capabilities,
+                capability,
+                true,
+            ) {
+                unknown_capability = Some(capability.clone());
+                break;
+            }
+        }
+        if let Some(capability) = unknown_capability {
+            diagnostics.push(recipe_availability_diagnostic(
+                &recipe.id,
+                severity,
+                "recipe_availability_unknown_capability",
+                &format!("The planner selected an unsupported runtime capability: {capability}."),
+            ));
+            return (
+                RecipeAvailability {
+                    available: false,
+                    unavailable_capabilities: Vec::new(),
+                },
+                diagnostics,
+            );
+        }
+
+        let probe =
+            crate::planner::plan_execution_for_recipe_availability(probe_input, app_definitions);
+        if planning_result_has_steps(&probe) {
+            minimal_solutions.push(subset);
+        } else if !planning_result_is_empty_only(&probe) {
+            diagnostics.extend(recipe_planner_diagnostics(
+                &probe, &recipe.id, severity, false,
+            ));
+            if diagnostics.is_empty() {
+                diagnostics.push(recipe_availability_diagnostic(
+                    &recipe.id,
+                    severity,
+                    "recipe_availability_unresolved",
+                    "The planner could not validate a capability candidate graph.",
+                ));
+            }
+            return (
+                RecipeAvailability {
+                    available: false,
+                    unavailable_capabilities: Vec::new(),
+                },
+                diagnostics,
+            );
+        }
+    }
+
+    let blockers = minimal_solutions
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if blockers.is_empty() {
+        if unsupported_capabilities.is_empty() {
+            diagnostics.push(recipe_availability_diagnostic(
+                &recipe.id,
+                severity,
+                "recipe_availability_unresolved",
+                "The planner found executable work but no missing capability set that restores a runnable graph.",
+            ));
+        } else {
+            diagnostics.retain(|diagnostic| diagnostic.code != "unsupported_runtime_capability");
+            diagnostics.push(unsupported_capability_diagnostic(
+                &recipe.id,
+                severity,
+                &unsupported_capabilities,
+            ));
+        }
+    }
+    (
+        RecipeAvailability {
+            available: false,
+            unavailable_capabilities: blockers,
+        },
+        diagnostics,
+    )
+}
+
+fn planning_result_has_steps(result: &crate::planner::PlanningResult) -> bool {
+    result
+        .execution_plan
+        .as_ref()
+        .is_some_and(|plan| !plan.steps.is_empty())
+}
+
+fn planning_result_is_empty_only(result: &crate::planner::PlanningResult) -> bool {
+    result.execution_plan.is_none()
+        && !result.errors.is_empty()
+        && result
+            .errors
+            .iter()
+            .all(|error| error.code == "empty_execution_plan")
+}
+
+fn recipe_planner_diagnostics(
+    result: &crate::planner::PlanningResult,
+    recipe_id: &str,
+    error_severity: &'static str,
+    include_empty_plan: bool,
+) -> Vec<RuntimeConfigurationDiagnostic> {
+    let mut diagnostics = result
+        .warnings
+        .iter()
+        .cloned()
+        .map(|message| {
+            let mut diagnostic = planner_result_diagnostic("warning", message);
+            diagnostic.key = Some(recipe_id.to_string());
+            diagnostic
+        })
+        .collect::<Vec<_>>();
+    diagnostics.extend(
+        result
+            .errors
+            .iter()
+            .filter(|error| include_empty_plan || error.code != "empty_execution_plan")
+            .cloned()
+            .map(|message| {
+                let mut diagnostic = planner_result_diagnostic(error_severity, message);
+                diagnostic.key = Some(recipe_id.to_string());
+                diagnostic
+            }),
+    );
+    diagnostics
+}
+
+fn recipe_availability_diagnostic(
+    recipe_id: &str,
+    severity: &'static str,
+    code: &str,
+    message: &str,
+) -> RuntimeConfigurationDiagnostic {
+    RuntimeConfigurationDiagnostic {
+        severity,
+        code: code.to_string(),
+        message: message.to_string(),
+        key: Some(recipe_id.to_string()),
+        provenance: None,
+        details: json!({}),
+    }
+}
+
+fn unsupported_capability_diagnostic(
+    recipe_id: &str,
+    severity: &'static str,
+    capabilities: &[String],
+) -> RuntimeConfigurationDiagnostic {
+    recipe_availability_diagnostic(
+        recipe_id,
+        severity,
+        "recipe_availability_unknown_capability",
+        &format!(
+            "The Recipe requires unsupported runtime capability name(s): {}. Update the Recipe to use capabilities supported by the planner.",
+            capabilities.join(", ")
+        ),
+    )
+}
+
+fn capability_subsets(candidates: &[String]) -> Vec<Vec<String>> {
+    fn append_combinations(
+        candidates: &[String],
+        start: usize,
+        remaining: usize,
+        current: &mut Vec<String>,
+        combinations: &mut Vec<Vec<String>>,
+    ) {
+        if remaining == 0 {
+            combinations.push(current.clone());
+            return;
+        }
+        let last_start = candidates.len() - remaining;
+        for index in start..=last_start {
+            current.push(candidates[index].clone());
+            append_combinations(candidates, index + 1, remaining - 1, current, combinations);
+            current.pop();
+        }
+    }
+
+    let mut combinations = Vec::new();
+    for size in 1..=candidates.len() {
+        append_combinations(candidates, 0, size, &mut Vec::new(), &mut combinations);
+    }
+    combinations
+}
+
+fn all_runtime_capabilities() -> crate::planner::RuntimeCapabilities {
+    crate::planner::RuntimeCapabilities {
+        adb_available: true,
+        apk_install: true,
+        shared_storage_write: true,
+        app_launch: true,
+        shell_command: true,
+        package_remove_for_user: true,
+        root_shell: true,
+        app_data_write: true,
+    }
+}
+
 /// Warn when two active, user-supplied file inputs resolve to one filesystem
 /// object. Canonical identity is used only for comparison and is never copied
 /// into the diagnostic, serialized response, or logs.
@@ -485,34 +862,9 @@ pub(crate) fn describe_configuration(
         .recipes
         .iter()
         .map(|recipe| {
-            // An unresolved target makes the recipe's requirements unknown.
-            // Keep it unavailable and report the authored error instead of
-            // treating an empty authored constraint list as complete.
-            let required_capabilities =
-                match crate::planner::effective_recipe_capabilities(recipe, &app_definitions) {
-                    Ok(capabilities) => Some(
-                        capabilities
-                            .into_iter()
-                            .flatten()
-                            .collect::<std::collections::BTreeSet<_>>(),
-                    ),
-                    Err(errors) => {
-                        // Catalog discovery includes unselected Recipes. Their
-                        // target errors remain visible without blocking review
-                        // of an unrelated selected Recipe.
-                        let severity = if prepared.expanded_recipe_refs.contains(&recipe.id) {
-                            "error"
-                        } else {
-                            "warning"
-                        };
-                        target_diagnostics.extend(errors.into_iter().map(|error| {
-                            let mut diagnostic = planner_result_diagnostic(severity, error);
-                            diagnostic.key = Some(recipe.id.clone());
-                            diagnostic
-                        }));
-                        None
-                    }
-                };
+            let (availability, diagnostics) =
+                recipe_availability(&prepared, recipe, &app_definitions);
+            target_diagnostics.extend(diagnostics);
             let mut content_requirements = std::collections::BTreeSet::new();
             if !recipe.artifacts.is_empty() {
                 content_requirements.insert("network_download");
@@ -531,22 +883,6 @@ pub(crate) fn describe_configuration(
                     _ => {}
                 }
             }
-            let unavailable_capabilities = required_capabilities
-                .as_ref()
-                .filter(|_| prepared.device_plan_parts.is_some())
-                .map(|capabilities| {
-                    capabilities
-                        .iter()
-                        .filter(|capability| {
-                            !runtime_capability_available(
-                                &prepared.runtime_capabilities,
-                                capability,
-                            )
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
             let explicitly_selected = prepared.selected_recipe_refs.contains(&recipe.id);
             let recommended = prepared
                 .device_plan_parts
@@ -554,21 +890,18 @@ pub(crate) fn describe_configuration(
                 .is_some_and(|parts| parts.selected_recipe_refs.contains(&recipe.id));
             let dependency_required =
                 prepared.expanded_recipe_refs.contains(&recipe.id) && !explicitly_selected;
-            let mut option = json!({
+            let option = json!({
                 "id": recipe.id,
                 "name": recipe.name,
                 "description": recipe.description,
                 "selected": explicitly_selected,
                 "recommended": recommended,
                 "dependencyRequired": dependency_required,
-                "available": required_capabilities.is_some() && unavailable_capabilities.is_empty(),
+                "available": availability.available,
                 "recipeDependencies": recipe.recipe_dependencies,
                 "contentRequirements": content_requirements,
-                "unavailableCapabilities": unavailable_capabilities,
+                "unavailableCapabilities": availability.unavailable_capabilities,
             });
-            if let Some(capabilities) = required_capabilities {
-                option["requiredCapabilities"] = json!(capabilities);
-            }
             option
         })
         .collect();
@@ -617,23 +950,6 @@ pub(crate) fn describe_configuration(
         inputs,
         diagnostics,
     })
-}
-
-fn runtime_capability_available(
-    capabilities: &crate::planner::RuntimeCapabilities,
-    capability: &str,
-) -> bool {
-    match capability {
-        "adb_available" => capabilities.adb_available,
-        "apk_install" => capabilities.apk_install,
-        "shared_storage_write" => capabilities.shared_storage_write,
-        "app_launch" => capabilities.app_launch,
-        "shell_command" => capabilities.shell_command,
-        "package_remove_for_user" => capabilities.package_remove_for_user,
-        "root_shell" => capabilities.root_shell,
-        "app_data_write" => capabilities.app_data_write,
-        _ => false,
-    }
 }
 
 fn apply_runtime_capability_availability(
