@@ -843,6 +843,7 @@ fn permission_intent_defaults_policy_required_and_empty_grants_without_serialize
     assert_eq!(no_actions, json!({"grants": []}));
 
     let plan = planning_result_value(PlannerInput {
+        device_plan_presentation: None,
         recipes: vec![Recipe {
             schema_version: 1,
             kind: "recipe".to_string(),
@@ -3098,6 +3099,31 @@ fn binding_resolution_applies_precedence_and_preserves_provenance() {
 }
 
 #[test]
+fn binding_resolution_rejects_explicit_json_null_for_optional_string_input() {
+    let recipe = review_snapshot_recipe();
+    let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+    let resolution = resolve_runtime_bindings(
+        &recipes,
+        &["feature.review".to_string()],
+        &binding_map(&[("feature.review/credential", Value::Null)]),
+        &OrderedMap::new(),
+        &OrderedMap::new(),
+    );
+
+    assert!(resolution
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "binding_validation_failed"));
+    let credential = resolution
+        .resolved_inputs
+        .iter()
+        .find(|input| input.key == "feature.review/credential")
+        .unwrap();
+    assert_eq!(credential.value, Some(Value::Null));
+    assert_eq!(credential.source, Some(BindingSource::Explicit));
+}
+
+#[test]
 fn binding_resolution_validates_only_the_winner_and_redacts_sensitive_values() {
     materialize_required_test_host_binding(
         "feature.copy_roms/source",
@@ -5129,6 +5155,7 @@ fn artifact_selection_input(
     }
 
     PlannerInput {
+        device_plan_presentation: None,
         recipes: vec![Recipe {
             schema_version: 1,
             kind: "recipe".to_string(),
@@ -5206,6 +5233,7 @@ fn artifact_selection_artifacts() -> Vec<(&'static str, &'static str)> {
 
 fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
     PlannerInput {
+        device_plan_presentation: None,
         recipes: vec![Recipe {
             schema_version: 1,
             kind: "recipe".to_string(),
@@ -5308,6 +5336,7 @@ fn execution_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) -> &'
 
 fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
     PlannerInput {
+        device_plan_presentation: None,
         recipes: vec![Recipe {
             schema_version: 1,
             kind: "recipe".to_string(),
@@ -5392,6 +5421,7 @@ fn dependency_step_dependencies<'a>(actual: &'a Value, step_id: &str) -> &'a Val
 
 fn recipe_expansion_input(recipes: Vec<Recipe>, selected_recipe_refs: Vec<&str>) -> PlannerInput {
     PlannerInput {
+        device_plan_presentation: None,
         recipes,
         selected_recipe_refs: selected_recipe_refs
             .into_iter()
@@ -5483,6 +5513,7 @@ fn corpus_recipe_expansion_bindings() -> Vec<(&'static str, Value)> {
 
 fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
     PlannerInput {
+        device_plan_presentation: None,
         recipes: vec![Recipe {
             schema_version: 1,
             kind: "recipe".to_string(),
@@ -6063,6 +6094,15 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
     ];
     if plan.contains_key("apps") {
         expected_plan_fields.push("apps");
+    }
+    if plan.contains_key("device_plan") {
+        expected_plan_fields.push("device_plan");
+    }
+    if plan.contains_key("recipes") {
+        expected_plan_fields.push("recipes");
+    }
+    if plan.contains_key("resolved_inputs") {
+        expected_plan_fields.push("resolved_inputs");
     }
     assert_object_keys(
         &format!("{name}.execution_plan"),
@@ -7759,4 +7799,610 @@ fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
         install.skip_if[0].params.get("package_name"),
         Some(&json!("com.retroarch.aarch64"))
     );
+}
+
+fn review_snapshot_recipe() -> Recipe {
+    let mode = InputDeclaration {
+        type_name: "enum".to_string(),
+        role: "mode".to_string(),
+        label: "Runtime value".to_string(),
+        description: Some("Select runtime value.".to_string()),
+        required: true,
+        multiple: false,
+        validation: InputValidation {
+            must_exist: false,
+            allowed_extensions: Vec::new(),
+            path_kind: None,
+            allowed_prefixes: Vec::new(),
+        },
+        default: Value::Null,
+        options: vec![
+            crate::model::InputOption {
+                value: json!("device"),
+                label: "Device".to_string(),
+            },
+            crate::model::InputOption {
+                value: json!("explicit"),
+                label: "Explicit".to_string(),
+            },
+        ],
+        sensitive: false,
+        advanced: false,
+        metadata: OrderedMap::new(),
+    };
+    let mut credential = mode.clone();
+    credential.type_name = "string".to_string();
+    credential.role = "credential".to_string();
+    credential.label = "Credential".to_string();
+    credential.description = None;
+    credential.required = false;
+    credential.options = Vec::new();
+    credential.sensitive = true;
+    let mut unused_default = credential.clone();
+    unused_default.role = "mode".to_string();
+    unused_default.label = "Unused default".to_string();
+    unused_default.sensitive = false;
+    unused_default.advanced = true;
+    unused_default.default = json!("from-default");
+    let mut inputs = OrderedMap::new();
+    inputs.insert("mode".to_string(), mode);
+    inputs.insert("credential".to_string(), credential);
+    inputs.insert("unused_default".to_string(), unused_default);
+    Recipe {
+        schema_version: 1,
+        kind: "recipe".to_string(),
+        id: "feature.review".to_string(),
+        name: "Review Feature".to_string(),
+        description: Some("Feature description".to_string()),
+        recipe_dependencies: Vec::new(),
+        provides: RecipeProvides {
+            features: Vec::new(),
+        },
+        inputs,
+        artifacts: OrderedMap::new(),
+        artifact_groups: OrderedMap::new(),
+        steps: vec![recipe_expansion_wait_step()],
+    }
+}
+
+fn review_snapshot_input() -> PlannerInput {
+    let mut input = recipe_expansion_input(vec![review_snapshot_recipe()], vec!["feature.review"]);
+    input
+        .explicit_input_bindings
+        .insert("feature.review/mode".to_string(), json!("explicit"));
+    input
+}
+
+fn review_catalog_device_plan_yaml(name: &str, description: &str) -> String {
+    format!(
+        r#"
+schema_version: 1
+kind: device_plan
+id: review.issue9.catalog
+name: "{name}"
+description: "{description}"
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: feature.issue9.review
+    selected_by_default: true
+defaults: {{}}
+overrides: {{}}
+metadata: {{}}
+"#
+    )
+}
+
+fn write_review_catalog_recipe(
+    path: &Path,
+    id: &str,
+    name: &str,
+    description: &str,
+    dependencies: &[&str],
+    selected_enum_label: Option<&str>,
+) {
+    let mut recipe = review_snapshot_recipe();
+    recipe.id = id.to_string();
+    recipe.name = name.to_string();
+    recipe.description = Some(description.to_string());
+    recipe.recipe_dependencies = dependencies
+        .iter()
+        .map(|dependency| dependency.to_string())
+        .collect();
+    if let Some(label) = selected_enum_label {
+        let mode = recipe
+            .inputs
+            .get_mut("mode")
+            .expect("review fixture should include a mode input");
+        mode.options
+            .iter_mut()
+            .find(|option| option.value == json!("explicit"))
+            .expect("review fixture should include an explicit enum option")
+            .label = label.to_string();
+    }
+    let yaml = crate::yaml::emit_recipe_yaml(&recipe)
+        .expect("review fixture recipe should serialize as authored YAML");
+    fs::write(path, yaml).expect("review fixture recipe should be written");
+}
+
+#[test]
+fn plan_emits_device_plan_recipe_and_resolved_input_review_snapshots() {
+    let mut input = review_snapshot_input();
+    input
+        .user_configuration_bindings
+        .insert("feature.review/mode".to_string(), json!("device"));
+    input
+        .device_plan_input_bindings
+        .insert("feature.review/mode".to_string(), json!("device"));
+    input.device_plan_presentation = Some(crate::planner::ExecutionDevicePlanSnapshot {
+        id: "example.device_plan".to_string(),
+        name: Some("Planned Setup".to_string()),
+        description: Some("Frozen plan description".to_string()),
+    });
+    let result = plan_execution_with_app_definitions(input, &[]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.expect("review snapshot plan");
+    assert_eq!(
+        plan.device_plan,
+        Some(crate::planner::ExecutionDevicePlanSnapshot {
+            id: "example.device_plan".to_string(),
+            name: Some("Planned Setup".to_string()),
+            description: Some("Frozen plan description".to_string()),
+        })
+    );
+    assert_eq!(
+        plan.recipes,
+        vec![crate::planner::ExecutionRecipeSnapshot {
+            id: "feature.review".to_string(),
+            name: "Review Feature".to_string(),
+            description: Some("Feature description".to_string()),
+        }]
+    );
+    assert_eq!(
+        plan.resolved_inputs,
+        vec![
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "feature.review/mode".to_string(),
+                recipe_id: "feature.review".to_string(),
+                input_id: "mode".to_string(),
+                type_name: "enum".to_string(),
+                value: Some(json!("explicit")),
+                source: Some(BindingSource::Explicit),
+                label: "Runtime value".to_string(),
+                description: Some("Select runtime value.".to_string()),
+                required: true,
+                sensitive: false,
+                selected_enum_label: Some("Explicit".to_string()),
+            },
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "feature.review/credential".to_string(),
+                recipe_id: "feature.review".to_string(),
+                input_id: "credential".to_string(),
+                type_name: "string".to_string(),
+                value: None,
+                source: None,
+                label: "Credential".to_string(),
+                description: None,
+                required: false,
+                sensitive: true,
+                selected_enum_label: None,
+            },
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "feature.review/unused_default".to_string(),
+                recipe_id: "feature.review".to_string(),
+                input_id: "unused_default".to_string(),
+                type_name: "string".to_string(),
+                value: Some(json!("from-default")),
+                source: Some(BindingSource::RecipeDefault),
+                label: "Unused default".to_string(),
+                description: None,
+                required: false,
+                sensitive: false,
+                selected_enum_label: None,
+            },
+        ]
+    );
+    assert!(plan.inputs.is_empty());
+
+    let mut explicit_null = plan.clone();
+    explicit_null.resolved_inputs[1].value = Some(Value::Null);
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&explicit_null).unwrap(),
+        crate::plan_digest::execution_plan_digest(&plan).unwrap()
+    );
+    let absent_value = serde_json::to_value(&plan).unwrap();
+    let explicit_null_value = serde_json::to_value(&explicit_null).unwrap();
+    assert!(absent_value["resolved_inputs"][1].get("value").is_none());
+    assert_eq!(
+        explicit_null_value["resolved_inputs"][1]["value"],
+        Value::Null
+    );
+}
+
+#[test]
+fn catalog_edits_preserve_existing_plan_review_and_refresh_fresh_plan() {
+    let temp = temp_authored_root_with_device_plan_selection_yaml(
+        &review_catalog_device_plan_yaml("Original Setup", "Original setup description"),
+    );
+    let authored_root = temp.path().join("authored");
+    let device_plan_path = authored_root.join("device_plans/test_device_plan.yaml");
+    let selected_recipe_path = authored_root.join("recipes/feature.issue9.review.yaml");
+    let dependency_recipe_path =
+        authored_root.join("recipes/feature.issue9.review_dependency.yaml");
+
+    write_review_catalog_recipe(
+        &selected_recipe_path,
+        "feature.issue9.review",
+        "Review Feature",
+        "Original feature description",
+        &["feature.issue9.review_dependency"],
+        Some("Explicit"),
+    );
+    write_review_catalog_recipe(
+        &dependency_recipe_path,
+        "feature.issue9.review_dependency",
+        "Original Dependency",
+        "Original dependency description",
+        &[],
+        None,
+    );
+
+    let selected_input_key = "feature.issue9.review/mode";
+    let plan_from_catalog = || {
+        let mut input = PlannerInput::from_authored_device_plan(
+            authored_root.clone(),
+            "review.issue9.catalog",
+            "plan.issue9.review-catalog".to_string(),
+            OrderedMap::new(),
+        )
+        .unwrap_or_else(|error| panic!("catalog plan input should load: {error}"));
+        input
+            .explicit_input_bindings
+            .insert(selected_input_key.to_string(), json!("explicit"));
+        input.explicit_input_bindings.insert(
+            "feature.issue9.review_dependency/mode".to_string(),
+            json!("device"),
+        );
+        plan_execution_with_app_definitions(input, &[])
+    };
+
+    let original_result = plan_from_catalog();
+    assert_eq!(
+        original_result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        original_result.errors
+    );
+    let original_plan = original_result
+        .execution_plan
+        .expect("original catalog plan");
+    assert_eq!(
+        original_plan.device_plan.as_ref().unwrap().name.as_deref(),
+        Some("Original Setup")
+    );
+    assert!(original_plan
+        .source
+        .expanded_recipe_refs
+        .contains(&"feature.issue9.review_dependency".to_string()));
+    assert_eq!(
+        original_plan
+            .recipes
+            .iter()
+            .find(|recipe| recipe.id == "feature.issue9.review")
+            .unwrap()
+            .name,
+        "Review Feature"
+    );
+    assert_eq!(
+        original_plan
+            .recipes
+            .iter()
+            .find(|recipe| recipe.id == "feature.issue9.review_dependency")
+            .unwrap()
+            .name,
+        "Original Dependency"
+    );
+    assert_eq!(
+        original_plan
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == selected_input_key)
+            .unwrap()
+            .selected_enum_label
+            .as_deref(),
+        Some("Explicit")
+    );
+    let original_digest = crate::plan_digest::execution_plan_digest(&original_plan).unwrap();
+    let original_review = crate::review_projection::project_review(&original_plan, &[]);
+    let original_review_bytes = serde_json::to_vec(&original_review).unwrap();
+
+    fs::write(
+        &device_plan_path,
+        review_catalog_device_plan_yaml("Updated Setup", "Updated setup description"),
+    )
+    .unwrap();
+    write_review_catalog_recipe(
+        &selected_recipe_path,
+        "feature.issue9.review",
+        "Updated Review Feature",
+        "Updated feature description",
+        &["feature.issue9.review_dependency"],
+        Some("Updated explicit value"),
+    );
+    write_review_catalog_recipe(
+        &dependency_recipe_path,
+        "feature.issue9.review_dependency",
+        "Updated Dependency",
+        "Updated dependency description",
+        &[],
+        None,
+    );
+
+    assert_eq!(
+        serde_json::to_vec(&crate::review_projection::project_review(
+            &original_plan,
+            &[]
+        ))
+        .unwrap(),
+        original_review_bytes,
+        "catalog edits must not change review projected from an existing plan"
+    );
+
+    let updated_result = plan_from_catalog();
+    assert_eq!(
+        updated_result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        updated_result.errors
+    );
+    let updated_plan = updated_result.execution_plan.expect("updated catalog plan");
+    assert_eq!(
+        updated_plan.device_plan.as_ref().unwrap().name.as_deref(),
+        Some("Updated Setup")
+    );
+    assert_eq!(
+        updated_plan
+            .recipes
+            .iter()
+            .find(|recipe| recipe.id == "feature.issue9.review")
+            .unwrap()
+            .name,
+        "Updated Review Feature"
+    );
+    assert_eq!(
+        updated_plan
+            .recipes
+            .iter()
+            .find(|recipe| recipe.id == "feature.issue9.review_dependency")
+            .unwrap()
+            .name,
+        "Updated Dependency"
+    );
+    assert_eq!(
+        updated_plan
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == selected_input_key)
+            .unwrap()
+            .selected_enum_label
+            .as_deref(),
+        Some("Updated explicit value")
+    );
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&updated_plan).unwrap(),
+        original_digest
+    );
+    assert_ne!(
+        serde_json::to_vec(&crate::review_projection::project_review(
+            &updated_plan,
+            &[]
+        ))
+        .unwrap(),
+        original_review_bytes
+    );
+}
+
+#[test]
+fn catalog_deletions_preserve_existing_plan_review_projection() {
+    let temp = temp_authored_root_with_device_plan_selection_yaml(
+        &review_catalog_device_plan_yaml("Deletion Setup", "Setup retained for review"),
+    );
+    let authored_root = temp.path().join("authored");
+    let device_plan_path = authored_root.join("device_plans/test_device_plan.yaml");
+    let selected_recipe_path = authored_root.join("recipes/feature.issue9.review.yaml");
+    let dependency_recipe_path =
+        authored_root.join("recipes/feature.issue9.review_dependency.yaml");
+
+    write_review_catalog_recipe(
+        &selected_recipe_path,
+        "feature.issue9.review",
+        "Review Feature",
+        "Feature retained for review",
+        &["feature.issue9.review_dependency"],
+        Some("Explicit"),
+    );
+    write_review_catalog_recipe(
+        &dependency_recipe_path,
+        "feature.issue9.review_dependency",
+        "Review Dependency",
+        "Dependency retained for review",
+        &[],
+        None,
+    );
+
+    let mut input = PlannerInput::from_authored_device_plan(
+        authored_root,
+        "review.issue9.catalog",
+        "plan.issue9.review-catalog".to_string(),
+        OrderedMap::new(),
+    )
+    .unwrap_or_else(|error| panic!("catalog plan input should load: {error}"));
+    input
+        .explicit_input_bindings
+        .insert("feature.issue9.review/mode".to_string(), json!("explicit"));
+    input.explicit_input_bindings.insert(
+        "feature.issue9.review_dependency/mode".to_string(),
+        json!("device"),
+    );
+
+    let result = plan_execution_with_app_definitions(input, &[]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let retained_plan = result
+        .execution_plan
+        .expect("catalog plan should be emitted");
+    assert_eq!(
+        retained_plan.device_plan.as_ref().unwrap().name.as_deref(),
+        Some("Deletion Setup")
+    );
+    assert!(retained_plan
+        .recipes
+        .iter()
+        .any(|recipe| recipe.id == "feature.issue9.review"));
+    assert!(retained_plan
+        .recipes
+        .iter()
+        .any(|recipe| recipe.id == "feature.issue9.review_dependency"));
+    assert_eq!(
+        retained_plan
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == "feature.issue9.review/mode")
+            .unwrap()
+            .selected_enum_label
+            .as_deref(),
+        Some("Explicit")
+    );
+
+    let original_review_bytes = serde_json::to_vec(&crate::review_projection::project_review(
+        &retained_plan,
+        &[],
+    ))
+    .unwrap();
+    fs::remove_file(&device_plan_path).expect("source Device Plan should be removed");
+    fs::remove_file(&selected_recipe_path).expect("selected Recipe should be removed");
+    fs::remove_file(&dependency_recipe_path).expect("dependency Recipe should be removed");
+    assert!(!device_plan_path.exists());
+    assert!(!selected_recipe_path.exists());
+    assert!(!dependency_recipe_path.exists());
+
+    let retained_review_bytes = serde_json::to_vec(&crate::review_projection::project_review(
+        &retained_plan,
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(
+        retained_review_bytes, original_review_bytes,
+        "catalog deletions must not change review projected from a retained plan"
+    );
+}
+
+#[test]
+fn plan_digest_changes_when_review_presentation_snapshots_change() {
+    let mut input = review_snapshot_input();
+    input.device_plan_presentation = Some(crate::planner::ExecutionDevicePlanSnapshot {
+        id: "example.device_plan".to_string(),
+        name: Some("Planned Setup".to_string()),
+        description: None,
+    });
+    let plan = plan_execution_with_app_definitions(input, &[])
+        .execution_plan
+        .expect("review snapshot plan");
+    let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+    assert_eq!(
+        crate::plan_digest::execution_plan_digest(&plan.clone()).unwrap(),
+        digest
+    );
+    let mut renamed = plan.clone();
+    renamed.device_plan.as_mut().unwrap().name = Some("Renamed Setup".to_string());
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&renamed).unwrap(),
+        digest
+    );
+    let mut relabeled = plan.clone();
+    relabeled.resolved_inputs[0].label = "Renamed label".to_string();
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&relabeled).unwrap(),
+        digest
+    );
+    let mut changed_selected_enum_label = plan.clone();
+    changed_selected_enum_label.resolved_inputs[0].selected_enum_label =
+        Some("Updated enum choice".to_string());
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&changed_selected_enum_label).unwrap(),
+        digest
+    );
+    let mut redescribed = plan.clone();
+    redescribed.device_plan.as_mut().unwrap().description =
+        Some("Updated plan description".to_string());
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&redescribed).unwrap(),
+        digest
+    );
+    let mut changed_required = plan.clone();
+    changed_required.resolved_inputs[0].required = !changed_required.resolved_inputs[0].required;
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&changed_required).unwrap(),
+        digest
+    );
+    let mut changed_sensitive = plan.clone();
+    changed_sensitive.resolved_inputs[0].sensitive =
+        !changed_sensitive.resolved_inputs[0].sensitive;
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&changed_sensitive).unwrap(),
+        digest
+    );
+
+    let mut refreshed_input = review_snapshot_input();
+    refreshed_input.device_plan_presentation = Some(crate::planner::ExecutionDevicePlanSnapshot {
+        id: "example.device_plan".to_string(),
+        name: Some("Planned Setup".to_string()),
+        description: None,
+    });
+    refreshed_input.recipes[0].name = "Updated Review Feature".to_string();
+    refreshed_input.recipes[0]
+        .inputs
+        .get_mut("mode")
+        .unwrap()
+        .options[1]
+        .label = "Updated explicit value".to_string();
+    let refreshed_plan = plan_execution_with_app_definitions(refreshed_input, &[])
+        .execution_plan
+        .expect("refreshed review snapshot plan");
+    assert_ne!(
+        crate::plan_digest::execution_plan_digest(&refreshed_plan).unwrap(),
+        digest
+    );
+    assert_eq!(
+        refreshed_plan.resolved_inputs[0]
+            .selected_enum_label
+            .as_deref(),
+        Some("Updated explicit value")
+    );
+}
+
+#[test]
+fn planner_inputs_without_presentation_keep_review_snapshot_fields_absent() {
+    let result = plan_execution_with_app_definitions(review_snapshot_input(), &[]);
+    assert_eq!(
+        result.status,
+        PlanningStatus::Success,
+        "{:?}",
+        result.errors
+    );
+    let plan = result.execution_plan.expect("generic plan");
+    assert_eq!(plan.device_plan, None);
+    assert!(plan.recipes.is_empty());
+    assert!(plan.resolved_inputs.is_empty());
+    let serialized = serde_json::to_value(&plan).unwrap();
+    assert!(serialized.get("device_plan").is_none());
+    assert!(serialized.get("resolved_inputs").is_none());
 }

@@ -494,20 +494,6 @@ impl SessionHandles {
         }
     }
 
-    pub fn invalidate_catalog(&mut self, current_digest: &str) {
-        let handles = self
-            .reviews
-            .iter()
-            .filter(|(_, review)| review.catalog_digest != current_digest)
-            .map(|(handle, _)| handle.clone())
-            .collect::<Vec<_>>();
-        for handle in handles {
-            self.reviews.remove(&handle);
-            self.review_order.retain(|candidate| candidate != &handle);
-            self.push_tombstone(handle, "review_stale");
-        }
-    }
-
     pub fn invalidate_reviews_for_device(&mut self, device_handle: &str, code: &'static str) {
         self.invalidate_reviews_for_device_if(device_handle, code, |_| true);
     }
@@ -1191,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_facts_and_catalog_digest_stale_reviews() {
+    fn changed_facts_stale_reviews_but_catalog_changes_do_not() {
         let mut store = SessionHandles::default();
         let devices = store
             .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
@@ -1201,10 +1187,17 @@ mod tests {
         let changed = store.insert_review(review_snapshot(&handle));
         store.set_facts(&handle, json!({ "model": "two" })).unwrap();
         assert!(store.review(&changed).unwrap_err().contains("review_stale"));
-
-        let catalog = store.insert_review(review_snapshot(&handle));
-        store.invalidate_catalog("different-catalog");
-        assert!(store.review(&catalog).unwrap_err().contains("review_stale"));
+        store.set_facts(&handle, json!({ "model": "one" })).unwrap();
+        let mut catalog_review = review_snapshot(&handle);
+        catalog_review.catalog_identity["contentDigest"]["value"] = json!("changed");
+        catalog_review.catalog_digest = "sha256:changed-catalog".to_string();
+        let catalog = store.insert_review(catalog_review);
+        // The handle store retains catalog provenance without treating it as
+        // session freshness authority.
+        assert_eq!(
+            store.review(&catalog).unwrap().catalog_digest,
+            "sha256:changed-catalog"
+        );
     }
 
     #[test]

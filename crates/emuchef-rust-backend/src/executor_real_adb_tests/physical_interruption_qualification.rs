@@ -2675,6 +2675,8 @@ fn reviewed_plan(
     steps.push(first);
     steps.push(second);
     ExecutionPlan {
+        device_plan: None,
+        resolved_inputs: Vec::new(),
         id: format!(
             "plan.phase6d6.{}.{}",
             invocation.scenario.as_str(),
@@ -8818,6 +8820,8 @@ mod tests {
             *value = Value::String("merge".to_string());
         }
         let plan = ExecutionPlan {
+            device_plan: None,
+            resolved_inputs: Vec::new(),
             id: "plan.phase6d6.physical-style.host-sleep".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "fixture.phase6d6".to_string(),

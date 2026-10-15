@@ -197,11 +197,17 @@ pub struct PlannerMessage {
 pub struct ExecutionPlan {
     pub id: String,
     pub source: ExecutionPlanSource,
+    /// Device Plan identity and presentation captured during planning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_plan: Option<ExecutionDevicePlanSnapshot>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recipes: Vec<ExecutionRecipeSnapshot>,
     /// App identity and presentation needed after catalog planning completes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<ExecutionAppSnapshot>,
+    /// Resolved input values and their presentation captured in recipe order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_inputs: Vec<ExecutionResolvedInputSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_device: Option<TargetDeviceBinding>,
     pub device_context: DeviceContext,
@@ -211,6 +217,17 @@ pub struct ExecutionPlan {
     pub steps: Vec<ExecutionStep>,
     pub schema_version: i64,
     pub kind: &'static str,
+}
+
+/// Device Plan identity and presentation copied into a reviewed plan.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionDevicePlanSnapshot {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// App identity and presentation copied into a reviewed execution plan.
@@ -242,6 +259,28 @@ pub struct ExecutionRecipeSnapshot {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Resolved Recipe input value and presentation copied into a reviewed plan.
+/// `value` preserves both an absent binding and an explicitly supplied null.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionResolvedInputSnapshot {
+    pub key: String,
+    pub recipe_id: String,
+    pub input_id: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    pub source: Option<BindingSource>,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub required: bool,
+    pub sensitive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_enum_label: Option<String>,
 }
 
 /// Reviewed target facts that bind a plan to one ADB device.
@@ -843,10 +882,12 @@ pub struct PlannerInput {
     pub runtime_capabilities: RuntimeCapabilities,
     pub catalog_identity: Option<CatalogIdentity>,
     pub target_device: Option<TargetDeviceBinding>,
+    /// Optional Device Plan presentation supplied by product planning.
+    pub device_plan_presentation: Option<ExecutionDevicePlanSnapshot>,
 }
 
 /// Identifies the layer that supplied an effective runtime input value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingSource {
     Explicit,
@@ -921,6 +962,7 @@ impl PlannerInput {
             runtime_capabilities,
             catalog_identity: None,
             target_device: None,
+            device_plan_presentation: None,
         })
     }
 
@@ -955,6 +997,11 @@ impl PlannerInput {
         }
         Ok(Self {
             recipes,
+            device_plan_presentation: Some(ExecutionDevicePlanSnapshot {
+                id: parts.device_plan_ref.clone(),
+                name: parts.device_plan_name.clone(),
+                description: parts.device_plan_description.clone(),
+            }),
             selected_recipe_refs: parts.selected_recipe_refs,
             explicit_input_bindings,
             user_configuration_bindings: OrderedMap::new(),
@@ -1208,6 +1255,22 @@ fn plan_execution_with_app_definitions_inner(
     }
 
     let emit_product_contract = input.catalog_identity.is_some() || input.target_device.is_some();
+    let emit_review_snapshots = emit_product_contract || input.device_plan_presentation.is_some();
+    let (device_plan_snapshot, recipe_snapshots, resolved_input_snapshots) =
+        match execution_review_snapshots(
+            emit_review_snapshots,
+            input.device_plan_presentation.as_ref(),
+            &expanded_recipe_refs,
+            &recipes,
+            &binding_resolution.resolved_inputs,
+        ) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                let mut result = error_result(vec![error]);
+                result.warnings = selection_warnings;
+                return result;
+            }
+        };
     let execution_plan = ExecutionPlan {
         id: input.plan_id,
         source: ExecutionPlanSource {
@@ -1217,25 +1280,15 @@ fn plan_execution_with_app_definitions_inner(
             expanded_recipe_refs: expanded_recipe_refs.clone(),
             catalog: input.catalog_identity,
         },
-        recipes: if emit_product_contract {
-            expanded_recipe_refs
-                .iter()
-                .filter_map(|recipe_id| recipes.get(recipe_id))
-                .map(|recipe| ExecutionRecipeSnapshot {
-                    id: recipe.id.clone(),
-                    name: recipe.name.clone(),
-                    description: recipe.description.clone(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
+        device_plan: device_plan_snapshot,
+        recipes: recipe_snapshots,
         apps: app_authority::execution_app_snapshots(
             &recipes,
             &expanded_recipe_refs,
             &ordered_steps,
             &app_definitions,
         ),
+        resolved_inputs: resolved_input_snapshots,
         target_device: input.target_device,
         device_context: input.device_context,
         runtime_capabilities: input.runtime_capabilities,
@@ -1345,6 +1398,96 @@ fn plan_execution_with_app_definitions_inner(
         schema_version: SCHEMA_VERSION,
         kind: "planning_result",
     }
+}
+
+fn execution_review_snapshots(
+    emit_review_snapshots: bool,
+    device_plan: Option<&ExecutionDevicePlanSnapshot>,
+    expanded_recipe_refs: &[String],
+    recipes: &HashMap<String, Recipe>,
+    resolved_inputs: &[ResolvedInputBinding],
+) -> Result<
+    (
+        Option<ExecutionDevicePlanSnapshot>,
+        Vec<ExecutionRecipeSnapshot>,
+        Vec<ExecutionResolvedInputSnapshot>,
+    ),
+    PlannerMessage,
+> {
+    if !emit_review_snapshots {
+        return Ok((None, Vec::new(), Vec::new()));
+    }
+
+    let expected_input_count = expanded_recipe_refs
+        .iter()
+        .filter_map(|recipe_id| recipes.get(recipe_id))
+        .map(|recipe| recipe.inputs.len())
+        .sum::<usize>();
+    if expected_input_count != resolved_inputs.len() {
+        return Err(PlannerMessage {
+            code: "review_input_snapshot_incomplete".to_string(),
+            message: "Resolved inputs could not be captured completely for plan review."
+                .to_string(),
+            details: json!({
+                "expected_count": expected_input_count,
+                "resolved_count": resolved_inputs.len(),
+            }),
+        });
+    }
+
+    let mut resolved_input_snapshots = Vec::new();
+    for resolved in resolved_inputs {
+        let Some(declaration) = recipes
+            .get(&resolved.recipe_id)
+            .and_then(|recipe| recipe.inputs.get(&resolved.input_id))
+        else {
+            return Err(PlannerMessage {
+                code: "review_input_snapshot_missing".to_string(),
+                message: "A resolved input could not be captured for plan review.".to_string(),
+                details: json!({ "input_id": resolved.key }),
+            });
+        };
+        let selected_enum_label = (declaration.type_name == "enum")
+            .then(|| {
+                resolved.value.as_ref().and_then(|value| {
+                    declaration
+                        .options
+                        .iter()
+                        .find(|option| option.value == *value)
+                        .map(|option| option.label.clone())
+                })
+            })
+            .flatten();
+        resolved_input_snapshots.push(ExecutionResolvedInputSnapshot {
+            key: resolved.key.clone(),
+            recipe_id: resolved.recipe_id.clone(),
+            input_id: resolved.input_id.clone(),
+            type_name: resolved.type_name.clone(),
+            value: resolved.value.clone(),
+            source: resolved.source,
+            label: declaration.label.clone(),
+            description: declaration.description.clone(),
+            required: declaration.required,
+            sensitive: declaration.sensitive,
+            selected_enum_label,
+        });
+    }
+
+    let recipe_snapshots = expanded_recipe_refs
+        .iter()
+        .filter_map(|recipe_id| recipes.get(recipe_id))
+        .map(|recipe| ExecutionRecipeSnapshot {
+            id: recipe.id.clone(),
+            name: recipe.name.clone(),
+            description: recipe.description.clone(),
+        })
+        .collect();
+
+    Ok((
+        device_plan.cloned(),
+        recipe_snapshots,
+        resolved_input_snapshots,
+    ))
 }
 
 /// Resolve user-facing progress text without exposing blank presentation data.

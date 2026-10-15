@@ -5189,6 +5189,8 @@ mod phase_5b10_tests {
             verify: Vec::new(),
         };
         let plan = ExecutionPlan {
+            device_plan: None,
+            resolved_inputs: Vec::new(),
             id: "plan.phase5b10.permissions".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "example.device_profile".to_string(),

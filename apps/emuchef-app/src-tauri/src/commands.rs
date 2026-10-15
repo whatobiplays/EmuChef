@@ -1637,7 +1637,6 @@ pub fn create_review(
             "The selected device changed. Refresh device discovery and try again.",
         ));
     }
-    handles.invalidate_catalog(catalog(&state)?.digest());
     let review_handle = handles.insert_review(snapshot.clone());
     drop(handles);
     crate::qualification_session::observe_in_transition(

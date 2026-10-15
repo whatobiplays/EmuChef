@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::adb::{AdbRevalidationError, PlatformToolsReadiness};
 use crate::commands::{
-    catalog, current_adb_path, redact_absolute_paths, redact_exact_serial, safe_error, AppState,
+    current_adb_path, redact_absolute_paths, redact_exact_serial, safe_error, AppState,
 };
 use crate::device_observation::{
     qualify_reconciled_current_with_runtime, CurrentQualification, DeviceQualificationState,
@@ -697,7 +697,6 @@ fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
         .clone();
 
     validate_review_executable(&review)?;
-    validate_catalog(&review, state)?;
     let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
     let _devices = list_and_reconcile_preflight_inventory(state, runtime, &platform_tools)
         .map_err(|failure| match failure {
@@ -1304,7 +1303,6 @@ fn start_real_execution_inner(
         .review(review_handle)?
         .clone();
     validate_review_executable(&review)?;
-    validate_catalog(&review, state)?;
 
     let expected_adb = review.platform_tools_identity.as_ref().ok_or_else(|| {
         stale_review(
@@ -2749,7 +2747,6 @@ where
         .review(&mapping.review_handle)
         .map_err(|_| launch_stale_target())?
         .clone();
-    validate_catalog(&review, &state).map_err(|_| launch_stale_target())?;
     let platform_tools = resolve_platform_tools(state, &review)?;
 
     let _devices = match list_and_reconcile_preflight_inventory(&state, runtime, &platform_tools) {
@@ -3272,23 +3269,6 @@ fn validate_review_executable(review: &ReviewedPlanSnapshot) -> Result<(), Strin
         "review_not_executable",
         "This plan cannot be executed safely. Generate a new review after updating EmuChef or the setup catalog.",
     ))
-}
-
-fn validate_catalog(review: &ReviewedPlanSnapshot, state: &AppState) -> Result<(), String> {
-    let current = catalog(state)?;
-    let identity = serde_json::to_value(current.public_identity()).map_err(|_| {
-        safe_error(
-            "catalog_resource_invalid",
-            "The packaged setup catalog identity could not be verified.",
-        )
-    })?;
-    let fields_match = ["sourceKind", "sourceId", "version", "contentDigest"]
-        .iter()
-        .all(|field| review.catalog_identity.get(field) == identity.get(field));
-    if review.catalog_digest != current.digest() || !fields_match {
-        return Err(stale_review("The setup catalog changed after review."));
-    }
-    Ok(())
 }
 
 fn validate_target(target: &Value, serial: &str, facts: &Value) -> Result<(), String> {
@@ -6034,6 +6014,18 @@ pub(crate) mod tests {
         assert!(validate_plan_digest(&retained)
             .unwrap_err()
             .contains("review_stale"));
+    }
+
+    #[test]
+    fn catalog_mutation_does_not_stale_unchanged_reviewed_plan() {
+        let mut retained = review();
+        let plan_before_catalog_change = retained.response["plan"].clone();
+        retained.catalog_identity["contentDigest"]["value"] = json!("changed");
+        retained.catalog_digest = "sha256:changed-catalog".to_string();
+
+        validate_review_executable(&retained).unwrap();
+        validate_plan_digest(&retained).unwrap();
+        assert_eq!(retained.response["plan"], plan_before_catalog_change);
     }
 
     #[test]
@@ -9296,10 +9288,9 @@ pub(crate) mod tests {
 
     /// Rebind one prepared review to the catalog the test app serves.
     ///
-    /// The simulated-start seam validates the retained catalog identity before
-    /// any runtime request, so a review built from the shared synthetic fixture
-    /// must be reinserted against the real test catalog to reach the request
-    /// classification under test.
+    /// Keep catalog provenance aligned with the test app when exercising
+    /// request classification. Simulated-start admission checks the reviewed
+    /// plan digest and session freshness, not catalog identity.
     fn rebind_review_to_test_catalog(
         handles: &Mutex<SessionHandles>,
         review_handle: &str,

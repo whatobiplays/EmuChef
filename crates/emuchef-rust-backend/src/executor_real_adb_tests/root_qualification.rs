@@ -584,6 +584,8 @@ fn run_root_executor_plan<E: AdbCommandExecutor>(
 ) -> crate::executor::ExecutionRunResult {
     let sandbox = tempfile::tempdir().expect("root qualification sandbox should be created");
     let plan = ExecutionPlan {
+        device_plan: None,
+        resolved_inputs: Vec::new(),
         id: "plan.phase6c2.root.001".to_string(),
         source: ExecutionPlanSource {
             device_profile_ref: "fixture.root".to_string(),

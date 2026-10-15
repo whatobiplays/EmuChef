@@ -1464,6 +1464,8 @@ mod tests {
             verify: Vec::new(),
         };
         ExecutionPlan {
+            device_plan: None,
+            resolved_inputs: Vec::new(),
             id: "plan.permission-bounds".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "example.device".to_string(),
