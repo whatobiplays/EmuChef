@@ -217,10 +217,13 @@ certificate and hostname verification remains enabled. A configured system
 proxy remains enabled; proxy-side DNS is controlled by that trusted network
 route and cannot be pinned by the local resolver. Execution records retain the
 exact approved plan, including its original URL query, with the matching plan
-digest. Consumer-facing reports serialize that exact plan as `reviewedPlan`
-when it contains no URL credentials, query, or fragment. When redaction is
-needed, the report omits `reviewedPlan` and instead serializes the separately
-named `redactedReviewedPlan` projection, plus an explicit redaction marker.
+digest. Execution records retain the exact reviewed plan, including sensitive
+input values. Consumer-facing reports redact sensitive values in both
+executable inputs and review snapshots while preserving the original plan and
+digest internally. When any consumer redaction is needed, the report omits
+`reviewedPlan` and serializes `redactedReviewedPlan`. The
+`reviewedPlanSourceUrlsRedacted` marker is present only when a source URL was
+redacted; input-only redaction does not set it.
 
 App-owned `latest_release` artifacts support GitHub, GitLab, and Forgejo from
 their authored public HTTPS service origin and repository. Review records the
@@ -508,8 +511,16 @@ diagnostic and never falls back. Resolved records retain `explicit`,
 `user_configuration`, `device_plan`, or `recipe_default` provenance. Unknown
 keys and bindings outside the effective recipe set are errors, optional inputs
 may remain explicitly unbound, and required inputs without a winner are
-reported together. The execution plan receives only normalized effective input
-values; the executor does not merge layers or interpret provenance.
+reported together. The execution plan receives normalized values selected for
+execution in its `inputs` field; the executor does not merge binding layers or
+interpret provenance. Product plans also retain immutable `resolved_inputs`
+review snapshots for every input in dependency-expanded Recipes, including
+unselected and nullable values, the winning binding source, and the input's
+review presentation. Device Plan ID/name/description and expanded Recipe
+ID/name/description are captured in the same plan. Review uses these snapshots
+and planning-time diagnostics without reopening authored Device Plans or
+Recipes. The canonical plan digest covers the snapshots, so a fresh plan
+captures presentation edits and receives a new digest.
 
 The side-effect-free `describeConfiguration` JSON operation accepts an authored
 root plus a request or saved device plan, optional saved configuration,
@@ -1398,16 +1409,20 @@ or step IDs, input keys, capability tokens, raw parameters, hashes, host paths,
 or diagnostic codes. A review marked unsafe by the backend cannot start either
 simulation or real execution. At most 16 live reviews
 are kept in memory, with a 30-minute idle lifetime, two-hour absolute lifetime,
-and 64 bounded tombstones. Device disappearance, changed facts, catalog change,
-Platform-Tools replacement/removal, discard, or capacity eviction returns
+and 64 bounded tombstones. Device disappearance, changed device or
+qualification facts, session changes, Platform-Tools replacement/removal,
+discard, or capacity eviction returns
 `review_stale`; time expiry returns `review_expired`; an unrecognized handle
 returns `review_unknown`.
 
 Simulation start accepts only the opaque review handle at the React boundary.
-Tauri revalidates review lifetime, current catalog identity/digest, connected
-device presence, the retained serial/manufacturer/model/API target facts, and a
-new canonical plan digest without repeating profile matching or planning. It
-then sends the exact retained plan, digest, and target to `startExecution` with
+Tauri revalidates review lifetime, connected-device presence, retained target
+facts, and device, qualification, and session freshness. It verifies the exact
+retained plan against its canonical digest without repeating profile matching
+or planning. Catalog identity and digest remain planning-time provenance;
+catalog edits alone do not invalidate an unchanged reviewed plan. Fresh
+planning captures catalog presentation edits and produces a new plan digest.
+Tauri then sends the exact retained plan, digest, and target to `startExecution` with
 trusted code forcing `dry_run`. A device disconnect blocks start but cannot
 cancel or erase a dry run after it has started.
 

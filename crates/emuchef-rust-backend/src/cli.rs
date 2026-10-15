@@ -974,6 +974,20 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
     let steps = parse_steps(data)?;
     let recipes = parse_recipe_snapshots(data, &steps)?;
     let apps = parse_apps(data)?;
+    let device_plan = data
+        .get(yaml_key("device_plan"))
+        .map(|value| {
+            serde_json::from_value(yaml_to_json(value)?).map_err(|error| {
+                CliError::Message(format!("Invalid device plan snapshot: {error}"))
+            })
+        })
+        .transpose()?;
+    let resolved_inputs = match data.get(yaml_key("resolved_inputs")) {
+        Some(value) => serde_json::from_value(yaml_to_json(value)?).map_err(|error| {
+            CliError::Message(format!("Invalid resolved input snapshots: {error}"))
+        })?,
+        None => Vec::new(),
+    };
     Ok(ExecutionPlan {
         id: required_string(data, "id")?,
         source: ExecutionPlanSource {
@@ -986,8 +1000,10 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
                 .map(parse_catalog_identity)
                 .transpose()?,
         },
+        device_plan,
         recipes,
         apps,
+        resolved_inputs,
         target_device: data
             .get(yaml_key("target_device"))
             .map(parse_target_device)

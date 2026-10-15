@@ -73,6 +73,8 @@ fn plan_with_artifacts(
     steps: Vec<ExecutionStep>,
 ) -> ExecutionPlan {
     ExecutionPlan {
+        device_plan: None,
+        resolved_inputs: Vec::new(),
         id: "plan.test".to_string(),
         source: ExecutionPlanSource {
             device_profile_ref: "example.device_profile".to_string(),

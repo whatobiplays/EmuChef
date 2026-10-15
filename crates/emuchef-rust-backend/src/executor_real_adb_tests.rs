@@ -464,6 +464,8 @@ fn run_executor_plan(
 ) -> crate::executor::ExecutionRunResult {
     let sandbox = tempfile::tempdir().expect("qualification sandbox should be created");
     let plan = ExecutionPlan {
+        device_plan: None,
+        resolved_inputs: Vec::new(),
         id: "plan.phase6c.fixture.001".to_string(),
         source: ExecutionPlanSource {
             device_profile_ref: "fixture.non_root".to_string(),
@@ -515,6 +517,8 @@ fn permission_executor_plan(
     actions: Vec<PermissionPlanAction>,
 ) -> ExecutionPlan {
     ExecutionPlan {
+        device_plan: None,
+        resolved_inputs: Vec::new(),
         id: "plan.permission-operation-test".to_string(),
         source: ExecutionPlanSource {
             device_profile_ref: "fixture.permission".to_string(),

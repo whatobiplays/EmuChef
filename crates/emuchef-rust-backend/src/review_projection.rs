@@ -10,13 +10,12 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{InputDeclaration, Recipe};
 use crate::planner::{
-    ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, ExecutionStep,
-    PermissionActionApplicability, PermissionFailurePolicy, PermissionPlanAction,
-    PermissionSetKind, ResolvedInputBinding,
+    ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, ExecutionResolvedInputSnapshot,
+    ExecutionStep, PermissionActionApplicability, PermissionFailurePolicy, PermissionPlanAction,
+    PermissionSetKind,
 };
-use crate::runtime_configuration::{PreparedConfiguration, RuntimeConfigurationDiagnostic};
+use crate::runtime_configuration::RuntimeConfigurationDiagnostic;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,25 +115,24 @@ const SECTIONS: [(&str, &str); 7] = [
 ];
 
 pub(crate) fn project_review(
-    prepared: &PreparedConfiguration,
     plan: &ExecutionPlan,
-    resolved_inputs: &[ResolvedInputBinding],
     diagnostics: &[RuntimeConfigurationDiagnostic],
 ) -> ReviewProjection {
-    let recipes = prepared
+    let recipes = plan
         .recipes
         .iter()
         .map(|recipe| (recipe.id.as_str(), recipe))
         .collect::<HashMap<_, _>>();
     let mut notices = project_warnings(diagnostics);
     let mut unsupported_action = false;
-    let mut missing_feature_metadata = false;
+    let mut missing_feature_metadata = plan.recipes.len() != plan.source.expanded_recipe_refs.len();
+    let mut missing_required_snapshot = plan.device_plan.is_none();
     let features = plan
         .source
         .expanded_recipe_refs
         .iter()
         .filter_map(|recipe_id| {
-            let Some(authored) = recipes.get(recipe_id.as_str()).copied() else {
+            let Some(snapshot) = recipes.get(recipe_id.as_str()).copied() else {
                 missing_feature_metadata = true;
                 return None;
             };
@@ -174,10 +172,10 @@ pub(crate) fn project_review(
                 unsupported_action = true;
             }
             Some(ReviewFeature {
-                name: non_blank(&authored.name)
+                name: non_blank(&snapshot.name)
                     .unwrap_or("Selected feature")
                     .to_string(),
-                description: authored
+                description: snapshot
                     .description
                     .as_deref()
                     .and_then(non_blank)
@@ -187,7 +185,15 @@ pub(crate) fn project_review(
             })
         })
         .collect::<Vec<_>>();
-    if unsupported_action || missing_feature_metadata {
+    let inputs = project_inputs(&plan.resolved_inputs);
+    if plan
+        .resolved_inputs
+        .iter()
+        .any(|input| input.required && input.value.as_ref().is_none_or(Value::is_null))
+    {
+        missing_required_snapshot = true;
+    }
+    if unsupported_action || missing_feature_metadata || missing_required_snapshot {
         notices.push(ReviewNotice {
             severity: "blocker",
             title: "This plan cannot be reviewed safely",
@@ -203,17 +209,17 @@ pub(crate) fn project_review(
         .sum::<u64>();
     ReviewProjection {
         setup: ReviewSetup {
-            name: prepared
-                .device_plan_parts
+            name: plan
+                .device_plan
                 .as_ref()
-                .and_then(|parts| parts.device_plan_name.as_deref())
+                .and_then(|snapshot| snapshot.name.as_deref())
                 .and_then(non_blank)
                 .unwrap_or("Selected setup")
                 .to_string(),
-            description: prepared
-                .device_plan_parts
+            description: plan
+                .device_plan
                 .as_ref()
-                .and_then(|parts| parts.device_plan_description.as_deref())
+                .and_then(|snapshot| snapshot.description.as_deref())
                 .and_then(non_blank)
                 .map(str::to_string),
         },
@@ -225,14 +231,14 @@ pub(crate) fn project_review(
             android_api_level: plan.device_context.android_api_level,
         },
         features,
-        inputs: project_inputs(resolved_inputs, &recipes),
+        inputs,
         notices,
         work: ReviewWork {
             action_count,
             known_wait_seconds: (known_wait_milliseconds > 0)
                 .then_some(known_wait_milliseconds.div_ceil(1_000)),
         },
-        can_execute: !unsupported_action && !missing_feature_metadata,
+        can_execute: !unsupported_action && !missing_feature_metadata && !missing_required_snapshot,
     }
 }
 
@@ -483,44 +489,33 @@ fn wait_duration_milliseconds(step: &ExecutionStep) -> Option<u64> {
     value.as_u64()
 }
 
-fn project_inputs(
-    inputs: &[ResolvedInputBinding],
-    recipes: &HashMap<&str, &Recipe>,
-) -> Vec<ReviewInput> {
+fn project_inputs(inputs: &[ExecutionResolvedInputSnapshot]) -> Vec<ReviewInput> {
     inputs
         .iter()
         .filter_map(|input| {
-            let declaration = recipes
-                .get(input.recipe_id.as_str())?
-                .inputs
-                .get(&input.input_id)?;
             let value = input.value.as_ref().filter(|value| !value.is_null())?;
             Some(ReviewInput {
-                label: non_blank(&declaration.label)
+                label: non_blank(&input.label)
                     .unwrap_or("Configured option")
                     .to_string(),
-                summary: input_summary(declaration, value),
-                required: declaration.required,
+                summary: input_summary(input, value),
+                required: input.required,
             })
         })
         .collect()
 }
 
-fn input_summary(declaration: &InputDeclaration, value: &Value) -> String {
-    if declaration.sensitive {
+fn input_summary(input: &ExecutionResolvedInputSnapshot, value: &Value) -> String {
+    if input.sensitive {
         return "Provided".to_string();
     }
-    if declaration.type_name == "enum" {
-        if let Some(option) = declaration
-            .options
-            .iter()
-            .find(|option| option.value == *value)
-        {
-            return option.label.clone();
-        }
-        return "Selected".to_string();
+    if input.type_name == "enum" {
+        return input
+            .selected_enum_label
+            .clone()
+            .unwrap_or_else(|| "Selected".to_string());
     }
-    match declaration.type_name.as_str() {
+    match input.type_name.as_str() {
         "file" | "directory" | "path" | "path_list" => portable_path_summary(value),
         "device_path" => value
             .as_str()
@@ -592,7 +587,8 @@ fn non_blank(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{InputOption, InputValidation, OrderedMap};
+    use crate::model::OrderedMap;
+    use crate::planner::{ExecutionDevicePlanSnapshot, ExecutionRecipeSnapshot};
 
     #[test]
     fn path_summaries_never_include_parent_directories() {
@@ -607,40 +603,187 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_and_enum_inputs_use_authored_safe_presentation() {
-        let mut declaration = InputDeclaration {
+    fn sensitive_and_enum_inputs_use_snapshot_safe_presentation() {
+        let mut input = ExecutionResolvedInputSnapshot {
+            key: "recipe.review/credential".into(),
+            recipe_id: "recipe.review".into(),
+            input_id: "credential".into(),
             type_name: "string".into(),
-            role: "generic".into(),
+            value: Some(Value::String("secret".into())),
+            source: None,
             label: "Credential".into(),
             description: None,
             required: true,
-            multiple: false,
-            validation: InputValidation {
-                must_exist: false,
-                allowed_extensions: Vec::new(),
-                path_kind: None,
-                allowed_prefixes: Vec::new(),
-            },
-            default: Value::Null,
-            options: Vec::new(),
             sensitive: true,
-            advanced: false,
-            metadata: OrderedMap::new(),
+            selected_enum_label: None,
         };
         assert_eq!(
-            input_summary(&declaration, &Value::String("secret".into())),
+            input_summary(&input, input.value.as_ref().unwrap()),
             "Provided"
         );
-        declaration.type_name = "enum".into();
-        declaration.sensitive = false;
-        declaration.options = vec![InputOption {
-            value: Value::String("raw".into()),
-            label: "Friendly choice".into(),
-        }];
+        input.type_name = "enum".into();
+        input.sensitive = false;
+        input.value = Some(Value::String("raw".into()));
+        input.selected_enum_label = Some("Friendly choice".into());
         assert_eq!(
-            input_summary(&declaration, &Value::String("raw".into())),
+            input_summary(&input, input.value.as_ref().unwrap()),
             "Friendly choice"
         );
+    }
+
+    fn immutable_review_plan() -> ExecutionPlan {
+        ExecutionPlan {
+            id: "plan.review-snapshot".into(),
+            source: crate::planner::ExecutionPlanSource {
+                device_profile_ref: "profile.review".into(),
+                device_plan_ref: "plan.review".into(),
+                selected_recipe_refs: vec!["recipe.review".into()],
+                expanded_recipe_refs: vec!["recipe.review".into()],
+                catalog: None,
+            },
+            device_plan: Some(ExecutionDevicePlanSnapshot {
+                id: "plan.review".into(),
+                name: Some("Frozen setup name".into()),
+                description: Some("Frozen setup description".into()),
+            }),
+            recipes: vec![ExecutionRecipeSnapshot {
+                id: "recipe.review".into(),
+                name: "Frozen feature name".into(),
+                description: Some("Frozen feature description".into()),
+            }],
+            apps: Vec::new(),
+            resolved_inputs: vec![ExecutionResolvedInputSnapshot {
+                key: "recipe.review/mode".into(),
+                recipe_id: "recipe.review".into(),
+                input_id: "mode".into(),
+                type_name: "enum".into(),
+                value: Some(Value::String("raw".into())),
+                source: None,
+                label: "Frozen option label".into(),
+                description: Some("Frozen input description".into()),
+                required: true,
+                sensitive: false,
+                selected_enum_label: Some("Frozen selected value".into()),
+            }],
+            target_device: None,
+            device_context: crate::planner::DeviceContext {
+                manufacturer: "Example".into(),
+                model: "Handheld".into(),
+                android_version: 14,
+                android_api_level: Some(35),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: crate::planner::RuntimeCapabilities {
+                adb_available: false,
+                apk_install: false,
+                shared_storage_write: false,
+                app_launch: false,
+                shell_command: false,
+                package_remove_for_user: false,
+                root_shell: false,
+                app_data_write: false,
+            },
+            inputs: Vec::new(),
+            artifacts: Vec::new(),
+            steps: Vec::new(),
+            schema_version: 1,
+            kind: "execution_plan",
+        }
+    }
+
+    #[test]
+    fn review_projection_uses_only_immutable_plan_presentation() {
+        let plan = immutable_review_plan();
+
+        let review = project_review(&plan, &[]);
+
+        assert_eq!(review.setup.name, "Frozen setup name");
+        assert_eq!(
+            review.setup.description.as_deref(),
+            Some("Frozen setup description")
+        );
+        assert_eq!(review.features[0].name, "Frozen feature name");
+        assert_eq!(
+            review.features[0].description.as_deref(),
+            Some("Frozen feature description")
+        );
+        assert_eq!(review.inputs[0].label, "Frozen option label");
+        assert_eq!(review.inputs[0].summary, "Frozen selected value");
+        assert!(review.inputs[0].required);
+        assert!(review.can_execute);
+        assert_eq!(project_review(&plan.clone(), &[]), review);
+    }
+
+    #[test]
+    fn plan_only_review_uses_frozen_dependency_recipe_and_enum_presentation() {
+        let mut plan = immutable_review_plan();
+        plan.source
+            .expanded_recipe_refs
+            .push("recipe.dependency".into());
+        plan.recipes.push(ExecutionRecipeSnapshot {
+            id: "recipe.dependency".into(),
+            name: "Frozen dependency name".into(),
+            description: None,
+        });
+        plan.resolved_inputs.push(ExecutionResolvedInputSnapshot {
+            key: "recipe.dependency/mode".into(),
+            recipe_id: "recipe.dependency".into(),
+            input_id: "mode".into(),
+            type_name: "enum".into(),
+            value: Some(Value::String("raw-dependency-value".into())),
+            source: None,
+            label: "Frozen dependency option".into(),
+            description: None,
+            required: true,
+            sensitive: false,
+            selected_enum_label: Some("Frozen dependency choice".into()),
+        });
+
+        let review = project_review(&plan, &[]);
+
+        assert!(review.can_execute);
+        assert_eq!(review.features[0].name, "Frozen feature name");
+        assert!(!review.features[0].automatically_added);
+        assert_eq!(review.features[1].name, "Frozen dependency name");
+        assert_eq!(review.features[1].description, None);
+        assert!(review.features[1].automatically_added);
+        assert_eq!(review.inputs[0].summary, "Frozen selected value");
+        assert_eq!(review.inputs[1].summary, "Frozen dependency choice");
+    }
+
+    #[test]
+    fn missing_required_review_snapshots_block_safely_and_optional_metadata_is_allowed() {
+        let mut complete = immutable_review_plan();
+        complete.device_plan.as_mut().unwrap().name = None;
+        complete.device_plan.as_mut().unwrap().description = None;
+        complete.recipes[0].description = None;
+        complete.resolved_inputs[0].description = None;
+
+        let optional_metadata_review = project_review(&complete, &[]);
+        assert!(optional_metadata_review.can_execute);
+        assert_eq!(optional_metadata_review.setup.name, "Selected setup");
+        assert_eq!(optional_metadata_review.setup.description, None);
+
+        let assert_blocked = |plan: &ExecutionPlan| {
+            let review = project_review(plan, &[]);
+            assert!(!review.can_execute);
+            assert!(review.notices.iter().any(|notice| {
+                notice.severity == "blocker"
+                    && notice.title == "This plan cannot be reviewed safely"
+            }));
+        };
+
+        let mut missing_device_plan = complete.clone();
+        missing_device_plan.device_plan = None;
+        assert_blocked(&missing_device_plan);
+
+        let mut missing_recipe = complete.clone();
+        missing_recipe.recipes.clear();
+        assert_blocked(&missing_recipe);
+
+        let mut missing_required_value = complete;
+        missing_required_value.resolved_inputs[0].value = None;
+        assert_blocked(&missing_required_value);
     }
 
     #[test]
@@ -669,6 +812,8 @@ mod tests {
             verify: Vec::new(),
         };
         let mut plan = ExecutionPlan {
+            device_plan: None,
+            resolved_inputs: Vec::new(),
             id: "plan.review".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),
@@ -844,6 +989,8 @@ mod tests {
             verify: Vec::new(),
         };
         let mut plan = ExecutionPlan {
+            device_plan: None,
+            resolved_inputs: Vec::new(),
             id: "plan.permission-review".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),

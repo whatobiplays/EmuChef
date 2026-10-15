@@ -5,7 +5,7 @@
 //! exit. Cancellation is cooperative between atomic steps and never rolls back
 //! completed work. Retrying or repairing always creates a new execution id.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -147,11 +147,13 @@ pub struct ExecutionReport {
     /// because direct artifact URLs may contain signed query credentials.
     #[serde(skip_serializing)]
     pub reviewed_plan: ExecutionPlan,
-    /// Exact plan for consumers when no source URL requires redaction.
+    /// Exact plan for consumers when no source URL or sensitive input value
+    /// requires redaction.
     #[serde(rename = "reviewedPlan", skip_serializing_if = "Option::is_none")]
     pub public_reviewed_plan: Option<ExecutionPlan>,
-    /// Redacted consumer-facing plan used only when the exact plan contains
-    /// direct artifact URL credentials, queries, or fragments.
+    /// Redacted consumer-facing plan used when the exact plan contains direct
+    /// artifact URL credentials, queries, or fragments, or sensitive input
+    /// values.
     #[serde(
         rename = "redactedReviewedPlan",
         skip_serializing_if = "Option::is_none"
@@ -851,7 +853,7 @@ fn initial_report(
     mode: ExecutionMode,
     target: Option<TargetDeviceBinding>,
 ) -> ExecutionReport {
-    let (redacted_plan, was_redacted) = redacted_report_plan(plan);
+    let (redacted_plan, was_redacted, source_urls_redacted) = redacted_report_plan(plan);
     let mut recipes = plan
         .recipes
         .iter()
@@ -899,7 +901,7 @@ fn initial_report(
         reviewed_plan: plan.clone(),
         public_reviewed_plan: (!was_redacted).then(|| plan.clone()),
         redacted_reviewed_plan: was_redacted.then_some(redacted_plan),
-        reviewed_plan_source_urls_redacted: was_redacted.then_some(true),
+        reviewed_plan_source_urls_redacted: source_urls_redacted.then_some(true),
         mode,
         simulated: mode == ExecutionMode::DryRun,
         verification_scope: if mode == ExecutionMode::DryRun {
@@ -920,9 +922,43 @@ fn initial_report(
     }
 }
 
-fn redacted_report_plan(plan: &ExecutionPlan) -> (ExecutionPlan, bool) {
+fn redacted_report_plan(plan: &ExecutionPlan) -> (ExecutionPlan, bool, bool) {
     let mut redacted_plan = plan.clone();
     let mut redacted = false;
+    let mut source_urls_redacted = false;
+    let resolved_input_keys = plan
+        .resolved_inputs
+        .iter()
+        .map(|input| input.key.as_str())
+        .collect::<HashSet<_>>();
+    let sensitive_input_keys = plan
+        .resolved_inputs
+        .iter()
+        .filter(|input| input.sensitive)
+        .map(|input| input.key.as_str())
+        .collect::<HashSet<_>>();
+    for input in &mut redacted_plan.resolved_inputs {
+        if let Some(value) = &mut input.value {
+            redacted |= redact_consumer_input_value(
+                value,
+                input.sensitive,
+                is_host_path_input_type(&input.type_name),
+            );
+        }
+        if input.sensitive && input.selected_enum_label.take().is_some() {
+            redacted = true;
+        }
+    }
+    for input in &mut redacted_plan.inputs {
+        let sensitivity_missing = !resolved_input_keys.contains(input.id.as_str());
+        let sensitive = sensitivity_missing || sensitive_input_keys.contains(input.id.as_str());
+        let host_path = input.value.location.as_deref() == Some("host")
+            && is_host_path_input_type(&input.value.type_name);
+        redacted |= redact_consumer_input_value(&mut input.value.value, sensitive, host_path);
+        if sensitive && input.value.location.take().is_some() {
+            redacted = true;
+        }
+    }
     for artifact in &mut redacted_plan.artifacts {
         let crate::planner::ExecutionArtifactSource::DirectUrl { url, .. } = &mut artifact.source
         else {
@@ -931,6 +967,7 @@ fn redacted_report_plan(plan: &ExecutionPlan) -> (ExecutionPlan, bool) {
         let Ok(mut parsed) = url::Url::parse(url) else {
             *url = "<redacted-invalid-url>".to_string();
             redacted = true;
+            source_urls_redacted = true;
             continue;
         };
         let has_credentials = !parsed.username().is_empty() || parsed.password().is_some();
@@ -941,9 +978,44 @@ fn redacted_report_plan(plan: &ExecutionPlan) -> (ExecutionPlan, bool) {
             parsed.set_fragment(None);
             *url = parsed.to_string();
             redacted = true;
+            source_urls_redacted = true;
         }
     }
-    (redacted_plan, redacted)
+    (redacted_plan, redacted, source_urls_redacted)
+}
+
+fn is_host_path_input_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "file" | "directory" | "file_path" | "directory_path" | "path" | "path_list"
+    )
+}
+
+fn redact_consumer_input_value(value: &mut Value, sensitive: bool, host_path: bool) -> bool {
+    if sensitive {
+        *value = json!("[redacted]");
+        true
+    } else if host_path {
+        redact_host_path_value(value)
+    } else {
+        false
+    }
+}
+
+fn redact_host_path_value(value: &mut Value) -> bool {
+    match value {
+        Value::String(path) if path != "[redacted]" => {
+            *value = json!("[redacted]");
+            true
+        }
+        Value::Array(values) => values.iter_mut().fold(false, |redacted, value| {
+            redact_host_path_value(value) || redacted
+        }),
+        Value::Object(values) => values.values_mut().fold(false, |redacted, value| {
+            redact_host_path_value(value) || redacted
+        }),
+        Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 fn execute_attempt(
@@ -1874,6 +1946,279 @@ mod tests {
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(!serialized.contains("token="));
         assert!(!serialized.contains("private-signed-value"));
+    }
+
+    #[test]
+    fn legacy_plan_inputs_without_sensitivity_metadata_are_redacted_from_consumer_reports() {
+        let secret = "legacy-private-input-value";
+        let mut plan = test_plan("plan.legacy-input");
+        plan.inputs.push(crate::planner::ExecutionInputValue {
+            id: "recipe.setup/legacy_setting".to_string(),
+            value: RuntimeValue {
+                type_name: "string".to_string(),
+                value: json!(secret),
+                location: None,
+            },
+        });
+
+        let report = initial_report(
+            "execution.legacy-input",
+            &plan,
+            "legacy-digest",
+            ExecutionMode::DryRun,
+            None,
+        );
+
+        assert_eq!(report.reviewed_plan.inputs[0].value.value, json!(secret));
+        assert!(report.public_reviewed_plan.is_none());
+        assert_eq!(
+            report.redacted_reviewed_plan.as_ref().unwrap().inputs[0]
+                .value
+                .value,
+            json!("[redacted]")
+        );
+        assert_eq!(report.reviewed_plan_source_urls_redacted, None);
+        assert!(!serde_json::to_string(&report).unwrap().contains(secret));
+
+        let mut plan_with_url = plan;
+        plan_with_url
+            .artifacts
+            .push(crate::planner::ExecutionArtifact {
+                id: "recipe.setup/download".to_string(),
+                type_name: "remote_file".to_string(),
+                source: ExecutionArtifactSource::DirectUrl {
+                    url: "https://cdn.example.com/download.apk?token=private-url-token".to_string(),
+                    sha256: None,
+                },
+                cache: "default".to_string(),
+                app_provenance: None,
+            });
+        let report_with_url = initial_report(
+            "execution.legacy-input-with-url",
+            &plan_with_url,
+            "legacy-digest",
+            ExecutionMode::DryRun,
+            None,
+        );
+
+        assert_eq!(
+            report_with_url.reviewed_plan.inputs[0].value.value,
+            json!(secret)
+        );
+        assert!(report_with_url.public_reviewed_plan.is_none());
+        assert_eq!(
+            report_with_url.reviewed_plan_source_urls_redacted,
+            Some(true)
+        );
+        assert_eq!(
+            report_with_url
+                .redacted_reviewed_plan
+                .as_ref()
+                .unwrap()
+                .inputs[0]
+                .value
+                .value,
+            json!("[redacted]")
+        );
+        let serialized = serde_json::to_string(&report_with_url).unwrap();
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("private-url-token"));
+    }
+
+    #[test]
+    fn input_only_report_redaction_does_not_mark_source_urls_redacted() {
+        let enum_label_secret = "PRIVATE_ENUM_LABEL_SENTINEL";
+        let mut plan = test_plan("plan.sensitive-input");
+        plan.resolved_inputs
+            .push(crate::planner::ExecutionResolvedInputSnapshot {
+                key: "recipe.setup/token".to_string(),
+                recipe_id: "recipe.setup".to_string(),
+                input_id: "token".to_string(),
+                type_name: "enum".to_string(),
+                value: Some(json!("very-private-token")),
+                source: Some(crate::planner::BindingSource::Explicit),
+                label: "Access token".to_string(),
+                description: None,
+                required: true,
+                sensitive: true,
+                selected_enum_label: Some(enum_label_secret.to_string()),
+            });
+        plan.inputs.push(crate::planner::ExecutionInputValue {
+            id: "recipe.setup/token".to_string(),
+            value: crate::planner::RuntimeValue {
+                type_name: "enum".to_string(),
+                value: json!("very-private-token"),
+                location: Some("/Users/private/token.txt".to_string()),
+            },
+        });
+
+        let report = initial_report(
+            "execution.sensitive-input",
+            &plan,
+            "reviewed-digest",
+            ExecutionMode::DryRun,
+            None,
+        );
+
+        assert_eq!(report.reviewed_plan, plan);
+        assert_eq!(
+            report.reviewed_plan.resolved_inputs[0]
+                .selected_enum_label
+                .as_deref(),
+            Some(enum_label_secret)
+        );
+        assert!(report.public_reviewed_plan.is_none());
+        assert_eq!(report.reviewed_plan_source_urls_redacted, None);
+        let consumer_plan = report.redacted_reviewed_plan.as_ref().unwrap();
+        assert_eq!(
+            consumer_plan.resolved_inputs[0].value,
+            Some(json!("[redacted]"))
+        );
+        assert_eq!(consumer_plan.resolved_inputs[0].selected_enum_label, None);
+        assert_eq!(consumer_plan.inputs[0].value.value, json!("[redacted]"));
+        assert_eq!(consumer_plan.inputs[0].value.location, None);
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("very-private-token"));
+        assert!(!serialized.contains("/Users/private/token.txt"));
+        let consumer_json = serde_json::to_string(consumer_plan).unwrap();
+        assert!(!consumer_json.contains(enum_label_secret));
+        let value = serde_json::to_value(report).unwrap();
+        assert!(value.get("reviewedPlanSourceUrlsRedacted").is_none());
+    }
+
+    #[test]
+    fn non_sensitive_host_paths_are_redacted_from_consumer_plan() {
+        let file_path = "/Users/private/selected-image.iso";
+        let directory_path = "/Users/private/selected-roms";
+        let path_list = ["/Users/private/disk-a.iso", "/Users/private/disk-b.iso"];
+        let unselected_file_path = "/Users/private/unselected-image.iso";
+        let mut plan = test_plan("plan.host-path-inputs");
+        plan.resolved_inputs = vec![
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "recipe.setup/image".to_string(),
+                recipe_id: "recipe.setup".to_string(),
+                input_id: "image".to_string(),
+                type_name: "file".to_string(),
+                value: Some(json!(file_path)),
+                source: Some(crate::planner::BindingSource::Explicit),
+                label: "Image file".to_string(),
+                description: None,
+                required: true,
+                sensitive: false,
+                selected_enum_label: None,
+            },
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "recipe.setup/roms".to_string(),
+                recipe_id: "recipe.setup".to_string(),
+                input_id: "roms".to_string(),
+                type_name: "directory".to_string(),
+                value: Some(json!(directory_path)),
+                source: Some(crate::planner::BindingSource::Explicit),
+                label: "ROM directory".to_string(),
+                description: None,
+                required: true,
+                sensitive: false,
+                selected_enum_label: None,
+            },
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "recipe.setup/disks".to_string(),
+                recipe_id: "recipe.setup".to_string(),
+                input_id: "disks".to_string(),
+                type_name: "path_list".to_string(),
+                value: Some(json!(path_list)),
+                source: Some(crate::planner::BindingSource::Explicit),
+                label: "Disk images".to_string(),
+                description: None,
+                required: true,
+                sensitive: false,
+                selected_enum_label: None,
+            },
+            crate::planner::ExecutionResolvedInputSnapshot {
+                key: "recipe.optional/image".to_string(),
+                recipe_id: "recipe.optional".to_string(),
+                input_id: "image".to_string(),
+                type_name: "file".to_string(),
+                value: Some(json!(unselected_file_path)),
+                source: Some(crate::planner::BindingSource::RecipeDefault),
+                label: "Optional image file".to_string(),
+                description: None,
+                required: false,
+                sensitive: false,
+                selected_enum_label: None,
+            },
+        ];
+        plan.inputs = vec![
+            crate::planner::ExecutionInputValue {
+                id: "recipe.setup/image".to_string(),
+                value: crate::planner::RuntimeValue {
+                    type_name: "file_path".to_string(),
+                    value: json!(file_path),
+                    location: Some("host".to_string()),
+                },
+            },
+            crate::planner::ExecutionInputValue {
+                id: "recipe.setup/disks".to_string(),
+                value: crate::planner::RuntimeValue {
+                    type_name: "path_list".to_string(),
+                    value: json!(path_list),
+                    location: Some("host".to_string()),
+                },
+            },
+            crate::planner::ExecutionInputValue {
+                id: "recipe.setup/roms".to_string(),
+                value: crate::planner::RuntimeValue {
+                    type_name: "directory_path".to_string(),
+                    value: json!(directory_path),
+                    location: Some("host".to_string()),
+                },
+            },
+        ];
+
+        let report = initial_report(
+            "execution.host-path-inputs",
+            &plan,
+            "reviewed-digest",
+            ExecutionMode::DryRun,
+            None,
+        );
+
+        assert_eq!(report.reviewed_plan, plan);
+        assert!(report.public_reviewed_plan.is_none());
+        assert_eq!(report.reviewed_plan_source_urls_redacted, None);
+        let consumer_plan = report.redacted_reviewed_plan.as_ref().unwrap();
+        assert_eq!(consumer_plan.inputs[0].value.value, json!("[redacted]"));
+        assert_eq!(consumer_plan.inputs[0].value.type_name, "file_path");
+        assert_eq!(
+            consumer_plan.inputs[1].value.value,
+            json!(["[redacted]", "[redacted]"])
+        );
+        assert_eq!(consumer_plan.inputs[1].value.type_name, "path_list");
+        assert_eq!(consumer_plan.inputs[2].value.value, json!("[redacted]"));
+        assert_eq!(consumer_plan.inputs[2].value.type_name, "directory_path");
+        assert_eq!(
+            consumer_plan.resolved_inputs[0].value,
+            Some(json!("[redacted]"))
+        );
+        assert_eq!(
+            consumer_plan.resolved_inputs[1].value,
+            Some(json!("[redacted]"))
+        );
+        assert_eq!(
+            consumer_plan.resolved_inputs[2].value,
+            Some(json!(["[redacted]", "[redacted]"]))
+        );
+        assert_eq!(
+            consumer_plan.resolved_inputs[3].value,
+            Some(json!("[redacted]"))
+        );
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains(file_path));
+        assert!(!serialized.contains(directory_path));
+        assert!(!serialized.contains(path_list[0]));
+        assert!(!serialized.contains(path_list[1]));
+        assert!(!serialized.contains(unselected_file_path));
     }
 
     #[test]
@@ -2819,6 +3164,8 @@ mod tests {
             ExecutionParamValue::Literal { value: json!(1) },
         );
         ExecutionPlan {
+            device_plan: None,
+            resolved_inputs: Vec::new(),
             id: id.to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),

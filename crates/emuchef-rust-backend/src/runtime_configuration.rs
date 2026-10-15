@@ -322,6 +322,11 @@ impl PreparedConfiguration {
             runtime_capabilities: self.runtime_capabilities.clone(),
             catalog_identity: self.catalog.identity().cloned(),
             target_device: self.target_device.clone(),
+            device_plan_presentation: Some(crate::planner::ExecutionDevicePlanSnapshot {
+                id: parts.device_plan_ref.clone(),
+                name: parts.device_plan_name.clone(),
+                description: parts.device_plan_description.clone(),
+            }),
         })
     }
 }
@@ -383,7 +388,7 @@ pub(crate) fn plan_configuration(
     let review = result
         .execution_plan
         .as_ref()
-        .map(|plan| project_review(&prepared, plan, &resolved_inputs, &diagnostics));
+        .map(|plan| project_review(plan, &diagnostics));
     Ok(PlanConfigurationResult {
         plan: result.execution_plan,
         plan_digest,
