@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "41fd4dd0831ebcbb612eaaca99a67b74548723c9",
+  "prompts": {},
+  "humans": {
+    "h_94cec7b4c73360": {
+      "author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
