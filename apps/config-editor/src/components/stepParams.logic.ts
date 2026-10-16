@@ -6,6 +6,11 @@ export interface AuthoredRefValue {
   ref: string;
 }
 
+/** An authored App Target reference value, for example `{ app_target: "system" }`. */
+export interface AppTargetValue {
+  app_target: string;
+}
+
 export interface RefPickerOption {
   ref: string;
   label: string;
@@ -45,11 +50,58 @@ export function isAuthoredRefValue(value: unknown): value is AuthoredRefValue {
   return keys.length === 1 && keys[0] === "ref" && typeof (value as { ref?: unknown }).ref === "string";
 }
 
+/**
+ * Whether a param value is an authored App Target reference.
+ *
+ * Only the exact sole-key `{ app_target }` shape counts. Objects with extra
+ * keys stay raw JSON values, matching the backend decoder rules, so the
+ * structured control never rewrites a value the backend would treat as a
+ * literal.
+ */
+export function isAppTargetValue(value: unknown): value is AppTargetValue {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  return (
+    keys.length === 1 &&
+    keys[0] === "app_target" &&
+    typeof (value as { app_target?: unknown }).app_target === "string"
+  );
+}
+
+/**
+ * Step types whose absent parameters stay visible in the params editor.
+ *
+ * These app-aware steps are authored through catalog-backed structured
+ * controls. A required parameter, or one the StepSpec gives a default, must
+ * render even before the authored params map contains it; otherwise the step
+ * could only be completed by hand-editing raw JSON. Every other step type
+ * keeps the presence-driven behavior, where a parameter appears once it is
+ * authored or carries a structured shape.
+ */
+const APP_AWARE_STEP_TYPES = new Set(["copy_files", "grant_permissions", "install_apk"]);
+
+function absentParamStaysVisible(stepSpec: StepSpecDto | null | undefined, paramName: string): boolean {
+  if (stepSpec === null || stepSpec === undefined || !APP_AWARE_STEP_TYPES.has(stepSpec.type)) {
+    return false;
+  }
+  const paramSpec = stepSpec.params[paramName];
+  return (
+    paramSpec !== undefined &&
+    (paramSpec.required || Object.prototype.hasOwnProperty.call(stepSpec.defaults, paramName))
+  );
+}
+
 export function orderedParamNames(params: Record<string, unknown>, stepSpec: StepSpecDto | null | undefined): string[] {
   const presentNames = new Set(Object.keys(params));
   const ordered: string[] = [];
   for (const name of stepSpec?.paramOrder ?? []) {
-    if (presentNames.has(name) || structuredParamEditorKind(stepSpec, name, undefined) !== null) {
+    if (
+      presentNames.has(name) ||
+      structuredParamEditorKind(stepSpec, name, undefined) !== null ||
+      absentParamStaysVisible(stepSpec, name)
+    ) {
       ordered.push(name);
     }
   }
@@ -292,15 +344,28 @@ export function buildRefPickerOptions(
     allowedValueTypes,
     currentRef,
     showAll,
+    allowedArtifactRefs = null,
   }: {
     allowedSources: readonly string[];
     allowedValueTypes: readonly string[];
     currentRef: string | null;
     showAll: boolean;
+    /**
+     * Refs the consuming step may newly select, or null for no restriction.
+     *
+     * The restriction is an authority rule rather than a display filter: when
+     * set, it is the complete newly selectable set regardless of source kind,
+     * and it also applies while showing all refs, because an app-aware step
+     * may only consume artifact refs the selected App Definition owns. The
+     * current authored ref stays visible as a retained diagnostic option and
+     * is marked incompatible when it is outside the set.
+     */
+    allowedArtifactRefs?: readonly string[] | null;
   },
 ): RefPickerOption[] {
   const acceptedSources = new Set(allowedSources);
   const allowed = new Set(allowedValueTypes);
+  const allowedRefs = allowedArtifactRefs === null ? null : new Set(allowedArtifactRefs);
   const hasSourceFilter = acceptedSources.size > 0 && !showAll;
   const hasTypeFilter = allowed.size > 0 && !showAll;
   const candidates = candidateOptions(refIndex.candidates);
@@ -309,10 +374,13 @@ export function buildRefPickerOptions(
     .filter((ref) => !candidateRefs.has(ref))
     .map((ref) => rawRefOption(ref, false, refIndex.candidates));
   const allOptions = [...candidates, ...fallbackOptions];
+  const authorityAllowed = (option: RefPickerOption): boolean =>
+    allowedRefs === null || allowedRefs.has(option.ref);
   const filteredOptions = allOptions.filter(
     (option) =>
       (!hasSourceFilter || acceptedSources.has(option.sourceKind)) &&
-      (!hasTypeFilter || (option.valueType !== null && allowed.has(option.valueType))),
+      (!hasTypeFilter || (option.valueType !== null && allowed.has(option.valueType))) &&
+      authorityAllowed(option),
   );
   const optionsByRef = new Map(filteredOptions.map((option) => [option.ref, option]));
 
@@ -325,7 +393,8 @@ export function buildRefPickerOptions(
       missing: currentIsMissing,
       incompatible:
         !currentIsMissing &&
-        ((hasSourceFilter && !acceptedSources.has(currentFromAll.sourceKind)) ||
+        (!authorityAllowed(currentFromAll) ||
+          (hasSourceFilter && !acceptedSources.has(currentFromAll.sourceKind)) ||
           (hasTypeFilter && currentFromAll.valueType !== null && !allowed.has(currentFromAll.valueType))),
     });
   }

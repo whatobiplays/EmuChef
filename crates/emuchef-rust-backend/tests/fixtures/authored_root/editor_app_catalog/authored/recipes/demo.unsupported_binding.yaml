@@ -1,0 +1,30 @@
+schema_version: 1
+kind: recipe
+id: demo.unsupported_binding
+name: Binding on an App Artifact that is not user-provided
+recipe_dependencies: []
+provides:
+  features: []
+inputs:
+  payload:
+    type: file
+    role: generic
+    label: Payload
+    description: Only user-provided App Artifacts may bind Recipe inputs.
+    required: true
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: file
+    default: null
+artifacts:
+  installer:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: apk
+    input:
+      ref: inputs.payload
+artifact_groups: {}
+steps: []
+

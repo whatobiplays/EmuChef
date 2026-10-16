@@ -8,8 +8,20 @@ export type EditorCommand =
   | { type: "DeleteInput"; inputId: string }
   | { type: "DuplicateInput"; sourceInputId: string; newInputId: string }
   | { type: "AddArtifact"; artifactId: string; url: string }
+  | {
+      type: "AddAppArtifact";
+      artifactId: string;
+      appRef: string;
+      artifact: string;
+      input?: string | null;
+    }
   | { type: "RenameArtifact"; artifactId: string; newArtifactId: string }
-  | { type: "UpdateArtifactField"; artifactId: string; field: "url" | "cache"; value: unknown }
+  | {
+      type: "UpdateArtifactField";
+      artifactId: string;
+      field: "url" | "cache" | "appRef" | "artifact" | "input";
+      value: unknown;
+    }
   | { type: "DeleteArtifact"; artifactId: string }
   | { type: "DuplicateArtifact"; sourceArtifactId: string; newArtifactId: string }
   | { type: "AddArtifactGroup"; groupId: string }

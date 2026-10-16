@@ -1,0 +1,16 @@
+schema_version: 1
+kind: recipe
+id: demo.unused_missing_binding
+name: Unused user-provided artifact without input binding
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  config:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: config
+artifact_groups: {}
+steps: []
+

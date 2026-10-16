@@ -1,0 +1,38 @@
+schema_version: 1
+kind: recipe
+id: demo.target_usage
+name: App target usage
+recipe_dependencies: []
+provides:
+  features: []
+inputs:
+  payload:
+    type: file
+    role: generic
+    label: Payload
+    description: Source file copied to the App-owned target.
+    required: true
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: file
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: copy_payload
+    type: copy_files
+    name: Copy payload
+    user_toggleable: false
+    app_ref: demo_app
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.payload
+      dest:
+        app_target: config_file
+    verify: []

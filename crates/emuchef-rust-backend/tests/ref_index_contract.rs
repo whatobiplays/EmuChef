@@ -48,10 +48,16 @@ fn normalize_document_result(value: &Value) -> Value {
             let input_validation = object.contains_key("mustExist")
                 && object.contains_key("allowedExtensions")
                 && object.contains_key("pathKind");
+            let editor_document = object.contains_key("recipe")
+                && object.contains_key("refIndex")
+                && object.contains_key("yaml");
             for (key, item) in object {
                 // Frozen v1 fixtures remain immutable compatibility evidence.
                 // Compare their legacy input projection while newer DTO fields
                 // receive Rust-native contract coverage.
+                if editor_document && key == "appCatalog" {
+                    continue;
+                }
                 if input_definition
                     && matches!(
                         key.as_str(),
@@ -408,7 +414,13 @@ fn document_ref_index_is_current_after_get_save_apply_undo_and_redo() {
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
-        vec!["diagnostics"]
+        vec!["diagnostics", "document"]
+    );
+    // Recipe validation returns the complete refreshed document projection,
+    // so the ref index carried by that projection must match other commands.
+    assert_eq!(
+        responses[7]["result"]["document"]["refIndex"],
+        expected_ref_index
     );
 }
 

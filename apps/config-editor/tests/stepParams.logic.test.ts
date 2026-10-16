@@ -13,6 +13,7 @@ import {
   buildUpdateStepParamsCommand,
   displayValueForObjectField,
   isAuthoredRefValue,
+  isAppTargetValue,
   literalSeedForParam,
   moveStringListValue,
   orderedParamNames,
@@ -54,7 +55,7 @@ const copySpec: StepSpecDto = {
       enumValues: ["merge", "sync"],
     },
   },
-  defaults: {},
+  defaults: { copy_policy: "merge" },
 };
 
 const resolveSpec: StepSpecDto = {
@@ -157,6 +158,62 @@ const grantSpec: StepSpecDto = {
   defaults: {},
 };
 
+const installApkSpec: StepSpecDto = {
+  type: "install_apk",
+  label: "Install APK",
+  supported: true,
+  appContext: "required",
+  primaryOutputName: null,
+  outputs: [],
+  paramOrder: ["app", "expected_package_name", "expected_sha256", "replace_existing"],
+  params: {
+    app: {
+      acceptedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+      acceptedValueTypes: ["file_path"],
+      required: true,
+      enumValues: [],
+    },
+    expected_package_name: {
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["string"],
+      required: false,
+      enumValues: [],
+    },
+    expected_sha256: {
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["string"],
+      required: false,
+      enumValues: [],
+    },
+    replace_existing: {
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["boolean"],
+      required: false,
+      enumValues: [],
+    },
+  },
+  defaults: { replace_existing: false },
+};
+
+const waitSpec: StepSpecDto = {
+  type: "wait",
+  label: "Wait",
+  supported: true,
+  appContext: "none",
+  primaryOutputName: null,
+  outputs: [],
+  paramOrder: ["duration_ms"],
+  params: {
+    duration_ms: {
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["integer"],
+      required: true,
+      enumValues: [],
+    },
+  },
+  defaults: {},
+};
+
 const refIndex: RefIndexDto = {
   inputRefs: ["inputs.source_dir"],
   artifactRefs: ["artifacts.archive.local_path"],
@@ -203,13 +260,18 @@ test("orderedParamNames renders present spec params first and keeps extra params
       },
       copySpec,
     ),
-    ["source", "copy_policy", "extra"],
+    ["source", "dest", "copy_policy", "extra"],
   );
 });
 
-test("orderedParamNames includes absent structured params without including absent primitive params", () => {
+test("orderedParamNames keeps absent structured params for every step type", () => {
   assert.deepEqual(orderedParamNames({}, grantSpec), ["runtime", "appops", "policy"]);
-  assert.deepEqual(orderedParamNames({}, copySpec), []);
+  assert.deepEqual(orderedParamNames({ extra: true }, waitSpec), ["extra"]);
+});
+
+test("orderedParamNames exposes absent required and defaulted params of app-aware steps", () => {
+  assert.deepEqual(orderedParamNames({}, installApkSpec), ["app", "replace_existing"]);
+  assert.deepEqual(orderedParamNames({}, copySpec), ["source", "dest", "copy_policy"]);
 });
 
 test("buildUpdateStepParamsCommand preserves sibling params and literal null values", () => {
@@ -656,4 +718,144 @@ test("buildRefDependencyAction appends producer ids and avoids duplicates or sel
     ok: false,
     reason: "self-dependency",
   });
+});
+
+test("isAppTargetValue only accepts top-level sole-key app target objects", () => {
+  assert.equal(isAppTargetValue({ app_target: "system" }), true);
+  assert.equal(isAppTargetValue({ app_target: "system", cache: "default" }), false);
+  assert.equal(isAppTargetValue({ app_target: 3 }), false);
+  assert.equal(isAppTargetValue({ ref: "inputs.target" }), false);
+  assert.equal(isAppTargetValue("system"), false);
+  assert.equal(isAppTargetValue(["app_target"]), false);
+  assert.equal(isAppTargetValue(null), false);
+});
+
+const installIndex: RefIndexDto = {
+  inputRefs: ["inputs.apk_file"],
+  artifactRefs: ["artifacts.demo_apk.local_path", "artifacts.other_apk.local_path"],
+  stepRefs: [],
+  stepOutputRefs: ["steps.unzip.outputs.extracted_path"],
+  allRefs: [
+    "inputs.apk_file",
+    "artifacts.demo_apk.local_path",
+    "artifacts.other_apk.local_path",
+    "steps.unzip.outputs.extracted_path",
+  ],
+  candidates: [
+    {
+      ref: "inputs.apk_file",
+      label: "APK file",
+      valueType: "file_path",
+      sourceKind: "input",
+      sourceId: "apk_file",
+    },
+    {
+      ref: "artifacts.demo_apk.local_path",
+      label: "Demo apk",
+      valueType: "file_path",
+      sourceKind: "artifact",
+      sourceId: "demo_apk",
+    },
+    {
+      ref: "artifacts.other_apk.local_path",
+      label: "Other apk",
+      valueType: "file_path",
+      sourceKind: "artifact",
+      sourceId: "other_apk",
+    },
+    {
+      ref: "steps.unzip.outputs.extracted_path",
+      label: "Unzip output",
+      valueType: "file_path",
+      sourceKind: "step_output",
+      sourceId: "unzip",
+    },
+  ],
+};
+
+test("buildRefPickerOptions artifact allow-list keeps only permitted artifact refs", () => {
+  const unrestricted = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: null,
+    showAll: false,
+  });
+  assert.deepEqual(unrestricted.map((option) => option.ref), [
+    "inputs.apk_file",
+    "artifacts.demo_apk.local_path",
+    "artifacts.other_apk.local_path",
+    "steps.unzip.outputs.extracted_path",
+  ]);
+
+  const restricted = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: null,
+    showAll: false,
+    allowedArtifactRefs: ["artifacts.demo_apk.local_path"],
+  });
+  assert.deepEqual(restricted.map((option) => option.ref), ["artifacts.demo_apk.local_path"]);
+
+  const showAllRestricted = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: null,
+    showAll: true,
+    allowedArtifactRefs: ["artifacts.demo_apk.local_path"],
+  });
+  assert.deepEqual(showAllRestricted.map((option) => option.ref), ["artifacts.demo_apk.local_path"]);
+
+  const retained = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: "artifacts.other_apk.local_path",
+    showAll: false,
+    allowedArtifactRefs: ["artifacts.demo_apk.local_path"],
+  });
+  assert.deepEqual(retained.map((option) => option.ref), [
+    "artifacts.other_apk.local_path",
+    "artifacts.demo_apk.local_path",
+  ]);
+  assert.equal(retained[0].current, true);
+  assert.equal(retained[0].incompatible, true);
+  assert.equal(retained[1].incompatible, false);
+});
+
+test("show all cannot newly select unrelated refs for an app-aware install_apk", () => {
+  const noCurrent = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: null,
+    showAll: true,
+    allowedArtifactRefs: ["artifacts.demo_apk.local_path"],
+  });
+  assert.deepEqual(noCurrent.map((option) => option.ref), ["artifacts.demo_apk.local_path"]);
+  assert.equal(noCurrent[0].incompatible, false);
+
+  const currentStepOutput = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: "steps.unzip.outputs.extracted_path",
+    showAll: true,
+    allowedArtifactRefs: ["artifacts.demo_apk.local_path"],
+  });
+  assert.deepEqual(currentStepOutput.map((option) => option.ref), [
+    "steps.unzip.outputs.extracted_path",
+    "artifacts.demo_apk.local_path",
+  ]);
+  assert.equal(currentStepOutput[0].current, true);
+  assert.equal(currentStepOutput[0].incompatible, true);
+  assert.equal(currentStepOutput[0].missing, false);
+  assert.equal(currentStepOutput[1].incompatible, false);
+
+  const emptyAuthority = buildRefPickerOptions(installIndex, {
+    allowedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+    allowedValueTypes: ["file_path"],
+    currentRef: "inputs.apk_file",
+    showAll: true,
+    allowedArtifactRefs: [],
+  });
+  assert.deepEqual(emptyAuthority.map((option) => option.ref), ["inputs.apk_file"]);
+  assert.equal(emptyAuthority[0].current, true);
+  assert.equal(emptyAuthority[0].incompatible, true);
 });

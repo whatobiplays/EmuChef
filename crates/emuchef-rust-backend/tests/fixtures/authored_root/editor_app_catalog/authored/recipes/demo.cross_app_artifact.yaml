@@ -1,0 +1,31 @@
+schema_version: 1
+kind: recipe
+id: demo.cross_app_artifact
+name: Cross-app App artifact
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  installer:
+    type: app_artifact
+    app_ref: second_app
+    artifact: apk
+artifact_groups: {}
+steps:
+  - id: install_demo
+    type: install_apk
+    name: Install Demo App
+    user_toggleable: false
+    app_ref: demo_app
+    dependencies: []
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.installer.local_path
+      replace_existing: true
+    verify: []

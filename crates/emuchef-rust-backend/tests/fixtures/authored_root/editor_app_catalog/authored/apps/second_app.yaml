@@ -1,0 +1,14 @@
+schema_version: 1
+kind: app_definition
+id: second_app
+name: Second App
+description: Second catalog fixture app without launcher, permission sets, or targets.
+category: emulator
+package_id: com.example.second
+artifacts:
+  apk:
+    kind: apk
+    name: Second APK
+    source:
+      strategy: direct_url
+      url: https://example.com/second.apk

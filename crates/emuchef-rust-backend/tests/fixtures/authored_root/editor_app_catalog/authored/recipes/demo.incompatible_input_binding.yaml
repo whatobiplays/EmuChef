@@ -1,0 +1,48 @@
+schema_version: 1
+kind: recipe
+id: demo.incompatible_input_binding
+name: Unused bindings to incompatible Recipe inputs
+recipe_dependencies: []
+provides:
+  features: []
+inputs:
+  folder:
+    type: directory
+    role: generic
+    label: Folder
+    description: A directory input cannot supply one user-provided file.
+    required: true
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+  many:
+    type: file
+    role: generic
+    label: Many files
+    description: A multiple file input cannot supply one user-provided file.
+    required: true
+    multiple: true
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: file
+    default: null
+artifacts:
+  config_folder:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: config
+    input:
+      ref: inputs.folder
+  config_many:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: config
+    input:
+      ref: inputs.many
+artifact_groups: {}
+steps: []
+

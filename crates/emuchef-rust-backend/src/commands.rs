@@ -37,6 +37,14 @@ pub enum RecipeCommand {
         artifact_id: String,
         url: String,
     },
+    /// Add one Recipe App Artifact that references an App Definition artifact.
+    AddAppArtifact {
+        artifact_id: String,
+        app_ref: String,
+        artifact: String,
+        /// Recipe input id bound to a user-provided App Artifact source.
+        input_id: Option<String>,
+    },
     RenameArtifact {
         artifact_id: String,
         new_artifact_id: String,
@@ -167,6 +175,9 @@ pub enum InputField {
 pub enum ArtifactField {
     Url,
     Cache,
+    AppRef,
+    AppArtifact,
+    Input,
 }
 
 pub fn decode_recipe_command(payload: &Value) -> Result<RecipeCommand, ApiError> {
@@ -198,6 +209,7 @@ pub fn decode_recipe_command(payload: &Value) -> Result<RecipeCommand, ApiError>
         "DuplicateInput" => decode_duplicate_input(object),
         "UpdateInputField" => decode_update_input_field(object),
         "AddArtifact" => decode_add_artifact(object),
+        "AddAppArtifact" => decode_add_app_artifact(object),
         "UpdateArtifactField" => decode_update_artifact_field(object),
         "RenameArtifact" => decode_rename_artifact(object),
         "DeleteArtifact" => decode_delete_artifact(object),
@@ -353,17 +365,48 @@ fn decode_add_artifact(object: &Map<String, Value>) -> Result<RecipeCommand, Api
     })
 }
 
+fn decode_add_app_artifact(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    reject_unexpected_fields(
+        object,
+        &["type", "artifactId", "appRef", "artifact", "input"],
+        "AddAppArtifact",
+    )?;
+    let input_id = match object.get("input") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        value => {
+            return Err(ApiError::invalid_command_with_details(
+                "Command field 'input' must be a non-empty string or null.",
+                json!({
+                    "commandType": "AddAppArtifact",
+                    "field": "input",
+                    "value": value,
+                }),
+            ));
+        }
+    };
+    Ok(RecipeCommand::AddAppArtifact {
+        artifact_id: required_str(object, "artifactId", "AddAppArtifact")?,
+        app_ref: required_str(object, "appRef", "AddAppArtifact")?,
+        artifact: required_str(object, "artifact", "AddAppArtifact")?,
+        input_id,
+    })
+}
+
 fn decode_update_artifact_field(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
     let field = match required_str(object, "field", "UpdateArtifactField")?.as_str() {
         "url" => ArtifactField::Url,
         "cache" => ArtifactField::Cache,
+        "appRef" => ArtifactField::AppRef,
+        "artifact" => ArtifactField::AppArtifact,
+        "input" => ArtifactField::Input,
         value => {
             return Err(ApiError::invalid_command_with_details(
                 format!("Command field 'field' has unsupported value: {value}"),
                 json!({
                     "commandType": "UpdateArtifactField",
                     "field": "field",
-                    "allowedValues": ["url", "cache"],
+                    "allowedValues": ["url", "cache", "appRef", "artifact", "input"],
                 }),
             ));
         }

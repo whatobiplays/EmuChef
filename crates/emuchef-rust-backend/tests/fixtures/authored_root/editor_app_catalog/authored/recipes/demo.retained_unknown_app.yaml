@@ -1,0 +1,23 @@
+schema_version: 1
+kind: recipe
+id: demo.retained_unknown_app
+name: Retained unknown App reference
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: launch_ghost
+    type: launch_app
+    name: Launch ghost app
+    user_toggleable: true
+    app_ref: ghost_app
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params: {}
+    verify: []

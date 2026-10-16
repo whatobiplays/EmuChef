@@ -1,0 +1,111 @@
+schema_version: 1
+kind: recipe
+id: demo.app.install
+name: Install Demo App
+recipe_dependencies: []
+provides:
+  features:
+    - demo_app_install
+inputs:
+  config:
+    type: file
+    role: generic
+    label: Demo config
+    description: User-provided configuration file for the Demo App.
+    required: true
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: file
+artifacts:
+  installer:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: apk
+  config:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: config
+    input:
+      ref: inputs.config
+artifact_groups: {}
+steps:
+  - id: resolve_demo_apk
+    type: resolve_artifacts
+    name: Resolve Demo APK
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - installer
+    verify: []
+  - id: install_demo
+    type: install_apk
+    name: Install Demo App
+    user_toggleable: false
+    app_ref: demo_app
+    dependencies:
+      - resolve_demo_apk
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.installer.local_path
+      replace_existing: true
+    verify:
+      - type: package_installed
+        params: {}
+  - id: grant_demo
+    type: grant_permissions
+    name: Grant Demo permissions
+    user_toggleable: false
+    app_ref: demo_app
+    dependencies:
+      - install_demo
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      permission_set: baseline
+      policy:
+        on_failure: warn
+    verify: []
+  - id: copy_demo_config
+    type: copy_files
+    name: Copy Demo config
+    user_toggleable: false
+    app_ref: demo_app
+    dependencies:
+      - install_demo
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: artifacts.config.local_path
+      dest:
+        app_target: config_file
+    verify: []
+  - id: launch_demo
+    type: launch_app
+    name: Launch Demo App
+    user_toggleable: true
+    app_ref: demo_app
+    dependencies:
+      - install_demo
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params: {}
+    verify: []

@@ -119,6 +119,58 @@ export interface RecipeDto {
   steps: StepDto[];
 }
 
+/**
+ * Whether structured App Definition choices are currently available.
+ *
+ * - `unbound`: the document has no authored catalog root, so no App choices exist.
+ * - `ready`: the catalog loaded without diagnostics and every choice is resolvable.
+ * - `invalid`: the catalog reported diagnostics, so all choices fail closed.
+ */
+export type AppCatalogStatusDto = "unbound" | "ready" | "invalid";
+
+/** One App Definition artifact choice offered by the catalog projection. */
+export interface AppCatalogArtifactDto {
+  id: string;
+  /** Authored artifact kind, for example `apk` or `file`. */
+  kind: string;
+  /** True when the App Definition sources the artifact from a user-provided file. */
+  requiresInput: boolean;
+}
+
+/** One App Definition target choice offered by the catalog projection. */
+export interface AppCatalogTargetDto {
+  id: string;
+  /** Authored target kind, `directory` or `file`. */
+  kind: string;
+  /** Android storage location, for example `shared_storage`. */
+  location: string;
+  path: string;
+}
+
+/** One App Definition projected for structured editor controls. */
+export interface AppCatalogAppDto {
+  id: string;
+  name: string;
+  artifacts: AppCatalogArtifactDto[];
+  /** Defined permission set names, for example `baseline`. */
+  permissionSets: string[];
+  targets: AppCatalogTargetDto[];
+  /** Canonical launcher activity, or null when the App Definition has none. */
+  launcherActivity: string | null;
+}
+
+/**
+ * Sanitized App Definition choices projected once per document refresh.
+ *
+ * The Rust document session owns this projection; editor controls consume it
+ * and never re-derive App Definition facts themselves.
+ */
+export interface AppCatalogDto {
+  status: AppCatalogStatusDto;
+  apps: AppCatalogAppDto[];
+  diagnostics: DiagnosticDto[];
+}
+
 export interface RecipeDocumentDto {
   documentId: string;
   path: string;
@@ -130,6 +182,7 @@ export interface RecipeDocumentDto {
   yaml: string;
   diagnostics: DiagnosticDto[];
   refIndex: RefIndexDto;
+  appCatalog: AppCatalogDto;
 }
 
 export interface AppDefinitionDocumentDto {
@@ -256,6 +309,13 @@ export interface ValidateRecipePathResult {
 }
 
 export interface ValidateResult {
+  /**
+   * Complete refreshed projection for Recipe documents.
+   *
+   * App Definition and user-configuration validation responses carry
+   * diagnostics only, so consumers fall back to diagnostics for them.
+   */
+  document?: RecipeDocumentDto;
   diagnostics: DiagnosticDto[];
 }
 

@@ -1,4 +1,5 @@
 import type { EditorCommand } from "../api/commands.js";
+import type { AppConditionType } from "./appCatalog.logic.js";
 
 export type AdvancedInternalsField = "constraints" | "skipIf" | "verify";
 
@@ -22,8 +23,19 @@ export type ConstraintsClassification =
         | "ambiguous_conflict_fields";
     };
 export type SupportedVerifyType = "path_exists" | "file_exists" | "package_installed";
+/**
+ * Classification of one authored `skip_if` or `verify` condition entry.
+ *
+ * `structured` covers exact supported shapes with a literal string field,
+ * `app_target` covers the planner's App Target path form, and
+ * `app_package_installed` covers the canonical parameterless app-aware
+ * package check. Every other authored shape is `json` and is edited as
+ * raw JSON instead of being coerced into another representation.
+ */
 export type VerifyClassification =
   | { kind: "structured"; type: SupportedVerifyType; fieldName: "path" | "package_name"; fieldValue: string }
+  | { kind: "app_target"; type: AppConditionType; targetId: string }
+  | { kind: "app_package_installed"; type: "package_installed" }
   | { kind: "json" };
 export type VerifyUpdateResult = { ok: true; value: unknown[] } | { ok: false; error: string };
 
@@ -119,6 +131,23 @@ export function verifyFieldForType(type: string): "path" | "package_name" | null
     : null;
 }
 
+/**
+ * Narrows a supported condition type to the kinds that may select an App Target.
+ *
+ * Only `path_exists` and `file_exists` conditions resolve their
+ * `path` parameter through the enclosing step's App Definition; every other
+ * supported type keeps its literal parameter form.
+ */
+export function appConditionType(type: SupportedVerifyType): AppConditionType | null {
+  return type === "path_exists" || type === "file_exists" ? type : null;
+}
+
+/**
+ * Classifies one authored condition entry for the structured editors.
+ *
+ * The same classification serves `skip_if` and `verify` because both
+ * author the same condition shape and share every structured edit rule.
+ */
 export function classifyVerifyEntry(entry: unknown): VerifyClassification {
   if (!isJsonObject(entry) || hasUnsupportedKeys(entry, ["type", "params"])) {
     return { kind: "json" };
@@ -126,8 +155,15 @@ export function classifyVerifyEntry(entry: unknown): VerifyClassification {
   if (typeof entry.type !== "string" || !isJsonObject(entry.params)) {
     return { kind: "json" };
   }
+  const appTarget = classifyAppTargetCondition(entry.type, entry.params);
+  if (appTarget !== null) {
+    return appTarget;
+  }
   const fieldName = verifyFieldForType(entry.type);
   if (fieldName === null || typeof entry.params[fieldName] !== "string") {
+    if (entry.type === "package_installed" && Object.keys(entry.params).length === 0) {
+      return { kind: "app_package_installed", type: "package_installed" };
+    }
     return { kind: "json" };
   }
   return {
@@ -136,6 +172,24 @@ export function classifyVerifyEntry(entry: unknown): VerifyClassification {
     fieldName,
     fieldValue: entry.params[fieldName],
   };
+}
+
+/**
+ * Recognizes the planner's App Target path form under an exact shape.
+ *
+ * The execution planner accepts only a sole `path` parameter holding a sole
+ * `app_target` string key, so any other key or value shape stays raw JSON
+ * and is never edited as if it were the App Target form.
+ */
+function classifyAppTargetCondition(type: string, params: Record<string, unknown>): VerifyClassification | null {
+  if ((type !== "path_exists" && type !== "file_exists") || Object.keys(params).length !== 1) {
+    return null;
+  }
+  const target = params.path;
+  if (!isJsonObject(target) || Object.keys(target).length !== 1 || typeof target.app_target !== "string") {
+    return null;
+  }
+  return { kind: "app_target", type, targetId: target.app_target };
 }
 
 export function classifyConstraintsDto(value: unknown): ConstraintsClassification {
@@ -282,6 +336,112 @@ export function buildAddVerifyEntry(
     return { ok: false, error: validation };
   }
   return { ok: true, value: [...currentVerify, { type, params: { [fieldName]: fieldValue } }] };
+}
+
+/**
+ * Adds an app-aware parameterless `package_installed` condition.
+ *
+ * The condition inherits its package from the enclosing step `app_ref`, so it
+ * never authors a `package_name` parameter. Authoring requires an App
+ * Definition context on the step, and legacy conditions stay untouched.
+ */
+export function buildAddAppPackageInstalledEntry(
+  currentVerify: unknown[],
+  appRef: string | null | undefined,
+): VerifyUpdateResult {
+  if (!appRef) {
+    return { ok: false, error: "Select an App Definition before adding an App Definition package check." };
+  }
+  return { ok: true, value: [...currentVerify, { type: "package_installed", params: {} }] };
+}
+
+/**
+ * Adds one App Target `path_exists` or `file_exists` condition.
+ *
+ * The condition stores its target under `path` and inherits the App
+ * Definition from the enclosing step `app_ref`, matching what the execution
+ * planner resolves. Authoring requires a selected target.
+ */
+export function buildAddAppTargetConditionEntry(
+  currentConditions: unknown[],
+  type: AppConditionType,
+  targetId: string,
+): VerifyUpdateResult {
+  if (!targetId.trim()) {
+    return { ok: false, error: "Select an App Target for this check." };
+  }
+  return { ok: true, value: [...currentConditions, { type, params: { path: { app_target: targetId } } }] };
+}
+
+/**
+ * Replaces the App Target of one `path_exists` or `file_exists` condition.
+ *
+ * Accepts both the App Target form and the literal path form, so an author can
+ * switch representations explicitly. Returns null when the entry already
+ * matches and an error when the entry is missing or is a different kind of
+ * check.
+ */
+export function buildConditionAppTargetUpdate(
+  currentConditions: unknown[],
+  index: number,
+  targetId: string,
+): VerifyUpdateResult | null {
+  if (index < 0 || index >= currentConditions.length) {
+    return { ok: false, error: "Check entry does not exist." };
+  }
+  if (!targetId.trim()) {
+    return { ok: false, error: "Select an App Target for this check." };
+  }
+  const type = conditionPathType(classifyVerifyEntry(currentConditions[index]));
+  if (type === null) {
+    return { ok: false, error: "This check does not select an App Target." };
+  }
+  const nextEntry = { type, params: { path: { app_target: targetId } } };
+  if (jsonValuesEqual(nextEntry, currentConditions[index])) {
+    return null;
+  }
+  const nextConditions = [...currentConditions];
+  nextConditions[index] = nextEntry;
+  return { ok: true, value: nextConditions };
+}
+
+/**
+ * Switches one App Target condition back to its literal path form.
+ *
+ * The caller supplies the replacement value; the Config Editor switches with
+ * an empty path so the author types the literal value instead of the editor
+ * deriving one from the App Definition.
+ */
+export function buildConditionLiteralUpdate(
+  currentConditions: unknown[],
+  index: number,
+  fieldValue: string,
+): VerifyUpdateResult | null {
+  if (index < 0 || index >= currentConditions.length) {
+    return { ok: false, error: "Check entry does not exist." };
+  }
+  const classification = classifyVerifyEntry(currentConditions[index]);
+  if (classification.kind !== "app_target") {
+    return { ok: false, error: "This check does not select an App Target." };
+  }
+  const nextEntry = { type: classification.type, params: { path: fieldValue } };
+  if (jsonValuesEqual(nextEntry, currentConditions[index])) {
+    return null;
+  }
+  const nextConditions = [...currentConditions];
+  nextConditions[index] = nextEntry;
+  return { ok: true, value: nextConditions };
+}
+
+/** The `path_exists` or `file_exists` type of a condition that may select an App Target. */
+function conditionPathType(classification: VerifyClassification): AppConditionType | null {
+  if (classification.kind === "app_target") {
+    return classification.type;
+  }
+  if (classification.kind === "structured" && classification.fieldName === "path") {
+    return appConditionType(classification.type);
+  }
+  return null;
 }
 
 export function buildVerifyKnownFieldUpdate(
