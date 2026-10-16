@@ -78,6 +78,9 @@ pub struct AdmissionSnapshot {
     pub(crate) directories: Vec<CatalogDirectorySnapshot>,
     pub(crate) destination: PathBuf,
     pub(crate) publish_kind: AdmissionPublishKind,
+    /// True when the destination file is expected to be absent, as for a
+    /// generated catalog App that does not exist yet.
+    pub(crate) expect_new_destination: bool,
     dependent_references: DependentAppReferences,
 }
 
@@ -155,6 +158,14 @@ pub fn admit_app_definition_save(
     value: &AppDefinitionV1,
     context: &AppDefinitionSaveContext,
 ) -> AppDefinitionSaveAdmission {
+    admit_app_definition_save_inner(value, context, false)
+}
+
+fn admit_app_definition_save_inner(
+    value: &AppDefinitionV1,
+    context: &AppDefinitionSaveContext,
+    expect_new_destination: bool,
+) -> AppDefinitionSaveAdmission {
     let mut diagnostics = authored_models::validate_app_definition(value)
         .into_iter()
         .map(|diagnostic| {
@@ -167,7 +178,7 @@ pub fn admit_app_definition_save(
         })
         .collect::<Vec<_>>();
 
-    let mut snapshot = match prepare_save_snapshot(value, context, &mut diagnostics) {
+    let mut snapshot = match prepare_save_snapshot(value, context, &mut diagnostics, expect_new_destination) {
         Some(snapshot) => Some(snapshot),
         None => None,
     };
@@ -189,6 +200,7 @@ fn prepare_save_snapshot(
     value: &AppDefinitionV1,
     context: &AppDefinitionSaveContext,
     diagnostics: &mut Vec<AppDefinitionSaveDiagnostic>,
+    expect_new_destination: bool,
 ) -> Option<AdmissionSnapshot> {
     let mut directories = Vec::new();
     let mut dependent_references = DependentAppReferences::default();
@@ -399,6 +411,7 @@ fn prepare_save_snapshot(
             directories,
             destination,
             publish_kind,
+            expect_new_destination,
             dependent_references,
         })
     } else {
@@ -411,10 +424,352 @@ fn prepare_save_snapshot(
             directories,
             destination: context.opened_file.path.clone(),
             publish_kind,
+            expect_new_destination,
             dependent_references,
         })
     }
 }
+
+/// Inputs for one generated App Definition publication that also creates the
+/// single new Recipe referencing it.
+///
+/// The App is either a brand-new catalog document or an existing catalog App
+/// being extended; the Recipe always targets a new destination file.
+pub struct GeneratedAppSaveContext {
+    pub authored_root: PathBuf,
+    /// Canonical `apps/<app-id>.yaml` destination of the generated App.
+    pub app_destination: PathBuf,
+    /// Captured existing App file when the generation extends an existing App.
+    pub opened_app: Option<OpenedAppDefinitionFile>,
+    /// Canonical `recipes/<recipe-id>.yaml` destination of the new Recipe.
+    pub recipe_destination: PathBuf,
+}
+
+/// Captured App and Recipe state required to publish one generated pair.
+#[derive(Clone, Debug)]
+pub(crate) struct GeneratedAppPairSnapshot {
+    pub(crate) app_snapshot: AdmissionSnapshot,
+    pub(crate) recipe_canonical_yaml: String,
+    pub(crate) recipe_destination: PathBuf,
+}
+
+/// Combined admission result for one generated App/Recipe pair.
+pub struct GeneratedAppPairAdmission {
+    pub diagnostics: Vec<AppDefinitionSaveDiagnostic>,
+    pub(crate) snapshot: Option<GeneratedAppPairSnapshot>,
+}
+
+impl GeneratedAppPairAdmission {
+    /// Return whether the pair was fully classified and admits publication.
+    pub fn can_save(&self) -> bool {
+        self.snapshot.is_some()
+            && self
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity != "error")
+    }
+
+    /// Return the editor-facing JSON projection of the combined diagnostics.
+    pub fn diagnostics_as_values(&self) -> Vec<Value> {
+        self.diagnostics
+            .iter()
+            .map(AppDefinitionSaveDiagnostic::to_value)
+            .collect()
+    }
+}
+
+/// Admit one generated App Definition together with the new Recipe that
+/// references it.
+///
+/// Admission reuses the authored save machinery: the App passes the same
+/// catalog inventory classification as an ordinary save, and the proposed
+/// Recipe passes the same model, planner-authority, and permission-policy
+/// validation applied to every persisted Recipe. Identity and destination
+/// collisions block; an inventory entry or Recipe that cannot be classified
+/// leaves the pair without a capture so publication cannot proceed.
+pub fn admit_generated_app_pair_save(
+    app: &AppDefinitionV1,
+    recipe: &Recipe,
+    recipe_canonical_yaml: &str,
+    context: &GeneratedAppSaveContext,
+) -> GeneratedAppPairAdmission {
+    let exists = context.opened_app.is_some();
+    let opened_file = match context.opened_app.clone() {
+        Some(opened) => opened,
+        None => OpenedAppDefinitionFile::absent_destination(&context.app_destination),
+    };
+    let opened_catalog_identity = match context.opened_app.as_ref() {
+        Some(opened) => match parse_app_bytes(&opened.bytes) {
+            Ok(parsed) => Some(AppDefinitionCatalogIdentity {
+                id: parsed.id,
+                package_id: parsed.package_id,
+            }),
+            Err(message) => {
+                return GeneratedAppPairAdmission {
+                    diagnostics: vec![diagnostic(
+                        "app_definition_stale_state",
+                        format!(
+                            "The opened App Definition can no longer be identified: {message}"
+                        ),
+                        Some(&opened.path),
+                        Some("app_definition"),
+                        None,
+                        Some("file"),
+                    )],
+                    snapshot: None,
+                };
+            }
+        },
+        None => None,
+    };
+    let save_context = AppDefinitionSaveContext {
+        opened_file,
+        authored_root: Some(context.authored_root.clone()),
+        opened_catalog_identity,
+        destination: if exists {
+            AppDefinitionSaveDestination::OpenedFile
+        } else {
+            AppDefinitionSaveDestination::NewCatalogApp
+        },
+    };
+    let mut admission = admit_app_definition_save_inner(app, &save_context, !exists);
+    let Some(app_snapshot) = admission.snapshot.take() else {
+        return GeneratedAppPairAdmission {
+            diagnostics: admission.diagnostics,
+            snapshot: None,
+        };
+    };
+    let mut diagnostics = admission.diagnostics;
+    let complete = validate_proposed_recipe_overlay(
+        app,
+        recipe,
+        &app_snapshot,
+        &context.recipe_destination,
+        &context.authored_root,
+        &mut diagnostics,
+    );
+    sort_diagnostics(&mut diagnostics);
+    let snapshot = complete.then(|| GeneratedAppPairSnapshot {
+        app_snapshot,
+        recipe_canonical_yaml: recipe_canonical_yaml.to_string(),
+        recipe_destination: context.recipe_destination.clone(),
+    });
+    GeneratedAppPairAdmission {
+        diagnostics,
+        snapshot,
+    }
+}
+
+/// Validate the new Recipe that one generated pair adds.
+///
+/// The Recipe is checked with the same validation path as a persisted Recipe.
+/// The return value reports whether every relevant file and identity was
+/// classified; validation failures are recorded on the diagnostics even when
+/// classification itself succeeded.
+fn validate_proposed_recipe_overlay(
+    app: &AppDefinitionV1,
+    recipe: &Recipe,
+    app_snapshot: &AdmissionSnapshot,
+    recipe_destination: &Path,
+    root: &Path,
+    diagnostics: &mut Vec<AppDefinitionSaveDiagnostic>,
+) -> bool {
+    let mut complete = true;
+    let recipes_directory = app_snapshot.directories.get(1);
+    let destination_is_yaml = matches!(
+        recipe_destination
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("yaml" | "yml")
+    );
+    let destination_inside_catalog = recipes_directory
+        .is_some_and(|directory| recipe_destination.parent() == Some(directory.path.as_path()))
+        && destination_is_yaml;
+    if !destination_inside_catalog {
+        diagnostics.push(diagnostic(
+            "recipe_destination_invalid",
+            "The generated Recipe destination must be a recipes/<id>.yaml file inside the authored root.",
+            Some(recipe_destination),
+            Some("recipe"),
+            Some(&recipe.id),
+            Some("file"),
+        ));
+        complete = false;
+    }
+    match fs::symlink_metadata(recipe_destination) {
+        Ok(_) => {
+            diagnostics.push(diagnostic(
+                "recipe_destination_exists",
+                "A file already exists at the generated Recipe destination.",
+                Some(recipe_destination),
+                Some("recipe"),
+                Some(&recipe.id),
+                Some("file"),
+            ));
+            complete = false;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            diagnostics.push(diagnostic(
+                "recipe_destination_invalid",
+                format!("The generated Recipe destination could not be inspected: {error}"),
+                Some(recipe_destination),
+                Some("recipe"),
+                Some(&recipe.id),
+                Some("file"),
+            ));
+            complete = false;
+        }
+    }
+    if let Some(directory) = recipes_directory {
+        for file in &directory.files {
+            if file.path == recipe_destination {
+                diagnostics.push(diagnostic(
+                    "recipe_destination_exists",
+                    "The generated Recipe destination already exists in the captured catalog inventory.",
+                    Some(&file.path),
+                    Some("recipe"),
+                    Some(&recipe.id),
+                    Some("file"),
+                ));
+                complete = false;
+                continue;
+            }
+            match parse_recipe_bytes(&file.bytes, &file.path) {
+                Ok(existing) => {
+                    if existing.id == recipe.id {
+                        diagnostics.push(diagnostic(
+                            "recipe_id_collision",
+                            format!(
+                                "Recipe ID '{}' is already declared by {}.",
+                                recipe.id,
+                                relative_path(root, &file.path)
+                            ),
+                            Some(&file.path),
+                            Some("recipe"),
+                            Some(&existing.id),
+                            Some("id"),
+                        ));
+                        complete = false;
+                    }
+                }
+                Err(message) => {
+                    diagnostics.push(diagnostic(
+                        "app_dependency_classification_incomplete",
+                        format!(
+                            "Recipe references cannot be classified from this file: {message}"
+                        ),
+                        Some(&file.path),
+                        Some("recipe"),
+                        None,
+                        Some("file"),
+                    ));
+                    complete = false;
+                }
+            }
+        }
+    }
+    let mut definitions = Vec::new();
+    if let Some(directory) = app_snapshot.directories.first() {
+        for file in &directory.files {
+            if file.path == app_snapshot.opened_file.path {
+                continue;
+            }
+            match parse_app_bytes(&file.bytes) {
+                Ok(definition) => definitions.push(definition),
+                Err(message) => {
+                    diagnostics.push(diagnostic(
+                        "app_dependency_classification_incomplete",
+                        format!(
+                            "App references cannot be classified from this file: {message}"
+                        ),
+                        Some(&file.path),
+                        Some("app_definition"),
+                        None,
+                        Some("file"),
+                    ));
+                    complete = false;
+                }
+            }
+        }
+    }
+    definitions.push(app.clone());
+    validate_dependent_recipe(&definitions, recipe, recipe_destination, root, diagnostics);
+    complete
+}
+
+/// One persisted Recipe affected by a proposed App change, classified with the
+/// same validation path used for ordinary App saves.
+#[derive(Clone, Debug)]
+pub(crate) struct AffectedRecipeSummary {
+    pub(crate) recipe_id: String,
+    pub(crate) relative_path: String,
+    pub(crate) status: &'static str,
+    pub(crate) diagnostics: Vec<AppDefinitionSaveDiagnostic>,
+}
+
+/// Classify every persisted Recipe that references the candidate App.
+///
+/// A Recipe whose App references cannot be parsed is left out of the summary
+/// because the pair admission already blocks publication for an inventory it
+/// cannot classify.
+pub(crate) fn classify_affected_recipes(
+    app: &AppDefinitionV1,
+    snapshot: &AdmissionSnapshot,
+    root: &Path,
+    previously_opened_app: Option<&AppDefinitionV1>,
+) -> Vec<AffectedRecipeSummary> {
+    let mut summaries = Vec::new();
+    let Some(recipes_directory) = snapshot.directories.get(1) else {
+        return summaries;
+    };
+    let mut definitions = Vec::new();
+    if let Some(directory) = snapshot.directories.first() {
+        for file in directory
+            .files
+            .iter()
+            .filter(|file| file.path != snapshot.opened_file.path)
+        {
+            if let Ok(definition) = parse_app_bytes(&file.bytes) {
+                definitions.push(definition);
+            }
+        }
+    }
+    definitions.push(app.clone());
+    for file in &recipes_directory.files {
+        let Ok(recipe) = parse_recipe_bytes(&file.bytes, &file.path) else {
+            continue;
+        };
+        if !recipe_references_app(&recipe, &app.id, &file.path).unwrap_or(false) {
+            continue;
+        }
+        let mut diagnostics = Vec::new();
+        validate_dependent_recipe(&definitions, &recipe, &file.path, root, &mut diagnostics);
+        let has_errors = diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "error");
+        let app_surfaces_changed = previously_opened_app.is_none_or(|before| {
+            before.artifacts != app.artifacts
+                || before.permission_sets != app.permission_sets
+                || before.launcher_activity != app.launcher_activity
+        });
+        let status = if has_errors {
+            "invalid"
+        } else if app_surfaces_changed {
+            "revalidated_ok"
+        } else {
+            "unchanged"
+        };
+        summaries.push(AffectedRecipeSummary {
+            recipe_id: recipe.id.clone(),
+            relative_path: relative_path(root, &file.path),
+            status,
+            diagnostics,
+        });
+    }
+    summaries
+}
+
 
 fn canonical_authored_root(root: &Path) -> Result<PathBuf, AppDefinitionPersistenceError> {
     let metadata = fs::symlink_metadata(root).map_err(|error| {
@@ -1037,12 +1392,18 @@ fn parse_recipe_bytes(bytes: &[u8], path: &Path) -> Result<Recipe, String> {
 pub(crate) fn verify_admission_snapshot(
     snapshot: &AdmissionSnapshot,
 ) -> Result<(), AppDefinitionPersistenceError> {
-    let opened = capture_file_snapshot(&snapshot.opened_file.path)?;
-    if opened.path != snapshot.opened_file.path
-        || opened.bytes != snapshot.opened_file.bytes
-        || opened.identity != snapshot.opened_file.identity
-    {
-        return Err(stale_file(&snapshot.opened_file.path));
+    if snapshot.expect_new_destination {
+        if fs::symlink_metadata(&snapshot.destination).is_ok() {
+            return Err(stale_file(&snapshot.destination));
+        }
+    } else {
+        let opened = capture_file_snapshot(&snapshot.opened_file.path)?;
+        if opened.path != snapshot.opened_file.path
+            || opened.bytes != snapshot.opened_file.bytes
+            || opened.identity != snapshot.opened_file.identity
+        {
+            return Err(stale_file(&snapshot.opened_file.path));
+        }
     }
     for directory in &snapshot.directories {
         let current = capture_catalog_directory(

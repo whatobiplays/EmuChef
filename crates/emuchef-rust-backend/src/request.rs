@@ -1,8 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::app_generator_review::{self, SelectedExistingApp};
 use crate::catalog_source::{CatalogIdentity, CatalogSnapshot, CatalogSource, LocalCatalogSource};
 use crate::envelope;
 use crate::errors::ApiError;
@@ -65,11 +66,12 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "qualifyDevice" => handle_qualify_device(object),
         "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
-        "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
-        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object),
+        "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object, None),
+        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object, None),
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
+        "listAppGeneratorExistingApps" => handle_list_app_generator_existing_apps(object),
         "describeConfiguration" => handle_describe_configuration(object),
         "planConfiguration" => handle_plan_configuration(object),
         unknown => Err(ApiError::invalid_request(format!(
@@ -102,10 +104,22 @@ fn handle_validated_sidecar_object(
         "qualifyDevice" => handle_qualify_device(object),
         "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
-        "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
-        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object),
+        "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object, Some(sessions)),
+        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object, Some(sessions)),
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
+        "listAppGeneratorExistingApps" => handle_list_app_generator_existing_apps(object),
+        "selectAppGeneratorExistingApp" => {
+            handle_select_app_generator_existing_app(object, sessions)
+        }
+        "reviewAppGeneratorDraft" => handle_review_app_generator_draft(object, sessions),
+        "reviewRemoteAppGeneratorDraft" => {
+            handle_review_remote_app_generator_draft(object, sessions)
+        }
+        "saveAppGeneratorReview" => handle_save_app_generator_review(object, sessions),
+        "appGeneratorPublicationStatus" => {
+            handle_app_generator_publication_status(object, sessions)
+        }
         "matchDevice" => handle_match_device(object),
         "openUserConfiguration" => handle_open_user_configuration(object, sessions),
         "createUserConfiguration" => handle_create_user_configuration(object, sessions),
@@ -454,18 +468,28 @@ fn handle_inspect_apk(object: &Map<String, Value>) -> Result<Value, ApiError> {
     Ok(envelope::success(result))
 }
 
-fn handle_generate_app_recipe_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
-    let payload = payload_object(object)?;
-    let request = serde_json::from_value::<crate::generation::AppRecipeDraftRequest>(
-        Value::Object(payload.clone()),
+/// Build one non-committable local App/Recipe draft preview.
+///
+/// The preview shares the review request shape: the native layer supplies the
+/// authored root and, for an existing-App target, the opaque snapshot handle
+/// captured by `selectAppGeneratorExistingApp`. This boundary resolves the
+/// retained App Definition exactly like a review request, so a preview can never
+/// be built from App facts the caller invented.
+fn handle_generate_app_recipe_draft(
+    object: &Map<String, Value>,
+    sessions: Option<&DocumentSessionManager>,
+) -> Result<Value, ApiError> {
+    let payload = resolve_draft_generator_payload(object, sessions)?;
+    let draft_request = serde_json::from_value::<crate::generation::AppRecipeDraftRequest>(
+        Value::Object(payload),
     )
-    .map_err(|_| {
+    .map_err(|error| {
         ApiError::invalid_request_with_details(
-            "App-and-recipe draft input is invalid.",
+            format!("App-and-recipe draft input is invalid: {error}"),
             json!({ "field": "payload" }),
         )
     })?;
-    let result = serde_json::to_value(crate::generation::generate_app_recipe_draft(request))
+    let result = serde_json::to_value(crate::generation::generate_app_recipe_draft(draft_request))
         .map_err(|_| {
             ApiError::command_failed(
                 "App-and-recipe draft could not be represented.",
@@ -475,25 +499,295 @@ fn handle_generate_app_recipe_draft(object: &Map<String, Value>) -> Result<Value
     Ok(envelope::success(result))
 }
 
-fn handle_generate_remote_app_recipe_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
+/// Resolve one App Generator draft payload for preview consumption.
+///
+/// The returned payload matches the strict generation request schema: routing
+/// fields are removed and, for an existing-App target, the retained App
+/// Definition replaces the caller's snapshot handle.
+fn resolve_draft_generator_payload(
+    object: &Map<String, Value>,
+    sessions: Option<&DocumentSessionManager>,
+) -> Result<Map<String, Value>, ApiError> {
     let payload = payload_object(object)?;
-    let request = serde_json::from_value::<crate::generation::RemoteAppRecipeDraftRequest>(
-        Value::Object(payload.clone()),
+    let (_, stripped, _) = resolve_app_generator_payload(payload, sessions, false)?;
+    Ok(stripped)
+}
+
+/// Build one non-committable remote-source App/Recipe draft preview.
+///
+/// The preview resolves the retained existing-App snapshot through the same
+/// trust boundary as its local counterpart.
+fn handle_generate_remote_app_recipe_draft(
+    object: &Map<String, Value>,
+    sessions: Option<&DocumentSessionManager>,
+) -> Result<Value, ApiError> {
+    let payload = resolve_draft_generator_payload(object, sessions)?;
+    let draft_request = serde_json::from_value::<crate::generation::RemoteAppRecipeDraftRequest>(
+        Value::Object(payload),
     )
-    .map_err(|_| {
+    .map_err(|error| {
         ApiError::invalid_request_with_details(
-            "Remote app-and-recipe draft input is invalid.",
+            format!("Remote app-and-recipe draft input is invalid: {error}"),
             json!({ "field": "payload" }),
         )
     })?;
-    let result = serde_json::to_value(crate::generation::generate_remote_app_recipe_draft(request))
-        .map_err(|_| {
-            ApiError::command_failed(
-                "Remote app-and-recipe draft could not be represented.",
-                json!({ "reason": "remote_app_recipe_draft_serialization_failed" }),
-            )
-        })?;
+    let result =
+        serde_json::to_value(crate::generation::generate_remote_app_recipe_draft(draft_request))
+            .map_err(|_| {
+                ApiError::command_failed(
+                    "Remote app-and-recipe draft could not be represented.",
+                    json!({ "reason": "remote_app_recipe_draft_serialization_failed" }),
+                )
+            })?;
     Ok(envelope::success(result))
+}
+
+/// List the catalog Apps one authored root offers for extension.
+///
+/// The inventory result reports whether every App Definition under the root
+/// could be read. An incomplete inventory blocks existing-App selection,
+/// because the generator cannot rule out duplicate identities when part of the
+/// catalog is unreadable.
+fn handle_list_app_generator_existing_apps(
+    object: &Map<String, Value>,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let authored_root = required_string(payload, "authoredRoot")?;
+    Ok(envelope::success(app_generator_review::list_existing_apps(
+        Path::new(authored_root),
+    )?))
+}
+
+/// Capture one existing App Definition as a root-bound snapshot handle.
+///
+/// The returned handle retains the exact file bytes and filesystem identity
+/// captured at selection time, so a later review or publication validates
+/// against the file the author actually selected.
+fn handle_select_app_generator_existing_app(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let authored_root = required_string(payload, "authoredRoot")?;
+    let app_path = required_string(payload, "appPath")?;
+    Ok(envelope::success(app_generator_review::select_existing_app(
+        sessions.app_generator_mut(),
+        Path::new(authored_root),
+        app_path,
+    )?))
+}
+
+/// One parsed App Generator request.
+///
+/// The struct separates backend-only routing fields from the generation input
+/// so the generation payload keeps its strict schema.
+struct AppGeneratorRequest {
+    authored_root: PathBuf,
+    request_id: i64,
+    artifact_name: Option<String>,
+    existing: Option<SelectedExistingApp>,
+    payload: Map<String, Value>,
+}
+
+/// Parse an App Generator payload and resolve its trusted existing-App snapshot.
+///
+/// A review always names its authored root and request identity, because the
+/// retained review handle binds to that root and orders the author's revisions.
+/// The native layer never supplies App Definition facts for an existing-App
+/// draft: it provides only the opaque snapshot handle captured by
+/// `selectAppGeneratorExistingApp`, and this boundary substitutes the retained
+/// App Definition before generation, for previews and reviews alike. A handle
+/// captured against a different authored root is treated as invalid rather than
+/// re-bound.
+fn parse_app_generator_request(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<AppGeneratorRequest, ApiError> {
+    let payload = payload_object(object)?;
+    let (canonical_root, stripped, existing) =
+        resolve_app_generator_payload(payload, Some(sessions), true)?;
+    let request_id = required_i64(payload, "requestId")?;
+    let artifact_name = optional_string(payload, "artifactName")?.map(str::to_string);
+    Ok(AppGeneratorRequest {
+        authored_root: canonical_root,
+        request_id,
+        artifact_name,
+        existing,
+        payload: stripped,
+    })
+}
+
+fn resolve_app_generator_payload(
+    payload: &Map<String, Value>,
+    sessions: Option<&DocumentSessionManager>,
+    require_root: bool,
+) -> Result<(PathBuf, Map<String, Value>, Option<SelectedExistingApp>), ApiError> {
+    if payload.contains_key("existingApp") {
+        return Err(ApiError::invalid_request_with_details(
+            "Request field 'existingApp' is not accepted; select an existing App and provide 'existingAppSnapshotId'.",
+            json!({ "field": "existingApp" }),
+        ));
+    }
+    let snapshot_id = optional_string(payload, "existingAppSnapshotId")?;
+    let authored_root = match optional_string(payload, "authoredRoot")? {
+        Some(root) => Some(root),
+        None if require_root || snapshot_id.is_some() => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request payload is missing required field: authoredRoot",
+                json!({ "field": "authoredRoot" }),
+            ));
+        }
+        None => None,
+    };
+    let canonical_root = match (authored_root, snapshot_id) {
+        (Some(root), Some(handle)) => {
+            let canonical = app_generator_review::canonical_authored_root(Path::new(root))?;
+            let snapshot = sessions
+                .ok_or_else(|| {
+                    ApiError::invalid_request_with_details(
+                        "An existing-App draft preview requires a stateful session.",
+                        json!({ "field": "existingAppSnapshotId" }),
+                    )
+                })?
+                .app_generator()
+                .select(handle)
+                .cloned()
+                .ok_or_else(app_generator_review::review_invalidated_error)?;
+            if snapshot.authored_root != canonical {
+                return Err(app_generator_review::review_invalidated_error());
+            }
+            let app = serde_json::to_value(&snapshot.app).map_err(|_| {
+                ApiError::command_failed(
+                    "The selected App Definition could not be represented.",
+                    json!({ "reason": "app_definition_serialization_failed" }),
+                )
+            })?;
+            let mut stripped = payload.clone();
+            for field in [
+                "authoredRoot",
+                "requestId",
+                "artifactName",
+                "existingAppSnapshotId",
+            ] {
+                stripped.remove(field);
+            }
+            stripped.insert("existingApp".to_string(), app);
+            return Ok((canonical, stripped, Some(snapshot)));
+        }
+        (Some(root), None) => app_generator_review::canonical_authored_root(Path::new(root))?,
+        (None, _) => PathBuf::new(),
+    };
+    let mut stripped = payload.clone();
+    for field in [
+        "authoredRoot",
+        "requestId",
+        "artifactName",
+        "existingAppSnapshotId",
+    ] {
+        stripped.remove(field);
+    }
+    Ok((canonical_root, stripped, None))
+}
+
+/// Build one immutable review handle from a local App Generator draft.
+fn handle_review_app_generator_draft(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let request = parse_app_generator_request(object, sessions)?;
+    let draft_request = serde_json::from_value::<crate::generation::AppRecipeDraftRequest>(
+        Value::Object(request.payload),
+    )
+    .map_err(|error| {
+        ApiError::invalid_request_with_details(
+            format!("App-and-recipe review input is invalid: {error}"),
+            json!({ "field": "payload" }),
+        )
+    })?;
+    let permission_automation_enabled = draft_request.permission_automation_enabled;
+    let draft = crate::generation::generate_app_recipe_draft(draft_request);
+    let intent = app_generator_review::ReviewIntent {
+        authored_root: request.authored_root,
+        request_id: request.request_id,
+        artifact_name: request.artifact_name,
+        existing: request.existing,
+        permission_automation_enabled,
+    };
+    Ok(envelope::success(app_generator_review::review_from_draft(
+        sessions.app_generator_mut(),
+        draft,
+        intent,
+    )?))
+}
+
+/// Build one immutable review handle from a remote-source App Generator draft.
+fn handle_review_remote_app_generator_draft(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let request = parse_app_generator_request(object, sessions)?;
+    let draft_request = serde_json::from_value::<crate::generation::RemoteAppRecipeDraftRequest>(
+        Value::Object(request.payload),
+    )
+    .map_err(|error| {
+        ApiError::invalid_request_with_details(
+            format!("Remote app-and-recipe review input is invalid: {error}"),
+            json!({ "field": "payload" }),
+        )
+    })?;
+    let permission_automation_enabled = draft_request.permission_automation_enabled;
+    let draft = crate::generation::generate_remote_app_recipe_draft(draft_request);
+    let intent = app_generator_review::ReviewIntent {
+        authored_root: request.authored_root,
+        request_id: request.request_id,
+        artifact_name: request.artifact_name,
+        existing: request.existing,
+        permission_automation_enabled,
+    };
+    Ok(envelope::success(
+        app_generator_review::review_from_remote_draft(
+            sessions.app_generator_mut(),
+            draft,
+            intent,
+        )?,
+    ))
+}
+
+/// Publish one reviewed generated App/Recipe pair.
+///
+/// The native layer passes only the operation identity it recorded and the
+/// immutable review handle; the retained candidate pair is published exactly
+/// as reviewed, and a repeated operation id replays its recorded result.
+fn handle_save_app_generator_review(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let operation_id = required_string(payload, "operationId")?;
+    let review_id = required_string(payload, "reviewId")?;
+    let request_id = required_i64(payload, "requestId")?;
+    Ok(envelope::success(sessions.save_generated_app_review(
+        operation_id,
+        review_id,
+        request_id,
+    )?))
+}
+
+/// Report the recorded publication outcome for one native operation.
+///
+/// A missing record reports `unknown` with `detail.reason` set to
+/// `no_record`: the native layer interprets that as an unconfirmed outcome and
+/// never retries automatically.
+fn handle_app_generator_publication_status(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let operation_id = required_string(payload, "operationId")?;
+    Ok(envelope::success(app_generator_review::publication_status(
+        sessions.app_generator(),
+        operation_id,
+    )))
 }
 
 fn handle_generate_device_profile_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
@@ -1415,6 +1709,21 @@ fn required_path(payload: &Map<String, Value>) -> Result<&str, ApiError> {
 fn required_string<'a>(payload: &'a Map<String, Value>, field: &str) -> Result<&'a str, ApiError> {
     match payload.get(field) {
         Some(Value::String(value)) if !value.is_empty() => Ok(value),
+        _ => Err(ApiError::invalid_request_with_details(
+            format!("Request payload is missing required field: {field}"),
+            json!({ "field": field }),
+        )),
+    }
+}
+
+fn required_i64(payload: &Map<String, Value>, field: &str) -> Result<i64, ApiError> {
+    match payload.get(field) {
+        Some(Value::Number(number)) => number.as_i64().ok_or_else(|| {
+            ApiError::invalid_request_with_details(
+                format!("Request field '{field}' must be a signed integer."),
+                json!({ "field": field }),
+            )
+        }),
         _ => Err(ApiError::invalid_request_with_details(
             format!("Request payload is missing required field: {field}"),
             json!({ "field": field }),

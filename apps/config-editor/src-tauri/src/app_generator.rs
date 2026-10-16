@@ -5,14 +5,15 @@
 //! diagnostics, canonical previews, and relative destination metadata cross into React.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::IpAddr;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::{Client, Response};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{
     HeaderMap, ACCEPT, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER, USER_AGENT,
 };
@@ -52,6 +53,12 @@ struct AppGeneratorPreferences {
 struct GeneratorRegistry {
     next_handle: u64,
     sessions: HashMap<String, GeneratorSession>,
+    /// Sticky publication outcomes keyed by native operation identity.
+    ///
+    /// A record exists before its sidecar request is sent, so a lost or
+    /// interrupted response keeps its truthful UNKNOWN state instead of
+    /// being reported as a confirmed failure.
+    publications: HashMap<String, PublicationRecord>,
 }
 
 #[derive(Default)]
@@ -61,14 +68,27 @@ struct GeneratorSession {
     remote_sources: HashMap<String, TrustedRemoteSource>,
     remote_assets: HashMap<String, TrustedRemoteAsset>,
     temp_directory: Option<TempDir>,
+    /// Root handle most recently chosen for this session. List and selection
+    /// fall back to it when a request carries no explicit root handle.
+    active_root: Option<String>,
+    /// Root-bound existing-App selections by native handle.
+    existing_apps: HashMap<String, TrustedExistingApp>,
+    /// Immutable reviewed App/Recipe pairs by native review handle.
+    reviews: HashMap<String, ReviewRecord>,
 }
 
+#[derive(Clone, Debug)]
 struct TrustedApk {
     path: PathBuf,
     identity: FileIdentity,
     inspection: Option<Value>,
     inspection_handle: Option<String>,
     facts: Option<Value>,
+    /// Retained asset handle this APK was downloaded from, when it came from a
+    /// remote source. Draft resolution requires the selected asset to match it,
+    /// because two independently valid handles do not prove that the inspected
+    /// bytes are the bytes the generated recipe will install.
+    remote_asset_handle: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,11 +170,9 @@ struct TrustedRemoteAsset {
     release_tag: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TrustedRoot {
     root: PathBuf,
-    apps_directory: PathBuf,
-    recipes_directory: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,6 +185,125 @@ struct FileIdentity {
     inode: u64,
 }
 
+/// One existing-App selection captured by the backend and bound to a trusted root.
+#[derive(Clone, Debug)]
+struct TrustedExistingApp {
+    /// Canonical authored root the selection is bound to.
+    root_path: PathBuf,
+    /// Opaque backend snapshot handle; never leaves native process memory.
+    snapshot_id: String,
+    /// Catalog-relative App Definition path.
+    app_path: String,
+    package_id: Option<String>,
+}
+
+/// An existing-App selection together with the native handle that names it.
+#[derive(Clone, Debug)]
+struct BoundExistingApp {
+    handle: String,
+    selection: TrustedExistingApp,
+}
+
+/// Immutable dependency fingerprint of one reviewed draft.
+///
+/// Publication re-checks every captured fact before the sidecar request is sent.
+/// A changed APK file, a replaced inspection, a re-analyzed remote source, or a
+/// replaced existing-App selection invalidates the review instead of publishing
+/// a pair the author did not review.
+#[derive(Clone, Debug)]
+enum ReviewBinding {
+    Local {
+        apk_handle: String,
+        apk_identity: FileIdentity,
+        inspection_handle: String,
+    },
+    Remote {
+        apk_handle: String,
+        apk_identity: FileIdentity,
+        inspection_handle: String,
+        asset_handle: String,
+        strategy: String,
+        asset_pattern: Option<String>,
+        include_prereleases: bool,
+        trusted_sha256: Option<String>,
+        /// Deterministic serialization of the trusted remote source payload.
+        source_fingerprint: String,
+    },
+}
+
+impl ReviewBinding {
+    /// Native APK handle both binding kinds retain.
+    fn apk_handle(&self) -> &str {
+        match self {
+            ReviewBinding::Local { apk_handle, .. } => apk_handle.as_str(),
+            ReviewBinding::Remote { apk_handle, .. } => apk_handle.as_str(),
+        }
+    }
+}
+
+/// One immutable reviewed App/Recipe pair retained for publication.
+///
+/// Publication consumes only this capture: the save command accepts no mutable
+/// App, Recipe, mapping, or permission inputs from the frontend.
+#[derive(Clone)]
+struct ReviewRecord {
+    request_id: i64,
+    /// Opaque backend review handle; never leaves native process memory.
+    backend_review_id: Option<String>,
+    binding: ReviewBinding,
+    existing_app: Option<BoundExistingApp>,
+    /// Canonical authored root the review was generated against.
+    root_path: PathBuf,
+    /// The reviewed candidate retained blocking diagnostics.
+    blocking: bool,
+    /// Catalog-relative destinations captured from the review result.
+    app_relative_path: Option<String>,
+    recipe_relative_path: Option<String>,
+}
+
+/// Confirmation state of one publication attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PublicationState {
+    /// Recorded before the sidecar request is sent; a lost response keeps this state.
+    Submitted,
+    Saved,
+    Failed,
+}
+
+/// Sticky registry-level publication memory for one native operation identity.
+///
+/// Publication records survive session cancellation and sidecar restarts so a
+/// lost response stays an unconfirmed outcome instead of being reported as a
+/// confirmed failure or silently retried.
+#[derive(Clone)]
+struct PublicationRecord {
+    state: PublicationState,
+    recorded_at: String,
+    /// Confirmed publication outcome reported to the author, when one arrived.
+    detail: Option<Value>,
+    /// Canonical authored root the attempt was reviewed against.
+    root_path: PathBuf,
+}
+
+/// Narrow request boundary over the persistent sidecar.
+///
+/// Routing review and publication flow through this trait keeps the trusted
+/// lifecycle testable without a running sidecar process.
+trait AppGeneratorTransport {
+    fn request(&self, operation: &str, payload: Value) -> Result<Value, String>;
+}
+
+/// Production transport backed by the shared persistent sidecar.
+struct SidecarTransport<'a> {
+    sidecar: &'a SidecarState,
+}
+
+impl AppGeneratorTransport for SidecarTransport<'_> {
+    fn request(&self, operation: &str, payload: Value) -> Result<Value, String> {
+        request_sidecar(self.sidecar, operation, Some(payload))
+    }
+}
+
 /// Process-memory state for local-APK generator sessions.
 #[derive(Default)]
 pub struct AppGeneratorState {
@@ -175,6 +312,11 @@ pub struct AppGeneratorState {
 
 impl AppGeneratorState {
     /// Invalidate all trusted handles, including after a sidecar restart.
+    ///
+    /// Sticky publication records are deliberately preserved: a sidecar restart
+    /// erases the backend's publication memory, and dropping the native records
+    /// would turn an unconfirmed attempt into an apparent "no record" that the
+    /// author could mistake for a failed publication.
     pub fn clear(&self) -> Result<(), String> {
         let mut registry = lock_registry(self)?;
         registry.sessions.clear();
@@ -249,6 +391,7 @@ pub fn begin_app_generator(
             let handle = registry.allocate("app-root");
             if let Ok(session) = registry.session_mut(&session_handle) {
                 session.roots.insert(handle.clone(), root);
+                session.active_root = Some(handle.clone());
                 root_handle = Some(handle);
                 root_label = Some(SAFE_ROOT_LABEL);
             }
@@ -303,6 +446,7 @@ pub async fn choose_app_generator_apk(
             inspection: None,
             inspection_handle: None,
             facts: None,
+            remote_asset_handle: None,
         },
     );
     Ok(success(json!({
@@ -330,6 +474,7 @@ pub fn set_app_generator_authored_root(
         Err(error) => return Ok(error),
     };
     session.roots.insert(root_handle.clone(), root);
+    session.active_root = Some(root_handle.clone());
     Ok(success(json!({
         "cancelled": false,
         "rootHandle": root_handle,
@@ -363,6 +508,7 @@ pub async fn choose_app_generator_authored_root(
     };
     let persisted_root = root.root.clone();
     session.roots.insert(root_handle.clone(), root);
+    session.active_root = Some(root_handle.clone());
     Ok(success(json!({
         "cancelled": false,
         "rootHandle": root_handle,
@@ -582,9 +728,21 @@ pub async fn download_app_generator_remote_apk(
     let download_asset = asset.clone();
     let download_path = path.clone();
     let downloaded = tauri::async_runtime::spawn_blocking(move || {
+        // A retained address was accepted when it was captured; re-checking it
+        // immediately before the request keeps this path enforcing the address
+        // policy even if a future change stores a source without normalization.
+        let download_url = Url::parse(&download_asset.download_url)
+            .ok()
+            .filter(safe_remote_url)
+            .ok_or_else(|| {
+                remote_source_error(
+                    "remote_url_invalid",
+                    "The APK download address is not an accepted public HTTPS address.",
+                )
+            })?;
         let client = remote_http_client()?;
         let response = client
-            .get(&download_asset.download_url)
+            .get(download_url)
             .header(USER_AGENT, HTTP_USER_AGENT)
             .send()
             .map_err(|_| {
@@ -658,34 +816,76 @@ pub async fn download_app_generator_remote_apk(
         }
     };
 
-    let mut registry = lock_registry(&state)?;
+    retain_downloaded_remote_apk(
+        &state,
+        &session_handle,
+        &asset_handle,
+        &asset,
+        DownloadedRemoteApk {
+            path,
+            identity,
+            file_name,
+            final_url,
+        },
+    )
+}
+
+/// One completed APK download retained by the native boundary.
+///
+/// The transient post-redirect URL belongs to the labelled download result only:
+/// it is never written to session state, review payloads, or the catalog.
+struct DownloadedRemoteApk {
+    path: PathBuf,
+    identity: FileIdentity,
+    file_name: String,
+    final_url: Url,
+}
+
+/// Retain one completed remote download and build its author-facing result.
+///
+/// The retained records keep the durable asset identity only: the source record
+/// keeps the author's original address, the asset record keeps the provider's
+/// release asset URL, and the APK record keeps the asset handle it came from.
+/// The transient post-redirect URL is returned for display and is never stored,
+/// so a later review maps the original durable source instead of a signed or
+/// CDN address.
+fn retain_downloaded_remote_apk(
+    state: &AppGeneratorState,
+    session_handle: &str,
+    asset_handle: &str,
+    asset: &TrustedRemoteAsset,
+    downloaded: DownloadedRemoteApk,
+) -> Result<Value, String> {
+    let mut registry = lock_registry(state)?;
     let apk_handle = registry.allocate("apk");
-    let session = match registry.session_mut(&session_handle) {
+    let session = match registry.session_mut(session_handle) {
         Ok(session) => session,
         Err(error) => return Ok(error),
     };
     session.apks.insert(
         apk_handle.clone(),
         TrustedApk {
-            path,
-            identity,
+            path: downloaded.path,
+            identity: downloaded.identity,
             inspection: None,
             inspection_handle: None,
             facts: None,
+            remote_asset_handle: Some(asset_handle.to_string()),
         },
     );
     let source = session.remote_sources.get(&asset.source_handle).cloned();
+    let file_name = downloaded.file_name;
     Ok(success(json!({
         "apkHandle": apk_handle,
-        "label": file_name,
+        "label": file_name.clone(),
         "source": {
             "mode": source.as_ref().map(|value| value.mode.as_str()).unwrap_or("direct_apk"),
             "strategy": "pinned_remote_asset",
-            "downloadUrl": final_url,
+            "downloadUrl": downloaded.final_url,
             "provider": source.as_ref().and_then(|value| value.provider.clone()),
             "baseUrl": source.as_ref().and_then(|value| value.base_url.clone()),
             "repository": source.as_ref().and_then(|value| value.repository.clone()),
-            "releaseTag": asset.release_tag,
+            "releaseTag": asset.release_tag.clone(),
             "assetName": file_name,
             "assetPattern": Value::Null,
             "includePrereleases": false,
@@ -720,13 +920,25 @@ struct GitHubAsset {
     download_url: String,
 }
 
+/// Normalize one author-entered remote source address.
+///
+/// Every mode requires a public HTTPS address without credentials or a
+/// fragment. A durable query string is part of the author's original address,
+/// so a direct APK address keeps it; provider repository and release addresses
+/// are canonicalized from their path segments, and a query there is refused
+/// instead of being silently dropped.
 fn normalize_remote_source(mode: &str, input: &str) -> Result<NormalizedRemoteSource, Value> {
     let mut url = Url::parse(input.trim())
         .map_err(|_| remote_source_error("remote_url_invalid", "Enter a valid HTTPS address."))?;
-    if !safe_remote_url(&url) || url.fragment().is_some() || url.query().is_some() {
+    let durable_query = mode == "direct_apk";
+    if !safe_remote_url(&url) || url.fragment().is_some() || (!durable_query && url.query().is_some()) {
         return Err(remote_source_error(
             "remote_url_invalid",
-            "Enter a valid public HTTPS address without credentials, query parameters, or a fragment.",
+            if durable_query {
+                "Enter a valid public HTTPS address without credentials or a fragment."
+            } else {
+                "Enter a valid public HTTPS address without credentials, query parameters, or a fragment."
+            },
         ));
     }
     url.set_fragment(None);
@@ -878,6 +1090,93 @@ fn provider_url_error(provider: &str) -> Value {
     )
 }
 
+/// Whether one resolved address is publicly reachable.
+///
+/// The accepted source contract admits durable public HTTPS endpoints only, so
+/// loopback, private, link-local, shared, reserved, and documentation ranges are
+/// refused, including their IPv4-mapped IPv6 forms and IPv6 literals.
+fn public_unicast_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => public_ipv4_address(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(mapped) => public_ipv4_address(mapped),
+            None => public_ipv6_address(v6),
+        },
+    }
+}
+
+/// Whether one IPv4 address is inside the ranges the source policy admits.
+///
+/// The stable standard predicates cover loopback, private, link-local,
+/// broadcast, documentation, and multicast addresses. The remaining exclusions
+/// are ranges without a stable predicate: `0.0.0.0/8`, carrier-grade NAT
+/// `100.64.0.0/10`, IETF protocol assignments `192.0.0.0/24`, the deprecated
+/// 6to4 relay anycast `192.88.99.0/24`, benchmarking `198.18.0.0/15`, and
+/// reserved `240.0.0.0/4`.
+fn public_ipv4_address(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_private()
+        && !address.is_link_local()
+        && !address.is_broadcast()
+        && !address.is_documentation()
+        && !address.is_multicast()
+        && octets[0] != 0
+        && !(octets[0] == 100 && (64..=127).contains(&octets[1]))
+        && !(octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        && !(octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+        && !(octets[0] == 198 && (18..=19).contains(&octets[1]))
+        && octets[0] < 240
+}
+
+/// Whether one IPv6 address is inside the ranges the source policy admits.
+///
+/// IPv4-mapped addresses are classified as their embedded IPv4 address before
+/// this helper runs. The remaining exclusions are the unspecified and loopback
+/// addresses, multicast, unique-local `fc00::/7`, unicast link-local
+/// `fe80::/10`, documentation `2001:db8::/32`, deprecated site-local
+/// `fec0::/10`, the deprecated IPv4-compatible `::/96` form, and the Teredo
+/// `2001::/32` and 6to4 `2002::/16` transition prefixes. Uncommon IANA
+/// special-purpose registrations without a stable predicate stay outside this
+/// bounded list.
+fn public_ipv6_address(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_multicast()
+        && !address.is_unique_local()
+        && !address.is_unicast_link_local()
+        && !(segments[0] == 0x2001 && (segments[1] == 0x0000 || segments[1] == 0x0db8))
+        && segments[0] & 0xffc0 != 0xfec0
+        && segments[0] != 0x2002
+        && segments[..6].iter().any(|segment| *segment != 0)
+}
+
+/// Whether one resolved address set contains only public addresses.
+///
+/// Every answer for a name must be public: a host that resolves to any internal
+/// address is refused instead of racing the client's own connection choice.
+fn resolved_public_addresses(addresses: &[SocketAddr]) -> bool {
+    !addresses.is_empty()
+        && addresses
+            .iter()
+            .all(|address| public_unicast_address(address.ip()))
+}
+
+/// Resolve one host and require every answer to be publicly reachable.
+fn resolve_public_host(host: &str) -> Result<Vec<SocketAddr>, &'static str> {
+    let resolved = (host, 0u16)
+        .to_socket_addrs()
+        .map_err(|_| "remote_host_unresolved")?
+        .collect::<Vec<_>>();
+    if resolved_public_addresses(&resolved) {
+        Ok(resolved)
+    } else {
+        Err("remote_host_not_public")
+    }
+}
+
 fn safe_remote_url(url: &Url) -> bool {
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return false;
@@ -888,22 +1187,66 @@ fn safe_remote_url(url: &Url) -> bool {
     if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
         return false;
     }
-    if let Ok(address) = host.parse::<IpAddr>() {
-        return !(address.is_loopback() || address.is_unspecified() || address.is_multicast());
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = literal.parse::<IpAddr>() {
+        return public_unicast_address(address);
     }
     true
 }
 
+/// Whether one redirect hop stays inside the accepted source policy.
+///
+/// The chain must stay within the bounded hop budget and every hop must be a
+/// public HTTPS URL, so a public address that redirects to an internal one is
+/// refused before the hop is followed.
+fn redirect_target_allowed(previous_hops: usize, next: &Url) -> bool {
+    previous_hops < MAX_REDIRECTS && next.scheme() == "https" && safe_remote_url(next)
+}
+
+/// DNS resolver limited to publicly reachable addresses.
+///
+/// Validating inside resolution keeps the checked address set identical to the
+/// set the client connects to. A preflight lookup followed by an independent
+/// connect could resolve differently on the second lookup and reach an internal
+/// endpoint, so this resolver is the only resolver the remote client uses: it
+/// applies to the original request and to every redirect hop the client follows.
+struct PublicOnlyResolver;
+
+impl Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let resolved = tauri::async_runtime::spawn_blocking(move || resolve_public_host(&host))
+                .await
+                .map_err(|_| {
+                    Box::new(io::Error::other("host resolution task failed"))
+                        as Box<dyn std::error::Error + Send + Sync>
+                })?
+                .map_err(|code| {
+                    Box::new(io::Error::other(format!("host resolution refused: {code}")))
+                        as Box<dyn std::error::Error + Send + Sync>
+                })?;
+            Ok(Box::new(resolved.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// One guarded HTTP client for accepted public remote sources.
+///
+/// Every host resolves through [`PublicOnlyResolver`], and system or
+/// environment proxy settings are ignored: a proxy would resolve and reach the
+/// target on its own, outside the address policy this boundary enforces.
 fn remote_http_client() -> Result<Client, Value> {
     Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(NETWORK_TIMEOUT)
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicOnlyResolver))
         .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.stop();
-            }
-            let next = attempt.url();
-            if next.scheme() != "https" || !safe_remote_url(next) {
+            if !redirect_target_allowed(attempt.previous().len(), attempt.url()) {
                 return attempt.stop();
             }
             attempt.follow()
@@ -1561,6 +1904,17 @@ fn native_inspection_payload(apk_path: &Path) -> Value {
     json!({ "apkPath": apk_path })
 }
 
+/// Build one non-committable live preview of a local-APK App and Recipe pair.
+///
+/// The preview shares the review request shape, including the retained
+/// existing-App snapshot and the author's explicit identities, but retains no
+/// native state and never writes to the catalog. An explicit appArtifactId or
+/// recipeId is forwarded unchanged so the preview shows the exact identities a
+/// later review would publish under; omitted identities keep the backend's
+/// proposed defaults and are never renamed, suffixed, or replaced in between.
+/// Permission automation is opt-in: `permissionAutomationEnabled` defaults to
+/// false and preserves every declared permission set, while a disabled request
+/// refuses any selected permission actions.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn generate_app_recipe_draft(
@@ -1572,56 +1926,55 @@ pub fn generate_app_recipe_draft(
     recipe: Option<Value>,
     mappings: Option<Value>,
     permission_selection: Option<Value>,
+    permission_automation_enabled: Option<bool>,
     regenerate_identifiers: bool,
     root_handle: Option<String>,
+    request_id: i64,
+    existing_app_handle: Option<String>,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+    artifact_name: Option<String>,
 ) -> Result<Value, String> {
-    let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
-        Ok(facts) => facts,
-        Err(error) => return Ok(error),
-    };
-    let permission_automation = match stored_permission_automation(
+    // A live preview carries no review identity: the request id only orders the
+    // author's preview revisions, and the display name never changes identities.
+    let _ = (request_id, artifact_name);
+    let transport = SidecarTransport { sidecar: &sidecar };
+    let inputs = match resolve_draft_inputs(
         &state,
         &session_handle,
         &apk_handle,
-        permission_selection,
+        root_handle.as_deref(),
         false,
+        existing_app_handle.as_deref(),
+        permission_selection,
+        permission_automation_enabled.unwrap_or(false),
+        None,
     )? {
-        Ok(value) => value,
+        Ok(inputs) => inputs,
         Err(error) => return Ok(error),
     };
-    let mut payload = Map::new();
-    payload.insert("facts".to_string(), facts);
-    payload.insert(
-        "regenerateIdentifiers".to_string(),
-        Value::Bool(regenerate_identifiers),
-    );
-    if let Some(app) = app {
-        payload.insert("app".to_string(), app);
-    }
-    if let Some(recipe) = recipe {
-        payload.insert("recipe".to_string(), recipe);
-    }
-    if let Some(mappings) = mappings {
-        payload.insert("mappings".to_string(), mappings);
-    }
-    if let Some(permission_automation) = permission_automation {
-        payload.insert("permissionAutomation".to_string(), permission_automation);
-    }
-    let root = match root_handle {
-        Some(root_handle) => match stored_root(&state, &session_handle, &root_handle)? {
-            Ok(root) => Some(root),
-            Err(error) => return Ok(error),
-        },
-        None => None,
-    };
-    request_generated_draft(
-        &sidecar,
+    generate_draft_via_transport(
+        &transport,
+        inputs,
         "generateAppRecipeDraft",
-        Value::Object(payload),
-        root.as_ref(),
+        app_artifact_id,
+        recipe_id,
+        app,
+        recipe,
+        mappings,
+        regenerate_identifiers,
     )
 }
 
+/// Build one non-committable live preview of a remote-source App and Recipe pair.
+///
+/// The trusted remote payload is rebuilt from the retained source and asset, so
+/// only the author's asset choices and explicit identities cross the command
+/// boundary; provider facts, release analysis, download URLs, and publisher
+/// checksums stay native-owned.
+/// Permission automation is opt-in: `permissionAutomationEnabled` defaults to
+/// false and preserves every declared permission set, while a disabled request
+/// refuses any selected permission actions.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn generate_remote_app_recipe_draft(
@@ -1638,82 +1991,60 @@ pub fn generate_remote_app_recipe_draft(
     recipe: Option<Value>,
     mappings: Option<Value>,
     permission_selection: Option<Value>,
+    permission_automation_enabled: Option<bool>,
     regenerate_identifiers: bool,
     root_handle: Option<String>,
+    request_id: i64,
+    existing_app_handle: Option<String>,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+    artifact_name: Option<String>,
 ) -> Result<Value, String> {
-    let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
-        Ok(facts) => facts,
-        Err(error) => return Ok(error),
-    };
-    let trusted_remote = match trusted_remote_source_payload(
-        &state,
-        &session_handle,
-        &asset_handle,
-        &strategy,
-        asset_pattern.as_deref(),
+    // A live preview carries no review identity: the request id only orders the
+    // author's preview revisions, and the display name never changes identities.
+    let _ = (request_id, artifact_name);
+    let transport = SidecarTransport { sidecar: &sidecar };
+    let remote = RemoteReviewSelection {
+        asset_handle: &asset_handle,
+        strategy: &strategy,
+        asset_pattern: asset_pattern.as_deref(),
         include_prereleases,
-        trusted_sha256.as_deref(),
-    )? {
-        Ok(source) => source,
-        Err(error) => return Ok(error),
+        trusted_sha256: trusted_sha256.as_deref(),
     };
-    let eligible_strategy = trusted_remote
-        .source
-        .get("strategy")
-        .and_then(Value::as_str)
-        .is_some_and(|strategy| {
-            matches!(
-                strategy,
-                "pinned_remote_asset" | "latest_compatible_release"
-            )
-        });
-    let permission_automation = match stored_permission_automation(
+    let inputs = match resolve_draft_inputs(
         &state,
         &session_handle,
         &apk_handle,
+        root_handle.as_deref(),
+        false,
+        existing_app_handle.as_deref(),
         permission_selection,
-        eligible_strategy,
+        permission_automation_enabled.unwrap_or(false),
+        Some(remote),
     )? {
-        Ok(value) => value,
+        Ok(inputs) => inputs,
         Err(error) => return Ok(error),
     };
-    let mut payload = Map::new();
-    payload.insert("facts".to_string(), facts);
-    payload.insert("source".to_string(), trusted_remote.source);
-    if let Some(release_analysis) = trusted_remote.release_analysis {
-        payload.insert("releaseAnalysis".to_string(), release_analysis);
-    }
-    payload.insert(
-        "regenerateIdentifiers".to_string(),
-        Value::Bool(regenerate_identifiers),
-    );
-    if let Some(app) = app {
-        payload.insert("app".to_string(), app);
-    }
-    if let Some(recipe) = recipe {
-        payload.insert("recipe".to_string(), recipe);
-    }
-    if let Some(mappings) = mappings {
-        payload.insert("mappings".to_string(), mappings);
-    }
-    if let Some(permission_automation) = permission_automation {
-        payload.insert("permissionAutomation".to_string(), permission_automation);
-    }
-    let root = match root_handle {
-        Some(root_handle) => match stored_root(&state, &session_handle, &root_handle)? {
-            Ok(root) => Some(root),
-            Err(error) => return Ok(error),
-        },
-        None => None,
-    };
-    request_generated_draft(
-        &sidecar,
+    generate_draft_via_transport(
+        &transport,
+        inputs,
         "generateRemoteAppRecipeDraft",
-        Value::Object(payload),
-        root.as_ref(),
+        app_artifact_id,
+        recipe_id,
+        app,
+        recipe,
+        mappings,
+        regenerate_identifiers,
     )
 }
 
+/// Refuse legacy direct publication of a remote-source App and Recipe pair.
+///
+/// The retired command accepted App, Recipe, mapping, and permission inputs at
+/// save time, so nothing bound the published bytes to a reviewed candidate. It
+/// stays registered so earlier callers receive an explicit review_required
+/// refusal instead of an unknown-command error; publication now runs only
+/// through save_app_generator_review, and no alternative write authority exists.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn save_generated_remote_app_recipe(
@@ -1732,213 +2063,64 @@ pub fn save_generated_remote_app_recipe(
     mappings: Value,
     permission_selection: Option<Value>,
 ) -> Result<Value, String> {
-    let (facts, apk_path, identity, root) = {
-        let registry = lock_registry(&state)?;
-        let session = match registry.session(&session_handle) {
-            Ok(session) => session,
-            Err(error) => return Ok(error),
-        };
-        let Some(apk) = session.apks.get(&apk_handle) else {
-            return Ok(invalid_handle_error());
-        };
-        let Some(facts) = apk.facts.clone() else {
-            return Ok(inspection_required_error());
-        };
-        let Some(root) = session.roots.get(&root_handle) else {
-            return Ok(invalid_handle_error());
-        };
-        (facts, apk.path.clone(), apk.identity.clone(), root.clone())
-    };
-    if current_file_identity(&apk_path).as_ref() != Some(&identity) {
-        return Ok(apk_changed_error());
-    }
-    let trusted_remote = match trusted_remote_source_payload(
-        &state,
-        &session_handle,
-        &asset_handle,
-        &strategy,
-        asset_pattern.as_deref(),
+    let _ = (
+        sidecar,
+        state,
+        session_handle,
+        apk_handle,
+        asset_handle,
+        strategy,
+        asset_pattern,
         include_prereleases,
-        trusted_sha256.as_deref(),
-    )? {
-        Ok(source) => source,
-        Err(error) => return Ok(error),
-    };
-    let eligible_strategy = trusted_remote
-        .source
-        .get("strategy")
-        .and_then(Value::as_str)
-        .is_some_and(|strategy| {
-            matches!(
-                strategy,
-                "pinned_remote_asset" | "latest_compatible_release"
-            )
-        });
-    let permission_automation = match stored_permission_automation(
-        &state,
-        &session_handle,
-        &apk_handle,
+        trusted_sha256,
+        root_handle,
+        app,
+        recipe,
+        mappings,
         permission_selection,
-        eligible_strategy,
-    )? {
-        Ok(value) => value,
-        Err(error) => return Ok(error),
-    };
-    let mut validation_payload = json!({
-        "facts": facts,
-        "source": trusted_remote.source,
-        "app": app,
-        "recipe": recipe,
-        "mappings": mappings,
-        "regenerateIdentifiers": false,
-    });
-    if let Some(release_analysis) = trusted_remote.release_analysis {
-        validation_payload
-            .as_object_mut()
-            .expect("validation payload is an object")
-            .insert("releaseAnalysis".to_string(), release_analysis);
-    }
-    if let Some(permission_automation) = permission_automation {
-        validation_payload
-            .as_object_mut()
-            .expect("validation payload is an object")
-            .insert("permissionAutomation".to_string(), permission_automation);
-    }
-    let validation = request_sidecar(
-        &sidecar,
-        "generateRemoteAppRecipeDraft",
-        Some(validation_payload),
-    )?;
-    let Some(draft) = success_result(&validation) else {
-        return Ok(validation);
-    };
-    if draft.get("blocking").and_then(Value::as_bool) != Some(false) {
-        return Ok(api_error(
-            "app_recipe_invalid",
-            "The app and recipe must pass validation before they can be saved.",
-            json!({ "diagnostics": draft.get("diagnostics").cloned().unwrap_or_else(|| json!([])) }),
-        ));
-    }
-    let Some(app_yaml) = draft.get("appCanonicalYaml").and_then(Value::as_str) else {
-        return Ok(generator_protocol_error());
-    };
-    let Some(recipe_yaml) = draft.get("recipeCanonicalYaml").and_then(Value::as_str) else {
-        return Ok(generator_protocol_error());
-    };
-    let Some(app_file) = destination_file(draft, "appDestination") else {
-        return Ok(invalid_destination_error());
-    };
-    let Some(recipe_file) = destination_file(draft, "recipeDestination") else {
-        return Ok(invalid_destination_error());
-    };
-    let collision_payload = match collision_payload_from_generated_draft(&root, draft) {
-        Ok(payload) => payload,
-        Err(_) => return Ok(generator_protocol_error()),
-    };
-    let collisions = request_sidecar(
-        &sidecar,
-        "checkGeneratedCatalogCollisions",
-        Some(collision_payload),
-    )?;
-    let Some(collision_result) = success_result(&collisions) else {
-        return Ok(collisions);
-    };
-    if collision_result.get("blocking").and_then(Value::as_bool) != Some(false) {
-        return Ok(api_error(
-            "app_recipe_collision_blocking",
-            "Blocking app or recipe collisions must be resolved before saving.",
-            json!({ "collisions": collision_result.get("collisions").cloned().unwrap_or_else(|| json!([])) }),
-        ));
-    }
-    let (_, recipe_path) = match publish_pair_create_new(
-        &root,
-        &app_file,
-        app_yaml.as_bytes(),
-        &recipe_file,
-        recipe_yaml.as_bytes(),
-    ) {
-        Ok(paths) => paths,
-        Err(error) => return Ok(error),
-    };
-    let opened = request_sidecar(
-        &sidecar,
-        "openRecipe",
-        Some(json!({ "path": recipe_path, "authoredRoot": root.root })),
-    )?;
-    let Some(opened_result) = success_result(&opened).cloned() else {
-        return Ok(api_error(
-            "app_recipe_saved_open_failed",
-            "The app and recipe were saved, but the generated recipe could not be opened.",
-            json!({ "appRelativePath": format!("apps/{app_file}"), "recipeRelativePath": format!("recipes/{recipe_file}") }),
-        ));
-    };
-    let mut registry = lock_registry(&state)?;
-    registry.sessions.remove(&session_handle);
-    Ok(success(json!({
-        "appFileName": app_file,
-        "recipeFileName": recipe_file,
-        "appRelativePath": format!("apps/{app_file}"),
-        "recipeRelativePath": format!("recipes/{recipe_file}"),
-        "openedRecipe": opened_result,
-    })))
+    );
+    Ok(retired_direct_publication_refusal())
 }
 
 #[derive(Debug)]
 struct TrustedRemoteDraftContext {
     source: Value,
     release_analysis: Option<Value>,
+    /// Deterministic serialization of the trusted payload pieces.
+    ///
+    /// Reviews retain this fingerprint and re-derive it before publication, so a
+    /// re-analyzed repository or replaced asset invalidates the review instead of
+    /// publishing a pair generated from different provider facts.
+    source_fingerprint: String,
 }
 
-fn trusted_remote_source_payload(
-    state: &AppGeneratorState,
-    session_handle: &str,
-    asset_handle: &str,
+/// Build the trusted remote source payload from one retained source and asset.
+///
+/// Remote handling stays inside the native boundary: the sidecar receives only
+/// normalized provider facts, never a signed redirect or CDN URL supplied by the
+/// frontend, and a trusted publisher checksum is limited to pinned assets.
+fn remote_source_context(
+    source: &TrustedRemoteSource,
+    asset: &TrustedRemoteAsset,
     strategy: &str,
     asset_pattern: Option<&str>,
     include_prereleases: bool,
     trusted_sha256: Option<&str>,
-) -> Result<Result<TrustedRemoteDraftContext, Value>, String> {
-    if !matches!(
-        strategy,
-        "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
-    ) {
-        return Ok(Err(remote_source_error(
-            "remote_strategy_invalid",
-            "Choose a supported installation method.",
-        )));
-    }
-    let trusted_sha256 = match trusted_sha256_request_value(strategy, trusted_sha256) {
-        Ok(value) => value,
-        Err(error) => return Ok(Err(error)),
-    };
-    let registry = lock_registry(state)?;
-    let session = match registry.session(session_handle) {
-        Ok(session) => session,
-        Err(error) => return Ok(Err(error)),
-    };
-    let Some(asset) = session.remote_assets.get(asset_handle) else {
-        return Ok(Err(invalid_handle_error()));
-    };
-    let Some(source) = session.remote_sources.get(&asset.source_handle) else {
-        return Ok(Err(invalid_handle_error()));
-    };
+) -> Result<TrustedRemoteDraftContext, Value> {
     let release_analysis = if strategy == "latest_compatible_release" {
         if source.mode != "github_repository" || source.repository.is_none() {
-            return Ok(Err(remote_source_error(
+            return Err(remote_source_error(
                 "latest_release_source_unsupported",
                 "Latest compatible release currently requires a GitHub repository source.",
-            )));
+            ));
         }
         let Some(releases) = source.release_analysis.as_ref() else {
-            return Ok(Err(remote_source_error(
+            return Err(remote_source_error(
                 "latest_release_analysis_missing",
                 "Analyze the GitHub repository again before generating a latest-compatible recipe.",
-            )));
+            ));
         };
-        match trusted_release_analysis_value(releases) {
-            Ok(value) => Some(value),
-            Err(error) => return Ok(Err(error)),
-        }
+        Some(trusted_release_analysis_value(releases)?)
     } else {
         None
     };
@@ -1957,10 +2139,57 @@ fn trusted_remote_source_payload(
     if let Some(trusted_sha256) = trusted_sha256 {
         payload["trustedSha256"] = Value::String(trusted_sha256.to_string());
     }
-    Ok(Ok(TrustedRemoteDraftContext {
+    let source_fingerprint = format!(
+        "{payload}\u{1f}{}",
+        release_analysis
+            .as_ref()
+            .map(Value::to_string)
+            .unwrap_or_default()
+    );
+    Ok(TrustedRemoteDraftContext {
         source: payload,
         release_analysis,
-    }))
+        source_fingerprint,
+    })
+}
+
+/// Resolve one retained remote asset into its trusted draft context.
+///
+/// The session owns every provider fact: the request only names the retained
+/// asset and the author's strategy choices, and a strategy the generator cannot
+/// install, a missing asset, or a missing source is refused here. Review
+/// re-validation uses the same resolution, so a re-analyzed source changes the
+/// fingerprint and invalidates an outstanding review instead of publishing a
+/// pair generated from provider facts the author never saw.
+fn retained_remote_context(
+    session: &GeneratorSession,
+    asset_handle: &str,
+    strategy: &str,
+    asset_pattern: Option<&str>,
+    include_prereleases: bool,
+    trusted_sha256: Option<&str>,
+) -> Result<TrustedRemoteDraftContext, Value> {
+    if !remote_strategy_supported(strategy) {
+        return Err(remote_source_error(
+            "remote_strategy_invalid",
+            "Choose a supported installation method.",
+        ));
+    }
+    let trusted_sha256 = trusted_sha256_request_value(strategy, trusted_sha256)?;
+    let Some(asset) = session.remote_assets.get(asset_handle) else {
+        return Err(invalid_handle_error());
+    };
+    let Some(source) = session.remote_sources.get(&asset.source_handle) else {
+        return Err(invalid_handle_error());
+    };
+    remote_source_context(
+        source,
+        asset,
+        strategy,
+        asset_pattern,
+        include_prereleases,
+        trusted_sha256,
+    )
 }
 
 fn trusted_release_analysis_value(releases: &[TrustedRemoteRelease]) -> Result<Value, Value> {
@@ -2021,6 +2250,13 @@ pub fn check_app_recipe_collisions() -> Result<Value, String> {
     ))
 }
 
+/// Refuse legacy direct publication of a local-APK App and Recipe pair.
+///
+/// The retired command accepted App, Recipe, mapping, and permission inputs at
+/// save time, so nothing bound the published bytes to a reviewed candidate. It
+/// stays registered so earlier callers receive an explicit review_required
+/// refusal instead of an unknown-command error; publication now runs only
+/// through save_app_generator_review, and no alternative write authority exists.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn save_generated_app_recipe(
@@ -2034,126 +2270,18 @@ pub fn save_generated_app_recipe(
     mappings: Value,
     permission_selection: Option<Value>,
 ) -> Result<Value, String> {
-    let (facts, apk_path, identity, root) = {
-        let registry = lock_registry(&state)?;
-        let session = match registry.session(&session_handle) {
-            Ok(session) => session,
-            Err(error) => return Ok(error),
-        };
-        let Some(apk) = session.apks.get(&apk_handle) else {
-            return Ok(invalid_handle_error());
-        };
-        let Some(facts) = apk.facts.clone() else {
-            return Ok(inspection_required_error());
-        };
-        let Some(root) = session.roots.get(&root_handle) else {
-            return Ok(invalid_handle_error());
-        };
-        (facts, apk.path.clone(), apk.identity.clone(), root.clone())
-    };
-    if current_file_identity(&apk_path).as_ref() != Some(&identity) {
-        return Ok(apk_changed_error());
-    }
-
-    let permission_automation = match stored_permission_automation(
-        &state,
-        &session_handle,
-        &apk_handle,
+    let _ = (
+        sidecar,
+        state,
+        session_handle,
+        apk_handle,
+        root_handle,
+        app,
+        recipe,
+        mappings,
         permission_selection,
-        false,
-    )? {
-        Ok(value) => value,
-        Err(error) => return Ok(error),
-    };
-
-    let mut validation_payload = json!({
-        "facts": facts,
-        "app": app,
-        "recipe": recipe,
-        "mappings": mappings,
-        "regenerateIdentifiers": false,
-    });
-    if let Some(permission_automation) = permission_automation {
-        validation_payload
-            .as_object_mut()
-            .expect("validation payload is an object")
-            .insert("permissionAutomation".to_string(), permission_automation);
-    }
-    let validation = request_sidecar(&sidecar, "generateAppRecipeDraft", Some(validation_payload))?;
-    let Some(draft) = success_result(&validation) else {
-        return Ok(validation);
-    };
-    if draft.get("blocking").and_then(Value::as_bool) != Some(false) {
-        return Ok(api_error(
-            "app_recipe_invalid",
-            "The app and recipe must pass validation before they can be saved.",
-            json!({ "diagnostics": draft.get("diagnostics").cloned().unwrap_or_else(|| json!([])) }),
-        ));
-    }
-    let Some(app_yaml) = draft.get("appCanonicalYaml").and_then(Value::as_str) else {
-        return Ok(generator_protocol_error());
-    };
-    let Some(recipe_yaml) = draft.get("recipeCanonicalYaml").and_then(Value::as_str) else {
-        return Ok(generator_protocol_error());
-    };
-    let Some(app_file) = destination_file(draft, "appDestination") else {
-        return Ok(invalid_destination_error());
-    };
-    let Some(recipe_file) = destination_file(draft, "recipeDestination") else {
-        return Ok(invalid_destination_error());
-    };
-    let collision_payload = match collision_payload_from_generated_draft(&root, draft) {
-        Ok(payload) => payload,
-        Err(_) => return Ok(generator_protocol_error()),
-    };
-    let collisions = request_sidecar(
-        &sidecar,
-        "checkGeneratedCatalogCollisions",
-        Some(collision_payload),
-    )?;
-    let Some(collision_result) = success_result(&collisions) else {
-        return Ok(collisions);
-    };
-    if collision_result.get("blocking").and_then(Value::as_bool) != Some(false) {
-        return Ok(api_error(
-            "app_recipe_collision_blocking",
-            "Blocking app or recipe collisions must be resolved before saving.",
-            json!({ "collisions": collision_result.get("collisions").cloned().unwrap_or_else(|| json!([])) }),
-        ));
-    }
-
-    let (app_path, recipe_path) = match publish_pair_create_new(
-        &root,
-        &app_file,
-        app_yaml.as_bytes(),
-        &recipe_file,
-        recipe_yaml.as_bytes(),
-    ) {
-        Ok(paths) => paths,
-        Err(error) => return Ok(error),
-    };
-    let opened = request_sidecar(
-        &sidecar,
-        "openRecipe",
-        Some(json!({ "path": recipe_path, "authoredRoot": root.root })),
-    )?;
-    let Some(opened_result) = success_result(&opened).cloned() else {
-        return Ok(api_error(
-            "app_recipe_saved_open_failed",
-            "The app and recipe were saved, but the generated recipe could not be opened.",
-            json!({ "appRelativePath": format!("apps/{app_file}"), "recipeRelativePath": format!("recipes/{recipe_file}") }),
-        ));
-    };
-    let mut registry = lock_registry(&state)?;
-    registry.sessions.remove(&session_handle);
-    drop(app_path);
-    Ok(success(json!({
-        "appFileName": app_file,
-        "recipeFileName": recipe_file,
-        "appRelativePath": format!("apps/{app_file}"),
-        "recipeRelativePath": format!("recipes/{recipe_file}"),
-        "openedRecipe": opened_result,
-    })))
+    );
+    Ok(retired_direct_publication_refusal())
 }
 
 #[tauri::command]
@@ -2161,11 +2289,1352 @@ pub fn cancel_app_generator(
     state: State<'_, AppGeneratorState>,
     session_handle: String,
 ) -> Result<Value, String> {
+    // Cancelling discards every session handle and review, because those
+    // describe drafts the author abandoned. Sticky publication records are kept:
+    // an unconfirmed attempt must remain checkable, and cancelling must never
+    // turn an uncertain publication into an apparently never-attempted one.
     let mut registry = lock_registry(&state)?;
     if registry.sessions.remove(&session_handle).is_none() {
         return Ok(expired_session_error());
     }
     Ok(success(json!({})))
+}
+
+/// Remote source selection fields one preview or review request carries.
+///
+/// The values are the author's choices about which retained asset to use; every
+/// provider fact, release analysis entry, and download URL comes from the
+/// trusted native source state instead of the request.
+struct RemoteReviewSelection<'a> {
+    asset_handle: &'a str,
+    strategy: &'a str,
+    asset_pattern: Option<&'a str>,
+    include_prereleases: bool,
+    trusted_sha256: Option<&'a str>,
+}
+
+/// Trusted inputs one preview or review request resolved from native state.
+#[derive(Debug)]
+struct ResolvedDraftInputs {
+    /// Authored root the request targets; a preview may run without one.
+    root: Option<TrustedRoot>,
+    facts: Value,
+    permission_automation: Option<Value>,
+    /// Explicit author opt-in for permission automation, forwarded as its own
+    /// request field so the backend never infers intent from selected identities.
+    ///
+    /// An opt-in that selected no identities still travels: it allows the
+    /// backend to reference the whole declared permission sets. A disabled
+    /// request grants nothing and refuses nonempty selections.
+    permission_automation_enabled: bool,
+    existing_app: Option<BoundExistingApp>,
+    /// Dependency fingerprint retained for review requests only.
+    binding: Option<ReviewBinding>,
+    remote: Option<ResolvedRemoteInputs>,
+}
+
+/// Trusted remote payload pieces derived from the retained source and asset.
+#[derive(Debug)]
+struct ResolvedRemoteInputs {
+    source: Value,
+    release_analysis: Option<Value>,
+}
+
+/// Resolve the authored root one existing-App request operates on.
+///
+/// The most recently selected root is the session's active root. An explicit
+/// handle always wins, so a workflow that captured a handle keeps using the root
+/// it captured, and a request cannot silently retarget another catalog.
+fn resolve_session_root(
+    state: &AppGeneratorState,
+    session_handle: &str,
+    root_handle: Option<&str>,
+) -> Result<Result<(String, TrustedRoot), Value>, String> {
+    let registry = lock_registry(state)?;
+    let session = match registry.session(session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(Err(error)),
+    };
+    let handle = match root_handle {
+        Some(handle) => handle,
+        None => match session.active_root.as_deref() {
+            Some(handle) => handle,
+            None => return Ok(Err(invalid_root_error())),
+        },
+    };
+    Ok(session
+        .roots
+        .get(handle)
+        .cloned()
+        .map(|root| (handle.to_string(), root))
+        .ok_or_else(invalid_handle_error))
+}
+
+/// Package name the trusted APK inspection recorded for the selected APK.
+fn inspected_package_name(apk: &TrustedApk) -> Option<&str> {
+    apk.inspection
+        .as_ref()?
+        .get("manifest")?
+        .get("packageName")?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Look up one native existing-App handle and enforce its trusted bindings.
+///
+/// The selection is bound to the root it was captured against, and the inspected
+/// APK package must match the selected App Definition package: generation
+/// installs the inspected APK into that App Definition, so a mismatch can never
+/// produce an installable pair.
+fn trusted_existing_app(
+    session: &GeneratorSession,
+    apk: &TrustedApk,
+    handle: &str,
+    expected_root: Option<&TrustedRoot>,
+) -> Result<BoundExistingApp, Value> {
+    let Some(selection) = session.existing_apps.get(handle) else {
+        return Err(invalid_handle_error());
+    };
+    if let Some(root) = expected_root {
+        if selection.root_path != root.root {
+            return Err(existing_app_outside_root_error());
+        }
+    }
+    if let (Some(inspected), Some(selected)) = (
+        inspected_package_name(apk),
+        selection
+            .package_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        if inspected != selected {
+            return Err(package_mismatch_error(inspected, selected));
+        }
+    }
+    Ok(BoundExistingApp {
+        handle: handle.to_string(),
+        selection: selection.clone(),
+    })
+}
+
+/// Resolve every trusted fact one preview or review request needs.
+///
+/// Nothing in this boundary is trusted from the frontend: APK facts, permission
+/// automation bounds, remote provider payloads, and existing-App snapshots all
+/// come from native session state captured through the inspection and analysis
+/// flows. `require_root` is false for previews so an author can still see a
+/// non-committable draft before choosing a root.
+///
+/// The `permission_automation_enabled` flag is the author's explicit opt-in for
+/// permission automation. A disabled request preserves every declared App
+/// permission set and adds no grant steps, so a nonempty identity selection is
+/// refused as contradictory before any request reaches the backend.
+#[allow(clippy::too_many_arguments)]
+fn resolve_draft_inputs(
+    state: &AppGeneratorState,
+    session_handle: &str,
+    apk_handle: &str,
+    root_handle: Option<&str>,
+    require_root: bool,
+    existing_app_handle: Option<&str>,
+    permission_selection: Option<Value>,
+    permission_automation_enabled: bool,
+    remote_inputs: Option<RemoteReviewSelection<'_>>,
+) -> Result<Result<ResolvedDraftInputs, Value>, String> {
+    if let Some(selection) = &remote_inputs {
+        if !remote_strategy_supported(selection.strategy) {
+            return Ok(Err(remote_source_error(
+                "remote_strategy_invalid",
+                "Choose a supported installation method.",
+            )));
+        }
+    }
+    let registry = lock_registry(state)?;
+    let session = match registry.session(session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(Err(error)),
+    };
+    let root = match root_handle {
+        Some(handle) => match session.roots.get(handle) {
+            Some(root) => Some((handle.to_string(), root.clone())),
+            None => return Ok(Err(invalid_handle_error())),
+        },
+        None => match session
+            .active_root
+            .as_deref()
+            .and_then(|handle| session.roots.get(handle).map(|root| (handle.to_string(), root.clone())))
+        {
+            Some(resolved) => Some(resolved),
+            None if require_root => return Ok(Err(invalid_root_error())),
+            None => None,
+        },
+    };
+    let Some(apk) = session.apks.get(apk_handle) else {
+        return Ok(Err(invalid_handle_error()));
+    };
+    // An inspected APK and a remote install source must come from the same
+    // retained download. Two independently valid handles are not proof that the
+    // bytes the author inspected are the bytes the recipe will install, so a
+    // mismatched pair is refused before any review request reaches the backend.
+    if let Some(selection) = &remote_inputs {
+        if apk.remote_asset_handle.as_deref() != Some(selection.asset_handle) {
+            return Ok(Err(remote_source_error(
+                "remote_asset_mismatch",
+                "The inspected APK does not come from the selected release asset. Download and inspect the selected APK again.",
+            )));
+        }
+    }
+    let Some(facts) = apk.facts.clone() else {
+        return Ok(Err(inspection_required_error()));
+    };
+    let Some(inspection_handle) = apk.inspection_handle.clone() else {
+        return Ok(Err(inspection_required_error()));
+    };
+    let existing_app = match existing_app_handle {
+        Some(handle) => match trusted_existing_app(
+            session,
+            apk,
+            handle,
+            root.as_ref().map(|(_, root)| root),
+        ) {
+            Ok(bound) => Some(bound),
+            Err(error) => return Ok(Err(error)),
+        },
+        None => None,
+    };
+    if current_file_identity(&apk.path).as_ref() != Some(&apk.identity) {
+        return Ok(Err(apk_changed_error()));
+    }
+    // Permission automation is derived from the trusted inspection of the APK the
+    // draft installs. A local APK is that inspected artifact, and a remote source
+    // is eligible when its strategy re-resolves the inspected artifact at
+    // execution time. A user-provided remote artifact has no inspected identity
+    // to attach the grants to, so it stays refused.
+    let installs_inspected_apk = match &remote_inputs {
+        Some(selection) => matches!(
+            selection.strategy,
+            "pinned_remote_asset" | "latest_compatible_release"
+        ),
+        None => true,
+    };
+    let permission_automation = match canonical_permission_automation(
+        apk,
+        permission_selection,
+        installs_inspected_apk,
+        permission_automation_enabled,
+    ) {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(error)),
+    };
+    let (remote, binding) = match &remote_inputs {
+        Some(selection) => {
+            let context = match retained_remote_context(
+                session,
+                selection.asset_handle,
+                selection.strategy,
+                selection.asset_pattern,
+                selection.include_prereleases,
+                selection.trusted_sha256,
+            ) {
+                Ok(context) => context,
+                Err(error) => return Ok(Err(error)),
+            };
+            (
+                Some(ResolvedRemoteInputs {
+                    source: context.source,
+                    release_analysis: context.release_analysis,
+                }),
+                ReviewBinding::Remote {
+                    apk_handle: apk_handle.to_string(),
+                    apk_identity: apk.identity.clone(),
+                    inspection_handle: inspection_handle.clone(),
+                    asset_handle: selection.asset_handle.to_string(),
+                    strategy: selection.strategy.to_string(),
+                    asset_pattern: selection.asset_pattern.map(str::to_string),
+                    include_prereleases: selection.include_prereleases,
+                    trusted_sha256: selection.trusted_sha256.map(str::to_string),
+                    source_fingerprint: context.source_fingerprint,
+                },
+            )
+        }
+        None => (
+            None,
+            ReviewBinding::Local {
+                apk_handle: apk_handle.to_string(),
+                apk_identity: apk.identity.clone(),
+                inspection_handle: inspection_handle.clone(),
+            },
+        ),
+    };
+    Ok(Ok(ResolvedDraftInputs {
+        root: root.map(|(_, root)| root),
+        facts,
+        permission_automation,
+        permission_automation_enabled,
+        existing_app,
+        binding: Some(binding),
+        remote,
+    }))
+}
+
+/// Supported installation strategies for remote app generation.
+fn remote_strategy_supported(strategy: &str) -> bool {
+    matches!(
+        strategy,
+        "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
+    )
+}
+
+/// Copy explicit author-chosen identities into one request payload.
+///
+/// Omitted identifiers keep the backend's proposed default. The native boundary
+/// never renames, suffixes, or assigns a different identity on its own, and a
+/// blank value is treated as omitted instead of becoming an empty identifier.
+fn insert_explicit_identity(
+    payload: &mut Map<String, Value>,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+) {
+    if let Some(value) = app_artifact_id.filter(|value| !value.trim().is_empty()) {
+        payload.insert("appArtifactId".to_string(), Value::String(value));
+    }
+    if let Some(value) = recipe_id.filter(|value| !value.trim().is_empty()) {
+        payload.insert("recipeId".to_string(), Value::String(value));
+    }
+}
+
+/// Catalog-relative destination path one review destination carries.
+fn destination_relative_path(object: &Map<String, Value>, kind: &str) -> Option<String> {
+    object
+        .get("destinations")?
+        .get(kind)?
+        .get("relativePath")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Reject review results whose catalog paths are absolute or escape the root.
+///
+/// Every path the author sees stays catalog-relative; a backend payload that
+/// carries a native absolute path is a protocol violation instead of something
+/// the UI layer has to interpret.
+fn validate_review_paths(object: &Map<String, Value>) -> Result<(), Value> {
+    if let Some(destinations) = object.get("destinations").and_then(Value::as_object) {
+        for kind in ["app", "recipe"] {
+            if let Some(relative) = destinations
+                .get(kind)
+                .and_then(|destination| destination.get("relativePath"))
+                .and_then(Value::as_str)
+            {
+                if !is_catalog_relative_path(relative) {
+                    return Err(invalid_destination_error());
+                }
+            }
+        }
+    }
+    if let Some(app_path) = object
+        .get("target")
+        .and_then(|target| target.get("appPath"))
+        .and_then(Value::as_str)
+    {
+        if !is_catalog_relative_path(app_path) {
+            return Err(invalid_destination_error());
+        }
+    }
+    if let Some(affected) = object
+        .get("changeImpact")
+        .and_then(|impact| impact.get("affectedRecipes"))
+        .and_then(Value::as_array)
+    {
+        for recipe in affected {
+            if let Some(path) = recipe.get("recipePath").and_then(Value::as_str) {
+                if !is_catalog_relative_path(path) {
+                    return Err(invalid_destination_error());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build one immutable review, retain its native mapping, and map the result.
+///
+/// The backend review handle stays in native memory: the frontend receives a
+/// native review handle plus the frozen review payload. The retained mapping is
+/// the only thing save can publish, so no later request can alter the reviewed
+/// App, Recipe, mappings, permissions, or identities. A backend response that
+/// retained no review snapshot is reported as blocking, because native can
+/// never publish a review the backend cannot pair.
+#[allow(clippy::too_many_arguments)]
+fn review_draft_via_transport(
+    transport: &dyn AppGeneratorTransport,
+    state: &AppGeneratorState,
+    session_handle: &str,
+    inputs: ResolvedDraftInputs,
+    request_id: i64,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+    artifact_name: Option<String>,
+    app: Option<Value>,
+    recipe: Option<Value>,
+    mappings: Option<Value>,
+    regenerate_identifiers: bool,
+) -> Result<Value, String> {
+    let (Some(binding), Some(root)) = (inputs.binding.clone(), inputs.root.clone()) else {
+        return Ok(generator_protocol_error());
+    };
+    // Review and preview share one binding rule: an existing-App target and an
+    // App Definition edit cannot describe the same draft, because the existing
+    // snapshot already owns the App bytes the backend substitutes.
+    if inputs.existing_app.is_some() && app.is_some() {
+        return Ok(invalid_argument_error(
+            "A draft cannot combine an App Definition edit with an existing-App selection.",
+        ));
+    }
+    let operation = if inputs.remote.is_some() {
+        "reviewRemoteAppGeneratorDraft"
+    } else {
+        "reviewAppGeneratorDraft"
+    };
+    let mut payload = Map::new();
+    payload.insert("authoredRoot".to_string(), json!(root.root));
+    payload.insert("requestId".to_string(), json!(request_id));
+    payload.insert("facts".to_string(), inputs.facts.clone());
+    if let Some(existing) = &inputs.existing_app {
+        payload.insert(
+            "existingAppSnapshotId".to_string(),
+            Value::String(existing.selection.snapshot_id.clone()),
+        );
+    }
+    insert_explicit_identity(&mut payload, app_artifact_id, recipe_id);
+    if let Some(value) = artifact_name.filter(|value| !value.trim().is_empty()) {
+        payload.insert("artifactName".to_string(), Value::String(value));
+    }
+    for (field, value) in [("app", app), ("recipe", recipe), ("mappings", mappings)] {
+        if let Some(value) = value {
+            payload.insert(field.to_string(), value);
+        }
+    }
+    if let Some(value) = inputs.permission_automation.clone() {
+        payload.insert("permissionAutomation".to_string(), value);
+    }
+    payload.insert(
+        "permissionAutomationEnabled".to_string(),
+        Value::Bool(inputs.permission_automation_enabled),
+    );
+    payload.insert(
+        "regenerateIdentifiers".to_string(),
+        Value::Bool(regenerate_identifiers),
+    );
+    if let Some(remote) = &inputs.remote {
+        payload.insert("source".to_string(), remote.source.clone());
+        if let Some(release_analysis) = &remote.release_analysis {
+            payload.insert("releaseAnalysis".to_string(), release_analysis.clone());
+        }
+    }
+    let response = transport.request(operation, Value::Object(payload))?;
+    let Some(result) = success_result(&response).cloned() else {
+        return Ok(response);
+    };
+    let Some(object) = result.as_object() else {
+        return Ok(generator_protocol_error());
+    };
+    if object.get("requestId").and_then(Value::as_i64) != Some(request_id) {
+        return Ok(generator_protocol_error());
+    }
+    let Some(blocking) = object.get("blocking").and_then(Value::as_bool) else {
+        return Ok(generator_protocol_error());
+    };
+    if let Err(error) = validate_review_paths(object) {
+        return Ok(error);
+    }
+    let backend_review_id = object
+        .get("reviewId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let record = ReviewRecord {
+        request_id,
+        backend_review_id: backend_review_id.clone(),
+        binding,
+        existing_app: inputs.existing_app.clone(),
+        root_path: root.root.clone(),
+        // A review the backend could not retain a pair snapshot for can never be
+        // published, so it counts as blocking whatever the diagnostics report.
+        blocking: blocking || backend_review_id.is_none(),
+        app_relative_path: destination_relative_path(object, "app"),
+        recipe_relative_path: destination_relative_path(object, "recipe"),
+    };
+    let mut registry = lock_registry(state)?;
+    let review_handle = registry.allocate("app-review");
+    let session = match registry.session_mut(session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    // The public flag mirrors the save gate: a review the backend did not retain
+    // can never be published, so the UI must not offer publication even when the
+    // diagnostics come back clear.
+    let effective_blocking = record.blocking;
+    session.reviews.insert(review_handle.clone(), record);
+    let mut public = object.clone();
+    public.remove("reviewId");
+    public.insert("reviewHandle".to_string(), Value::String(review_handle));
+    public.insert("blocking".to_string(), Value::Bool(effective_blocking));
+    Ok(success(Value::Object(public)))
+}
+
+/// Build one non-committable preview from resolved trusted inputs.
+///
+/// Previews share the review request shape, including the retained existing-App
+/// snapshot, but retain nothing native-side and never write to the catalog.
+#[allow(clippy::too_many_arguments)]
+fn generate_draft_via_transport(
+    transport: &dyn AppGeneratorTransport,
+    inputs: ResolvedDraftInputs,
+    operation: &str,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+    app: Option<Value>,
+    recipe: Option<Value>,
+    mappings: Option<Value>,
+    regenerate_identifiers: bool,
+) -> Result<Value, String> {
+    let ResolvedDraftInputs {
+        root,
+        facts,
+        permission_automation,
+        permission_automation_enabled,
+        existing_app,
+        remote,
+        ..
+    } = inputs;
+    // Review and preview share one binding rule: an existing-App target and an
+    // App Definition edit cannot describe the same draft, because the existing
+    // snapshot already owns the App bytes the backend substitutes.
+    if existing_app.is_some() && app.is_some() {
+        return Ok(invalid_argument_error(
+            "A draft cannot combine an App Definition edit with an existing-App selection.",
+        ));
+    }
+    let mut payload = Map::new();
+    payload.insert("facts".to_string(), facts);
+    if let Some(existing) = &existing_app {
+        // The preview resolves the retained snapshot exactly like a review
+        // request: the frontend never supplies App Definition facts for an
+        // existing-App target.
+        payload.insert(
+            "authoredRoot".to_string(),
+            json!(existing.selection.root_path),
+        );
+        payload.insert(
+            "existingAppSnapshotId".to_string(),
+            Value::String(existing.selection.snapshot_id.clone()),
+        );
+    }
+    insert_explicit_identity(&mut payload, app_artifact_id, recipe_id);
+    for (field, value) in [("app", app), ("recipe", recipe), ("mappings", mappings)] {
+        if let Some(value) = value {
+            payload.insert(field.to_string(), value);
+        }
+    }
+    if let Some(value) = permission_automation {
+        payload.insert("permissionAutomation".to_string(), value);
+    }
+    payload.insert(
+        "permissionAutomationEnabled".to_string(),
+        Value::Bool(permission_automation_enabled),
+    );
+    payload.insert(
+        "regenerateIdentifiers".to_string(),
+        Value::Bool(regenerate_identifiers),
+    );
+    if let Some(remote) = &remote {
+        payload.insert("source".to_string(), remote.source.clone());
+        if let Some(release_analysis) = &remote.release_analysis {
+            payload.insert("releaseAnalysis".to_string(), release_analysis.clone());
+        }
+    }
+    request_generated_draft(transport, operation, Value::Object(payload), root.as_ref())
+}
+
+/// Pre-publication gate outcome for one save attempt.
+enum SaveGate {
+    Expired,
+    Invalidated,
+    Blocking(Box<ReviewRecord>),
+}
+
+/// Re-check every trusted fact one review was generated from.
+///
+/// Reviews are invalidated, never silently refreshed: a changed APK file, a
+/// replaced inspection, a re-analyzed remote source, a dropped root, or a
+/// replaced existing-App selection all mean the author must review again.
+fn review_dependencies_current(session: &GeneratorSession, record: &ReviewRecord) -> Result<(), ()> {
+    if !session.roots.values().any(|root| root.root == record.root_path) {
+        return Err(());
+    }
+    let Some(apk) = session.apks.get(record.binding.apk_handle()) else {
+        return Err(());
+    };
+    let (apk_identity, inspection_handle) = match &record.binding {
+        ReviewBinding::Local {
+            apk_identity,
+            inspection_handle,
+            ..
+        }
+        | ReviewBinding::Remote {
+            apk_identity,
+            inspection_handle,
+            ..
+        } => (apk_identity, inspection_handle),
+    };
+    if &apk.identity != apk_identity
+        || apk.inspection_handle.as_deref() != Some(inspection_handle.as_str())
+        || current_file_identity(&apk.path).as_ref() != Some(apk_identity)
+    {
+        return Err(());
+    }
+    if let ReviewBinding::Remote {
+        asset_handle,
+        strategy,
+        asset_pattern,
+        include_prereleases,
+        trusted_sha256,
+        source_fingerprint,
+        ..
+    } = &record.binding
+    {
+        let Ok(context) = retained_remote_context(
+            session,
+            asset_handle,
+            strategy,
+            asset_pattern.as_deref(),
+            *include_prereleases,
+            trusted_sha256.as_deref(),
+        ) else {
+            return Err(());
+        };
+        if &context.source_fingerprint != source_fingerprint {
+            return Err(());
+        }
+    }
+    if let Some(bound) = &record.existing_app {
+        let Some(current) = session.existing_apps.get(&bound.handle) else {
+            return Err(());
+        };
+        if current.snapshot_id != bound.selection.snapshot_id
+            || current.app_path != bound.selection.app_path
+            || current.root_path != bound.selection.root_path
+        {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+/// Update the sticky publication record for one native operation identity.
+fn update_publication(
+    state: &AppGeneratorState,
+    operation_id: &str,
+    status: PublicationState,
+    detail: Option<Value>,
+) -> Result<(), String> {
+    let mut registry = lock_registry(state)?;
+    if let Some(record) = registry.publications.get_mut(operation_id) {
+        record.state = status;
+        record.detail = detail;
+    }
+    Ok(())
+}
+
+/// Open the freshly published Recipe document after a confirmed save.
+///
+/// The catalog write already committed, so a failure here only reports that the
+/// new file could not be opened in the editor. Publication is never repeated
+/// because of it.
+fn open_generated_recipe(
+    transport: &dyn AppGeneratorTransport,
+    record: &ReviewRecord,
+) -> Result<String, Value> {
+    let Some(recipe_relative) = record.recipe_relative_path.as_deref() else {
+        return Err(open_failed_error(
+            "The saved Recipe destination is unknown, so the generated Recipe could not be opened.",
+        ));
+    };
+    let recipe_path = record.root_path.join(recipe_relative);
+    let response = transport
+        .request(
+            "openRecipe",
+            json!({ "path": recipe_path, "authoredRoot": record.root_path }),
+        )
+        .map_err(|_| {
+            open_failed_error(
+                "The generated Recipe was saved, but the editor backend is unavailable to open it.",
+            )
+        })?;
+    let Some(result) = success_result(&response) else {
+        return Err(response
+            .get("error")
+            .cloned()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| open_failed_error("The saved Recipe could not be opened.")));
+    };
+    result
+        .get("document")
+        .and_then(|document| document.get("documentId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            open_failed_error(
+                "The saved Recipe was opened, but its document identity was not reported.",
+            )
+        })
+}
+
+/// Publish one reviewed App/Recipe pair for the author.
+///
+/// The operation identity is recorded locally before the request is sent, so a
+/// lost response stays an unconfirmed outcome instead of a confirmed failure and
+/// is never retried automatically. Pre-publication refusals write nothing and
+/// therefore drop the local record.
+fn publish_review_via_transport(
+    transport: &dyn AppGeneratorTransport,
+    state: &AppGeneratorState,
+    session_handle: &str,
+    review_handle: &str,
+    request_id: i64,
+) -> Result<Value, String> {
+    let (operation_id, record) = {
+        let mut registry = lock_registry(state)?;
+        let gate = match registry.sessions.get(session_handle) {
+            None => Err(SaveGate::Expired),
+            Some(session) => match session.reviews.get(review_handle) {
+                None => Err(SaveGate::Invalidated),
+                Some(record) => {
+                    if record.request_id != request_id
+                        || review_dependencies_current(session, record).is_err()
+                    {
+                        Err(SaveGate::Invalidated)
+                    } else if record.blocking || record.backend_review_id.is_none() {
+                        Err(SaveGate::Blocking(Box::new(record.clone())))
+                    } else {
+                        Ok(record.clone())
+                    }
+                }
+            },
+        };
+        match gate {
+            Err(SaveGate::Expired) => return Ok(expired_session_error()),
+            Err(SaveGate::Invalidated) => {
+                if let Some(session) = registry.sessions.get_mut(session_handle) {
+                    session.reviews.remove(review_handle);
+                }
+                return Ok(review_invalidated_error());
+            }
+            Err(SaveGate::Blocking(record)) => return Ok(review_blocking_error(&record)),
+            Ok(record) => {
+                let operation_id = registry.allocate("publication");
+                registry.publications.insert(
+                    operation_id.clone(),
+                    PublicationRecord {
+                        state: PublicationState::Submitted,
+                        recorded_at: iso8601_now(),
+                        detail: None,
+                        root_path: record.root_path.clone(),
+                    },
+                );
+                // The review is consumed by this attempt unless the backend
+                // refuses before publication and keeps its retained pair.
+                if let Some(session) = registry.sessions.get_mut(session_handle) {
+                    session.reviews.remove(review_handle);
+                }
+                (operation_id, record)
+            }
+        }
+    };
+    let Some(backend_review_id) = record.backend_review_id.clone() else {
+        return Ok(review_blocking_error(&record));
+    };
+    let response = match transport.request(
+        "saveAppGeneratorReview",
+        json!({
+            "operationId": operation_id,
+            "reviewId": backend_review_id,
+            "requestId": request_id,
+        }),
+    ) {
+        Ok(response) => response,
+        Err(_) => {
+            return Ok(success(unknown_publication_value(
+                &operation_id,
+                UNCONFIRMED_PUBLICATION_MESSAGE,
+            )))
+        }
+    };
+    if success_result(&response).is_none() {
+        // A pre-publication refusal wrote no files. Blocking or unsaved-document
+        // refusals leave the backend review intact, so the native handle survives
+        // for an attempt after the author resolves the refusal.
+        let refusal_code = response
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str);
+        let retain_review = matches!(
+            refusal_code,
+            Some("review_blocking") | Some("dirty_app_document")
+        );
+        let mut registry = lock_registry(state)?;
+        registry.publications.remove(&operation_id);
+        if retain_review {
+            if let Some(session) = registry.sessions.get_mut(session_handle) {
+                if review_dependencies_current(session, &record).is_ok() {
+                    session.reviews.insert(review_handle.to_string(), record);
+                }
+            }
+        }
+        return Ok(response);
+    }
+    let result = success_result(&response).cloned().unwrap_or(Value::Null);
+    match result.get("outcome").and_then(Value::as_str) {
+        Some("saved") => {
+            let app_path = record.app_relative_path.clone().unwrap_or_default();
+            let recipe_path = record.recipe_relative_path.clone().unwrap_or_default();
+            let mut payload = json!({
+                "outcome": "saved",
+                "operationId": operation_id,
+                "app": { "appPath": app_path },
+                "recipe": {
+                    "recipePath": recipe_path,
+                    "documentId": Value::Null,
+                },
+                "createdFiles": catalog_relative_file_list(result.get("createdFiles"), &record.root_path),
+                "replacedFiles": catalog_relative_file_list(result.get("replacedFiles"), &record.root_path),
+            });
+            // The confirmed outcome is recorded before the Recipe is opened:
+            // status must never depend on the editor document opening.
+            update_publication(
+                state,
+                &operation_id,
+                PublicationState::Saved,
+                Some(payload.clone()),
+            )?;
+            match open_generated_recipe(transport, &record) {
+                Ok(document_id) => {
+                    payload["recipe"]["documentId"] = Value::String(document_id);
+                }
+                Err(open_error) => {
+                    payload["recipe"]["openError"] = open_error;
+                }
+            }
+            update_publication(
+                state,
+                &operation_id,
+                PublicationState::Saved,
+                Some(payload.clone()),
+            )?;
+            Ok(success(payload))
+        }
+        Some("failed") => {
+            let payload = failed_outcome_value(&operation_id, &record.root_path, &result);
+            update_publication(
+                state,
+                &operation_id,
+                PublicationState::Failed,
+                Some(payload.clone()),
+            )?;
+            Ok(success(payload))
+        }
+        _ => {
+            let message = result
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or(UNCONFIRMED_PUBLICATION_MESSAGE);
+            let payload = unknown_publication_value(&operation_id, message);
+            update_publication(state, &operation_id, PublicationState::Submitted, Some(payload.clone()))?;
+            Ok(success(payload))
+        }
+    }
+}
+
+/// Map one failed publication result onto the frozen outcome shape.
+fn failed_outcome_value(operation_id: &str, root: &Path, result: &Value) -> Value {
+    let error = result
+        .get("error")
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(generator_protocol_error_value);
+    let rollback_source = result.get("rollback").and_then(Value::as_object);
+    let mut rollback = json!({
+        "recipeRemoved": rollback_source
+            .and_then(|rollback| rollback.get("recipeRemoved"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "recipeRecoveryRequired": rollback_source
+            .and_then(|rollback| rollback.get("recipeRecoveryRequired"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    });
+    if let Some(relative) = rollback_source
+        .and_then(|rollback| rollback.get("recipePath"))
+        .and_then(Value::as_str)
+        .and_then(|raw| catalog_relative_from_raw(root, raw))
+    {
+        rollback["recipePath"] = Value::String(relative);
+    }
+    json!({
+        "outcome": "failed",
+        "operationId": operation_id,
+        "error": error,
+        "rollback": rollback,
+    })
+}
+
+/// Frozen result for one unconfirmed publication attempt.
+fn unknown_publication_value(operation_id: &str, message: &str) -> Value {
+    json!({
+        "outcome": "unknown",
+        "operationId": operation_id,
+        "message": message,
+    })
+}
+
+/// Report the recorded status of one native publication operation.
+///
+/// A confirmed record answers directly. An unconfirmed attempt is offered to the
+/// backend while the same sidecar process still holds its own publication
+/// memory; an answer that is still unconfirmed keeps the outcome unknown, which
+/// is never treated as a failed publication.
+fn publication_status_via_transport(
+    transport: &dyn AppGeneratorTransport,
+    state: &AppGeneratorState,
+    operation_id: &str,
+) -> Result<Value, String> {
+    let record = {
+        let registry = lock_registry(state)?;
+        registry.publications.get(operation_id).cloned()
+    };
+    let Some(record) = record else {
+        return Ok(success(publication_status_value(
+            operation_id,
+            "unknown",
+            false,
+            None,
+            json!({ "reason": "no_record" }),
+        )));
+    };
+    if matches!(record.state, PublicationState::Saved | PublicationState::Failed) {
+        return Ok(success(publication_status_value(
+            operation_id,
+            publication_state_name(record.state),
+            true,
+            Some(record.recorded_at.clone()),
+            record.detail.clone().unwrap_or(Value::Null),
+        )));
+    }
+    let response = transport.request(
+        "appGeneratorPublicationStatus",
+        json!({ "operationId": operation_id }),
+    );
+    let Ok(response) = response else {
+        return Ok(success(unconfirmed_publication_status(
+            operation_id,
+            &record,
+            "status_unavailable",
+        )));
+    };
+    let Some(result) = success_result(&response) else {
+        return Ok(success(unconfirmed_publication_status(
+            operation_id,
+            &record,
+            "status_unavailable",
+        )));
+    };
+    let backend_outcome = result
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let backend_confirmed = result
+        .get("confirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if backend_confirmed && matches!(backend_outcome, "saved" | "failed") {
+        let detail = confirmed_status_detail(operation_id, &record, result);
+        let status = if backend_outcome == "saved" {
+            PublicationState::Saved
+        } else {
+            PublicationState::Failed
+        };
+        update_publication(state, operation_id, status, Some(detail.clone()))?;
+        let recorded_at = result
+            .get("recordedAt")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| record.recorded_at.clone());
+        return Ok(success(publication_status_value(
+            operation_id,
+            backend_outcome,
+            true,
+            Some(recorded_at),
+            detail,
+        )));
+    }
+    let reason = result
+        .get("detail")
+        .and_then(|detail| detail.get("reason"))
+        .and_then(Value::as_str)
+        .filter(|reason| *reason == "no_record")
+        .unwrap_or("unconfirmed");
+    Ok(success(unconfirmed_publication_status(
+        operation_id,
+        &record,
+        reason,
+    )))
+}
+
+/// Map one confirmed backend record onto the frozen status detail shape.
+fn confirmed_status_detail(operation_id: &str, record: &PublicationRecord, result: &Value) -> Value {
+    let outcome = result.get("outcome").and_then(Value::as_str).unwrap_or("unknown");
+    if outcome == "failed" {
+        // A status lookup nests the recorded save payload under `detail`, while a
+        // direct save response carries the failure fields at its top level. Both
+        // shapes must keep the real error, the rollback facts, and the recovery
+        // path instead of degrading to the protocol-error placeholder.
+        let payload = match result.get("detail") {
+            Some(detail) if detail.is_object() => detail,
+            _ => result,
+        };
+        return failed_outcome_value(operation_id, &record.root_path, payload);
+    }
+    let detail = result.get("detail").cloned().unwrap_or(Value::Null);
+    let app_path = detail
+        .get("app")
+        .and_then(|app| app.get("appPath"))
+        .and_then(Value::as_str)
+        .and_then(|raw| catalog_relative_from_raw(&record.root_path, raw))
+        .unwrap_or_default();
+    let recipe_path = detail
+        .get("recipe")
+        .and_then(|recipe| recipe.get("recipePath"))
+        .and_then(Value::as_str)
+        .and_then(|raw| catalog_relative_from_raw(&record.root_path, raw))
+        .unwrap_or_default();
+    json!({
+        "outcome": "saved",
+        "operationId": operation_id,
+        "app": { "appPath": app_path },
+        "recipe": { "recipePath": recipe_path },
+        "createdFiles": catalog_relative_file_list(detail.get("createdFiles"), &record.root_path),
+        "replacedFiles": catalog_relative_file_list(detail.get("replacedFiles"), &record.root_path),
+    })
+}
+
+/// Build one status result for an operation that never confirmed an outcome.
+fn unconfirmed_publication_status(
+    operation_id: &str,
+    record: &PublicationRecord,
+    reason: &str,
+) -> Value {
+    publication_status_value(
+        operation_id,
+        "unknown",
+        false,
+        Some(record.recorded_at.clone()),
+        json!({ "reason": reason }),
+    )
+}
+
+/// Build one publication status result payload.
+fn publication_status_value(
+    operation_id: &str,
+    outcome: &str,
+    confirmed: bool,
+    recorded_at: Option<String>,
+    detail: Value,
+) -> Value {
+    json!({
+        "operationId": operation_id,
+        "outcome": outcome,
+        "confirmed": confirmed,
+        "recordedAt": recorded_at,
+        "detail": detail,
+    })
+}
+
+/// Name one confirmed publication state for status results.
+fn publication_state_name(status: PublicationState) -> &'static str {
+    match status {
+        PublicationState::Saved => "saved",
+        PublicationState::Failed => "failed",
+        PublicationState::Submitted => "unknown",
+    }
+}
+
+/// List the catalog App Definitions one authored root offers for extension.
+///
+/// The listing is catalog-relative and inventory-aware: an incomplete inventory
+/// blocks selection, so the author never picks an App whose identity could not
+/// be read completely.
+#[tauri::command]
+pub fn list_app_generator_existing_apps(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    root_handle: Option<String>,
+) -> Result<Value, String> {
+    let transport = SidecarTransport { sidecar: &sidecar };
+    let (_, root) = match resolve_session_root(&state, &session_handle, root_handle.as_deref())? {
+        Ok(resolved) => resolved,
+        Err(error) => return Ok(error),
+    };
+    let response = transport.request(
+        "listAppGeneratorExistingApps",
+        json!({ "authoredRoot": root.root }),
+    )?;
+    let Some(result) = success_result(&response) else {
+        return Ok(response);
+    };
+    let Some(apps) = result.get("apps").and_then(Value::as_array) else {
+        return Ok(generator_protocol_error());
+    };
+    let paths_relative = apps.iter().all(|app| {
+        app.get("appPath")
+            .and_then(Value::as_str)
+            .is_some_and(is_catalog_relative_path)
+    });
+    if !paths_relative {
+        return Ok(generator_protocol_error());
+    }
+    Ok(response)
+}
+
+/// Capture one catalog App Definition as the target of existing-App generation.
+///
+/// The returned handle names a native record bound to the exact root the App was
+/// captured under; the backend snapshot it wraps retains the App bytes and
+/// filesystem identity the later review and publication validate against.
+#[tauri::command]
+pub fn select_app_generator_existing_app(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    app_path: String,
+) -> Result<Value, String> {
+    let transport = SidecarTransport { sidecar: &sidecar };
+    if !is_catalog_relative_path(&app_path) {
+        return Ok(existing_app_outside_root_error());
+    }
+    let (_, root) = match resolve_session_root(&state, &session_handle, None)? {
+        Ok(resolved) => resolved,
+        Err(error) => return Ok(error),
+    };
+    let response = transport.request(
+        "selectAppGeneratorExistingApp",
+        json!({ "authoredRoot": root.root, "appPath": app_path }),
+    )?;
+    let Some(result) = success_result(&response).cloned() else {
+        return Ok(response);
+    };
+    let Some(public) = result.as_object().cloned() else {
+        return Ok(generator_protocol_error());
+    };
+    let Some(snapshot_id) = public.get("appSnapshotId").and_then(Value::as_str) else {
+        return Ok(generator_protocol_error());
+    };
+    let Some(echoed_path) = public.get("appPath").and_then(Value::as_str) else {
+        return Ok(generator_protocol_error());
+    };
+    if !is_catalog_relative_path(echoed_path) {
+        return Ok(generator_protocol_error());
+    }
+    let selection = TrustedExistingApp {
+        root_path: root.root.clone(),
+        snapshot_id: snapshot_id.to_string(),
+        app_path: echoed_path.to_string(),
+        package_id: public
+            .get("packageId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let mut registry = lock_registry(&state)?;
+    let app_handle = registry.allocate("existing-app");
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    // A new selection replaces every earlier capture and every outstanding
+    // review, because those describe a different target App Definition.
+    session.existing_apps.clear();
+    session.reviews.clear();
+    session.existing_apps.insert(app_handle.clone(), selection);
+    let mut mapped = public;
+    mapped.remove("appSnapshotId");
+    mapped.insert("appHandle".to_string(), Value::String(app_handle));
+    Ok(success(Value::Object(mapped)))
+}
+
+/// Build one immutable review of a local-APK App and Recipe pair.
+///
+/// Every trusted input is resolved from native session state. The result retains
+/// the exact chosen App Artifact ID and Recipe ID, and the sidecar review handle
+/// it wraps stays private so publication cannot be redirected later.
+/// Permission automation is opt-in: `permissionAutomationEnabled` defaults to
+/// false and preserves every declared permission set, while a disabled request
+/// refuses any selected permission actions.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn review_app_generator_draft(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    apk_handle: String,
+    root_handle: String,
+    request_id: i64,
+    existing_app_handle: Option<String>,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+    artifact_name: Option<String>,
+    app: Option<Value>,
+    recipe: Option<Value>,
+    mappings: Option<Value>,
+    permission_selection: Option<Value>,
+    permission_automation_enabled: Option<bool>,
+    regenerate_identifiers: bool,
+) -> Result<Value, String> {
+    let transport = SidecarTransport { sidecar: &sidecar };
+    let inputs = match resolve_draft_inputs(
+        &state,
+        &session_handle,
+        &apk_handle,
+        Some(&root_handle),
+        true,
+        existing_app_handle.as_deref(),
+        permission_selection,
+        permission_automation_enabled.unwrap_or(false),
+        None,
+    )? {
+        Ok(inputs) => inputs,
+        Err(error) => return Ok(error),
+    };
+    review_draft_via_transport(
+        &transport,
+        &state,
+        &session_handle,
+        inputs,
+        request_id,
+        app_artifact_id,
+        recipe_id,
+        artifact_name,
+        app,
+        recipe,
+        mappings,
+        regenerate_identifiers,
+    )
+}
+
+/// Build one immutable review of a remote-source App and Recipe pair.
+///
+/// The trusted remote payload is rebuilt from the retained source and asset, so
+/// the author's choices select an asset while the provider facts, release
+/// analysis, download URL, and publisher checksum stay native-owned.
+/// Permission automation is opt-in: `permissionAutomationEnabled` defaults to
+/// false and preserves every declared permission set, while a disabled request
+/// refuses any selected permission actions.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn review_remote_app_generator_draft(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    apk_handle: String,
+    root_handle: String,
+    asset_handle: String,
+    strategy: String,
+    asset_pattern: Option<String>,
+    include_prereleases: bool,
+    trusted_sha256: Option<String>,
+    request_id: i64,
+    existing_app_handle: Option<String>,
+    app_artifact_id: Option<String>,
+    recipe_id: Option<String>,
+    artifact_name: Option<String>,
+    app: Option<Value>,
+    recipe: Option<Value>,
+    mappings: Option<Value>,
+    permission_selection: Option<Value>,
+    permission_automation_enabled: Option<bool>,
+    regenerate_identifiers: bool,
+) -> Result<Value, String> {
+    let transport = SidecarTransport { sidecar: &sidecar };
+    let remote = RemoteReviewSelection {
+        asset_handle: &asset_handle,
+        strategy: &strategy,
+        asset_pattern: asset_pattern.as_deref(),
+        include_prereleases,
+        trusted_sha256: trusted_sha256.as_deref(),
+    };
+    let inputs = match resolve_draft_inputs(
+        &state,
+        &session_handle,
+        &apk_handle,
+        Some(&root_handle),
+        true,
+        existing_app_handle.as_deref(),
+        permission_selection,
+        permission_automation_enabled.unwrap_or(false),
+        Some(remote),
+    )? {
+        Ok(inputs) => inputs,
+        Err(error) => return Ok(error),
+    };
+    review_draft_via_transport(
+        &transport,
+        &state,
+        &session_handle,
+        inputs,
+        request_id,
+        app_artifact_id,
+        recipe_id,
+        artifact_name,
+        app,
+        recipe,
+        mappings,
+        regenerate_identifiers,
+    )
+}
+
+/// Publish exactly the pair one immutable review handle describes.
+///
+/// The request carries no App, Recipe, mapping, permission, or identity input:
+/// the reviewed capture is the only publication authority, and a stale request
+/// id is refused instead of publishing a newer draft under an older review.
+#[tauri::command]
+pub fn save_app_generator_review(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    review_handle: String,
+    request_id: i64,
+) -> Result<Value, String> {
+    let transport = SidecarTransport { sidecar: &sidecar };
+    publish_review_via_transport(
+        &transport,
+        &state,
+        &session_handle,
+        &review_handle,
+        request_id,
+    )
+}
+
+/// Report the recorded outcome of one publication operation identity.
+#[tauri::command]
+pub fn app_generator_publication_status(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    operation_id: String,
+) -> Result<Value, String> {
+    let transport = SidecarTransport { sidecar: &sidecar };
+    publication_status_via_transport(&transport, &state, &operation_id)
 }
 
 fn validate_apk(path: &Path) -> Result<(PathBuf, FileIdentity), Value> {
@@ -2203,8 +3672,6 @@ fn validate_authored_root(path: &Path) -> Result<TrustedRoot, Value> {
     }
     Ok(TrustedRoot {
         root,
-        apps_directory,
-        recipes_directory,
     })
 }
 
@@ -2239,139 +3706,6 @@ fn file_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
             modified_nanos,
         })
     }
-}
-
-fn publish_pair_create_new(
-    root: &TrustedRoot,
-    app_file: &str,
-    app_bytes: &[u8],
-    recipe_file: &str,
-    recipe_bytes: &[u8],
-) -> Result<(PathBuf, PathBuf), Value> {
-    publish_pair_create_new_with_hook(root, app_file, app_bytes, recipe_file, recipe_bytes, || {})
-}
-
-fn publish_pair_create_new_with_hook<F>(
-    root: &TrustedRoot,
-    app_file: &str,
-    app_bytes: &[u8],
-    recipe_file: &str,
-    recipe_bytes: &[u8],
-    before_recipe_publish: F,
-) -> Result<(PathBuf, PathBuf), Value>
-where
-    F: FnOnce(),
-{
-    if !safe_file_name(app_file) || !safe_file_name(recipe_file) {
-        return Err(invalid_destination_error());
-    }
-    let app_path = root.apps_directory.join(app_file);
-    let recipe_path = root.recipes_directory.join(recipe_file);
-    ensure_absent(&app_path)?;
-    ensure_absent(&recipe_path)?;
-    let app_temp = create_temp_sibling(&root.apps_directory, app_file, app_bytes)?;
-    let recipe_temp = match create_temp_sibling(&root.recipes_directory, recipe_file, recipe_bytes)
-    {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = fs::remove_file(&app_temp);
-            return Err(error);
-        }
-    };
-    let app_guard = TempFileGuard(app_temp.clone());
-    let recipe_guard = TempFileGuard(recipe_temp.clone());
-    if let Err(error) = fs::hard_link(&app_temp, &app_path) {
-        return Err(publication_error(error));
-    }
-    before_recipe_publish();
-    if let Err(error) = fs::hard_link(&recipe_temp, &recipe_path) {
-        let rollback = fs::remove_file(&app_path);
-        if rollback.is_err() {
-            return Err(api_error(
-                "app_recipe_partial_publication",
-                "The recipe could not be published and the newly published app definition could not be safely removed.",
-                json!({}),
-            ));
-        }
-        return Err(publication_error(error));
-    }
-    let _ = fs::remove_file(&app_temp);
-    let _ = fs::remove_file(&recipe_temp);
-    drop(app_guard);
-    drop(recipe_guard);
-    sync_directory_when_supported(&root.apps_directory);
-    sync_directory_when_supported(&root.recipes_directory);
-    Ok((app_path, recipe_path))
-}
-
-fn ensure_absent(path: &Path) -> Result<(), Value> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Err(destination_exists_error()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(save_failed_error()),
-    }
-}
-
-fn create_temp_sibling(directory: &Path, file_name: &str, bytes: &[u8]) -> Result<PathBuf, Value> {
-    for attempt in 0..32_u64 {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = directory.join(format!(".{file_name}.emuchef-{nonce}-{attempt}.tmp"));
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(bytes).map_err(|_| save_failed_error())?;
-                file.sync_all().map_err(|_| save_failed_error())?;
-                return Ok(path);
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(save_failed_error()),
-        }
-    }
-    Err(save_failed_error())
-}
-
-#[cfg(unix)]
-fn sync_directory_when_supported(directory: &Path) {
-    if let Ok(file) = File::open(directory) {
-        let _ = file.sync_all();
-    }
-}
-#[cfg(not(unix))]
-fn sync_directory_when_supported(_directory: &Path) {}
-
-struct TempFileGuard(PathBuf);
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-fn publication_error(error: io::Error) -> Value {
-    if error.kind() == io::ErrorKind::AlreadyExists {
-        destination_exists_error()
-    } else {
-        save_failed_error()
-    }
-}
-
-fn destination_file(draft: &Value, field: &str) -> Option<String> {
-    draft
-        .get(field)?
-        .get("fileName")?
-        .as_str()
-        .filter(|value| safe_file_name(value))
-        .map(str::to_string)
-}
-
-fn safe_file_name(file_name: &str) -> bool {
-    !file_name.is_empty()
-        && file_name.ends_with(".yaml")
-        && !file_name.contains('/')
-        && !file_name.contains('\\')
-        && file_name != "."
-        && file_name != ".."
 }
 
 fn preferences_path(app: &AppHandle) -> Option<PathBuf> {
@@ -2417,48 +3751,23 @@ fn require_session(state: &AppGeneratorState, handle: &str) -> Result<(), String
         .map_err(|_| "The app generator session has expired.".to_string())
 }
 
-fn stored_facts(
-    state: &AppGeneratorState,
-    session_handle: &str,
-    apk_handle: &str,
-) -> Result<Result<Value, Value>, String> {
-    let registry = lock_registry(state)?;
-    let session = match registry.session(session_handle) {
-        Ok(value) => value,
-        Err(error) => return Ok(Err(error)),
-    };
-    let Some(apk) = session.apks.get(apk_handle) else {
-        return Ok(Err(invalid_handle_error()));
-    };
-    Ok(apk.facts.clone().ok_or_else(inspection_required_error))
-}
-
-fn stored_permission_automation(
-    state: &AppGeneratorState,
-    session_handle: &str,
-    apk_handle: &str,
-    selection: Option<Value>,
-    eligible_strategy: bool,
-) -> Result<Result<Option<Value>, Value>, String> {
-    let registry = lock_registry(state)?;
-    let session = match registry.session(session_handle) {
-        Ok(value) => value,
-        Err(error) => return Ok(Err(error)),
-    };
-    let Some(apk) = session.apks.get(apk_handle) else {
-        return Ok(Err(invalid_handle_error()));
-    };
-    Ok(canonical_permission_automation(
-        apk,
-        selection,
-        eligible_strategy,
-    ))
-}
-
+/// Canonicalize one author-selected permission set against the trusted
+/// inspection of the APK a draft installs.
+///
+/// `installs_inspected_apk` records whether the draft's installation source is
+/// the inspected artifact itself: a local APK file, or a remote source whose
+/// strategy re-resolves that artifact at execution time. Every identity, bound,
+/// and candidate check below still runs against the retained inspection, so a
+/// selection can never widen what the inspection authorizes.
+///
+/// The `enabled` flag is the request's explicit opt-in. A disabled request with
+/// a nonempty selection is contradictory: canonicalizing those identities would
+/// produce grant steps the author turned off, so it is refused instead.
 fn canonical_permission_automation(
     apk: &TrustedApk,
     selection: Option<Value>,
-    eligible_strategy: bool,
+    installs_inspected_apk: bool,
+    enabled: bool,
 ) -> Result<Option<Value>, Value> {
     let Some(selection) = selection else {
         return Ok(None);
@@ -2468,7 +3777,10 @@ fn canonical_permission_automation(
     if selection.runtime_permissions.is_empty() && selection.app_ops.is_empty() {
         return Ok(None);
     }
-    if !eligible_strategy {
+    if !enabled {
+        return Err(permission_automation_disabled_error());
+    }
+    if !installs_inspected_apk {
         return Err(permission_strategy_error());
     }
     if apk.inspection_handle.as_deref() != Some(selection.inspection_handle.as_str()) {
@@ -2684,23 +3996,6 @@ fn nullable_string(object: &Map<String, Value>, field: &str) -> Option<Option<St
     }
 }
 
-fn stored_root(
-    state: &AppGeneratorState,
-    session_handle: &str,
-    root_handle: &str,
-) -> Result<Result<TrustedRoot, Value>, String> {
-    let registry = lock_registry(state)?;
-    let session = match registry.session(session_handle) {
-        Ok(value) => value,
-        Err(error) => return Ok(Err(error)),
-    };
-    Ok(session
-        .roots
-        .get(root_handle)
-        .cloned()
-        .ok_or_else(invalid_handle_error))
-}
-
 fn lock_registry(
     state: &AppGeneratorState,
 ) -> Result<std::sync::MutexGuard<'_, GeneratorRegistry>, String> {
@@ -2711,12 +4006,12 @@ fn lock_registry(
 }
 
 fn request_generated_draft(
-    sidecar: &SidecarState,
+    transport: &dyn AppGeneratorTransport,
     operation: &str,
     payload: Value,
     root: Option<&TrustedRoot>,
 ) -> Result<Value, String> {
-    let mut response = request_sidecar(sidecar, operation, Some(payload))?;
+    let mut response = transport.request(operation, payload)?;
     let Some(draft) = success_result(&response).cloned() else {
         return Ok(response);
     };
@@ -2726,11 +4021,8 @@ fn request_generated_draft(
                 Ok(payload) => payload,
                 Err(_) => return Ok(generator_protocol_error()),
             };
-            let collision_response = request_sidecar(
-                sidecar,
-                "checkGeneratedCatalogCollisions",
-                Some(collision_payload),
-            )?;
+            let collision_response =
+                transport.request("checkGeneratedCatalogCollisions", collision_payload)?;
             let Some(collisions) = success_result(&collision_response).cloned() else {
                 return Ok(collision_response);
             };
@@ -2835,20 +4127,6 @@ fn invalid_destination_error() -> Value {
         json!({}),
     )
 }
-fn destination_exists_error() -> Value {
-    api_error(
-        "app_recipe_destination_exists",
-        "A generated destination already exists; no files were overwritten.",
-        json!({}),
-    )
-}
-fn save_failed_error() -> Value {
-    api_error(
-        "app_recipe_save_failed",
-        "The generated files could not be saved safely.",
-        json!({}),
-    )
-}
 fn inspection_required_error() -> Value {
     api_error(
         "apk_inspection_required",
@@ -2863,10 +4141,24 @@ fn permission_selection_error(reason: &str) -> Value {
         json!({ "reason": reason }),
     )
 }
+/// Refusal for selected permission actions on a request that disabled
+/// permission automation.
+///
+/// The error code matches the other permission-selection refusals so the
+/// frontend keeps one display path, while `details.reason` records the specific
+/// contradiction: the draft asked for no permission automation and still listed
+/// actions to grant.
+fn permission_automation_disabled_error() -> Value {
+    api_error(
+        "app_generator_permission_selection_invalid",
+        "Permission automation is disabled for this draft, but permission actions were selected. Enable permission automation or clear the selection.",
+        json!({ "reason": "disabled" }),
+    )
+}
 fn permission_strategy_error() -> Value {
     api_error(
         "apk_permission_automation_strategy_unsupported",
-        "Permission automation is supported only for pinned or latest-compatible remote APK recipes.",
+        "Permission automation is supported only when the draft installs the inspected APK: a local APK or a pinned or latest-compatible remote artifact.",
         json!({}),
     )
 }
@@ -2876,6 +4168,181 @@ fn generator_protocol_error() -> Value {
         "The generator backend returned an incomplete response.",
         json!({}),
     )
+}
+/// Protocol-violation error object used where only the error value is kept.
+fn generator_protocol_error_value() -> Value {
+    json!({
+        "code": "app_generator_protocol_error",
+        "message": "The generator backend returned an incomplete response.",
+        "details": {},
+    })
+}
+/// Refusal for every retired direct-publication command.
+///
+/// Generated files may only be published through an immutable review handle,
+/// so the legacy writers can no longer act as an alternative write authority.
+fn review_required_error() -> Value {
+    api_error(
+        "review_required",
+        "Generated files can only be published through an immutable review. Review the draft and save the review.",
+        json!({}),
+    )
+}
+/// Refusal shared by the retired direct-publication commands.
+///
+/// The retired commands accepted mutable App, Recipe, mapping, and permission
+/// inputs at save time, so nothing bound the published bytes to a reviewed
+/// candidate. Both commands resolve to exactly this refusal, which keeps
+/// publication authority with the immutable review handle.
+fn retired_direct_publication_refusal() -> Value {
+    review_required_error()
+}
+/// Refusal for an App Definition outside the authored root this request targets.
+fn existing_app_outside_root_error() -> Value {
+    api_error(
+        "existing_app_outside_root",
+        "Choose an App Definition path inside the current authored root.",
+        json!({}),
+    )
+}
+/// Refusal for an inspected APK whose package differs from the selected App.
+///
+/// Generation installs the inspected APK into the selected App Definition, so a
+/// package mismatch could never produce a working install; the pairing is
+/// rejected before any review or publication state exists.
+fn package_mismatch_error(inspected: &str, selected: &str) -> Value {
+    api_error(
+        "existing_app_package_mismatch",
+        "The inspected APK package does not match the selected App Definition package.",
+        json!({ "inspectedPackageId": inspected, "selectedPackageId": selected }),
+    )
+}
+/// Refusal for one request that combines mutually exclusive inputs.
+fn invalid_argument_error(message: &str) -> Value {
+    api_error("invalid_argument", message, json!({}))
+}
+/// Error object for a committed save whose Recipe document could not be opened.
+fn open_failed_error(message: &str) -> Value {
+    json!({
+        "code": "app_recipe_saved_open_failed",
+        "message": message,
+        "details": {},
+    })
+}
+/// Refusal for a save attempt whose review no longer matches its trusted inputs.
+fn review_invalidated_error() -> Value {
+    api_error(
+        "review_invalidated",
+        "This review no longer matches the selected APK, root, inspection, source, or App snapshot. Generate a new review.",
+        json!({}),
+    )
+}
+/// Refusal for a save attempt whose reviewed candidate still blocks publication.
+///
+/// Nothing was written, and the retained review survives the attempt, so the
+/// author can resolve the reported problem and save the same review again.
+fn review_blocking_error(record: &ReviewRecord) -> Value {
+    api_error(
+        "review_blocking",
+        "The review still has blocking problems, so nothing was published.",
+        json!({ "requestId": record.request_id }),
+    )
+}
+/// Frozen message for one unconfirmed publication attempt.
+///
+/// The wording is part of the published UI contract: it tells the author that
+/// the catalog may already contain the generated files and that repeating the
+/// save can duplicate them.
+const UNCONFIRMED_PUBLICATION_MESSAGE: &str =
+    "Publication status unknown — the catalog may already contain these files. Do not repeat the save.";
+/// True when one path is a non-empty catalog-relative path.
+///
+/// Catalog paths are relative POSIX-style paths below the authored root, so
+/// absolute paths, parent-directory escapes, empty names, and Windows
+/// separators are all rejected instead of being interpreted by the UI.
+fn is_catalog_relative_path(path: &str) -> bool {
+    if path.is_empty() || path.contains('\\') {
+        return false;
+    }
+    let candidate = Path::new(path);
+    !candidate.is_absolute()
+        && candidate
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+/// Reduce one backend-reported path to its catalog-relative form.
+///
+/// Backend evidence sometimes carries absolute native paths. The UI contract
+/// only ever exposes catalog-relative paths, so a path outside the authored
+/// root yields None instead of leaking host filesystem layout.
+fn catalog_relative_from_raw(root: &Path, raw: &str) -> Option<String> {
+    let raw_path = Path::new(raw);
+    let relative = if raw_path.is_absolute() {
+        raw_path.strip_prefix(root).ok()?
+    } else {
+        raw_path
+    };
+    let relative = relative.to_str()?;
+    is_catalog_relative_path(relative).then(|| relative.to_string())
+}
+/// Reduce one backend-reported file list to catalog-relative paths.
+///
+/// Entries that cannot be expressed relative to the authored root are omitted:
+/// the list is author-facing evidence, and a host absolute path must never
+/// reach a result payload.
+fn catalog_relative_file_list(value: Option<&Value>, root: &Path) -> Value {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        entries
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|raw| catalog_relative_from_raw(root, raw))
+            .map(Value::String)
+            .collect(),
+    )
+}
+/// Current UTC time formatted as an ISO 8601 timestamp.
+fn iso8601_now() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    iso8601_from_epoch_seconds(seconds)
+}
+/// Format one Unix timestamp in seconds as an ISO 8601 UTC timestamp.
+fn iso8601_from_epoch_seconds(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let time_of_day = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60,
+        time_of_day % 60
+    )
+}
+/// Convert a day count since 1970-01-01 into a civil (year, month, day).
+///
+/// This is Howard Hinnant's civil_from_days date algorithm: it is exact for
+/// every timestamp a system clock can produce and needs no date library.
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let shifted = days_since_epoch + 719_468;
+    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let day_of_era = (shifted - era * 146_097) as u64;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        (month_prime + 3) as u32
+    } else {
+        (month_prime - 9) as u32
+    };
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 #[cfg(test)]
 mod tests {
@@ -3073,6 +4540,7 @@ mod tests {
             })),
             inspection_handle: Some("apk-inspection-current".to_string()),
             facts: Some(json!({ "packageName": "com.example.inspected" })),
+            remote_asset_handle: None,
         }
     }
 
@@ -3140,6 +4608,32 @@ mod tests {
         (state, session_handle, asset_handle)
     }
 
+    /// Resolve one retained remote context the way the production boundary does.
+    ///
+    /// Reviews and previews resolve remote inputs from the session, so tests go
+    /// through the same lookup and trusted-payload construction the generator
+    /// uses instead of a parallel test-only path.
+    fn remote_context_from_state(
+        state: &AppGeneratorState,
+        session_handle: &str,
+        asset_handle: &str,
+        strategy: &str,
+        asset_pattern: Option<&str>,
+        include_prereleases: bool,
+        trusted_sha256: Option<&str>,
+    ) -> Result<TrustedRemoteDraftContext, Value> {
+        let registry = lock_registry(state).unwrap();
+        let session = registry.session(session_handle).unwrap();
+        retained_remote_context(
+            session,
+            asset_handle,
+            strategy,
+            asset_pattern,
+            include_prereleases,
+            trusted_sha256,
+        )
+    }
+
     #[test]
     fn trusted_release_snapshot_preserves_session_order_and_minimal_shape() {
         let releases = vec![
@@ -3155,7 +4649,7 @@ mod tests {
             },
         ];
         let (state, session_handle, asset_handle) = trusted_remote_test_state(Some(releases));
-        let trusted = trusted_remote_source_payload(
+        let trusted = remote_context_from_state(
             &state,
             &session_handle,
             &asset_handle,
@@ -3164,7 +4658,6 @@ mod tests {
             false,
             None,
         )
-        .unwrap()
         .unwrap();
         assert_eq!(
             trusted.release_analysis,
@@ -3192,7 +4685,7 @@ mod tests {
     #[test]
     fn trusted_release_snapshot_rejects_missing_ambiguous_and_stale_state() {
         let (missing_state, missing_session, missing_asset) = trusted_remote_test_state(None);
-        let missing = trusted_remote_source_payload(
+        let missing = remote_context_from_state(
             &missing_state,
             &missing_session,
             &missing_asset,
@@ -3201,7 +4694,6 @@ mod tests {
             false,
             None,
         )
-        .unwrap()
         .unwrap_err();
         assert_eq!(
             api_error_code(&missing),
@@ -3238,7 +4730,7 @@ mod tests {
             }],
         ] {
             let (state, session, asset) = trusted_remote_test_state(Some(releases));
-            let error = trusted_remote_source_payload(
+            let error = remote_context_from_state(
                 &state,
                 &session,
                 &asset,
@@ -3247,7 +4739,6 @@ mod tests {
                 false,
                 None,
             )
-            .unwrap()
             .unwrap_err();
             assert_eq!(
                 api_error_code(&error),
@@ -3262,7 +4753,7 @@ mod tests {
                     prerelease: false,
                     asset_file_names: vec!["app.apk".to_string()],
                 }]));
-            let blank_pattern = trusted_remote_source_payload(
+            let blank_pattern = remote_context_from_state(
                 &state,
                 &session,
                 &asset,
@@ -3271,7 +4762,6 @@ mod tests {
                 false,
                 None,
             )
-            .unwrap()
             .unwrap();
             assert!(blank_pattern.release_analysis.is_some());
             match pattern {
@@ -3284,7 +4774,7 @@ mod tests {
         }
 
         let (state, session, _) = trusted_remote_test_state(Some(Vec::new()));
-        let stale = trusted_remote_source_payload(
+        let stale = remote_context_from_state(
             &state,
             &session,
             "frontend-invented-asset",
@@ -3293,7 +4783,6 @@ mod tests {
             false,
             None,
         )
-        .unwrap()
         .unwrap_err();
         assert_eq!(api_error_code(&stale), Some("app_generator_handle_invalid"));
     }
@@ -3302,10 +4791,9 @@ mod tests {
     fn pinned_and_user_provided_payloads_do_not_require_release_analysis() {
         for strategy in ["pinned_remote_asset", "user_provided_apk"] {
             let (state, session, asset) = trusted_remote_test_state(None);
-            let trusted = trusted_remote_source_payload(
+            let trusted = remote_context_from_state(
                 &state, &session, &asset, strategy, None, false, None,
             )
-            .unwrap()
             .unwrap();
             assert!(trusted.release_analysis.is_none());
             assert_eq!(trusted.source["strategy"], strategy);
@@ -3315,7 +4803,12 @@ mod tests {
     #[test]
     fn permission_selection_is_canonicalized_from_stored_inspection_only() {
         let apk = permission_test_apk("permission-canonical");
-        let canonical = canonical_permission_automation(&apk, Some(permission_selection()), true)
+        let canonical = canonical_permission_automation(
+            &apk,
+            Some(permission_selection()),
+            true,
+            true,
+        )
             .unwrap()
             .unwrap();
         assert_eq!(canonical["packageName"], "com.example.inspected");
@@ -3366,7 +4859,8 @@ mod tests {
                 "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
                 "appOps": []
             });
-            let error = canonical_permission_automation(&apk, Some(selection), true).unwrap_err();
+            let error = canonical_permission_automation(&apk, Some(selection), true, true)
+                .unwrap_err();
             assert_eq!(error["error"]["details"]["reason"], "altered");
             fs::remove_file(apk.path).unwrap();
         }
@@ -3409,7 +4903,8 @@ mod tests {
             ),
         ];
         for (selection, reason) in cases {
-            let error = canonical_permission_automation(&apk, Some(selection), true).unwrap_err();
+            let error = canonical_permission_automation(&apk, Some(selection), true, true)
+                .unwrap_err();
             assert_eq!(
                 api_error_code(&error),
                 Some("app_generator_permission_selection_invalid")
@@ -3441,6 +4936,7 @@ mod tests {
                 "appOps": []
             })),
             true,
+            true,
         )
         .unwrap_err();
         assert_eq!(error["error"]["details"]["reason"], "ambiguous");
@@ -3452,7 +4948,8 @@ mod tests {
         let apk = permission_test_apk("permission-stale");
         let mut stale = permission_selection();
         stale["inspectionHandle"] = json!("apk-inspection-previous");
-        let stale_error = canonical_permission_automation(&apk, Some(stale), true).unwrap_err();
+        let stale_error = canonical_permission_automation(&apk, Some(stale), true, true)
+            .unwrap_err();
         assert_eq!(
             api_error_code(&stale_error),
             Some("app_generator_permission_selection_invalid")
@@ -3461,7 +4958,8 @@ mod tests {
 
         fs::write(&apk.path, b"replacement-apk-with-new-identity").unwrap();
         let changed_error =
-            canonical_permission_automation(&apk, Some(permission_selection()), true).unwrap_err();
+            canonical_permission_automation(&apk, Some(permission_selection()), true, true)
+                .unwrap_err();
         assert_eq!(api_error_code(&changed_error), Some("apk_changed"));
         fs::remove_file(apk.path).unwrap();
     }
@@ -3478,12 +4976,14 @@ mod tests {
                     "appOps": []
                 })),
                 false,
+                true,
             )
             .unwrap(),
             None
         );
         let error =
-            canonical_permission_automation(&apk, Some(permission_selection()), false).unwrap_err();
+            canonical_permission_automation(&apk, Some(permission_selection()), false, true)
+                .unwrap_err();
         assert_eq!(
             api_error_code(&error),
             Some("apk_permission_automation_strategy_unsupported")
@@ -3621,6 +5121,7 @@ mod tests {
             inspection: Some(inspection.clone()),
             inspection_handle: Some("apk-inspection-test".to_string()),
             facts: Some(facts.clone()),
+            remote_asset_handle: None,
         };
         assert_eq!(trusted.inspection, Some(inspection));
         assert_eq!(trusted.facts, Some(facts));
@@ -3632,8 +5133,6 @@ mod tests {
     fn incomplete_generated_draft_maps_to_protocol_error_envelope() {
         let trusted_root = TrustedRoot {
             root: PathBuf::from("/trusted/authored"),
-            apps_directory: PathBuf::from("/trusted/authored/apps"),
-            recipes_directory: PathBuf::from("/trusted/authored/recipes"),
         };
         let malformed = json!({ "app": { "id": "generated-app" } });
         let response = match collision_payload_from_generated_draft(&trusted_root, &malformed) {
@@ -3650,8 +5149,6 @@ mod tests {
     fn collision_payload_uses_only_generated_draft_and_trusted_root() {
         let trusted_root = TrustedRoot {
             root: PathBuf::from("/trusted/authored"),
-            apps_directory: PathBuf::from("/trusted/authored/apps"),
-            recipes_directory: PathBuf::from("/trusted/authored/recipes"),
         };
         let generated_app = json!({ "id": "generated-app", "metadata": { "trusted": true } });
         let generated_recipe = json!({ "id": "app.generated.install", "steps": [] });
@@ -3682,52 +5179,6 @@ mod tests {
             api_error_code(&response),
             Some("app_recipe_collision_review_requires_generation")
         );
-    }
-
-    #[test]
-    fn pair_publication_never_clobbers_and_rolls_back_first_file() {
-        let root_path =
-            std::env::temp_dir().join(format!("emuchef-app-generator-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root_path);
-        fs::create_dir_all(root_path.join("apps")).unwrap();
-        fs::create_dir_all(root_path.join("recipes")).unwrap();
-        let root = validate_authored_root(&root_path).unwrap();
-        publish_pair_create_new(
-            &root,
-            "example.yaml",
-            b"app",
-            "app.example.install.yaml",
-            b"recipe",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read(root_path.join("apps/example.yaml")).unwrap(),
-            b"app"
-        );
-        assert!(
-            publish_pair_create_new(&root, "example.yaml", b"new", "other.yaml", b"new").is_err()
-        );
-        assert_eq!(
-            fs::read(root_path.join("apps/example.yaml")).unwrap(),
-            b"app"
-        );
-
-        let rollback_app = root_path.join("apps/rollback.yaml");
-        let blocked_recipe = root_path.join("recipes/app.rollback.install.yaml");
-        let result = publish_pair_create_new_with_hook(
-            &root,
-            "rollback.yaml",
-            b"rollback-app",
-            "app.rollback.install.yaml",
-            b"rollback-recipe",
-            || {
-                fs::write(&blocked_recipe, b"concurrent-writer").unwrap();
-            },
-        );
-        assert!(result.is_err());
-        assert!(!rollback_app.exists());
-        assert_eq!(fs::read(&blocked_recipe).unwrap(), b"concurrent-writer");
-        fs::remove_dir_all(root_path).unwrap();
     }
 
     #[test]
@@ -3764,6 +5215,7 @@ mod tests {
                 inspection: None,
                 inspection_handle: None,
                 facts: None,
+                remote_asset_handle: None,
             },
         );
         assert!(registry.session(&first).unwrap().apks.contains_key(&handle));
@@ -4156,9 +5608,16 @@ mod tests {
         )
         .is_err());
         assert!(normalize_remote_source("direct_apk", "https://127.0.0.1/app.apk",).is_err());
+        assert!(normalize_remote_source("direct_apk", "https://[::1]/app.apk").is_err());
+        assert!(normalize_remote_source("direct_apk", "https://169.254.10.10/app.apk").is_err());
+        assert!(normalize_remote_source("direct_apk", "https://localhost/app.apk").is_err());
+        assert!(normalize_remote_source("direct_apk", "https://example.com/app.apk#frag").is_err());
+        assert!(normalize_remote_source("direct_apk", "https://user@example.com/app.apk").is_err());
+        // Provider addresses are canonicalized from their path segments, so a
+        // query there has no durable meaning and is refused instead of dropped.
         assert!(normalize_remote_source(
-            "direct_apk",
-            "https://example.com/download?variant=stable",
+            "github_repository",
+            "https://github.com/example/project?tab=readme",
         )
         .is_err());
     }
@@ -4167,6 +5626,91 @@ mod tests {
     fn direct_url_can_defer_apk_filename_to_response_headers() {
         let source = normalize_remote_source("direct_apk", "https://example.com/download").unwrap();
         assert_eq!(source.url.as_str(), "https://example.com/download");
+        // A durable query string is part of the author's original address.
+        let query = normalize_remote_source("direct_apk", "https://example.com/download?variant=stable")
+            .unwrap();
+        assert_eq!(
+            query.url.as_str(),
+            "https://example.com/download?variant=stable"
+        );
+    }
+
+    #[test]
+    fn public_source_guard_refuses_internal_addresses_and_unsafe_redirect_hops() {
+        for refused in [
+            "http://mirror.example.com/app.apk",
+            "https://user:secret@mirror.example.com/app.apk",
+            "https://localhost/app.apk",
+            "https://status.localhost/app.apk",
+            "https://127.0.0.1/app.apk",
+            "https://10.0.0.7/app.apk",
+            "https://172.16.9.9/app.apk",
+            "https://192.168.1.4/app.apk",
+            "https://169.254.10.10/app.apk",
+            "https://100.64.0.1/app.apk",
+            "https://192.0.2.10/app.apk",
+            "https://198.18.0.5/app.apk",
+            "https://224.0.0.1/app.apk",
+            "https://0.0.0.0/app.apk",
+            "https://240.0.0.9/app.apk",
+            "https://255.255.255.255/app.apk",
+            "https://[::1]/app.apk",
+            "https://[::]/app.apk",
+            "https://[fe80::1]/app.apk",
+            "https://[fc00::1]/app.apk",
+            "https://[ff02::1]/app.apk",
+            "https://[2001:db8::1]/app.apk",
+            "https://[2001::1]/app.apk",
+            "https://[2002:0a00::1]/app.apk",
+            "https://[::ffff:10.0.0.1]/app.apk",
+            "https://[::ffff:192.168.1.1]/app.apk",
+        ] {
+            let url = Url::parse(refused).unwrap();
+            assert!(!safe_remote_url(&url), "{refused} must be refused");
+        }
+        for allowed in [
+            "https://mirror.example.com/app.apk",
+            "https://mirror.example.com/app.apk?channel=stable&signature=abc",
+            "https://1.1.1.1/app.apk",
+            "https://[2606:4700:4700::1111]/app.apk",
+            "https://[2001:4860:4860::8888]/app.apk",
+            "https://[::ffff:1.1.1.1]/app.apk",
+        ] {
+            let url = Url::parse(allowed).unwrap();
+            assert!(safe_remote_url(&url), "{allowed} must be accepted");
+        }
+        // Every address a name answers with must be public, so a hostname that
+        // resolves to an internal address is refused instead of racing the
+        // client's own connection choice.
+        assert!(resolved_public_addresses(&[SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            443,
+        )]));
+        assert!(!resolved_public_addresses(&[]));
+        assert!(!resolved_public_addresses(&[
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)), 443),
+        ]));
+        assert!(!resolved_public_addresses(&[SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            443,
+        )]));
+        assert_eq!(resolve_public_host("localhost"), Err("remote_host_not_public"));
+        // Redirect hops keep the original address policy and the bounded budget.
+        let public_hop = Url::parse("https://mirror.example.com/app.apk?signature=abc").unwrap();
+        assert!(redirect_target_allowed(0, &public_hop));
+        assert!(redirect_target_allowed(MAX_REDIRECTS - 1, &public_hop));
+        assert!(!redirect_target_allowed(MAX_REDIRECTS, &public_hop));
+        for refused in [
+            "https://127.0.0.1/app.apk",
+            "https://[::1]/app.apk",
+            "https://169.254.10.10/app.apk",
+            "http://mirror.example.com/app.apk",
+            "https://user:secret@mirror.example.com/app.apk",
+            "https://localhost/app.apk",
+        ] {
+            assert!(!redirect_target_allowed(0, &Url::parse(refused).unwrap()));
+        }
     }
 
     #[test]
@@ -4195,5 +5739,2209 @@ mod tests {
                 "apk_trusted_sha256_strategy_unsupported"
             );
         }
+    }
+
+    /// Scripted sidecar transport for native review and publication tests.
+    ///
+    /// Every request is recorded verbatim so the tests can assert what the
+    /// native boundary actually sent, while the handler decides the response or
+    /// a transport failure per operation.
+    struct ScriptedTransport {
+        handler: Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>,
+        requests: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl ScriptedTransport {
+        fn new<F>(handler: F) -> Self
+        where
+            F: Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static,
+        {
+            Self {
+                handler: Box::new(handler),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests_for(&self, operation: &str) -> Vec<Value> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(name, _)| name == operation)
+                .map(|(_, payload)| payload.clone())
+                .collect()
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+    }
+
+    impl AppGeneratorTransport for ScriptedTransport {
+        fn request(&self, operation: &str, payload: Value) -> Result<Value, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((operation.to_string(), payload.clone()));
+            (self.handler)(operation, &payload)
+        }
+    }
+
+    /// Create one temporary authored root with apps and recipes directories.
+    fn temp_authored_root(label: &str) -> (PathBuf, TrustedRoot) {
+        let path = temp_path(label);
+        fs::create_dir_all(path.join("apps")).unwrap();
+        fs::create_dir_all(path.join("recipes")).unwrap();
+        let root = validate_authored_root(&path).unwrap();
+        (path, root)
+    }
+
+    /// One prepared session with a trusted root, inspected APK, and one review.
+    ///
+    /// The fixture mirrors the state a successful review leaves behind, so save
+    /// and status tests exercise the real gates instead of hand-built records.
+    struct ReviewFixture {
+        state: AppGeneratorState,
+        session_handle: String,
+        review_handle: String,
+        root_path: PathBuf,
+        canonical_root: PathBuf,
+        apk_path: PathBuf,
+        apk_identity: FileIdentity,
+    }
+
+    impl ReviewFixture {
+        fn create(label: &str) -> Self {
+            let (root_path, root) = temp_authored_root(label);
+            let apk = permission_test_apk(label);
+            let state = AppGeneratorState::default();
+            let mut registry = lock_registry(&state).unwrap();
+            let session_handle = registry.begin();
+            let session = registry.session_mut(&session_handle).unwrap();
+            session.roots.insert("root-handle".to_string(), root.clone());
+            session.active_root = Some("root-handle".to_string());
+            session.apks.insert("apk-handle".to_string(), apk.clone());
+            session.reviews.insert(
+                "app-review-handle".to_string(),
+                ReviewRecord {
+                    request_id: 7,
+                    backend_review_id: Some("backend-review-handle".to_string()),
+                    binding: ReviewBinding::Local {
+                        apk_handle: "apk-handle".to_string(),
+                        apk_identity: apk.identity.clone(),
+                        inspection_handle: apk
+                            .inspection_handle
+                            .clone()
+                            .expect("fixture APK retains an inspection handle"),
+                    },
+                    existing_app: None,
+                    root_path: root.root.clone(),
+                    blocking: false,
+                    app_relative_path: Some("apps/example.yaml".to_string()),
+                    recipe_relative_path: Some("recipes/app.example.install.yaml".to_string()),
+                },
+            );
+            drop(registry);
+            Self {
+                state,
+                session_handle,
+                review_handle: "app-review-handle".to_string(),
+                root_path,
+                canonical_root: root.root,
+                apk_path: apk.path,
+                apk_identity: apk.identity,
+            }
+        }
+
+        fn cleanup(self) {
+            let _ = fs::remove_file(&self.apk_path);
+            let _ = fs::remove_dir_all(&self.root_path);
+        }
+    }
+
+    /// Build the trusted draft inputs the fixture's retained APK and root resolve.
+    fn fixture_review_inputs(fixture: &ReviewFixture) -> ResolvedDraftInputs {
+        let registry = lock_registry(&fixture.state).unwrap();
+        let session = registry.session(&fixture.session_handle).unwrap();
+        let apk = session.apks.get("apk-handle").unwrap();
+        ResolvedDraftInputs {
+            root: session.roots.get("root-handle").cloned(),
+            facts: apk.facts.clone().expect("fixture APK retains facts"),
+            permission_automation: None,
+            permission_automation_enabled: false,
+            existing_app: None,
+            binding: Some(ReviewBinding::Local {
+                apk_handle: "apk-handle".to_string(),
+                apk_identity: apk.identity.clone(),
+                inspection_handle: apk
+                    .inspection_handle
+                    .clone()
+                    .expect("fixture APK retains an inspection handle"),
+            }),
+            remote: None,
+        }
+    }
+
+    /// Attach one root-bound existing-App selection to trusted draft inputs.
+    fn with_existing_app(
+        mut inputs: ResolvedDraftInputs,
+        fixture: &ReviewFixture,
+    ) -> ResolvedDraftInputs {
+        inputs.existing_app = Some(BoundExistingApp {
+            handle: "existing-app-handle".to_string(),
+            selection: TrustedExistingApp {
+                root_path: fixture.canonical_root.clone(),
+                snapshot_id: "backend-snapshot-1".to_string(),
+                app_path: "apps/armsx1.yaml".to_string(),
+                package_id: Some("com.example.inspected".to_string()),
+            },
+        });
+        inputs
+    }
+
+    #[test]
+    fn save_rejects_a_stale_request_id_without_publishing() {
+        let fixture = ReviewFixture::create("publication-stale-request");
+        let transport = ScriptedTransport::new(|operation, _| {
+            panic!("a stale save must not reach the backend: {operation}")
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            8,
+        )
+        .unwrap();
+        assert_eq!(api_error_code(&response), Some("review_invalidated"));
+        assert_eq!(transport.request_count(), 0);
+        // The stale attempt consumed the review, so only a new review can publish.
+        let repeated = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        assert_eq!(api_error_code(&repeated), Some("review_invalidated"));
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn save_publishes_only_the_retained_review_identity_and_consumes_the_handle() {
+        let fixture = ReviewFixture::create("publication-identity");
+        let transport = ScriptedTransport::new(|operation, _| match operation {
+            "saveAppGeneratorReview" => Ok(success(json!({ "outcome": "saved" }))),
+            "openRecipe" => Ok(success(json!({ "document": { "documentId": "document-1" } }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        assert_eq!(result["outcome"], "saved");
+        assert_eq!(result["app"]["appPath"], "apps/example.yaml");
+        assert_eq!(
+            result["recipe"]["recipePath"],
+            "recipes/app.example.install.yaml"
+        );
+        assert_eq!(result["recipe"]["documentId"], "document-1");
+        assert!(result["recipe"].get("openError").is_none());
+
+        let saves = transport.requests_for("saveAppGeneratorReview");
+        assert_eq!(saves.len(), 1);
+        let payload = saves[0].as_object().unwrap();
+        let mut keys: Vec<&str> = payload.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["operationId", "requestId", "reviewId"]);
+        assert_eq!(payload["reviewId"], "backend-review-handle");
+        assert_eq!(payload["requestId"], 7);
+        let operation_id = payload["operationId"].as_str().unwrap();
+
+        // A confirmed saved record answers status from native memory.
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "saved");
+        assert_eq!(status["confirmed"], true);
+        assert_eq!(status["detail"]["recipe"]["documentId"], "document-1");
+        assert!(transport
+            .requests_for("appGeneratorPublicationStatus")
+            .is_empty());
+
+        // Repeating the consumed handle cannot publish a second pair.
+        let repeated = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        assert_eq!(api_error_code(&repeated), Some("review_invalidated"));
+        assert_eq!(transport.requests_for("saveAppGeneratorReview").len(), 1);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn lost_publication_response_stays_unknown_and_is_never_retried() {
+        let fixture = ReviewFixture::create("publication-lost-response");
+        let transport = ScriptedTransport::new(|operation, _| match operation {
+            "saveAppGeneratorReview" => Err("sidecar exited during publication".to_string()),
+            "appGeneratorPublicationStatus" => Err("sidecar restarting".to_string()),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        assert_eq!(result["outcome"], "unknown");
+        assert_eq!(
+            result["message"].as_str(),
+            Some(UNCONFIRMED_PUBLICATION_MESSAGE)
+        );
+        let operation_id = result["operationId"].as_str().unwrap().to_string();
+        assert_eq!(transport.requests_for("saveAppGeneratorReview").len(), 1);
+
+        // The uncertain attempt stays uncertain instead of becoming a failure.
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, &operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "unknown");
+        assert_eq!(status["confirmed"], false);
+        assert_eq!(status["detail"]["reason"], "status_unavailable");
+        let recorded_at = status["recordedAt"].as_str().unwrap();
+        assert_eq!(recorded_at.len(), 20);
+        assert!(recorded_at.ends_with('Z'));
+        assert_eq!(transport.requests_for("saveAppGeneratorReview").len(), 1);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn sidecar_restart_clears_handles_but_preserves_unknown_publication_memory() {
+        let fixture = ReviewFixture::create("publication-restart");
+        let transport = ScriptedTransport::new(|operation, _| match operation {
+            "saveAppGeneratorReview" => Err("transport closed".to_string()),
+            "appGeneratorPublicationStatus" => Ok(success(json!({
+                "operationId": "restarted",
+                "outcome": "unknown",
+                "confirmed": false,
+                "recordedAt": Value::Null,
+                "detail": { "reason": "no_record" },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        let operation_id = result["operationId"].as_str().unwrap().to_string();
+
+        // A sidecar restart drops every session handle.
+        fixture.state.clear().unwrap();
+        let after_restart = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            api_error_code(&after_restart),
+            Some("app_generator_session_expired")
+        );
+
+        // A restart that forgot the operation reports no_record, which stays unknown.
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, &operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "unknown");
+        assert_eq!(status["confirmed"], false);
+        assert_eq!(status["detail"]["reason"], "no_record");
+        assert!(status["recordedAt"].as_str().is_some());
+        assert_eq!(transport.requests_for("saveAppGeneratorReview").len(), 1);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn saved_publication_survives_open_failure_and_status_never_requires_opening() {
+        let fixture = ReviewFixture::create("publication-open-failure");
+        let transport = ScriptedTransport::new(|operation, _| match operation {
+            "saveAppGeneratorReview" => Ok(success(json!({
+                "outcome": "saved",
+                "createdFiles": [],
+                "replacedFiles": [],
+            }))),
+            "openRecipe" => Ok(api_error(
+                "app_recipe_open_failed",
+                "The saved Recipe could not be opened.",
+                json!({ "reason": "missing_catalog" }),
+            )),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        assert_eq!(result["outcome"], "saved");
+        assert_eq!(result["recipe"]["documentId"], Value::Null);
+        assert_eq!(result["recipe"]["openError"]["code"], "app_recipe_open_failed");
+        assert_eq!(
+            result["recipe"]["openError"]["details"]["reason"],
+            "missing_catalog"
+        );
+        let operation_id = result["operationId"].as_str().unwrap();
+
+        // The saved record never depends on the editor document opening.
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "saved");
+        assert_eq!(status["confirmed"], true);
+        assert_eq!(status["detail"]["recipe"]["documentId"], Value::Null);
+        assert_eq!(
+            status["detail"]["recipe"]["openError"]["code"],
+            "app_recipe_open_failed"
+        );
+        assert!(transport
+            .requests_for("appGeneratorPublicationStatus")
+            .is_empty());
+        assert_eq!(transport.requests_for("saveAppGeneratorReview").len(), 1);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn failed_publication_maps_rollback_relative_and_is_recorded() {
+        let fixture = ReviewFixture::create("publication-failed");
+        let absolute_recipe = fixture
+            .canonical_root
+            .join("recipes/app.example.install.yaml")
+            .to_string_lossy()
+            .to_string();
+        let transport = ScriptedTransport::new(move |operation, _| match operation {
+            "saveAppGeneratorReview" => Ok(success(json!({
+                "outcome": "failed",
+                "error": {
+                    "code": "publication_denied",
+                    "message": "The destination already exists.",
+                    "details": {},
+                },
+                "rollback": {
+                    "recipeRemoved": true,
+                    "recipeRecoveryRequired": false,
+                    "recipePath": absolute_recipe.clone(),
+                },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        assert_eq!(result["outcome"], "failed");
+        assert_eq!(result["error"]["code"], "publication_denied");
+        assert_eq!(result["rollback"]["recipeRemoved"], true);
+        assert_eq!(
+            result["rollback"]["recipePath"],
+            "recipes/app.example.install.yaml"
+        );
+        assert!(transport.requests_for("openRecipe").is_empty());
+        let operation_id = result["operationId"].as_str().unwrap();
+
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "failed");
+        assert_eq!(status["confirmed"], true);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn backend_confirmation_upgrades_an_uncertain_publication_record() {
+        let fixture = ReviewFixture::create("publication-confirmation");
+        let absolute_app = fixture
+            .canonical_root
+            .join("apps/example.yaml")
+            .to_string_lossy()
+            .to_string();
+        let absolute_recipe = fixture
+            .canonical_root
+            .join("recipes/app.example.install.yaml")
+            .to_string_lossy()
+            .to_string();
+        let transport = ScriptedTransport::new(move |operation, payload| match operation {
+            "saveAppGeneratorReview" => Err("response lost after commit".to_string()),
+            "appGeneratorPublicationStatus" => Ok(success(json!({
+                "operationId": payload["operationId"].clone(),
+                "outcome": "saved",
+                "confirmed": true,
+                "recordedAt": "2026-10-15T20:00:00Z",
+                "detail": {
+                    "app": { "appPath": absolute_app.clone() },
+                    "recipe": { "recipePath": absolute_recipe.clone() },
+                    "createdFiles": [absolute_app.clone()],
+                    "replacedFiles": [],
+                },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let operation_id = success_result(&response).unwrap()["operationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, &operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "saved");
+        assert_eq!(status["confirmed"], true);
+        assert_eq!(status["recordedAt"], "2026-10-15T20:00:00Z");
+        assert_eq!(status["detail"]["app"]["appPath"], "apps/example.yaml");
+        assert_eq!(
+            status["detail"]["recipe"]["recipePath"],
+            "recipes/app.example.install.yaml"
+        );
+        assert_eq!(
+            status["detail"]["createdFiles"],
+            json!(["apps/example.yaml"])
+        );
+
+        // The upgrade is sticky: a later query answers from native memory.
+        let adopted =
+            publication_status_via_transport(&transport, &fixture.state, &operation_id).unwrap();
+        let adopted = success_result(&adopted).unwrap();
+        assert_eq!(adopted["outcome"], "saved");
+        assert_eq!(
+            transport
+                .requests_for("appGeneratorPublicationStatus")
+                .len(),
+            1
+        );
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn lost_publication_response_upgrades_to_confirmed_failure_with_rollback_detail() {
+        let fixture = ReviewFixture::create("publication-confirmation-failure");
+        let transport = ScriptedTransport::new(|operation, payload| match operation {
+            "saveAppGeneratorReview" => Err("response lost after commit".to_string()),
+            "appGeneratorPublicationStatus" => Ok(success(json!({
+                "operationId": payload["operationId"].clone(),
+                "outcome": "failed",
+                "confirmed": true,
+                "recordedAt": "2026-10-15T20:30:00Z",
+                "detail": {
+                    "ok": true,
+                    "outcome": "failed",
+                    "operationId": payload["operationId"].clone(),
+                    "app": { "appPath": "apps/example.yaml" },
+                    "recipe": { "recipePath": "recipes/app.example.install.yaml" },
+                    "createdFiles": [],
+                    "replacedFiles": [],
+                    "rollback": {
+                        "recipeRemoved": false,
+                        "recipeRecoveryRequired": true,
+                        "recipePath": "recipes/app.example.install.yaml",
+                    },
+                    "error": {
+                        "code": "app_definition_publish_failed",
+                        "message": "The App Definition could not be published atomically",
+                        "details": { "reason": "app_definition_publish_failed" },
+                    },
+                    "message": Value::Null,
+                },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &fixture.review_handle,
+            7,
+        )
+        .unwrap();
+        let operation_id = success_result(&response).unwrap()["operationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The lost save response left the attempt unknown; the backend record
+        // confirms the failure, so the status must surface its real detail.
+        let status =
+            publication_status_via_transport(&transport, &fixture.state, &operation_id).unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["outcome"], "failed");
+        assert_eq!(status["confirmed"], true);
+        assert_eq!(status["recordedAt"], "2026-10-15T20:30:00Z");
+        assert_eq!(
+            status["detail"]["error"]["code"],
+            "app_definition_publish_failed"
+        );
+        assert_eq!(
+            status["detail"]["error"]["message"],
+            "The App Definition could not be published atomically"
+        );
+        assert_eq!(
+            status["detail"]["error"]["details"]["reason"],
+            "app_definition_publish_failed"
+        );
+        assert_eq!(status["detail"]["rollback"]["recipeRemoved"], false);
+        assert_eq!(status["detail"]["rollback"]["recipeRecoveryRequired"], true);
+        assert_eq!(
+            status["detail"]["rollback"]["recipePath"],
+            "recipes/app.example.install.yaml"
+        );
+
+        // The confirmed failure is sticky: a later query answers from native memory.
+        let adopted =
+            publication_status_via_transport(&transport, &fixture.state, &operation_id).unwrap();
+        let adopted = success_result(&adopted).unwrap();
+        assert_eq!(adopted["outcome"], "failed");
+        assert_eq!(
+            adopted["detail"]["rollback"]["recipeRecoveryRequired"],
+            true
+        );
+        assert_eq!(
+            transport
+                .requests_for("appGeneratorPublicationStatus")
+                .len(),
+            1
+        );
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn unknown_operation_ids_report_no_record_without_backend_contact() {
+        let state = AppGeneratorState::default();
+        let transport =
+            ScriptedTransport::new(|operation, _| panic!("unexpected operation {operation}"));
+        let status =
+            publication_status_via_transport(&transport, &state, "publication-404").unwrap();
+        let status = success_result(&status).unwrap();
+        assert_eq!(status["operationId"], "publication-404");
+        assert_eq!(status["outcome"], "unknown");
+        assert_eq!(status["confirmed"], false);
+        assert_eq!(status["recordedAt"], Value::Null);
+        assert_eq!(status["detail"]["reason"], "no_record");
+        assert_eq!(transport.request_count(), 0);
+    }
+
+    #[test]
+    fn retired_direct_save_commands_refuse_with_review_required() {
+        let refusal = retired_direct_publication_refusal();
+        assert_eq!(refusal["ok"], false);
+        assert_eq!(api_error_code(&refusal), Some("review_required"));
+        assert!(api_error_message(&refusal)
+            .expect("refusal carries a message")
+            .contains("review"));
+        assert!(refusal.get("result").is_none());
+    }
+
+    #[test]
+    fn review_retains_immutable_mapping_and_rejects_backend_protocol_violations() {
+        let fixture = ReviewFixture::create("review-mapping");
+        let transport = ScriptedTransport::new(|operation, payload| match operation {
+            "reviewAppGeneratorDraft" => Ok(success(json!({
+                "requestId": payload["requestId"].clone(),
+                "blocking": false,
+                "reviewId": "backend-review-9",
+                "destinations": {
+                    "app": {
+                        "fileName": "example.yaml",
+                        "relativePath": "apps/example.yaml",
+                    },
+                    "recipe": {
+                        "fileName": "app.example.install.yaml",
+                        "relativePath": "recipes/app.example.install.yaml",
+                    },
+                },
+                "target": { "mode": "new_app", "appPath": Value::Null },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = review_draft_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            fixture_review_inputs(&fixture),
+            11,
+            Some("fan.apk".to_string()),
+            Some("app.fan.install".to_string()),
+            Some("Fan APK".to_string()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        let review_handle = result["reviewHandle"].as_str().unwrap().to_string();
+        assert!(review_handle.starts_with("app-review-"));
+        assert!(result.get("reviewId").is_none());
+        assert_eq!(result["requestId"], 11);
+
+        let requests = transport.requests_for("reviewAppGeneratorDraft");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["appArtifactId"], "fan.apk");
+        assert_eq!(requests[0]["recipeId"], "app.fan.install");
+        assert_eq!(requests[0]["artifactName"], "Fan APK");
+        assert!(requests[0].get("app").is_none());
+        assert!(requests[0].get("recipe").is_none());
+        assert!(requests[0].get("mappings").is_none());
+        assert!(requests[0].get("permissionSelection").is_none());
+
+        // The retained mapping, not a later request, is what publication consumes.
+        {
+            let registry = lock_registry(&fixture.state).unwrap();
+            let session = registry.session(&fixture.session_handle).unwrap();
+            let record = session.reviews.get(&review_handle).unwrap();
+            assert_eq!(
+                record.backend_review_id.as_deref(),
+                Some("backend-review-9")
+            );
+            assert_eq!(
+                record.app_relative_path.as_deref(),
+                Some("apps/example.yaml")
+            );
+            assert_eq!(
+                record.recipe_relative_path.as_deref(),
+                Some("recipes/app.example.install.yaml")
+            );
+            assert!(!record.blocking);
+            assert_eq!(record.request_id, 11);
+        }
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn review_rejects_mismatched_request_ids_and_absolute_destinations() {
+        let fixture = ReviewFixture::create("review-protocol");
+        let mismatched = ScriptedTransport::new(|operation, _| match operation {
+            "reviewAppGeneratorDraft" => Ok(success(json!({
+                "requestId": 99,
+                "blocking": false,
+                "reviewId": "backend-review-x",
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = review_draft_via_transport(
+            &mismatched,
+            &fixture.state,
+            &fixture.session_handle,
+            fixture_review_inputs(&fixture),
+            11,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            api_error_code(&response),
+            Some("app_generator_protocol_error")
+        );
+
+        let absolute = ScriptedTransport::new(|operation, payload| match operation {
+            "reviewAppGeneratorDraft" => Ok(success(json!({
+                "requestId": payload["requestId"].clone(),
+                "blocking": false,
+                "reviewId": "backend-review-y",
+                "destinations": {
+                    "app": { "relativePath": "/etc/apps/example.yaml" },
+                },
+                "target": { "mode": "new_app", "appPath": Value::Null },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = review_draft_via_transport(
+            &absolute,
+            &fixture.state,
+            &fixture.session_handle,
+            fixture_review_inputs(&fixture),
+            11,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            api_error_code(&response),
+            Some("app_recipe_destination_invalid")
+        );
+
+        // Neither protocol violation retained a review handle: the fixture's own
+        // pre-seeded review is still the only record.
+        {
+            let registry = lock_registry(&fixture.state).unwrap();
+            let session = registry.session(&fixture.session_handle).unwrap();
+            assert_eq!(session.reviews.len(), 1);
+            assert!(session.reviews.contains_key("app-review-handle"));
+        }
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn review_without_a_retained_backend_pair_can_never_publish() {
+        let fixture = ReviewFixture::create("review-unretained");
+        let transport = ScriptedTransport::new(|operation, payload| match operation {
+            "reviewAppGeneratorDraft" => Ok(success(json!({
+                "requestId": payload["requestId"].clone(),
+                "blocking": false,
+                "destinations": {},
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = review_draft_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            fixture_review_inputs(&fixture),
+            11,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let result = success_result(&response).unwrap();
+        let review_handle = result["reviewHandle"].as_str().unwrap().to_string();
+        assert_eq!(result["blocking"], true);
+
+        let save = publish_review_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            &review_handle,
+            11,
+        )
+        .unwrap();
+        assert_eq!(api_error_code(&save), Some("review_blocking"));
+        assert!(transport.requests_for("saveAppGeneratorReview").is_empty());
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn review_dependency_changes_invalidate_the_retained_review() {
+        let fixture = ReviewFixture::create("review-dependencies");
+        let local_record = || ReviewRecord {
+            request_id: 7,
+            backend_review_id: Some("backend-review-handle".to_string()),
+            binding: ReviewBinding::Local {
+                apk_handle: "apk-handle".to_string(),
+                apk_identity: fixture.apk_identity.clone(),
+                inspection_handle: "apk-inspection-current".to_string(),
+            },
+            existing_app: Some(BoundExistingApp {
+                handle: "existing-app-handle".to_string(),
+                selection: TrustedExistingApp {
+                    root_path: fixture.canonical_root.clone(),
+                    snapshot_id: "backend-snapshot-1".to_string(),
+                    app_path: "apps/armsx1.yaml".to_string(),
+                    package_id: Some("com.example.inspected".to_string()),
+                },
+            }),
+            root_path: fixture.canonical_root.clone(),
+            blocking: false,
+            app_relative_path: None,
+            recipe_relative_path: None,
+        };
+        {
+            let mut registry = lock_registry(&fixture.state).unwrap();
+            let session = registry.session_mut(&fixture.session_handle).unwrap();
+            session.existing_apps.insert(
+                "existing-app-handle".to_string(),
+                TrustedExistingApp {
+                    root_path: fixture.canonical_root.clone(),
+                    snapshot_id: "backend-snapshot-1".to_string(),
+                    app_path: "apps/armsx1.yaml".to_string(),
+                    package_id: Some("com.example.inspected".to_string()),
+                },
+            );
+            let record = local_record();
+            assert!(review_dependencies_current(session, &record).is_ok());
+
+            // A replaced inspection invalidates the review.
+            session
+                .apks
+                .get_mut("apk-handle")
+                .unwrap()
+                .inspection_handle = Some("apk-inspection-replaced".to_string());
+            assert!(review_dependencies_current(session, &record).is_err());
+            session
+                .apks
+                .get_mut("apk-handle")
+                .unwrap()
+                .inspection_handle = Some("apk-inspection-current".to_string());
+
+            // A replaced existing-App snapshot invalidates the review.
+            session
+                .existing_apps
+                .get_mut("existing-app-handle")
+                .unwrap()
+                .snapshot_id = "backend-snapshot-2".to_string();
+            assert!(review_dependencies_current(session, &record).is_err());
+            session
+                .existing_apps
+                .get_mut("existing-app-handle")
+                .unwrap()
+                .snapshot_id = "backend-snapshot-1".to_string();
+
+            // A dropped root invalidates the review.
+            let root = session.roots.remove("root-handle").unwrap();
+            assert!(review_dependencies_current(session, &record).is_err());
+            session.roots.insert("root-handle".to_string(), root);
+        }
+        // A changed APK file invalidates the review.
+        fs::write(&fixture.apk_path, b"replacement-apk-bytes").unwrap();
+        {
+            let registry = lock_registry(&fixture.state).unwrap();
+            let session = registry.session(&fixture.session_handle).unwrap();
+            assert!(review_dependencies_current(session, &local_record()).is_err());
+        }
+        fixture.cleanup();
+
+        // A re-analyzed remote source invalidates the review through its fingerprint.
+        let (remote_state, remote_session, remote_asset) =
+            trusted_remote_test_state(Some(vec![TrustedRemoteRelease {
+                tag: "v1".to_string(),
+                prerelease: false,
+                asset_file_names: vec!["app.apk".to_string()],
+            }]));
+        let remote_apk = permission_test_apk("review-dependencies-remote");
+        let (remote_root_path, remote_root) = temp_authored_root("review-dependencies-remote-root");
+        let remote_context = remote_context_from_state(
+            &remote_state,
+            &remote_session,
+            &remote_asset,
+            "latest_compatible_release",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let remote_record = ReviewRecord {
+            request_id: 7,
+            backend_review_id: Some("backend-review-remote".to_string()),
+            binding: ReviewBinding::Remote {
+                apk_handle: "apk-handle".to_string(),
+                apk_identity: remote_apk.identity.clone(),
+                inspection_handle: "apk-inspection-current".to_string(),
+                asset_handle: remote_asset.clone(),
+                strategy: "latest_compatible_release".to_string(),
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+                source_fingerprint: remote_context.source_fingerprint.clone(),
+            },
+            existing_app: None,
+            root_path: remote_root.root.clone(),
+            blocking: false,
+            app_relative_path: None,
+            recipe_relative_path: None,
+        };
+        {
+            let mut registry = lock_registry(&remote_state).unwrap();
+            let session = registry.session_mut(&remote_session).unwrap();
+            session
+                .apks
+                .insert("apk-handle".to_string(), remote_apk.clone());
+            session
+                .roots
+                .insert("root-handle".to_string(), remote_root.clone());
+            assert!(review_dependencies_current(session, &remote_record).is_ok());
+
+            let source_handle = session
+                .remote_assets
+                .get(&remote_asset)
+                .unwrap()
+                .source_handle
+                .clone();
+            session
+                .remote_sources
+                .get_mut(&source_handle)
+                .unwrap()
+                .release_analysis = Some(vec![TrustedRemoteRelease {
+                tag: "v3".to_string(),
+                prerelease: false,
+                asset_file_names: vec!["app.apk".to_string()],
+            }]);
+            assert!(review_dependencies_current(session, &remote_record).is_err());
+        }
+        let _ = fs::remove_file(&remote_apk.path);
+        let _ = fs::remove_dir_all(&remote_root_path);
+    }
+
+    #[test]
+    fn resolve_draft_inputs_derives_local_and_remote_permission_automation() {
+        let fixture = ReviewFixture::create("resolve-permissions-local");
+        // A local APK is the inspected artifact the draft installs, so the
+        // selection canonicalizes against the stored inspection exactly like a
+        // pinned remote artifact does.
+        let baseline = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(json!({
+                "inspectionHandle": "apk-inspection-current",
+                "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
+                "appOps": [],
+            })),
+            true,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            baseline.permission_automation,
+            Some(json!({
+                "packageName": "com.example.inspected",
+                "runtimePermissions": [{
+                    "permissionName": "android.permission.CAMERA",
+                    "requiresRoot": false,
+                    "androidApiMin": 23,
+                    "androidApiMax": null,
+                }],
+                "appOps": [],
+            }))
+        );
+        assert!(matches!(baseline.binding, Some(ReviewBinding::Local { .. })));
+
+        // Elevated selections keep the trusted root requirement and API bounds.
+        let elevated = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(json!({
+                "inspectionHandle": "apk-inspection-current",
+                "runtimePermissions": [],
+                "appOps": [{
+                    "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "operationName": "MANAGE_EXTERNAL_STORAGE",
+                    "mode": "allow",
+                }],
+            })),
+            true,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            elevated.permission_automation,
+            Some(json!({
+                "packageName": "com.example.inspected",
+                "runtimePermissions": [],
+                "appOps": [{
+                    "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "operationName": "MANAGE_EXTERNAL_STORAGE",
+                    "mode": "allow",
+                    "requiresRoot": true,
+                    "androidApiMin": 30,
+                    "androidApiMax": null,
+                }],
+            }))
+        );
+
+        // The empty selection means no permission automation and grants nothing;
+        // the draft still resolves as a plain local binding.
+        let empty = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(json!({
+                "inspectionHandle": "apk-inspection-current",
+                "runtimePermissions": [],
+                "appOps": [],
+            })),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(empty.permission_automation.is_none());
+        assert!(empty.remote.is_none());
+        assert!(matches!(empty.binding, Some(ReviewBinding::Local { .. })));
+        fixture.cleanup();
+
+        // A remote review derives the same canonical selection from the retained asset.
+        let (remote_state, remote_session, remote_asset) = trusted_remote_test_state(None);
+        let mut remote_apk = permission_test_apk("resolve-permissions-remote");
+        // The download flow retains the originating asset on the inspected APK,
+        // so a remote case binds the record exactly like a completed download.
+        remote_apk.remote_asset_handle = Some(remote_asset.clone());
+        let (remote_root_path, remote_root) = temp_authored_root("resolve-permissions-remote-root");
+        {
+            let mut registry = lock_registry(&remote_state).unwrap();
+            let session = registry.session_mut(&remote_session).unwrap();
+            session
+                .apks
+                .insert("apk-handle".to_string(), remote_apk.clone());
+            session
+                .roots
+                .insert("root-handle".to_string(), remote_root.clone());
+        }
+        let remote_inputs = resolve_draft_inputs(
+            &remote_state,
+            &remote_session,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(permission_selection()),
+            true,
+            Some(RemoteReviewSelection {
+                asset_handle: &remote_asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let automation = remote_inputs
+            .permission_automation
+            .as_ref()
+            .expect("eligible remote strategy derives permission automation");
+        assert_eq!(automation["packageName"], "com.example.inspected");
+        assert!(matches!(
+            remote_inputs.binding,
+            Some(ReviewBinding::Remote { .. })
+        ));
+
+        // A user-provided remote artifact is never the inspected APK, so the
+        // selection is refused before generation or publication.
+        let unsupported = resolve_draft_inputs(
+            &remote_state,
+            &remote_session,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(permission_selection()),
+            true,
+            Some(RemoteReviewSelection {
+                asset_handle: &remote_asset,
+                strategy: "user_provided_apk",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            api_error_code(&unsupported),
+            Some("apk_permission_automation_strategy_unsupported")
+        );
+        let _ = fs::remove_file(&remote_apk.path);
+        let _ = fs::remove_dir_all(&remote_root_path);
+    }
+
+    #[test]
+    fn resolve_draft_inputs_refuses_malformed_and_untrusted_local_permission_evidence() {
+        let fixture = ReviewFixture::create("resolve-permissions-untrusted");
+        let cases = [
+            ("malformed", json!({ "inspectionHandle": 9 }), "altered"),
+            (
+                "stale",
+                json!({
+                    "inspectionHandle": "apk-inspection-stale",
+                    "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
+                    "appOps": [],
+                }),
+                "stale",
+            ),
+            (
+                "unknown",
+                json!({
+                    "inspectionHandle": "apk-inspection-current",
+                    "runtimePermissions": [{ "permissionName": "android.permission.RECORD_AUDIO" }],
+                    "appOps": [],
+                }),
+                "unknown",
+            ),
+            (
+                "duplicate",
+                json!({
+                    "inspectionHandle": "apk-inspection-current",
+                    "runtimePermissions": [
+                        { "permissionName": "android.permission.CAMERA" },
+                        { "permissionName": "android.permission.CAMERA" },
+                    ],
+                    "appOps": [],
+                }),
+                "duplicate",
+            ),
+        ];
+        for (label, selection, reason) in cases {
+            let refused = resolve_draft_inputs(
+                &fixture.state,
+                &fixture.session_handle,
+                "apk-handle",
+                Some("root-handle"),
+                true,
+                None,
+                Some(selection),
+                true,
+                None,
+            )
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(
+                api_error_code(&refused),
+                Some("app_generator_permission_selection_invalid"),
+                "{label} selection carries the permission-selection error code"
+            );
+            assert_eq!(
+                refused["error"]["details"]["reason"],
+                reason,
+                "{label} selection reports its refusal reason"
+            );
+        }
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn permission_automation_optin_travels_on_local_preview_and_review_wires() {
+        let fixture = ReviewFixture::create("optin-local-wire");
+        // Zero selected identities in both directions: the request intent is the
+        // flag alone, so it must survive canonicalization returning no actions.
+        let disabled = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!disabled.permission_automation_enabled);
+        assert!(disabled.permission_automation.is_none());
+        let enabled = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            true,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(enabled.permission_automation_enabled);
+        assert!(enabled.permission_automation.is_none());
+
+        let transport = ScriptedTransport::new(|operation, payload| match operation {
+            "generateAppRecipeDraft" => Ok(success(json!({
+                "app": { "id": "generated.app" },
+                "recipe": { "id": "generated.app.install" },
+            }))),
+            "checkGeneratedCatalogCollisions" => Ok(success(json!({ "collisions": [] }))),
+            "reviewAppGeneratorDraft" => Ok(success(json!({
+                "requestId": payload["requestId"].clone(),
+                "blocking": false,
+                "reviewId": "backend-review-optin-local",
+                "destinations": {
+                    "app": { "fileName": "example.yaml", "relativePath": "apps/example.yaml" },
+                    "recipe": {
+                        "fileName": "app.example.install.yaml",
+                        "relativePath": "recipes/app.example.install.yaml",
+                    },
+                },
+                "target": { "mode": "new_app", "appPath": Value::Null },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let preview = generate_draft_via_transport(
+            &transport,
+            enabled,
+            "generateAppRecipeDraft",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(success_result(&preview).is_some());
+        let review = review_draft_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            disabled,
+            5,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(success_result(&review).is_some());
+
+        let previews = transport.requests_for("generateAppRecipeDraft");
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0]["permissionAutomationEnabled"], true);
+        assert!(previews[0].get("permissionAutomation").is_none());
+        let reviews = transport.requests_for("reviewAppGeneratorDraft");
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0]["permissionAutomationEnabled"], false);
+        assert!(reviews[0].get("permissionAutomation").is_none());
+
+        // The existing-App mode carries the same flag beside its retained snapshot.
+        let mut existing = with_existing_app(fixture_review_inputs(&fixture), &fixture);
+        existing.permission_automation_enabled = true;
+        let response = review_draft_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            existing,
+            6,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(success_result(&response).is_some());
+        let reviews = transport.requests_for("reviewAppGeneratorDraft");
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[1]["permissionAutomationEnabled"], true);
+        assert_eq!(reviews[1]["existingAppSnapshotId"], "backend-snapshot-1");
+        assert!(reviews[1].get("permissionAutomation").is_none());
+        // Two reviews, one preview, and its collision check; nothing else.
+        assert_eq!(transport.request_count(), 4);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn permission_automation_optin_travels_on_remote_preview_and_review_wires() {
+        let (state, session_handle, asset) = trusted_remote_test_state(None);
+        let apk = insert_retained_remote_apk(&state, &session_handle, &asset, "optin-remote-wire");
+        let (root_path, root) = temp_authored_root("optin-remote-wire-root");
+        {
+            let mut registry = lock_registry(&state).unwrap();
+            let session = registry.session_mut(&session_handle).unwrap();
+            session.roots.insert("root-handle".to_string(), root.clone());
+            session.existing_apps.insert(
+                "existing-app-handle".to_string(),
+                TrustedExistingApp {
+                    root_path: root.root,
+                    snapshot_id: "backend-snapshot-1".to_string(),
+                    app_path: "apps/armsx1.yaml".to_string(),
+                    package_id: Some("com.example.inspected".to_string()),
+                },
+            );
+        }
+        let opted_in = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            true,
+            Some(RemoteReviewSelection {
+                asset_handle: &asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(opted_in.permission_automation_enabled);
+        assert!(opted_in.permission_automation.is_none());
+        let opted_out = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            Some("existing-app-handle"),
+            None,
+            false,
+            Some(RemoteReviewSelection {
+                asset_handle: &asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!opted_out.permission_automation_enabled);
+        assert!(opted_out.existing_app.is_some());
+
+        let transport = ScriptedTransport::new(|operation, payload| match operation {
+            "generateRemoteAppRecipeDraft" => Ok(success(json!({
+                "app": { "id": "generated.app" },
+                "recipe": { "id": "generated.app.install" },
+            }))),
+            "checkGeneratedCatalogCollisions" => Ok(success(json!({ "collisions": [] }))),
+            "reviewRemoteAppGeneratorDraft" => Ok(success(json!({
+                "requestId": payload["requestId"].clone(),
+                "blocking": false,
+                "reviewId": "backend-review-optin-remote",
+                "destinations": {
+                    "app": { "fileName": "example.yaml", "relativePath": "apps/example.yaml" },
+                    "recipe": {
+                        "fileName": "app.example.install.yaml",
+                        "relativePath": "recipes/app.example.install.yaml",
+                    },
+                },
+                "target": { "mode": "new_app", "appPath": Value::Null },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let preview = generate_draft_via_transport(
+            &transport,
+            opted_in,
+            "generateRemoteAppRecipeDraft",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(success_result(&preview).is_some());
+        let review = review_draft_via_transport(
+            &transport,
+            &state,
+            &session_handle,
+            opted_out,
+            9,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(success_result(&review).is_some());
+
+        let previews = transport.requests_for("generateRemoteAppRecipeDraft");
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0]["permissionAutomationEnabled"], true);
+        assert!(previews[0].get("permissionAutomation").is_none());
+        // Only the durable asset address travels, and the flag rides beside it.
+        assert_eq!(
+            previews[0]["source"]["downloadUrl"],
+            "https://github.com/example/project/releases/download/v2/app.apk"
+        );
+        let reviews = transport.requests_for("reviewRemoteAppGeneratorDraft");
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0]["permissionAutomationEnabled"], false);
+        assert!(reviews[0].get("permissionAutomation").is_none());
+        assert_eq!(reviews[0]["existingAppSnapshotId"], "backend-snapshot-1");
+
+        let _ = fs::remove_file(&apk.path);
+        let _ = fs::remove_dir_all(&root_path);
+    }
+
+    #[test]
+    fn disabled_permission_automation_refuses_a_nonempty_selection() {
+        let fixture = ReviewFixture::create("optin-disabled-selection");
+        let refused = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(permission_selection()),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            api_error_code(&refused),
+            Some("app_generator_permission_selection_invalid")
+        );
+        assert_eq!(refused["error"]["details"]["reason"], "disabled");
+
+        // The identical selection with the opt-in enabled still canonicalizes, so
+        // the refusal is the disabled flag and not the identities themselves.
+        let accepted = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(permission_selection()),
+            true,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(accepted.permission_automation_enabled);
+        assert!(accepted.permission_automation.is_some());
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn permission_automation_optin_without_identities_needs_no_inspected_install_source() {
+        let (state, session_handle, asset) = trusted_remote_test_state(None);
+        let apk =
+            insert_retained_remote_apk(&state, &session_handle, &asset, "optin-user-provided");
+        let (root_path, root) = temp_authored_root("optin-user-provided-root");
+        {
+            let mut registry = lock_registry(&state).unwrap();
+            let session = registry.session_mut(&session_handle).unwrap();
+            session.roots.insert("root-handle".to_string(), root);
+        }
+        let remote = |strategy| RemoteReviewSelection {
+            asset_handle: &asset,
+            strategy,
+            asset_pattern: None,
+            include_prereleases: false,
+            trusted_sha256: None,
+        };
+        // A user-provided remote artifact never installs the inspected bytes, so
+        // newly inspected actions stay refused for that source.
+        let refused = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            Some(permission_selection()),
+            true,
+            Some(remote("user_provided_apk")),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            api_error_code(&refused),
+            Some("apk_permission_automation_strategy_unsupported")
+        );
+        // An opt-in that selected no identities only lets the backend reference the
+        // App's already declared sets, so it needs no inspected install source.
+        let enabled = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            true,
+            Some(remote("user_provided_apk")),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(enabled.permission_automation_enabled);
+        assert!(enabled.permission_automation.is_none());
+        assert!(matches!(enabled.binding, Some(ReviewBinding::Remote { .. })));
+        let _ = fs::remove_file(&apk.path);
+        let _ = fs::remove_dir_all(&root_path);
+    }
+
+    #[test]
+    fn existing_app_binding_checks_root_and_package_identity() {
+        let fixture = ReviewFixture::create("existing-app-binding");
+        let (second_root_path, second_root) = temp_authored_root("existing-app-second-root");
+        {
+            let mut registry = lock_registry(&fixture.state).unwrap();
+            let session = registry.session_mut(&fixture.session_handle).unwrap();
+            session.existing_apps.insert(
+                "existing-app-handle".to_string(),
+                TrustedExistingApp {
+                    root_path: fixture.canonical_root.clone(),
+                    snapshot_id: "backend-snapshot-1".to_string(),
+                    app_path: "apps/armsx1.yaml".to_string(),
+                    package_id: Some("com.example.inspected".to_string()),
+                },
+            );
+            session
+                .roots
+                .insert("root-handle-2".to_string(), second_root);
+        }
+        let matched = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            Some("existing-app-handle"),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            matched.existing_app.unwrap().selection.snapshot_id,
+            "backend-snapshot-1"
+        );
+
+        // A selection captured under another root is refused, never re-bound.
+        let mismatch = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle-2"),
+            true,
+            Some("existing-app-handle"),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            api_error_code(&mismatch),
+            Some("existing_app_outside_root")
+        );
+
+        // A package that differs from the inspected APK can never install.
+        {
+            let mut registry = lock_registry(&fixture.state).unwrap();
+            let session = registry.session_mut(&fixture.session_handle).unwrap();
+            session
+                .existing_apps
+                .get_mut("existing-app-handle")
+                .unwrap()
+                .package_id = Some("com.example.other".to_string());
+        }
+        let package = resolve_draft_inputs(
+            &fixture.state,
+            &fixture.session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            Some("existing-app-handle"),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            api_error_code(&package),
+            Some("existing_app_package_mismatch")
+        );
+        assert_eq!(
+            package["error"]["details"]["inspectedPackageId"],
+            "com.example.inspected"
+        );
+        assert_eq!(
+            package["error"]["details"]["selectedPackageId"],
+            "com.example.other"
+        );
+        let _ = fs::remove_dir_all(second_root_path);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn drafts_reject_combined_app_edits_and_existing_app_selections() {
+        let fixture = ReviewFixture::create("combined-inputs");
+        let transport = ScriptedTransport::new(|operation, _| {
+            panic!("an invalid combination must not reach the backend: {operation}")
+        });
+        let preview = generate_draft_via_transport(
+            &transport,
+            with_existing_app(fixture_review_inputs(&fixture), &fixture),
+            "generateAppRecipeDraft",
+            None,
+            None,
+            Some(json!({ "id": "frontend-app" })),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(api_error_code(&preview), Some("invalid_argument"));
+        let review = review_draft_via_transport(
+            &transport,
+            &fixture.state,
+            &fixture.session_handle,
+            with_existing_app(fixture_review_inputs(&fixture), &fixture),
+            11,
+            None,
+            None,
+            None,
+            Some(json!({ "id": "frontend-app" })),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(api_error_code(&review), Some("invalid_argument"));
+        assert_eq!(transport.request_count(), 0);
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn catalog_paths_and_timestamps_stay_ui_safe() {
+        let root = Path::new("/trusted/authored");
+        assert!(is_catalog_relative_path("apps/example.yaml"));
+        assert!(!is_catalog_relative_path(""));
+        assert!(!is_catalog_relative_path("/etc/passwd"));
+        assert!(!is_catalog_relative_path("../escape.yaml"));
+        assert!(!is_catalog_relative_path("apps/../escape.yaml"));
+        assert!(!is_catalog_relative_path(r"apps\example.yaml"));
+        assert_eq!(
+            catalog_relative_from_raw(root, "/trusted/authored/apps/example.yaml").as_deref(),
+            Some("apps/example.yaml")
+        );
+        assert_eq!(
+            catalog_relative_from_raw(root, "apps/example.yaml").as_deref(),
+            Some("apps/example.yaml")
+        );
+        assert_eq!(
+            catalog_relative_from_raw(root, "/elsewhere/apps/example.yaml"),
+            None
+        );
+        assert_eq!(
+            catalog_relative_file_list(
+                Some(&json!([
+                    "/trusted/authored/apps/example.yaml",
+                    "/elsewhere/secret.yaml",
+                    "recipes/app.example.install.yaml",
+                ])),
+                root,
+            ),
+            json!(["apps/example.yaml", "recipes/app.example.install.yaml"])
+        );
+        assert_eq!(catalog_relative_file_list(None, root), json!([]));
+        assert_eq!(iso8601_from_epoch_seconds(0), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            iso8601_from_epoch_seconds(1_700_000_000),
+            "2023-11-14T22:13:20Z"
+        );
+        assert_eq!(iso8601_now().len(), 20);
+    }
+
+    /// Insert one additional provider asset retained by the fixture's source.
+    fn insert_remote_asset(
+        state: &AppGeneratorState,
+        session_handle: &str,
+        source_handle: &str,
+        download_url: &str,
+    ) -> String {
+        let mut registry = lock_registry(state).unwrap();
+        let handle = registry.allocate("remote-asset");
+        let session = registry.session_mut(session_handle).unwrap();
+        session.remote_assets.insert(
+            handle.clone(),
+            TrustedRemoteAsset {
+                source_handle: source_handle.to_string(),
+                download_url: download_url.to_string(),
+                file_name: "app.apk".to_string(),
+                size: 11,
+                release_tag: None,
+            },
+        );
+        handle
+    }
+
+    /// Retain one inspected APK exactly like a completed remote download does.
+    fn insert_retained_remote_apk(
+        state: &AppGeneratorState,
+        session_handle: &str,
+        asset_handle: &str,
+        label: &str,
+    ) -> TrustedApk {
+        let mut apk = permission_test_apk(label);
+        apk.remote_asset_handle = Some(asset_handle.to_string());
+        let mut registry = lock_registry(state).unwrap();
+        let session = registry.session_mut(session_handle).unwrap();
+        session.apks.insert("apk-handle".to_string(), apk.clone());
+        apk
+    }
+
+    /// Run one review after a redirected download and report what was sent.
+    ///
+    /// The download completed at `final_url`, which differs from the retained
+    /// durable address. Returns the review request payload the native boundary
+    /// sent and the durable session facts serialized as JSON, so tests can
+    /// prove what was persisted and what only passed through.
+    fn review_after_redirected_download(
+        state: &AppGeneratorState,
+        session_handle: &str,
+        asset_handle: &str,
+        final_url: &str,
+        request_id: i64,
+    ) -> (Value, String) {
+        let (asset, apk_path) = {
+            let mut registry = lock_registry(state).unwrap();
+            let session = registry.session_mut(session_handle).unwrap();
+            let asset = session.remote_assets.get(asset_handle).unwrap().clone();
+            if session.temp_directory.is_none() {
+                session.temp_directory = tempfile::Builder::new()
+                    .prefix("emuchef-app-generator-")
+                    .tempdir()
+                    .ok();
+            }
+            let path = session
+                .temp_directory
+                .as_ref()
+                .expect("temporary download workspace exists")
+                .path()
+                .join("selected.apk");
+            (asset, path)
+        };
+        fs::write(&apk_path, b"trusted-remote-apk").unwrap();
+        let (apk_path, identity) = validate_apk(&apk_path).unwrap();
+        let retained = retain_downloaded_remote_apk(
+            state,
+            session_handle,
+            asset_handle,
+            &asset,
+            DownloadedRemoteApk {
+                path: apk_path,
+                identity,
+                file_name: asset.file_name.clone(),
+                final_url: Url::parse(final_url).unwrap(),
+            },
+        )
+        .unwrap();
+        let retained = success_result(&retained).unwrap();
+        // The labelled download result may name the address it actually fetched;
+        // nothing below persists it.
+        assert_eq!(retained["source"]["downloadUrl"], final_url);
+        let apk_handle = retained["apkHandle"].as_str().unwrap().to_string();
+        // Store the trusted inspection exactly like the inspection command does.
+        let inspection = json!({
+            "manifest": {
+                "packageName": "com.example.inspected",
+                "versionCode": null,
+                "versionName": null,
+                "minSdkVersion": null,
+                "targetSdkVersion": null,
+            },
+            "permissions": [],
+            "runtimeGrantCandidates": [],
+            "appOpCandidates": [],
+            "warnings": [],
+            "calculatedSha256": "A".repeat(64),
+            "checksumStatus": "not_compared",
+            "signatureVerification": "not_performed",
+        });
+        let facts = facts_from_native_inspection(&inspection).unwrap();
+        {
+            let mut registry = lock_registry(state).unwrap();
+            let session = registry.session_mut(session_handle).unwrap();
+            let apk = session.apks.get_mut(&apk_handle).unwrap();
+            apk.inspection = Some(inspection);
+            apk.facts = Some(facts);
+            apk.inspection_handle = Some("apk-inspection-current".to_string());
+        }
+        let inputs = resolve_draft_inputs(
+            state,
+            session_handle,
+            &apk_handle,
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            false,
+            Some(RemoteReviewSelection {
+                asset_handle,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let transport = ScriptedTransport::new(|operation, payload| match operation {
+            "reviewRemoteAppGeneratorDraft" => Ok(success(json!({
+                "requestId": payload["requestId"].clone(),
+                "blocking": false,
+                "reviewId": "backend-review-durable",
+                "destinations": {
+                    "app": { "fileName": "example.yaml", "relativePath": "apps/example.yaml" },
+                    "recipe": {
+                        "fileName": "app.example.install.yaml",
+                        "relativePath": "recipes/app.example.install.yaml",
+                    },
+                },
+                "target": { "mode": "new_app", "appPath": Value::Null },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
+        let response = review_draft_via_transport(
+            &transport,
+            state,
+            session_handle,
+            inputs,
+            request_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(success_result(&response).is_some());
+        let requests = transport.requests_for("reviewRemoteAppGeneratorDraft");
+        assert_eq!(requests.len(), 1);
+        let durable = {
+            let registry = lock_registry(state).unwrap();
+            let session = registry.session(session_handle).unwrap();
+            json!({
+                "sources": session
+                    .remote_sources
+                    .values()
+                    .map(|source| json!({
+                        "mode": source.mode,
+                        "directUrl": source.direct_url,
+                        "repository": source.repository,
+                    }))
+                    .collect::<Vec<_>>(),
+                "assets": session
+                    .remote_assets
+                    .values()
+                    .map(|asset| json!({ "downloadUrl": asset.download_url }))
+                    .collect::<Vec<_>>(),
+                "apks": session
+                    .apks
+                    .values()
+                    .map(|apk| json!({ "remoteAssetHandle": apk.remote_asset_handle }))
+                    .collect::<Vec<_>>(),
+            })
+            .to_string()
+        };
+        (requests[0].clone(), durable)
+    }
+
+    #[test]
+    fn remote_review_refuses_an_apk_retained_for_a_different_asset() {
+        let (state, session_handle, retained_asset) = trusted_remote_test_state(None);
+        let source_handle = {
+            let registry = lock_registry(&state).unwrap();
+            let session = registry.session(&session_handle).unwrap();
+            session
+                .remote_assets
+                .get(&retained_asset)
+                .unwrap()
+                .source_handle
+                .clone()
+        };
+        // A second, independently valid asset of the same source. Both handles
+        // resolve on their own, so only the retained download relation proves
+        // which bytes were inspected.
+        let other_asset = insert_remote_asset(
+            &state,
+            &session_handle,
+            &source_handle,
+            "https://github.com/example/project/releases/download/v3/app.apk",
+        );
+        let apk = insert_retained_remote_apk(
+            &state,
+            &session_handle,
+            &retained_asset,
+            "swapped-asset-new-app",
+        );
+        let (root_path, root) = temp_authored_root("swapped-asset-new-app-root");
+        {
+            let mut registry = lock_registry(&state).unwrap();
+            let session = registry.session_mut(&session_handle).unwrap();
+            session.roots.insert("root-handle".to_string(), root);
+        }
+        let swapped = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            false,
+            Some(RemoteReviewSelection {
+                asset_handle: &other_asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(api_error_code(&swapped), Some("remote_asset_mismatch"));
+
+        // The retained pair still resolves: only the replacement relation fails.
+        let accepted = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            None,
+            None,
+            false,
+            Some(RemoteReviewSelection {
+                asset_handle: &retained_asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(accepted.binding, Some(ReviewBinding::Remote { .. })));
+
+        let _ = fs::remove_file(&apk.path);
+        let _ = fs::remove_dir_all(&root_path);
+    }
+
+    #[test]
+    fn remote_review_refuses_a_swapped_asset_with_an_existing_app_selection() {
+        let (state, session_handle, retained_asset) = trusted_remote_test_state(None);
+        let source_handle = {
+            let registry = lock_registry(&state).unwrap();
+            let session = registry.session(&session_handle).unwrap();
+            session
+                .remote_assets
+                .get(&retained_asset)
+                .unwrap()
+                .source_handle
+                .clone()
+        };
+        let other_asset = insert_remote_asset(
+            &state,
+            &session_handle,
+            &source_handle,
+            "https://github.com/example/project/releases/download/v3/app.apk",
+        );
+        let apk = insert_retained_remote_apk(
+            &state,
+            &session_handle,
+            &retained_asset,
+            "swapped-asset-existing-app",
+        );
+        let (root_path, root) = temp_authored_root("swapped-asset-existing-app-root");
+        {
+            let mut registry = lock_registry(&state).unwrap();
+            let session = registry.session_mut(&session_handle).unwrap();
+            session.roots.insert("root-handle".to_string(), root.clone());
+            session.existing_apps.insert(
+                "existing-app-handle".to_string(),
+                TrustedExistingApp {
+                    root_path: root.root,
+                    snapshot_id: "backend-snapshot-1".to_string(),
+                    app_path: "apps/armsx1.yaml".to_string(),
+                    package_id: Some("com.example.inspected".to_string()),
+                },
+            );
+        }
+        let swapped = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            Some("existing-app-handle"),
+            None,
+            false,
+            Some(RemoteReviewSelection {
+                asset_handle: &other_asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(api_error_code(&swapped), Some("remote_asset_mismatch"));
+
+        // The reviewed pair plus the existing-App selection still resolve.
+        let accepted = resolve_draft_inputs(
+            &state,
+            &session_handle,
+            "apk-handle",
+            Some("root-handle"),
+            true,
+            Some("existing-app-handle"),
+            None,
+            false,
+            Some(RemoteReviewSelection {
+                asset_handle: &retained_asset,
+                strategy: "pinned_remote_asset",
+                asset_pattern: None,
+                include_prereleases: false,
+                trusted_sha256: None,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            accepted
+                .existing_app
+                .as_ref()
+                .expect("existing App binding resolves")
+                .selection
+                .snapshot_id,
+            "backend-snapshot-1"
+        );
+        assert!(matches!(accepted.binding, Some(ReviewBinding::Remote { .. })));
+
+        let _ = fs::remove_file(&apk.path);
+        let _ = fs::remove_dir_all(&root_path);
+    }
+
+    #[test]
+    fn durable_original_address_survives_a_signed_redirect_in_the_review_payload() {
+        // Scenario 1: a direct APK address whose durable query string must reach
+        // the backend while the signed address the CDN served stays transient.
+        let original = "https://mirror.example.com/releases/app.apk?channel=stable";
+        let normalized = normalize_remote_source("direct_apk", original).unwrap();
+        assert_eq!(normalized.url.as_str(), original);
+        let state = AppGeneratorState::default();
+        let (root_path, root) = temp_authored_root("durable-address-direct");
+        let (session_handle, asset_handle) = {
+            let mut registry = lock_registry(&state).unwrap();
+            let session_handle = registry.begin();
+            let source_handle = registry.allocate("remote-source");
+            let asset_handle = registry.allocate("remote-asset");
+            let session = registry.session_mut(&session_handle).unwrap();
+            session.roots.insert("root-handle".to_string(), root);
+            session.remote_sources.insert(
+                source_handle.clone(),
+                TrustedRemoteSource {
+                    mode: "direct_apk".to_string(),
+                    provider: None,
+                    base_url: None,
+                    repository: None,
+                    release_tag: None,
+                    direct_url: Some(original.to_string()),
+                    release_analysis: None,
+                },
+            );
+            session.remote_assets.insert(
+                asset_handle.clone(),
+                TrustedRemoteAsset {
+                    source_handle,
+                    download_url: original.to_string(),
+                    file_name: "app.apk".to_string(),
+                    size: 17,
+                    release_tag: None,
+                },
+            );
+            (session_handle, asset_handle)
+        };
+        let (payload, durable) = review_after_redirected_download(
+            &state,
+            &session_handle,
+            &asset_handle,
+            "https://cdn.example.net/signed/app.apk?token=transient-abc",
+            31,
+        );
+        assert_eq!(payload["source"]["downloadUrl"], original);
+        assert!(!payload.to_string().contains("cdn.example.net"));
+        assert!(durable.contains(original));
+        assert!(!durable.contains("cdn.example.net"));
+        assert!(!durable.contains("transient-abc"));
+        let _ = fs::remove_dir_all(&root_path);
+
+        // Scenario 2: a provider release asset address stays the durable source.
+        let (state, session_handle, asset_handle) = trusted_remote_test_state(None);
+        let (provider_root_path, provider_root) = temp_authored_root("durable-address-provider");
+        {
+            let mut registry = lock_registry(&state).unwrap();
+            let session = registry.session_mut(&session_handle).unwrap();
+            session
+                .roots
+                .insert("root-handle".to_string(), provider_root);
+        }
+        let (payload, durable) = review_after_redirected_download(
+            &state,
+            &session_handle,
+            &asset_handle,
+            "https://objects.githubusercontent.com/signed/app.apk?token=transient-def",
+            32,
+        );
+        assert_eq!(
+            payload["source"]["downloadUrl"],
+            "https://github.com/example/project/releases/download/v2/app.apk"
+        );
+        assert!(!payload.to_string().contains("objects.githubusercontent.com"));
+        assert!(durable.contains("https://github.com/example/project/releases/download/v2/app.apk"));
+        assert!(!durable.contains("objects.githubusercontent.com"));
+        let _ = fs::remove_dir_all(&provider_root_path);
     }
 }

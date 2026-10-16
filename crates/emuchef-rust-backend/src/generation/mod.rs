@@ -11,11 +11,15 @@ mod device_profile;
 mod identifiers;
 mod remote_app_recipe;
 
-pub(crate) use app_recipe::{generate_app_recipe_draft, AppRecipeDraftRequest};
+pub(crate) use app_recipe::{
+    generate_app_recipe_draft, AppRecipeDraft, AppRecipeDraftRequest, ProposedDestination,
+};
 pub(crate) use collisions::{
     check_app_recipe_collisions, check_device_profile_collisions, AppRecipeCollisionRequest,
 };
 pub(crate) use device_profile::{
     generate_device_profile_draft, DeviceProfileDraftRequest, SafeDetectedDeviceFacts,
 };
-pub(crate) use remote_app_recipe::{generate_remote_app_recipe_draft, RemoteAppRecipeDraftRequest};
+pub(crate) use remote_app_recipe::{
+    generate_remote_app_recipe_draft, RemoteAppRecipeDraft, RemoteAppRecipeDraftRequest,
+};

@@ -61,18 +61,27 @@ documents; update the contract when those decisions change.
 ## Config Editor Authored Generation
 
 The Config Editor provides guided generation workflows for a starter app
-definition and installation recipe from a local APK, public GitHub repository,
-public GitHub release, or direct public HTTPS APK URL, and for a starter device
-profile from one connected ADB device. Rust owns APK inspection contracts, typed authored models,
-validation, canonical draft generation, collision detection, evidence
-classification, and sidecar operations. Tauri owns native paths, configured
-external tools, exact ADB serials, native save destinations, final collision
-revalidation, and trusted writes. React owns presentation and explicit author
-choices.
+definition and installation recipe from a local APK, a public GitHub, GitLab, or
+Codeberg/Forgejo repository or release, or a direct public HTTPS APK URL, and for a
+starter device profile from one connected ADB device. Rust owns APK inspection
+contracts, typed authored models, validation, canonical draft generation,
+catalog collision detection and revalidation, evidence classification, and the
+App-generator sidecar operations for combined admission, publication, and
+rollback. Tauri owns native paths, configured external tools, exact ADB serials,
+native save destinations, and trusted handles. React owns presentation and
+explicit author choices.
 
 Generation produces reviewable drafts and performs no authored-data writes until
-explicit save. The generated recipe opens through the existing Recipe document
-session. App and device profile generation remain draft workflows; App Definition
+explicit save. A save reports a confirmed publication, a confirmed failure, or an
+unknown outcome when the sidecar response is lost after submission. A confirmed
+save opens the new Recipe through the existing Recipe document session; a save
+whose catalog writes committed but whose Recipe document could not be opened stays
+a confirmed save with no document handle and reports the saved paths plus the
+structured open error for manual recovery. An unknown outcome never resubmits
+automatically and blocks saving until the author checks the recorded status or
+explicitly builds a new review, which reuses the exact reviewed identities so the
+backend still prevents a duplicate publication. App and device profile generation
+remain draft workflows; App Definition
 authoring also has a separate persistent document session for opening and
 maintaining existing or standalone schema-v1 documents.
 Schema-v1 App Definitions own intrinsic app identity and reusable app policy:
@@ -270,8 +279,12 @@ Android package facts come from APK inspection rather than filenames. The
 APK-inspection contract uses a separately configured user-supplied
 `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools.
 Local APK generation uses a required user-provided APK recipe input, and its
-generated App Definition declares a named `apk` artifact whose source strategy
-is `user_provided`. The selected APK path is session-only. The last validated
+generated App Definition declares one named `apk` artifact whose source strategy
+is `user_provided`. App Artifact IDs and Recipe IDs are explicit author edits: the
+generator proposes an artifact ID (`apk`) and the Recipe ID
+`app.<app-id>.<artifact-id>.install`, and it never silently renames an identity the
+author replaced. A colliding App Artifact ID or Recipe ID is a blocking review
+diagnostic. The selected APK path is session-only. The last validated
 analyzer executable and authored root are persisted by the trusted Tauri layer
 so later generator sessions can restore them. Verified APK inspection facts are
 transient draft review evidence and are never written into the saved App
@@ -289,39 +302,37 @@ the GitHub REST API and never scrape rendered HTML. Draft releases are always
 excluded; repository mode excludes prereleases by default, while exact
 prerelease selections require explicit confirmation. Candidate assets must be
 non-empty `.apk` files no larger than 2 GiB. Direct URL mode requires a public
-HTTPS address without credentials, fragments, or query parameters. Metadata
-responses are limited to 2 MiB, redirects to five HTTPS hops, connection time
+HTTPS address without credentials or a fragment and preserves the original query.
+Provider and repository addresses reject query parameters, which are refused
+rather than silently dropped. Metadata responses are limited to 2 MiB, redirects
+to five HTTPS hops, connection time
 to 10 seconds, and complete requests to 30 seconds. APK downloads stream into
 a generator-session temporary directory and are removed when that session is
 cancelled, completed, restarted, or dropped.
 
-Remote sources may generate either a pinned-download recipe or the same
-user-provided APK recipe shape used by local generation. The generated App
-Definition records the app's durable source: `direct_url` with the normalized
-public HTTPS APK URL for a pinned release asset, plus the lowercase trusted
-publisher SHA-256 when the author supplied one; or `latest_release` with
-provider, service origin, repository, optional asset filename pattern, and
-prerelease policy for latest-compatible mode. Pinned recipes still declare a
-`remote_file` artifact, resolve it, and install its `local_path`, and the
-user-provided strategy still retains the `user_provided_apk` recipe input
-shape. Credentials, temporary paths, response bodies, and inspected APK facts
-are not persisted. The reviewed App Definition artifact is the authority for
-the download policy the duplicate Recipe copies, so the filename pattern and
-prerelease toggle in the source step mirror that row while a draft exists and
+Remote sources generate an app-aware Recipe that references the selected App
+Artifact through a Recipe `app_artifact` reference. The generated App
+Definition records that artifact's durable source: `direct_url` with the
+normalized public HTTPS APK URL, covering both a direct APK URL and a pinned
+release asset, plus the lowercase trusted publisher SHA-256 when the author
+supplied one; `latest_release` with provider, service origin, repository,
+optional asset filename pattern, and prerelease policy for latest-compatible
+mode; or `user_provided` for the same user-provided APK recipe shape used by
+local generation. The Recipe's install, permission, and launch steps use the
+App Definition's app reference, and user-provided sources also
+declare the local APK file input that binds to it. Credentials, temporary paths,
+response bodies, and inspected APK facts are
+not persisted. The reviewed App Definition artifact owns the download policy;
+the generated Recipe references that artifact without copying the source
+policy, so the filename pattern and prerelease toggle in the source step mirror
+that row while a draft exists and
 the release preview, review gate, and save gate follow it. Only a
 latest-release source carries that policy, so a pinned artifact never resets
-either control. Generation blocks
-when that artifact is removed or replaced, and when several artifacts share
-the reviewed source strategy without the generated artifact id. Only an `apk`
-artifact can represent the reviewed source, so retyping it as a generic
-`file` blocks generation, and remote user-provided generation blocks the same
-way when its user-provided APK artifact is missing or ambiguous. A source-step
-edit rewrites only the artifact paired with the reviewed source, which is the
-artifact the backend proposes for that source, named `apk`, while it is still
-an APK whose source strategy matches the reviewed source, even after the
-author retargets its URL or repository and even when it records another
-service origin, and a single matching artifact otherwise, so an unresolvable
-pairing leaves every authored row untouched. A prerelease toggle
+either control. Generation blocks when that artifact is removed or replaced. Only
+an `apk` artifact can represent the reviewed source, so retyping it as a generic
+`file` blocks generation, and source-step edits rewrite only the single APK
+artifact whose ID equals the reviewed App Artifact ID carried by the request, so
+an unresolvable pairing leaves every authored row untouched. A prerelease toggle
 that keeps the selected asset eligible keeps the rows it is derived from.
 Starting a new
 remote download clears the source-step publisher checksum, because the freshly
@@ -346,15 +357,40 @@ persistent app-wide authored-root selection. Selecting a root in app generation
 updates that shared selection, applies it to an open recipe document, and makes
 it available to later app-generator and device-profile-generator sessions.
 Authored roots must contain existing canonical `apps`, `recipes`, and applicable
-generator destination directories. Saving rechecks APK file identity,
-revalidates both typed drafts, reruns both-directory collision analysis, writes
-and syncs temporary siblings, and publishes both files with create-new
-semantics. A failed second publication removes the first publication when
-safe. Successful publication opens the generated recipe through the existing
-recipe document session and invalidates the generator session. The Config
-Editor permits only one app or device generator wizard at a time.
+generator destination directories. Generation authors either a new App or adds one
+APK artifact to an existing App selected through an opaque trusted handle.
+Existing-App authoring preserves the App's identity, facts, definition, and other artifacts,
+locks its App ID and package, and
+reports an actionable blocking error when the inspected APK package does not match
+the selected App; the author resolves that by creating a different App rather than
+updating this one. Publication rechecks APK file identity, revalidates both typed drafts, reruns
+collision analysis, commits the Recipe first with no-clobber semantics and the App
+file last without cross-file atomic visibility, and removes a first commit only while the
+operation still owns the commit and the file's filesystem identity and content still
+match the file this operation created, otherwise preserving the Recipe
+and reporting it for recovery. Publication refuses to publish while another active
+session holds unsaved edits to the target App document, which leaves the generator
+draft intact. A confirmed save opens the generated Recipe
+through the existing Recipe document session when the backend returns its document
+ID and invalidates the generator session. The Config Editor permits only one app or
+device generator wizard at a time.
 
-Generated recipes are minimal: artifact resolution when needed, APK installation, a verified package-installed skip condition, and an optional explicit launch step only when a launcher component was verified and the author enables it. Generation does not infer configuration-copy, root, permission, force-stop, app-data, or device-plan behavior from repository prose.
+Generated recipes are minimal: an APK input binding and artifact resolution when
+needed, an APK installation step that references the App Definition, a
+parameterless verified package-installed skip condition, App-owned permission
+automation only when the author opts in, and an optional launch-once step whose
+opt-in is independent of a stored verified launcher activity. Generation does not
+infer configuration-copy, root, permission, force-stop, app-data, or device-plan
+behavior from repository prose.
+
+Permission review partitions inspected candidates into baseline (no root) and
+elevated (root-required, optional) sets, sends only the selected identities with
+the opaque inspection handle, and adds actions to App-owned policy only after an
+explicit automation opt-in. The review reports the whole resulting baseline and
+elevated sets, omits empty sets, and reports each addition's effect on existing
+Recipes. Inspected permission and source facts remain transient review evidence.
+Editing a reviewed identity, root, target App, or source invalidates the reviewed
+output, which must be rebuilt before saving.
 
 Device profile generation is available from the Config Editor File menu as an
 ephemeral guided wizard. Tauri invokes the existing device-listing and probing

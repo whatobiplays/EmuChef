@@ -77,6 +77,8 @@ export interface ArtifactDto {
   cache?: string;
   appRef?: string;
   artifact?: string;
+  /** Local input binding for an App-owned Artifact resolved from a provided file. */
+  input?: string;
 }
 
 export interface StepConditionDto {
@@ -573,6 +575,42 @@ export interface AppGeneratorSelectionResult {
   label?: string;
 }
 
+/** One catalog App Definition offered for existing-app generation. */
+export interface ExistingAppSummaryDto {
+  appPath: string;
+  appId: string | null;
+  name: string | null;
+  packageId: string | null;
+  artifactIds: string[];
+  permissionSetSummary: { baseline: number; elevated: number };
+  hasLauncher: boolean;
+  selectable: boolean;
+  diagnostics: AppGeneratorDiagnosticDto[];
+}
+
+/** Catalog inventory state behind an existing-app listing. */
+export interface ExistingAppInventoryDto {
+  state: "complete" | "incomplete";
+  diagnostics: Array<{ code: string; message: string; file?: string }>;
+}
+
+export interface AppGeneratorExistingAppsResult {
+  apps: ExistingAppSummaryDto[];
+  inventory: ExistingAppInventoryDto;
+}
+
+/** Immutable, root-bound selection of one existing App Definition. */
+export interface ExistingAppSelectionResult {
+  appHandle: string;
+  appPath: string;
+  appId: string;
+  name: string;
+  packageId: string;
+  artifactIds: string[];
+  permissionSetSummary: { baseline: number; elevated: number };
+  launcherActivity: string | null;
+}
+
 export interface ApkManifestMetadataDto {
   packageName: string;
   versionCode: string | null;
@@ -661,6 +699,8 @@ export interface AppGeneratorDiagnosticDto {
   code: string;
   message: string;
   field: string;
+  objectKind?: string;
+  objectId?: string;
 }
 
 export interface ApkInspectionResult {
@@ -837,6 +877,147 @@ export interface AppRecipeCollisionDto {
 export interface AppRecipeCollisionResult {
   collisions: AppRecipeCollisionDto[];
   blocking: boolean;
+}
+
+/** Identity, session, and permission-intent fields added to preview and review requests. */
+export interface AppGeneratorRequestContext {
+  requestId: number;
+  existingAppHandle?: string | null;
+  appArtifactId?: string | null;
+  recipeId?: string | null;
+  artifactName?: string | null;
+  /**
+   * Whether the author enabled generated permission automation for this request.
+   *
+   * An absent value means disabled: the App keeps its declared permission sets,
+   * the generated Recipe carries no permission grant steps, and no actions are
+   * added to App-owned policy.
+   */
+  permissionAutomationEnabled?: boolean;
+}
+
+/** One permission action partitioned by trusted review. */
+export interface ReviewPermissionActionDto {
+  kind: "runtime_permission" | "app_op";
+  permission: string;
+  op?: string | null;
+  mode?: string | null;
+  androidApiMin?: number | null;
+  androidApiMax?: number | null;
+}
+
+export interface ReviewPermissionSetDto {
+  actions: ReviewPermissionActionDto[];
+}
+
+export interface ReviewPermissionAutomationDto {
+  enabled: boolean;
+  baseline: ReviewPermissionSetDto;
+  elevated: ReviewPermissionSetDto & { rootRequired: true; optional: true };
+}
+
+export interface ReviewAffectedRecipeDto {
+  recipeId: string;
+  recipePath: string;
+  status: "unchanged" | "revalidated_ok" | "invalid" | "unreadable";
+  diagnostics: AppGeneratorDiagnosticDto[];
+}
+
+export interface ReviewChangeImpactDto {
+  addedArtifactIds: string[];
+  preservedArtifactIds: string[];
+  addedPermissionActions: {
+    baseline: ReviewPermissionActionDto[];
+    elevated: ReviewPermissionActionDto[];
+  };
+  affectedRecipes: ReviewAffectedRecipeDto[];
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface ReviewDestinationDto {
+  fileName: string;
+  relativePath: string;
+}
+
+export interface AppGeneratorReviewTargetDto {
+  mode: "new_app" | "existing_app";
+  appId: string;
+  appPath: string | null;
+  packageId: string;
+  packageLocked: boolean;
+}
+
+export interface AppGeneratorReviewArtifactDto {
+  appArtifactId: string;
+  name: string;
+  kind: "apk";
+  source: AppArtifactSourceDto;
+  change: "proposed" | "added" | "existing";
+}
+
+/** Immutable combined review of one App Definition and Recipe candidate. */
+export interface AppGeneratorReviewResult {
+  reviewHandle: string;
+  requestId: number;
+  blocking: boolean;
+  diagnostics: AppGeneratorDiagnosticDto[];
+  app: AppDefinitionV1Dto;
+  appCanonicalYaml: string | null;
+  recipe: RecipeDto;
+  recipeCanonicalYaml: string | null;
+  destinations: {
+    app: ReviewDestinationDto | null;
+    recipe: ReviewDestinationDto | null;
+  };
+  target: AppGeneratorReviewTargetDto;
+  /**
+   * Reviewed App Artifact.
+   *
+   * Null when the reviewed App Artifact ID does not name an artifact in the
+   * generated App Definition, which always arrives with a blocking diagnostic.
+   */
+  artifact: AppGeneratorReviewArtifactDto | null;
+  permissionAutomation: ReviewPermissionAutomationDto;
+  changeImpact: ReviewChangeImpactDto;
+  apkInspection: Record<string, unknown> | null;
+}
+
+/**
+ * Publication outcome for the review handle a save attempt consumed.
+ *
+ * A saved outcome means the catalog writes committed. The editor then opens the
+ * new Recipe document; when only that open fails, the outcome stays saved,
+ * recipe.documentId is null, and recipe.openError describes the open failure so
+ * the author can open the saved file manually.
+ */
+export type AppGeneratorPublicationOutcomeDto =
+  | {
+      outcome: "saved";
+      operationId: string;
+      app: { appPath: string };
+      recipe: {
+        recipePath: string;
+        documentId: string | null;
+        openError?: { code: string; message: string; details?: Record<string, unknown> } | null;
+      };
+      createdFiles: string[];
+      replacedFiles: string[];
+    }
+  | {
+      outcome: "failed";
+      operationId: string;
+      error: ApiError;
+      rollback: { recipeRemoved: boolean; recipeRecoveryRequired: boolean; recipePath?: string };
+    }
+  | { outcome: "unknown"; operationId: string; message: string };
+
+/** Recorded publication status, including lookups after a process restart. */
+export interface AppGeneratorPublicationStatusResult {
+  operationId: string;
+  outcome: "saved" | "failed" | "unknown";
+  confirmed: boolean;
+  recordedAt: string | null;
+  detail: Record<string, unknown> | null;
 }
 
 export interface AppRecipeSaveResult {
