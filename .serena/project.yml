@@ -172,7 +172,6 @@ ignored_memory_patterns: []
 language_servers:
 - typescript
 - rust
-- java
 - bash
 
 # list of APIs (facades or facade methods, e.g. "lsp" or "lsp.get_diagnostics_for_symbol") to include in the REPL
