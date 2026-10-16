@@ -1,0 +1,253 @@
+apps/config-editor/src/api/types.ts
+  s_a5d43bc9aa0977::t_6a81bb144919c1 122-173
+  s_a5d43bc9aa0977::t_8ceeb720559529 185
+  s_a5d43bc9aa0977::t_d91e95667a7ee4 312-318
+apps/config-editor/src/components/advancedStepInternals.logic.ts
+  s_a5d43bc9aa0977::t_1e47ef4ecd227e 2,26-34,37
+  s_a5d43bc9aa0977::t_4ea2704b9b7afb 134-150,158-161,177-193,356-445
+  s_a5d43bc9aa0977::t_46bd5bd495febf 38,164-166,341-355
+  s_a5d43bc9aa0977::t_9b4e168be04e55 194
+  s_a5d43bc9aa0977::t_29b1221093f107 446
+apps/config-editor/tests/vitest.setup.ts
+  s_a5d43bc9aa0977::t_e771a339ca5c88 4-15
+apps/config-editor/src/components/StepsEditor.tsx
+  s_a5d43bc9aa0977::t_40c517ea14191d 299-303,320-339
+  s_a5d43bc9aa0977::t_ac05282f3ad94c 463
+  s_a5d43bc9aa0977::t_b8afa24f0ebf3c 291-298,304-319,340-387
+  s_a5d43bc9aa0977::t_2a2be7055d5631 426-427,429-431
+  s_a5d43bc9aa0977::t_abef960021a19b 4-11,13
+  s_a5d43bc9aa0977::t_49ffb92cd86059 394,407
+  s_a5d43bc9aa0977::t_93b96e0c84ab37 471-477
+  s_a5d43bc9aa0977::t_d958421a6fb616 178
+apps/config-editor/tests/App.integration.dom.test.tsx
+  s_a5d43bc9aa0977::t_6415bf02b1aacb 867-908
+  s_a5d43bc9aa0977::t_7fe993915c2dc4 150
+apps/config-editor/tests/appCatalog.logic.test.ts
+  s_a5d43bc9aa0977::t_e2714a4f4c7215 1-4,6-9,11,13-14,20-21,24-137,140-146,148-149,151-156,158-159,161-163,194-201
+  s_a5d43bc9aa0977::t_657c9284b4a537 206-207,213-214,223,227-228,237
+  s_a5d43bc9aa0977::t_53c0580246893b 138-139,147,150,157,160,164-193
+  s_a5d43bc9aa0977::t_3984fe268989be 15-16,417-461
+  s_a5d43bc9aa0977::t_40cabae610714b 202-205,208-212,215-222,224-226,229-236,238-381,462-463
+  s_a5d43bc9aa0977::t_9b44adb8b82a5e 5,10,12,17-19,22
+  s_a5d43bc9aa0977::t_73e0638b9d93b6 23,382-383,411-416
+  s_a5d43bc9aa0977::t_cba18ffc1ee41e 384-410
+crates/emuchef-rust-backend/tests/ref_index_contract.rs
+  s_a5d43bc9aa0977::t_ca23df27279abd 51-53,58-60
+  s_a5d43bc9aa0977::t_05d21b313571f8 417-423
+apps/config-editor/tests/stepParams.logic.test.ts
+  s_a5d43bc9aa0977::t_bc563bf5c12e5d 787,797,806,822-860
+  s_a5d43bc9aa0977::t_0c620041e98c3a 263
+  s_a5d43bc9aa0977::t_45408653029206 215,722-736,744-765,773-786,788-796,798-805,807-821,861
+  s_a5d43bc9aa0977::t_deb05f5a36d194 212,766-772
+  s_a5d43bc9aa0977::t_833bf52ec72e97 16
+  s_a5d43bc9aa0977::t_58fb607bdb8bfa 58,161-211,213,267,269-274
+  s_a5d43bc9aa0977::t_174cb7476dbc63 737-743
+  s_a5d43bc9aa0977::t_365865b17ad574 214
+  s_a5d43bc9aa0977::t_586853a3153a78 216
+apps/config-editor/package.json
+  s_a5d43bc9aa0977::t_ad0b76515736ad 33
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.unknown_input_binding.yaml
+  s_a5d43bc9aa0977::t_d403968e3f1012 1-18
+crates/emuchef-rust-backend/src/planner/app_authority.rs
+  s_a5d43bc9aa0977::t_5c1f86f83ae2c0 236-239,412-493,495-500,525-552,554-555
+apps/config-editor/tests/ArtifactsEditor.dom.test.tsx
+  s_a5d43bc9aa0977::t_eefa88bf09cce5 440-541,623-712
+  s_a5d43bc9aa0977::t_b255ad7bceb6f1 59,63,79
+  s_a5d43bc9aa0977::t_c9533de053d12c 2,542-622
+  s_a5d43bc9aa0977::t_55259d0beebf24 192-194,200,202,206
+  s_a5d43bc9aa0977::t_0daf11c27875d6 1,3-58,60-62,64-78,80-191,195-199,201,203-205,207-249,257-265,267-270,274-277,279-281,283-338,713
+  s_a5d43bc9aa0977::t_44ff99ea823179 271-273
+  s_a5d43bc9aa0977::t_79c32a1f30474d 339-439
+  s_a5d43bc9aa0977::t_5d712e64b2f0d0 250-256,266,278,282
+crates/emuchef-rust-backend/tests/legacy_condition_round_trip.rs
+  s_a5d43bc9aa0977::t_6e767950217efc 100
+  s_a5d43bc9aa0977::t_ebedc5ebd281f9 226-316
+  s_a5d43bc9aa0977::t_90e88c1fe927c4 1-99,101-186,188-225
+  s_a5d43bc9aa0977::t_ac8790b29d5a13 187
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.unused_missing_binding.yaml
+  s_a5d43bc9aa0977::t_d403968e3f1012 1-16
+crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/phase6g_validate_after_overview.result.json
+  s_a5d43bc9aa0977::t_3df677b12f1aff 1
+crates/emuchef-rust-backend/src/catalog.rs
+  s_a5d43bc9aa0977::t_858ea80014f8ce 559-603
+  s_a5d43bc9aa0977::t_87980ca8ce6fc6 479-483
+  s_a5d43bc9aa0977::t_2681ecd53a01a4 73-261
+apps/config-editor/src/components/StepParamsEditor.tsx
+  s_a5d43bc9aa0977::t_9722a1b1f010b2 266,289-292,303,320-321,334-348,351-354,358-359
+  s_a5d43bc9aa0977::t_3d0ad38ce7836d 304-307,310
+  s_a5d43bc9aa0977::t_74fc1cc11a28d4 279,537,1349-1351,1364,1439
+  s_a5d43bc9aa0977::t_14ee33944a8a61 25,45-54,63,74
+  s_a5d43bc9aa0977::t_0cd15c4cb8cb01 249-252
+  s_a5d43bc9aa0977::t_cbe8f792836c9a 164-176,179-181,183-185,196-209,211-216,218-221
+  s_a5d43bc9aa0977::t_58b7560f9f348d 422-432,434-495,501-536,538,544-547,549-551,555-560
+  s_a5d43bc9aa0977::t_8087333e73a59c 114,137,150
+  s_a5d43bc9aa0977::t_f30c17cae2ed3e 1394,1404,1416-1424
+  s_a5d43bc9aa0977::t_b6860766acba09 6
+  s_a5d43bc9aa0977::t_88957aafe09231 159-160,210,217,253-263,269,280
+  s_a5d43bc9aa0977::t_37f886a5367fb7 177-178,182,186-193,355-357,496-500,539-543,548,552-554
+  s_a5d43bc9aa0977::t_b4d36fbbd00c9c 5
+  s_a5d43bc9aa0977::t_18abd1ed78dfe8 433
+crates/emuchef-rust-backend/tests/editor_commands.rs
+  s_a5d43bc9aa0977::t_f748bf22a36c02 45-50,52-54
+  s_a5d43bc9aa0977::t_7a4162b62c6763 397-399
+crates/emuchef-rust-backend/src/app_definition_admission.rs
+  s_a5d43bc9aa0977::t_08e711f1bcde64 1184-1204,1207-1209,1217-1223,1226-1231,1243-1245,1248-1308,1311
+apps/config-editor/tests/advancedStepInternals.logic.test.ts
+  s_a5d43bc9aa0977::t_8b36a7d92b58ef 5,9,11-12,418-511
+  s_a5d43bc9aa0977::t_02d7738d2f4561 8,387-417
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.unsupported_binding.yaml
+  s_a5d43bc9aa0977::t_d403968e3f1012 1-30
+crates/emuchef-rust-backend/tests/app_authority_validation.rs
+  s_a5d43bc9aa0977::t_bc521ce52474fa 1-376
+  s_a5d43bc9aa0977::t_e0f835497bd5b4 377-438
+apps/config-editor/src/components/stepParams.logic.ts
+  s_a5d43bc9aa0977::t_52cbeecab89652 347,353,355,362-363,382,397
+  s_a5d43bc9aa0977::t_5d41b4b155b7d2 396
+  s_a5d43bc9aa0977::t_c7373b3f97089f 71,73-95,100-104
+  s_a5d43bc9aa0977::t_91130a13ba2fb7 377-378
+  s_a5d43bc9aa0977::t_35af48799ab29b 354,356-361
+  s_a5d43bc9aa0977::t_dd6d08964fbd72 383
+  s_a5d43bc9aa0977::t_3cda19e0149b76 9-13,53-70
+  s_a5d43bc9aa0977::t_951260dafa7d9a 368
+  s_a5d43bc9aa0977::t_e11d7fe6a34d9d 72
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.incompatible_input_binding.yaml
+  s_a5d43bc9aa0977::t_d403968e3f1012 1-48
+apps/config-editor/src/App.tsx
+  s_a5d43bc9aa0977::t_34cc684e5a41b8 1124-1128
+crates/emuchef-rust-backend/src/document.rs
+  s_a5d43bc9aa0977::t_afabb709902286 212,556,1361-1375
+  s_a5d43bc9aa0977::t_00bfcd5ae4798f 531-533,536
+  s_a5d43bc9aa0977::t_c62a3c02759b82 598-605,627-649,655-659,661
+  s_a5d43bc9aa0977::t_849ed8358d105d 16-17
+  s_a5d43bc9aa0977::t_b83bae4e9c02ce 31-35,59,68,98,107,209-211,1058
+  s_a5d43bc9aa0977::t_0378fe1d262edd 249-254,519-530,534-535,537-554
+  s_a5d43bc9aa0977::t_a98999080b159d 213
+  s_a5d43bc9aa0977::t_56895997d3307b 555
+  s_a5d43bc9aa0977::t_5f13ca6b63a15f 557
+  s_a5d43bc9aa0977::t_818452859c5e61 660
+crates/emuchef-rust-backend/src/dto.rs
+  s_a5d43bc9aa0977::t_5698f1e60e18a1 28
+  s_a5d43bc9aa0977::t_0a90bf8681ef49 141
+apps/config-editor/tests/App.generator.integration.dom.test.tsx
+  s_a5d43bc9aa0977::t_d83f845752dceb 128
+apps/config-editor/src/components/AdvancedStepInternalsEditor.tsx
+  s_a5d43bc9aa0977::t_01a6fa19ec8441 4,6,8,12-13,31-37
+  s_a5d43bc9aa0977::t_2f9d052af58fb1 703
+  s_a5d43bc9aa0977::t_8d427a11ecab8e 411-412
+  s_a5d43bc9aa0977::t_bc63413c8b2322 7,92
+  s_a5d43bc9aa0977::t_83477a1ff522b8 408,410,413,419,425-426,439,459,468,482
+  s_a5d43bc9aa0977::t_2870c754972ced 495-497,499-502,508-510,512-514
+  s_a5d43bc9aa0977::t_8e87aeb05c6926 760
+  s_a5d43bc9aa0977::t_83a46486ad40f3 735-738
+  s_a5d43bc9aa0977::t_7eda64f0bbb3c3 614-619,621,623-676,682-685,699,710-734
+  s_a5d43bc9aa0977::t_1680ae5ccb4693 776,785,787,796,824,852-865,917
+  s_a5d43bc9aa0977::t_85f5e0125e815b 409,414-418,420-424,427-438
+  s_a5d43bc9aa0977::t_6a14042108c598 440-444,483
+  s_a5d43bc9aa0977::t_4be7a919850d37 449-458,460,467,469,476-477,479,484-488,490-494,498,511,516-520,524,544-549,561,574,586-610
+  s_a5d43bc9aa0977::t_eab35a564f083a 1007-1104
+  s_a5d43bc9aa0977::t_a667581d045d98 965-1006
+  s_a5d43bc9aa0977::t_982c34de0eb692 46,67,89-91,93
+  s_a5d43bc9aa0977::t_92b2093b3ea0b1 515
+  s_a5d43bc9aa0977::t_4af41ad2379d6c 611
+crates/emuchef-rust-backend/src/commands.rs
+  s_a5d43bc9aa0977::t_3fd8d93787fce0 40-47,178-180,212,368-395,400-402,409
+apps/config-editor/src/components/ArtifactsEditor.tsx
+  s_a5d43bc9aa0977::t_c5917e41147e5f 466-469
+  s_a5d43bc9aa0977::t_dea9003b73e186 200,203,208,211-221,223,265-302,409-410
+  s_a5d43bc9aa0977::t_ef05404ec71f96 695-697
+  s_a5d43bc9aa0977::t_89afb69ac92ce3 224-227,230-234,243-253,303-320,322-323,327-340,342-349,352-355,361-367,369-373,375,378,400,406-407,496-499,526-544,569-573,582,633,635-636,652-676
+  s_a5d43bc9aa0977::t_2c72a4cc7f15bc 447-465,474-495,546-558,561-568,574-581,583-607,609-625,627-632,634,637-651,677-679,681-694,698-702
+  s_a5d43bc9aa0977::t_b2bc0dfae1c0cb 608
+  s_a5d43bc9aa0977::t_cffdd31a8dd427 4-12,15
+  s_a5d43bc9aa0977::t_657803f46a3ae4 43
+  s_a5d43bc9aa0977::t_7e7b292c114e97 470-473
+  s_a5d43bc9aa0977::t_148dcbcd746f70 680
+  s_a5d43bc9aa0977::t_5dad7e2a20e754 140,149-157,162-178,180,183
+  s_a5d43bc9aa0977::t_0474feda14e76c 626
+  s_a5d43bc9aa0977::t_9ee3583dddf574 228-229,341,350-351,356-360,368,374,376-377,379-399,401-405
+  s_a5d43bc9aa0977::t_e30ddad792bf0f 500-525,545
+  s_a5d43bc9aa0977::t_28f03e1d9b78c7 321,324-326
+  s_a5d43bc9aa0977::t_cc16cdf6d3240e 559-560
+crates/emuchef-rust-backend/src/session.rs
+  s_a5d43bc9aa0977::t_cd1376f87b2730 439-445
+crates/emuchef-rust-backend/tests/app_catalog_projection.rs
+  s_a5d43bc9aa0977::t_cf93fa1fb42267 174-176,178,236-245
+  s_a5d43bc9aa0977::t_65eac39a39d075 1-173,177,179-235,246-316
+  s_a5d43bc9aa0977::t_76f4155a6e025d 317-365
+crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/README.md
+  s_a5d43bc9aa0977::t_391d0246f70c68 10-14
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.launcher_unavailable.yaml
+  s_a5d43bc9aa0977::t_10350524ed7b44 1-23
+apps/config-editor/src/api/commands.ts
+  s_a5d43bc9aa0977::t_59d901e68d2d35 11-17,19-24
+apps/config-editor/tests/StepsEditor.dom.test.tsx
+  s_a5d43bc9aa0977::t_1d52a262b7c95b 1-245,278-280,282-284,286-293,301-324,359,361-362,371-418,474-525,531-532,535-536,627-665,667-685,706-741,1011
+  s_a5d43bc9aa0977::t_3b4f225c93c2d1 325,354-358,360,363-370,526-530,533-534,666
+  s_a5d43bc9aa0977::t_778eaba260258c 537-592
+  s_a5d43bc9aa0977::t_9a82cffecfbe8e 326-339
+  s_a5d43bc9aa0977::t_ae99235fc508ad 686-705
+  s_a5d43bc9aa0977::t_19be3b44dbdd42 742-759,767-800,808,1010
+  s_a5d43bc9aa0977::t_2008c3702428e4 593-626
+  s_a5d43bc9aa0977::t_246fc028fe4ca9 246-277,281,285,294-300,340-353,760-766,801-807,809-1009
+  s_a5d43bc9aa0977::t_6efd5c636fa4a0 419-473
+crates/emuchef-rust-backend/tests/editor_app_artifact_commands.rs
+  s_a5d43bc9aa0977::t_d285e2ba0c1379 1-106,130-385
+  s_a5d43bc9aa0977::t_03eae3ecf8d77d 107-129
+  s_a5d43bc9aa0977::t_ad2bd50fcb9677 386-475
+apps/config-editor/src/components/appCatalog.logic.ts
+  s_a5d43bc9aa0977::t_fefc7bcbc1680a 151-160,165-166,175-178,190,197-204,209,211,213-214,217-229,231,245-248,265
+  s_a5d43bc9aa0977::t_3ee4c2de083ab2 1-2,4,8-25,28-53,56-57,59-62,64-65,67-68,70-86,88-89,91-150,161-164,167-174,179-189,191-196,205-208,210,212,215-216,230,459,461-462,482-490
+  s_a5d43bc9aa0977::t_a4be5fef35b7b5 428-433,439-441,443-446,449-451,460
+  s_a5d43bc9aa0977::t_91aefecc98daaa 3,26-27,54-55,58,63,66,69,87,90
+  s_a5d43bc9aa0977::t_00f98aeaa0ac71 463-481
+  s_a5d43bc9aa0977::t_396b5c86060ce2 5-7,232-244,249-264,266-275,339-427,434-438,442,447-448,452-458
+  s_a5d43bc9aa0977::t_1e47ef4ecd227e 276-338
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/apps/demo_app.yaml
+  s_f100845bb50600::t_d18a3b98e059b8 1-34
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/apps/second_app.yaml
+  s_f100845bb50600::t_deb50c0f9450af 1-14
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.app.install.yaml
+  s_f100845bb50600::t_3aff55306fe4a5 1-111
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.cross_app_artifact.yaml
+  s_f100845bb50600::t_33835a45db4955 1-31
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.legacy_package_condition.yaml
+  s_f100845bb50600::t_93766d8bcf5c72 1-26
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.missing_permission_set.yaml
+  s_f100845bb50600::t_9cb429a6300932 1-25
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.permission_set_without_app_ref.yaml
+  s_f100845bb50600::t_9de64c47277f2c 1-25
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.retained_unknown_app.yaml
+  s_f100845bb50600::t_650a4ba38e1906 1-23
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.target_usage.yaml
+  s_f100845bb50600::t_5e948594aa55f5 1-38
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.undefined_permission_set.yaml
+  s_f100845bb50600::t_9c348344d35436 1-26
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo.unused_unknown_artifact.yaml
+  s_f100845bb50600::t_be7f5737ae1ea5 1-15
+crates/emuchef-rust-backend/tests/fixtures/authored_root/editor_app_catalog/authored/recipes/demo_recipe.yaml
+  s_f100845bb50600::t_999b6552d8d86b 1-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "479c0100cb61155c53e791a5e243075caa09572a",
+  "prompts": {},
+  "sessions": {
+    "s_a5d43bc9aa0977": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14385-0254-7852-8d2a-2b75ef3d4cf8",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_f100845bb50600": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a143c6-bf18-7cf1-b119-534f037d1207",
+        "model": "unknown"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
