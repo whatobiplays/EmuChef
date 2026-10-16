@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use crate::app_definition_admission::{
     verify_admission_snapshot, AdmissionPublishKind, AppDefinitionSaveAdmission,
+    GeneratedAppPairSnapshot,
 };
 use crate::authored_models::{emit_app_definition_yaml, AppDefinitionV1};
 
@@ -41,6 +42,20 @@ impl OpenedAppDefinitionFile {
     /// Return the filesystem identity captured with the file bytes.
     pub fn identity(&self) -> &FileIdentity {
         &self.identity
+    }
+
+    /// Build the placeholder revision for a generated catalog file that does
+    /// not exist yet.
+    ///
+    /// The placeholder carries no bytes or trusted identity. Publication
+    /// verifies that the destination is still absent before writing, so the
+    /// placeholder is never compared against captured disk state.
+    pub(crate) fn absent_destination(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            bytes: Vec::new(),
+            identity: FileIdentity::absent(),
+        }
     }
 }
 
@@ -76,6 +91,27 @@ impl FileIdentity {
             Self {
                 length: metadata.len(),
                 modified: metadata.modified().ok(),
+            }
+        }
+    }
+
+    /// Build the placeholder identity used by a not-yet-created destination.
+    fn absent() -> Self {
+        #[cfg(unix)]
+        {
+            Self {
+                length: 0,
+                modified: None,
+                device: 0,
+                inode: 0,
+                permission_mode: 0,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                length: 0,
+                modified: None,
             }
         }
     }
@@ -342,6 +378,500 @@ where
         bytes: canonical_yaml.into_bytes(),
         identity: temporary_identity,
     })
+}
+
+/// Outcome of one successful generated App/Recipe pair publication.
+#[derive(Debug)]
+pub(crate) struct GeneratedPairOutcome {
+    /// Published App Definition revision, including the new file identity.
+    pub(crate) app: OpenedAppDefinitionFile,
+    /// Canonical destination of the Recipe created by this publication.
+    pub(crate) recipe_path: PathBuf,
+    /// True when the publication replaced an existing App file.
+    pub(crate) app_replaced: bool,
+}
+
+/// Ownership report for a pair whose Recipe was created before the final App
+/// commit failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GeneratedPairRollback {
+    pub(crate) recipe_path: PathBuf,
+    /// True when the new Recipe was removed by this publication.
+    pub(crate) recipe_removed: bool,
+    /// True when the new Recipe no longer matches this publication's own
+    /// content and identity, so it was preserved for manual recovery.
+    pub(crate) recipe_recovery_required: bool,
+}
+
+/// Failure of one generated App/Recipe pair publication.
+#[derive(Debug)]
+pub(crate) enum GeneratedPairPersistFailure {
+    /// Nothing was written; the caller reports a plain refusal.
+    Refused(AppDefinitionPersistenceError),
+    /// The new Recipe was committed but the final App commit failed.
+    RecipeCommitted {
+        error: AppDefinitionPersistenceError,
+        rollback: GeneratedPairRollback,
+    },
+}
+
+/// Publish one admitted generated App/Recipe pair.
+///
+/// The App and the new Recipe are staged as synchronized temporary files,
+/// then the Recipe is created with no-clobber semantics first and the App is
+/// committed atomically last. Full combined verification runs before the
+/// first write; after that only the two destinations owned by this operation
+/// are re-checked, so the Recipe this publication creates never invalidates
+/// its own captured inventory. When the final App commit fails, the new
+/// Recipe is removed only while it still matches this publication's exact
+/// identity and content; any other state is preserved for recovery.
+pub(crate) fn persist_generated_app_pair(
+    pair: &GeneratedAppPairSnapshot,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure> {
+    persist_generated_app_pair_with(pair, || {})
+}
+
+/// Run pair publication with a hook immediately before the final App commit.
+///
+/// The hook runs after the Recipe commit is durable and before the App commit,
+/// so tests can deterministically simulate an external writer claiming a
+/// destination in that window without timing-dependent threads.
+pub(crate) fn persist_generated_app_pair_with<BeforeCheck>(
+    pair: &GeneratedAppPairSnapshot,
+    before_final_check: BeforeCheck,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure>
+where
+    BeforeCheck: FnOnce(),
+{
+    let refused = GeneratedPairPersistFailure::Refused;
+    let _guard = APP_DEFINITION_PUBLISH_LOCK
+        .lock()
+        .map_err(|_| {
+            refused(AppDefinitionPersistenceError::new(
+                "app_definition_publish_unavailable",
+                "App Definition saves are unavailable because the save lock was poisoned.",
+                None,
+            ))
+        })?;
+
+    let app_snapshot = &pair.app_snapshot;
+    let canonical_app_yaml = emit_app_definition_yaml(&app_snapshot.candidate).map_err(|error| {
+        refused(AppDefinitionPersistenceError::new(
+            error.code(),
+            error.message(),
+            Some(&app_snapshot.destination),
+        ))
+    })?;
+
+    verify_admission_snapshot(app_snapshot).map_err(refused)?;
+    validate_destination(app_snapshot).map_err(refused)?;
+    validate_generated_recipe_destination(pair).map_err(refused)?;
+
+    let app_parent = app_snapshot.destination.parent().ok_or_else(|| {
+        refused(AppDefinitionPersistenceError::new(
+            "app_definition_destination_invalid",
+            "The App Definition destination has no parent directory.",
+            Some(&app_snapshot.destination),
+        ))
+    })?;
+    let recipe_parent = pair.recipe_destination.parent().ok_or_else(|| {
+        refused(AppDefinitionPersistenceError::new(
+            "recipe_destination_invalid",
+            "The generated Recipe destination has no parent directory.",
+            Some(&pair.recipe_destination),
+        ))
+    })?;
+
+    let mut app_temporary = tempfile::NamedTempFile::new_in(app_parent).map_err(|error| {
+        refused(AppDefinitionPersistenceError::io(
+            "app_definition_publish_failed",
+            "A synchronized temporary file could not be created beside the App Definition",
+            app_parent,
+            error,
+        ))
+    })?;
+    app_temporary
+        .write_all(canonical_app_yaml.as_bytes())
+        .map_err(|error| {
+            refused(AppDefinitionPersistenceError::io(
+                "app_definition_publish_failed",
+                "Canonical App Definition YAML could not be written to the temporary file",
+                app_temporary.path(),
+                error,
+            ))
+        })?;
+    #[cfg(unix)]
+    if app_snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile {
+        use std::os::unix::fs::PermissionsExt;
+        // Apply the captured mode after writing, since writing may clear
+        // special permission bits.
+        app_temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(
+                app_snapshot.opened_file.identity.permission_mode,
+            ))
+            .map_err(|error| {
+                refused(AppDefinitionPersistenceError::io(
+                    "app_definition_publish_failed",
+                    "The opened App Definition permission bits could not be preserved",
+                    app_temporary.path(),
+                    error,
+                ))
+            })?;
+    }
+    app_temporary.as_file().sync_all().map_err(|error| {
+        refused(AppDefinitionPersistenceError::io(
+            "app_definition_publish_failed",
+            "The temporary App Definition file could not be synchronized",
+            app_temporary.path(),
+            error,
+        ))
+    })?;
+    let app_temporary_identity =
+        FileIdentity::from_metadata(&app_temporary.as_file().metadata().map_err(|error| {
+            refused(AppDefinitionPersistenceError::io(
+                "app_definition_publish_failed",
+                "The synchronized temporary App Definition identity could not be read",
+                app_temporary.path(),
+                error,
+            ))
+        })?);
+
+    let mut recipe_temporary = tempfile::NamedTempFile::new_in(recipe_parent).map_err(|error| {
+        refused(AppDefinitionPersistenceError::io(
+            "recipe_publish_failed",
+            "A synchronized temporary file could not be created beside the generated Recipe",
+            recipe_parent,
+            error,
+        ))
+    })?;
+    recipe_temporary
+        .write_all(pair.recipe_canonical_yaml.as_bytes())
+        .map_err(|error| {
+            refused(AppDefinitionPersistenceError::io(
+                "recipe_publish_failed",
+                "Canonical Recipe YAML could not be written to the temporary file",
+                recipe_temporary.path(),
+                error,
+            ))
+        })?;
+    recipe_temporary.as_file().sync_all().map_err(|error| {
+        refused(AppDefinitionPersistenceError::io(
+            "recipe_publish_failed",
+            "The temporary Recipe file could not be synchronized",
+            recipe_temporary.path(),
+            error,
+        ))
+    })?;
+    let recipe_temporary_identity =
+        FileIdentity::from_metadata(&recipe_temporary.as_file().metadata().map_err(|error| {
+            refused(AppDefinitionPersistenceError::io(
+                "recipe_publish_failed",
+                "The synchronized temporary Recipe identity could not be read",
+                recipe_temporary.path(),
+                error,
+            ))
+        })?);
+
+    // Re-check only the destinations this publication owns. The complete
+    // catalog verification above is authoritative for everything else;
+    // recapturing it here would reject the Recipe this operation creates.
+    verify_app_destination_identity(app_snapshot).map_err(refused)?;
+    validate_generated_recipe_destination(pair).map_err(refused)?;
+
+    if let Err(error) = recipe_temporary.persist_noclobber(&pair.recipe_destination) {
+        return Err(refused(if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppDefinitionPersistenceError::new(
+                "recipe_destination_exists",
+                "A file appeared at the generated Recipe destination before publication.",
+                Some(&pair.recipe_destination),
+            )
+        } else {
+            AppDefinitionPersistenceError::io(
+                "recipe_publish_failed",
+                "The generated Recipe could not be published without overwriting",
+                &pair.recipe_destination,
+                error.error,
+            )
+        }));
+    }
+    sync_parent_best_effort(recipe_parent);
+
+    before_final_check();
+    verify_catalog_state_before_final_commit(pair, &recipe_temporary_identity).map_err(|error| {
+        let rollback = rollback_created_recipe(pair, &recipe_temporary_identity);
+        GeneratedPairPersistFailure::RecipeCommitted { error, rollback }
+    })?;
+    let app_commit = match app_snapshot.publish_kind {
+        AdmissionPublishKind::ReplaceOpenedFile => {
+            app_temporary.persist(&app_snapshot.destination).map(|_| ())
+        }
+        AdmissionPublishKind::CreateCatalogApp => app_temporary
+            .persist_noclobber(&app_snapshot.destination)
+            .map(|_| ()),
+    };
+    if let Err(error) = app_commit {
+        let persistence_error = if app_snapshot.publish_kind == AdmissionPublishKind::CreateCatalogApp
+            && error.error.kind() == std::io::ErrorKind::AlreadyExists
+        {
+            AppDefinitionPersistenceError::new(
+                "app_definition_stale_state",
+                "The requested App Definition destination appeared after save admission; validate again before saving.",
+                Some(&app_snapshot.destination),
+            )
+        } else {
+            AppDefinitionPersistenceError::io(
+                "app_definition_publish_failed",
+                "The App Definition could not be published atomically",
+                &app_snapshot.destination,
+                error.error,
+            )
+        };
+        let rollback = rollback_created_recipe(pair, &recipe_temporary_identity);
+        return Err(GeneratedPairPersistFailure::RecipeCommitted {
+            error: persistence_error,
+            rollback,
+        });
+    }
+    sync_parent_best_effort(app_parent);
+
+    Ok(GeneratedPairOutcome {
+        app: OpenedAppDefinitionFile {
+            path: app_snapshot.destination.clone(),
+            bytes: canonical_app_yaml.into_bytes(),
+            identity: app_temporary_identity,
+        },
+        recipe_path: pair.recipe_destination.clone(),
+        app_replaced: app_snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile,
+    })
+}
+
+/// Re-check the captured catalog state and the already committed Recipe
+/// immediately before the final App commit.
+///
+/// Publication is the only operation allowed to change the catalog between
+/// admission and this point, and the sole change it owns is the new Recipe at
+/// the publication's Recipe destination. Every other entry must still match the
+/// identity and bytes captured at admission: an App edited after the Recipe
+/// commit, or a dependent Recipe edited in the same window, refuses the final
+/// commit so the App is never published on state admission did not validate.
+/// The owned Recipe itself must still be present with its committed bytes and
+/// filesystem identity; the directory comparison tolerates that one addition,
+/// so it cannot notice the Recipe's deletion on its own.
+fn verify_catalog_state_before_final_commit(
+    pair: &GeneratedAppPairSnapshot,
+    committed_recipe_identity: &FileIdentity,
+) -> Result<(), AppDefinitionPersistenceError> {
+    verify_app_destination_identity(&pair.app_snapshot)?;
+    verify_owned_recipe_committed(pair, committed_recipe_identity)?;
+    let prepared_recipe_path = pair.recipe_destination.as_path();
+    for directory in &pair.app_snapshot.directories {
+        if !catalog_directory_is_unchanged_except_owned_recipe(
+            directory,
+            prepared_recipe_path,
+            pair.recipe_canonical_yaml.as_bytes(),
+        )? {
+            return Err(stale_file(&directory.path));
+        }
+    }
+    Ok(())
+}
+
+/// Require the Recipe this publication committed to still be present with the
+/// committed bytes and filesystem identity.
+///
+/// An external removal or replacement in the commit window refuses the final
+/// App commit: the App is never published without the Recipe saved alongside
+/// it, and a foreign file left at the destination is preserved for recovery
+/// instead of being adopted or removed.
+fn verify_owned_recipe_committed(
+    pair: &GeneratedAppPairSnapshot,
+    committed_identity: &FileIdentity,
+) -> Result<(), AppDefinitionPersistenceError> {
+    match fs::symlink_metadata(&pair.recipe_destination) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(stale_file(&pair.recipe_destination));
+        }
+        Err(error) => {
+            return Err(AppDefinitionPersistenceError::io(
+                "recipe_destination_invalid",
+                "The generated Recipe destination could not be inspected",
+                &pair.recipe_destination,
+                error,
+            ));
+        }
+    }
+    let current = capture_file_snapshot(&pair.recipe_destination)?;
+    if current.bytes != pair.recipe_canonical_yaml.as_bytes()
+        || &current.identity != committed_identity
+    {
+        return Err(stale_file(&pair.recipe_destination));
+    }
+    Ok(())
+}
+
+/// Compare one captured catalog directory against the current disk state.
+///
+/// Returns true when the directory still holds every captured file with its
+/// captured identity and bytes. The only permitted addition is the Recipe this
+/// publication created at `prepared_recipe_path` with `prepared_bytes`.
+fn catalog_directory_is_unchanged_except_owned_recipe(
+    captured: &CatalogDirectorySnapshot,
+    prepared_recipe_path: &Path,
+    prepared_bytes: &[u8],
+) -> Result<bool, AppDefinitionPersistenceError> {
+    let parent = captured.path.parent().unwrap_or(&captured.path);
+    let current = capture_catalog_directory(&captured.path, parent)?;
+    if current.path != captured.path || current.identity != captured.identity {
+        return Ok(false);
+    }
+    let mut matched = vec![false; captured.files.len()];
+    for file in &current.files {
+        if file.path == prepared_recipe_path {
+            if file.bytes != prepared_bytes {
+                return Ok(false);
+            }
+            continue;
+        }
+        let Some(index) = captured
+            .files
+            .iter()
+            .position(|expected| expected.path == file.path)
+        else {
+            return Ok(false);
+        };
+        if matched[index]
+            || captured.files[index].bytes != file.bytes
+            || captured.files[index].identity != file.identity
+        {
+            return Ok(false);
+        }
+        matched[index] = true;
+    }
+    Ok(matched.iter().all(|seen| *seen))
+}
+
+/// Re-check only the App destination owned by this publication.
+fn verify_app_destination_identity(
+    snapshot: &crate::app_definition_admission::AdmissionSnapshot,
+) -> Result<(), AppDefinitionPersistenceError> {
+    if snapshot.expect_new_destination {
+        return match fs::symlink_metadata(&snapshot.destination) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(stale_file(&snapshot.destination)),
+            Err(error) => Err(AppDefinitionPersistenceError::io(
+                "app_definition_destination_invalid",
+                "The App Definition destination could not be inspected",
+                &snapshot.destination,
+                error,
+            )),
+        };
+    }
+    let current = capture_file_snapshot(&snapshot.opened_file.path)?;
+    if current.path != snapshot.opened_file.path
+        || current.bytes != snapshot.opened_file.bytes
+        || current.identity != snapshot.opened_file.identity
+    {
+        return Err(stale_file(&snapshot.opened_file.path));
+    }
+    Ok(())
+}
+
+/// Validate the Recipe destination owned by this publication.
+fn validate_generated_recipe_destination(
+    pair: &GeneratedAppPairSnapshot,
+) -> Result<(), AppDefinitionPersistenceError> {
+    let destination = &pair.recipe_destination;
+    if !is_yaml_catalog_file(destination) {
+        return Err(AppDefinitionPersistenceError::new(
+            "recipe_destination_invalid",
+            "The generated Recipe destination must be a YAML catalog file.",
+            Some(destination),
+        ));
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        AppDefinitionPersistenceError::new(
+            "recipe_destination_invalid",
+            "The generated Recipe destination has no parent directory.",
+            Some(destination),
+        )
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        AppDefinitionPersistenceError::io(
+            "recipe_destination_invalid",
+            "The generated Recipe destination directory is unavailable",
+            parent,
+            error,
+        )
+    })?;
+    if canonical_parent != parent {
+        return Err(AppDefinitionPersistenceError::new(
+            "recipe_destination_invalid",
+            "The generated Recipe destination must use its canonical directory path.",
+            Some(parent),
+        ));
+    }
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(AppDefinitionPersistenceError::new(
+            "recipe_destination_exists",
+            "A file already exists at the generated Recipe destination.",
+            Some(destination),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppDefinitionPersistenceError::io(
+            "recipe_destination_invalid",
+            "The generated Recipe destination could not be inspected",
+            destination,
+            error,
+        )),
+    }
+}
+
+/// Remove the Recipe this publication created when it still matches the
+/// written content and identity; otherwise report the state truthfully.
+///
+/// An already-absent destination means the committed Recipe is gone without
+/// this publication removing it, so nothing of this publication remains to
+/// recover. Any other mismatch means a foreign file occupies the destination:
+/// it is preserved and recovery is reported.
+fn rollback_created_recipe(
+    pair: &GeneratedAppPairSnapshot,
+    created_identity: &FileIdentity,
+) -> GeneratedPairRollback {
+    let recipe_path = pair.recipe_destination.clone();
+    if let Err(error) = fs::symlink_metadata(&recipe_path) {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return GeneratedPairRollback {
+                recipe_path,
+                recipe_removed: false,
+                recipe_recovery_required: false,
+            };
+        }
+    }
+    let matches_creation = capture_file_snapshot(&recipe_path).is_ok_and(|current| {
+        current.bytes == pair.recipe_canonical_yaml.as_bytes()
+            && &current.identity == created_identity
+    });
+    if !matches_creation {
+        return GeneratedPairRollback {
+            recipe_path,
+            recipe_removed: false,
+            recipe_recovery_required: true,
+        };
+    }
+    match fs::remove_file(&recipe_path) {
+        Ok(()) => GeneratedPairRollback {
+            recipe_path,
+            recipe_removed: true,
+            recipe_recovery_required: false,
+        },
+        Err(_) => GeneratedPairRollback {
+            recipe_path,
+            recipe_removed: false,
+            recipe_recovery_required: true,
+        },
+    }
 }
 
 fn validate_destination(

@@ -15,8 +15,8 @@ use crate::authored_models::{
     APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
 };
 use crate::model::{
-    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides, Step,
-    StepCondition, StepConstraints,
+    AppArtifactInputBinding, AppArtifactReference, InputDeclaration, InputValidation, OrderedMap,
+    ParamValue, Recipe, RecipeArtifact, RecipeProvides, Step, StepCondition, StepConstraints,
 };
 use indexmap::IndexMap;
 
@@ -30,10 +30,22 @@ use super::identifiers::{normalize_identifier_component, recipe_local_token};
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct AppRecipeDraftRequest {
     pub facts: ApkInspectionFacts,
+    /// Whether the author enabled permission automation for this request.
+    ///
+    /// Permission automation is opt-in, so an absent flag means disabled and
+    /// the selection below only carries trusted action identities.
+    #[serde(default)]
+    pub permission_automation_enabled: bool,
     #[serde(default)]
     pub permission_automation: Option<PermissionAutomationSelection>,
     #[serde(default)]
     pub app: Option<AppDefinitionV1>,
+    #[serde(default)]
+    pub existing_app: Option<AppDefinitionV1>,
+    #[serde(default)]
+    pub app_artifact_id: Option<String>,
+    #[serde(default)]
+    pub recipe_id: Option<String>,
     #[serde(default)]
     pub recipe: Option<RecipeDraftEdits>,
     #[serde(default)]
@@ -495,75 +507,191 @@ struct FieldEvidence {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProposedDestination {
-    file_name: Option<String>,
-    relative_path: Option<String>,
+pub(crate) struct ProposedDestination {
+    pub(crate) file_name: Option<String>,
+    pub(crate) relative_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppRecipeDraft {
-    app: AppDefinitionV1,
+    pub(crate) app: AppDefinitionV1,
     /// Transient APK inspection evidence shown during draft review.
     ///
     /// The evidence never becomes part of the saved app definition, so the
     /// canonical YAML an author reviews matches the YAML that is written.
-    apk_inspection: Option<Value>,
-    recipe: Value,
-    recipe_edits: RecipeDraftEdits,
-    app_canonical_yaml: Option<String>,
-    recipe_canonical_yaml: Option<String>,
-    app_destination: ProposedDestination,
-    recipe_destination: ProposedDestination,
+    pub(crate) apk_inspection: Option<Value>,
+    pub(crate) recipe: Value,
+    pub(crate) recipe_edits: RecipeDraftEdits,
+    pub(crate) app_canonical_yaml: Option<String>,
+    pub(crate) recipe_canonical_yaml: Option<String>,
+    pub(crate) app_destination: ProposedDestination,
+    pub(crate) recipe_destination: ProposedDestination,
     evidence: Vec<FieldEvidence>,
-    diagnostics: Vec<DraftDiagnostic>,
-    blocking: bool,
+    pub(crate) diagnostics: Vec<DraftDiagnostic>,
+    pub(crate) blocking: bool,
 }
 
-/// Generate or revalidate both authored documents without filesystem writes.
 pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRecipeDraft {
-    let proposed_app = proposed_app(&request.facts);
-    let mut app = request.app.unwrap_or_else(|| proposed_app.clone());
-    let mut diagnostics = request
+    let existing_mode = request.existing_app.is_some();
+    let permission_automation_enabled = request.permission_automation_enabled;
+    let requested_selection = request
         .permission_automation
         .as_ref()
-        .into_iter()
-        .flat_map(PermissionAutomationSelection::validation_issues)
-        .map(|issue| error(issue.code, issue.message, &issue.field))
-        .collect::<Vec<_>>();
-    if request
-        .permission_automation
-        .as_ref()
-        .is_some_and(|selection| !selection.is_empty())
-    {
+        .filter(|selection| !selection.is_empty());
+    let mut diagnostics = Vec::new();
+    // Permission automation is opt-in. The request flag states the author's
+    // intent and the selection only carries trusted action identities, so a
+    // disabled request never adds actions: selected actions submitted with the
+    // flag off are contradictory and block instead of being silently dropped.
+    if !permission_automation_enabled {
+        if requested_selection.is_some() {
+            diagnostics.push(error(
+                "apk_permission_automation_disabled",
+                "Permission automation is disabled, so selected permission actions cannot be applied. Enable permission automation or clear the selected actions.",
+                "recipe.permissionAutomation.enabled",
+            ));
+        }
+    } else if let Some(selection) = requested_selection {
+        diagnostics.extend(
+            selection
+                .validation_issues()
+                .into_iter()
+                .map(|issue| error(issue.code, issue.message, &issue.field)),
+        );
+        if request.facts.package_name.as_deref() != Some(selection.package_name.as_str()) {
+            diagnostics.push(error(
+                "apk_permission_automation_package_mismatch",
+                "Permission automation must use the package name from the inspected APK manifest.",
+                "recipe.permissionAutomation.packageName",
+            ));
+        }
+    }
+
+    let requested_artifact_id = request
+        .app_artifact_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let artifact_id = match &requested_artifact_id {
+        Some(value) => value.clone(),
+        None if existing_mode => proposed_existing_artifact_id(&request.facts),
+        None => DEFAULT_APP_ARTIFACT_ID.to_string(),
+    };
+    if !crate::authored_models::is_valid_identifier(&artifact_id) {
         diagnostics.push(error(
-            "apk_permission_automation_strategy_unsupported",
-            "Permission automation is supported only for package-enforced remote APK recipes.",
-            "recipe.permissionAutomation",
+            "app_artifact_id_invalid",
+            "App Artifact ID must be a valid authored identifier.",
+            "appArtifactId",
         ));
     }
-    if let Some(mappings) = request.mappings {
+
+    let proposed_app = proposed_app(&request.facts, &artifact_id);
+    let mut app = if existing_mode {
+        if request.app.is_some() {
+            diagnostics.push(error(
+                "existing_app_edits_unsupported",
+                "Existing-app generation preserves the selected App Definition and edits only the new artifact and additive permission actions.",
+                "app",
+            ));
+        }
+        if request.mappings.is_some() {
+            diagnostics.push(error(
+                "existing_app_mapping_edits_unsupported",
+                "Existing-app generation cannot rewrite the selected App Definition artifact or target maps.",
+                "mappings",
+            ));
+        }
+        request
+            .existing_app
+            .clone()
+            .unwrap_or_else(|| proposed_app.clone())
+    } else {
+        request.app.clone().unwrap_or_else(|| proposed_app.clone())
+    };
+
+    // The App Definition package identity must match the inspected APK
+    // manifest: generation installs the reviewed APK, so a mismatched package
+    // cannot produce an installable pair, whether the App Definition is
+    // authored or selected.
+    if let Some(inspected_package) = request
+        .facts
+        .package_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if app.package_id.trim() != inspected_package {
+            diagnostics.push(error(
+                "app_package_mismatch",
+                "The inspected APK package name must match the App Definition package_id; choose the App Definition that owns the inspected package or start over from the correct APK.",
+                "packageId",
+            ));
+        }
+    }
+
+    let artifact_id_is_valid = crate::authored_models::is_valid_identifier(&artifact_id);
+    if existing_mode {
+        if app.artifacts.contains_key(&artifact_id) {
+            diagnostics.push(error(
+                "app_artifact_id_collision",
+                "The selected App Definition already declares this App Artifact ID; choose a different App Artifact ID.",
+                "appArtifactId",
+            ));
+        } else if artifact_id_is_valid {
+            app.artifacts
+                .insert(artifact_id.clone(), proposed_local_apk_artifact(&app));
+        }
+    } else if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
     }
-    // The generated recipe installs the local APK the author inspected, so the
-    // app definition must keep declaring that artifact. Structured mapping
-    // edits that remove it, retype it as a generic file, or swap in a remote
-    // source would otherwise save an app definition and recipe that disagree
-    // about where the installed APK comes from.
+
+    // The generated recipe installs the reviewed local APK, so the app
+    // definition must declare exactly one artifact representing that source,
+    // and it must be the artifact the author selected. The selected App
+    // Artifact ID is authoritative: when artifact edits declare the reviewed
+    // source under a different ID, generation blocks instead of emitting a
+    // recipe that references a missing artifact.
     match pair_reviewed_artifact(&app, &proposed_app, is_local_apk_artifact) {
-        ReviewedArtifactPairing::Paired(_) => {}
+        ReviewedArtifactPairing::Paired(paired_id) => {
+            if paired_id != artifact_id {
+                diagnostics.push(error(
+                    "app_artifact_id_mismatch",
+                    "The App Definition declares the reviewed local APK artifact under a different App Artifact ID; set appArtifactId to the declared artifact ID.",
+                    "appArtifactId",
+                ));
+            }
+        }
         ReviewedArtifactPairing::Missing => diagnostics.push(error(
             "local_artifact_missing",
-            "The app definition no longer declares the user-provided APK artifact this recipe installs. Keep the local APK artifact, or start a draft for a repository source.",
+            "The app definition no longer declares the user-provided APK artifact the recipe installs. Keep the local APK artifact, or start a repository-source draft.",
             "artifacts",
         )),
         ReviewedArtifactPairing::Ambiguous => diagnostics.push(error(
             "local_artifact_ambiguous",
-            "The app definition declares more than one user-provided APK artifact, so the artifact this recipe installs is ambiguous. Keep exactly one local APK artifact.",
+            "The app definition declares more than one user-provided APK artifact, so the artifact the recipe installs is ambiguous. Keep exactly one local APK artifact.",
             "artifacts",
         )),
     }
-    let apk_inspection = match generated_apk_inspection_metadata(&request.facts, None, false) {
+
+    // Permission automation is reviewed evidence plus canonical App
+    // permission sets: both come from an enabled selection that validates and
+    // names the inspected package, and the evidence stays transient (never
+    // written to persisted App metadata). A disabled request verifies nothing,
+    // so every permission set the selected App Definition already declares
+    // stays exactly as authored and no grant step is generated.
+    let verified_selection = requested_selection
+        .filter(|_| permission_automation_enabled)
+        .filter(|selection| {
+            selection.validation_issues().is_empty()
+                && request.facts.package_name.as_deref() == Some(selection.package_name.as_str())
+        });
+    let apk_inspection = match generated_apk_inspection_metadata(
+        &request.facts,
+        verified_selection,
+        permission_automation_enabled,
+    ) {
         Ok(metadata) => Some(metadata),
         Err(issues) => {
             diagnostics.extend(
@@ -575,24 +703,73 @@ pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRe
         }
     };
 
+    if let Some(selection) = verified_selection {
+        if existing_mode {
+            merge_additive_permission_sets(&mut app, selection, &mut diagnostics);
+        } else {
+            app.permission_sets = app_permission_sets(selection);
+        }
+    }
+
     let mut recipe_edits = request
         .recipe
-        .unwrap_or_else(|| proposed_recipe_edits(&app));
+        .unwrap_or_else(|| proposed_recipe_edits(&app, &artifact_id));
     if recipe_edits.ids.is_none() || request.regenerate_identifiers {
-        recipe_edits.ids = Some(generated_ids(&app.id));
+        recipe_edits.ids = Some(generated_ids(&app.id, &artifact_id));
+    }
+    if let Some(explicit_recipe_id) = request
+        .recipe_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !crate::authored_models::is_valid_identifier(explicit_recipe_id) {
+            diagnostics.push(error(
+                "recipe_id_invalid",
+                "Recipe ID must use authored identifier syntax.",
+                "recipeId",
+            ));
+        } else {
+            let mut ids = recipe_edits
+                .ids
+                .clone()
+                .unwrap_or_else(|| generated_ids(&app.id, &artifact_id));
+            ids.recipe_id = explicit_recipe_id.to_string();
+            recipe_edits.ids = Some(ids);
+        }
     }
     fill_empty_recipe_text(&mut recipe_edits, &app);
-    app.launcher_activity = verified_launcher_activity(
-        &request.facts,
-        recipe_edits.launch_enabled,
-        recipe_edits.launcher_activity.as_deref(),
-    );
-    // Local user-provided APK generation supports no permission automation, so
-    // the generated app definition carries no permission sets.
-    app.permission_sets = None;
+    if existing_mode {
+        if recipe_edits.launch_enabled && app.launcher_activity.is_none() {
+            diagnostics.push(error(
+                "app_launcher_activity_required",
+                "Launch-once generation requires the selected App Definition to declare the verified launcher activity.",
+                "recipe.launchEnabled",
+            ));
+        }
+    } else {
+        app.launcher_activity = verified_launcher_activity(
+            &request.facts,
+            recipe_edits.launch_enabled,
+            recipe_edits.launcher_activity.as_deref(),
+        );
+        if recipe_edits.launch_enabled && app.launcher_activity.is_none() {
+            diagnostics.push(error(
+                "apk_launcher_unverified",
+                "Launch-once generation requires a launcher component verified by APK inspection.",
+                "recipe.launcherActivity",
+            ));
+        }
+    }
 
     diagnostics.extend(app_diagnostics(&app));
-    let recipe = build_recipe(&app, &request.facts, &recipe_edits, &mut diagnostics);
+    let recipe = build_recipe(
+        &app,
+        &artifact_id,
+        &recipe_edits,
+        &mut diagnostics,
+        permission_automation_enabled,
+    );
     diagnostics.extend(recipe_diagnostics(&recipe));
     diagnostics.sort_by(|left, right| {
         left.severity
@@ -684,7 +861,7 @@ fn fully_qualified_activity(component: &str, package_name: Option<&str>) -> Stri
     }
 }
 
-fn proposed_app(facts: &ApkInspectionFacts) -> AppDefinitionV1 {
+fn proposed_app(facts: &ApkInspectionFacts, artifact_id: &str) -> AppDefinitionV1 {
     let id_source = facts
         .application_label
         .as_deref()
@@ -696,15 +873,17 @@ fn proposed_app(facts: &ApkInspectionFacts) -> AppDefinitionV1 {
         .or_else(|| facts.package_name.clone())
         .unwrap_or_default();
     let mut artifacts = IndexMap::new();
-    artifacts.insert(
-        "apk".to_string(),
-        AppArtifactV1 {
-            kind: AppArtifactKind::Apk,
-            name: (!name.trim().is_empty()).then(|| format!("{name} APK")),
-            description: None,
-            source: AppArtifactSource::UserProvided,
-        },
-    );
+    let artifact = AppArtifactV1 {
+        kind: AppArtifactKind::Apk,
+        name: (!name.trim().is_empty()).then(|| format!("{name} APK")),
+        description: None,
+        source: AppArtifactSource::UserProvided,
+    };
+    if crate::authored_models::is_valid_identifier(artifact_id) {
+        artifacts.insert(artifact_id.to_string(), artifact);
+    } else {
+        artifacts.insert(DEFAULT_APP_ARTIFACT_ID.to_string(), artifact);
+    }
     AppDefinitionV1 {
         schema_version: SCHEMA_VERSION_V1,
         kind: APP_DEFINITION_KIND.to_string(),
@@ -773,21 +952,252 @@ pub(crate) fn is_local_apk_artifact(artifact: &AppArtifactV1) -> bool {
         && matches!(artifact.source, AppArtifactSource::UserProvided)
 }
 
-fn generated_ids(app_id: &str) -> GeneratedRecipeIds {
-    let token = recipe_local_token(app_id);
-    GeneratedRecipeIds {
-        recipe_id: format!("app.{app_id}.install"),
-        input_id: format!("{token}_apk"),
-        feature_id: format!("{token}_install"),
-        install_step_id: format!("install_{token}"),
-        permission_step_id: format!("grant_permissions_{token}"),
-        launch_step_id: format!("launch_{token}"),
+/// Artifact ID proposed for a brand-new App Definition.
+const DEFAULT_APP_ARTIFACT_ID: &str = "apk";
+
+/// Deterministic App Artifact ID proposed for existing-app addition.
+///
+/// The proposal derives from the inspected application label so identical
+/// authored inputs always produce the same artifact identity; the author can
+/// replace it with any valid identifier before review.
+fn proposed_existing_artifact_id(facts: &ApkInspectionFacts) -> String {
+    let label = facts.application_label.as_deref().unwrap_or_default();
+    let normalized = normalize_identifier_component(label);
+    if normalized.is_empty() {
+        DEFAULT_APP_ARTIFACT_ID.to_string()
+    } else {
+        normalized
     }
 }
 
-fn proposed_recipe_edits(app: &AppDefinitionV1) -> RecipeDraftEdits {
+/// Proposed user-provided APK artifact entry appended by guided generation.
+fn proposed_local_apk_artifact(app: &AppDefinitionV1) -> AppArtifactV1 {
+    AppArtifactV1 {
+        kind: AppArtifactKind::Apk,
+        name: (!app.name.trim().is_empty()).then(|| format!("{} APK", app.name)),
+        description: None,
+        source: AppArtifactSource::UserProvided,
+    }
+}
+
+/// Deterministic artifact-resolution step id for one generated recipe.
+fn resolve_step_id(app_id: &str, artifact_id: &str) -> String {
+    let token = recipe_local_token(app_id);
+    if artifact_id == DEFAULT_APP_ARTIFACT_ID {
+        format!("resolve_{token}")
+    } else {
+        format!("resolve_{token}_{}", recipe_local_token(artifact_id))
+    }
+}
+
+/// Append app-aware permission steps for the App Definition permission sets.
+///
+/// Each present set becomes one granted-permission step that references the
+/// App Definition by id; the step never copies permission facts and never
+/// blocks launch because permission policy keeps failures advisory. The steps
+/// are appended only for requests that enable permission automation, so a
+/// disabled request executes none of the declared sets.
+pub(crate) fn append_permission_steps(
+    steps: &mut Vec<Step>,
+    app: &AppDefinitionV1,
+    permission_step_id: &str,
+    install_step_id: &str,
+) {
+    let Some(sets) = app.permission_sets.as_ref() else {
+        return;
+    };
+    for (kind, set) in [
+        ("baseline", sets.baseline.as_ref()),
+        ("elevated", sets.elevated.as_ref()),
+    ] {
+        let Some(set) = set else {
+            continue;
+        };
+        if set.runtime.is_empty() && set.app_ops.is_empty() {
+            continue;
+        }
+        let step_id = if kind == "baseline" {
+            permission_step_id.to_string()
+        } else {
+            format!("{permission_step_id}_elevated")
+        };
+        let mut params = OrderedMap::new();
+        params.insert(
+            "permission_set".to_string(),
+            ParamValue::Literal(Value::String(kind.to_string())),
+        );
+        params.insert(
+            "policy".to_string(),
+            ParamValue::Literal(json!({ "on_failure": "warn" })),
+        );
+        steps.push(Step {
+            id: step_id,
+            type_name: "grant_permissions".to_string(),
+            name: format!("Grant {kind} permissions for {}", app.name),
+            description: Some(format!(
+                "Apply the App Definition {kind} permission set after installation."
+            )),
+            progress_note: Some(format!("Applying {kind} permissions for {}", app.name)),
+            user_toggleable: false,
+            app_ref: Some(app.id.clone()),
+            dependencies: vec![install_step_id.to_string()],
+            constraints: StepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params,
+            verify: Vec::new(),
+        });
+    }
+}
+
+/// Append author-selected permission actions to existing App Definition sets.
+///
+/// Existing entries and their declared order are preserved. Actions are
+/// identified by their canonical identity (permission for runtime permissions,
+/// operation for app-ops): an action already present with the same Android API
+/// bounds and mode is reused, an action present with different bounds is
+/// reported as an actionable conflict, and a duplicate is never appended.
+pub(crate) fn merge_additive_permission_sets(
+    app: &mut AppDefinitionV1,
+    selection: &PermissionAutomationSelection,
+    diagnostics: &mut Vec<DraftDiagnostic>,
+) {
+    let Some(selected) = app_permission_sets(selection) else {
+        return;
+    };
+    let mut sets = app.permission_sets.take().unwrap_or(AppPermissionSets {
+        baseline: None,
+        elevated: None,
+    });
+    let mut baseline = sets.baseline.take().unwrap_or_default();
+    let mut elevated = sets.elevated.take().unwrap_or_default();
+    if let Some(source) = selected.baseline {
+        merge_permission_set(&mut baseline, &elevated, source, "baseline", diagnostics);
+    }
+    if let Some(source) = selected.elevated {
+        merge_permission_set(&mut elevated, &baseline, source, "elevated", diagnostics);
+    }
+    sets.baseline = present_permission_set(baseline);
+    sets.elevated = present_permission_set(elevated);
+    app.permission_sets = Some(sets);
+}
+
+/// Merge one selected permission set into its App Definition set.
+///
+/// Equivalence mirrors the persisted App permission identity: runtime
+/// permissions match by permission name, app-ops by operation name. A selected
+/// action whose bounds or mode differ from the existing declaration leaves the
+/// declared entry untouched and records an actionable conflict instead of
+/// manufacturing a duplicate the persisted contract rejects.
+fn merge_permission_set(
+    target: &mut AppPermissionSet,
+    other: &AppPermissionSet,
+    source: AppPermissionSet,
+    set_name: &str,
+    diagnostics: &mut Vec<DraftDiagnostic>,
+) {
+    for action in source.runtime {
+        if let Some(existing) = target
+            .runtime
+            .iter()
+            .find(|existing| existing.permission == action.permission)
+        {
+            if existing.android_api_min == action.android_api_min
+                && existing.android_api_max == action.android_api_max
+            {
+                continue;
+            }
+            diagnostics.push(error(
+                "app_permission_action_conflict",
+                &format!(
+                    "The selected {} permission is already declared in the App Definition {set_name} set with different Android API bounds.",
+                    action.permission
+                ),
+                &format!("recipe.permissionAutomation.{set_name}.runtime"),
+            ));
+            continue;
+        }
+        if other
+            .runtime
+            .iter()
+            .any(|existing| existing.permission == action.permission)
+        {
+            diagnostics.push(error(
+                "app_permission_action_conflict",
+                &format!(
+                    "The selected {} permission is already declared in the other App Definition permission set.",
+                    action.permission
+                ),
+                &format!("recipe.permissionAutomation.{set_name}.runtime"),
+            ));
+            continue;
+        }
+        target.runtime.push(action);
+    }
+    for action in source.app_ops {
+        if let Some(existing) = target.app_ops.iter().find(|existing| existing.op == action.op) {
+            if existing.mode == action.mode
+                && existing.android_api_min == action.android_api_min
+                && existing.android_api_max == action.android_api_max
+            {
+                continue;
+            }
+            diagnostics.push(error(
+                "app_permission_action_conflict",
+                &format!(
+                    "The selected {} app-op is already declared in the App Definition {set_name} set with a different mode or Android API bounds.",
+                    action.op
+                ),
+                &format!("recipe.permissionAutomation.{set_name}.appOps"),
+            ));
+            continue;
+        }
+        if other.app_ops.iter().any(|existing| existing.op == action.op) {
+            diagnostics.push(error(
+                "app_permission_action_conflict",
+                &format!(
+                    "The selected {} app-op is already declared in the other App Definition permission set.",
+                    action.op
+                ),
+                &format!("recipe.permissionAutomation.{set_name}.appOps"),
+            ));
+            continue;
+        }
+        target.app_ops.push(action);
+    }
+}
+
+fn present_permission_set(set: AppPermissionSet) -> Option<AppPermissionSet> {
+    (!set.runtime.is_empty() || !set.app_ops.is_empty()).then_some(set)
+}
+
+fn generated_ids(app_id: &str, artifact_id: &str) -> GeneratedRecipeIds {
+    let token = recipe_local_token(app_id);
+    let artifact_token = recipe_local_token(artifact_id);
+    let base = if artifact_id == DEFAULT_APP_ARTIFACT_ID {
+        token.clone()
+    } else {
+        format!("{token}_{artifact_token}")
+    };
+    GeneratedRecipeIds {
+        recipe_id: if artifact_id == DEFAULT_APP_ARTIFACT_ID {
+            format!("app.{app_id}.install")
+        } else {
+            format!("app.{app_id}.{artifact_token}.install")
+        },
+        input_id: format!("{base}_apk"),
+        feature_id: format!("{base}_install"),
+        install_step_id: format!("install_{base}"),
+        permission_step_id: format!("grant_permissions_{base}"),
+        launch_step_id: format!("launch_{base}"),
+    }
+}
+
+fn proposed_recipe_edits(app: &AppDefinitionV1, artifact_id: &str) -> RecipeDraftEdits {
     RecipeDraftEdits {
-        ids: Some(generated_ids(&app.id)),
+        ids: Some(generated_ids(&app.id, artifact_id)),
         name: format!("Install {}", app.name),
         description: format!("Install a user-provided {} APK.", app.name),
         input_label: format!("{} APK", app.name),
@@ -807,116 +1217,141 @@ fn fill_empty_recipe_text(edits: &mut RecipeDraftEdits, app: &AppDefinitionV1) {
 
 fn build_recipe(
     app: &AppDefinitionV1,
-    facts: &ApkInspectionFacts,
+    artifact_id: &str,
     edits: &RecipeDraftEdits,
-    diagnostics: &mut Vec<DraftDiagnostic>,
+    _diagnostics: &mut Vec<DraftDiagnostic>,
+    permission_automation_enabled: bool,
 ) -> Recipe {
-    let ids = edits.ids.clone().unwrap_or_else(|| generated_ids(&app.id));
+    let ids = edits
+        .ids
+        .clone()
+        .unwrap_or_else(|| generated_ids(&app.id, artifact_id));
+    let user_provided = app
+        .artifacts
+        .get(artifact_id)
+        .is_some_and(|artifact| matches!(artifact.source, AppArtifactSource::UserProvided));
     let mut inputs = OrderedMap::new();
-    inputs.insert(
-        ids.input_id.clone(),
-        InputDeclaration {
-            type_name: "file".to_string(),
-            role: "apk".to_string(),
-            label: edits.input_label.trim().to_string(),
-            description: present(&edits.input_description),
-            required: true,
-            multiple: false,
-            validation: InputValidation {
-                must_exist: true,
-                allowed_extensions: vec!["apk".to_string()],
-                path_kind: Some("file".to_string()),
-                allowed_prefixes: Vec::new(),
+    if user_provided {
+        inputs.insert(
+            ids.input_id.clone(),
+            InputDeclaration {
+                type_name: "file".to_string(),
+                role: "apk".to_string(),
+                label: edits.input_label.trim().to_string(),
+                description: present(&edits.input_description),
+                required: true,
+                multiple: false,
+                validation: InputValidation {
+                    must_exist: true,
+                    allowed_extensions: vec!["apk".to_string()],
+                    path_kind: Some("file".to_string()),
+                    allowed_prefixes: Vec::new(),
+                },
+                default: Value::Null,
+                options: Vec::new(),
+                sensitive: false,
+                advanced: false,
+                metadata: OrderedMap::new(),
             },
-            default: Value::Null,
-            options: Vec::new(),
-            sensitive: false,
-            advanced: false,
-            metadata: OrderedMap::new(),
-        },
+        );
+    }
+
+    let mut artifacts = OrderedMap::new();
+    artifacts.insert(
+        artifact_id.to_string(),
+        RecipeArtifact::AppArtifact(AppArtifactReference {
+            app_ref: app.id.clone(),
+            artifact: artifact_id.to_string(),
+            input: user_provided.then(|| AppArtifactInputBinding {
+                input_id: ids.input_id.clone(),
+            }),
+            cache: if user_provided {
+                "none".to_string()
+            } else {
+                "default".to_string()
+            },
+        }),
     );
+
+    let resolve_id = resolve_step_id(&app.id, artifact_id);
+    let mut resolve_params = OrderedMap::new();
+    resolve_params.insert(
+        "artifacts".to_string(),
+        ParamValue::Literal(Value::Array(vec![Value::String(artifact_id.to_string())])),
+    );
+    let mut steps = vec![Step {
+        id: resolve_id.clone(),
+        type_name: "resolve_artifacts".to_string(),
+        name: format!("Resolve {} artifact", app.name),
+        description: None,
+        progress_note: None,
+        user_toggleable: false,
+        app_ref: None,
+        dependencies: Vec::new(),
+        constraints: StepConstraints {
+            capabilities: Vec::new(),
+            conflicts_with: Vec::new(),
+        },
+        skip_if: Vec::new(),
+        params: resolve_params,
+        verify: Vec::new(),
+    }];
 
     let mut install_params = OrderedMap::new();
     install_params.insert(
         "app".to_string(),
-        ParamValue::Ref(format!("inputs.{}", ids.input_id)),
+        ParamValue::Ref(format!("artifacts.{artifact_id}.local_path")),
     );
     install_params.insert(
         "replace_existing".to_string(),
         ParamValue::Literal(Value::Bool(edits.replace_existing)),
     );
-    let mut skip_params = OrderedMap::new();
-    skip_params.insert(
-        "package_name".to_string(),
-        Value::String(app.package_id.clone()),
-    );
-    let install = Step {
+    steps.push(Step {
         id: ids.install_step_id.clone(),
         type_name: "install_apk".to_string(),
         name: format!("Install {} APK", app.name),
         description: None,
         progress_note: Some(format!("Installing {} on the selected device", app.name)),
         user_toggleable: false,
-        app_ref: None,
-        dependencies: Vec::new(),
+        app_ref: Some(app.id.clone()),
+        dependencies: vec![resolve_id],
         constraints: StepConstraints {
             capabilities: vec!["apk_install".to_string()],
             conflicts_with: Vec::new(),
         },
         skip_if: vec![StepCondition {
             type_name: "package_installed".to_string(),
-            params: skip_params,
+            params: OrderedMap::new(),
         }],
         params: install_params,
         verify: Vec::new(),
-    };
-    let mut steps = vec![install];
+    });
 
-    if edits.launch_enabled {
-        let launcher = edits
-            .launcher_activity
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if launcher.is_none()
-            || !facts
-                .launcher_activities
-                .iter()
-                .any(|value| Some(value.as_str()) == launcher)
-        {
-            diagnostics.push(error(
-                "apk_launcher_unverified",
-                "Launch-once generation requires a launcher component verified by APK inspection.",
-                "recipe.launcherActivity",
-            ));
-        } else if let Some(launcher) = launcher {
-            let mut params = OrderedMap::new();
-            params.insert(
-                "package_name".to_string(),
-                ParamValue::Literal(Value::String(app.package_id.clone())),
-            );
-            params.insert(
-                "activity".to_string(),
-                ParamValue::Literal(Value::String(launcher.to_string())),
-            );
-            steps.push(Step {
-                id: ids.launch_step_id.clone(),
-                type_name: "launch_app".to_string(),
-                name: format!("Launch {} once", app.name),
-                description: Some("Launch the app once after installation.".to_string()),
-                progress_note: Some(format!("Launching {} once", app.name)),
-                user_toggleable: false,
-                app_ref: None,
-                dependencies: vec![ids.install_step_id.clone()],
-                constraints: StepConstraints {
-                    capabilities: vec!["app_launch".to_string()],
-                    conflicts_with: Vec::new(),
-                },
-                skip_if: Vec::new(),
-                params,
-                verify: Vec::new(),
-            });
-        }
+    if edits.launch_enabled && app.launcher_activity.is_some() {
+        steps.push(Step {
+            id: ids.launch_step_id.clone(),
+            type_name: "launch_app".to_string(),
+            name: format!("Launch {} once", app.name),
+            description: Some("Launch the app once after installation.".to_string()),
+            progress_note: Some(format!("Launching {} once", app.name)),
+            user_toggleable: false,
+            app_ref: Some(app.id.clone()),
+            dependencies: vec![ids.install_step_id.clone()],
+            constraints: StepConstraints {
+                capabilities: vec!["app_launch".to_string()],
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params: OrderedMap::new(),
+            verify: Vec::new(),
+        });
+    }
+
+    // Permission automation is opt-in: a disabled request emits no grant
+    // steps even when the App Definition declares permission sets, while an
+    // enabled request executes the whole set each grant step references.
+    if permission_automation_enabled {
+        append_permission_steps(&mut steps, app, &ids.permission_step_id, &ids.install_step_id);
     }
 
     Recipe {
@@ -930,7 +1365,7 @@ fn build_recipe(
             features: vec![ids.feature_id],
         },
         inputs,
-        artifacts: OrderedMap::new(),
+        artifacts,
         artifact_groups: OrderedMap::new(),
         steps,
     }
@@ -1301,8 +1736,9 @@ mod tests {
     use crate::executor::ExecutorRunner;
     use crate::generation::apk::{ApkPermissionApplicabilityFacts, ApkPermissionDeclarationFacts};
     use crate::planner::{
-        DeviceContext, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep,
-        ExecutionStepConstraints, RuntimeCapabilities,
+        plan_execution_with_app_definitions, DeviceContext, ExecutionParamValue, ExecutionPlan,
+        ExecutionPlanSource, ExecutionStep, ExecutionStepConstraints, PlannerInput,
+        RuntimeCapabilities,
     };
 
     fn facts() -> ApkInspectionFacts {
@@ -1317,6 +1753,44 @@ mod tests {
             base: Some(true),
             ..ApkInspectionFacts::default()
         }
+    }
+
+    fn facts_with_package(package_name: &str) -> ApkInspectionFacts {
+        let mut facts = facts();
+        facts.package_name = Some(package_name.to_string());
+        facts
+    }
+
+    /// Collect the diagnostic codes of one generated draft for assertions.
+    fn diagnostic_codes(draft: &AppRecipeDraft) -> Vec<&str> {
+        draft
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect()
+    }
+
+    /// Validate the generated App/Recipe pair with the canonical planner
+    /// app-authority checks used for authored catalog content, so generation
+    /// tests prove the pair is admissible beyond draft diagnostics.
+    fn assert_pair_authority(draft: &AppRecipeDraft) {
+        let yaml = draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .expect("generated recipe canonical yaml");
+        let mapping =
+            serde_yaml::from_str::<serde_yaml::Mapping>(yaml).expect("recipe yaml mapping");
+        let recipe =
+            crate::yaml::parse_recipe_mapping(&mapping, std::path::Path::new("recipe.yaml"))
+                .expect("generated recipe parses");
+        let messages = crate::planner::validate_recipe_app_authority(
+            &recipe,
+            std::slice::from_ref(&draft.app),
+        );
+        assert!(
+            messages.is_empty(),
+            "app authority diagnostics: {messages:?}"
+        );
     }
 
     fn reviewed_permission(name: &str) -> ApkPermissionDeclarationFacts {
@@ -1341,13 +1815,17 @@ mod tests {
 
     #[test]
     fn valid_category_generates_existing_model_recipe_and_no_native_path() {
-        let mut app = proposed_app(&facts());
+        let mut app = proposed_app(&facts(), "apk");
         app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1356,25 +1834,35 @@ mod tests {
             .app_canonical_yaml
             .as_deref()
             .is_some_and(|yaml| !yaml.contains('/')));
-        let recipe = draft.recipe_canonical_yaml.unwrap();
+        let recipe = draft.recipe_canonical_yaml.as_deref().unwrap();
+        assert!(recipe.contains("type: app_artifact"));
+        assert!(recipe.contains("app_ref: example_player"));
+        assert!(recipe.contains("artifact: apk"));
         assert!(recipe.contains("ref: inputs.example_player_apk"));
-        assert!(recipe.contains("package_name: com.example.player"));
+        assert!(recipe.contains("type: install_apk"));
+        assert!(recipe.contains("ref: artifacts.apk.local_path"));
+        assert!(!recipe.contains("com.example.player"));
         assert!(!recipe.contains("expected_package_name"));
         assert!(!recipe.contains("launch_app"));
+        assert_pair_authority(&draft);
     }
 
     #[test]
     fn launch_requires_verified_component_and_adds_one_step_when_selected() {
-        let mut app = proposed_app(&facts());
+        let mut app = proposed_app(&facts(), "apk");
         app.category = Some("utility".to_string());
-        let mut edits = proposed_recipe_edits(&app);
+        let mut edits = proposed_recipe_edits(&app, "apk");
         edits.launch_enabled = true;
         edits.launcher_activity = Some("com.example.player/.MainActivity".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
             app: Some(app),
             recipe: Some(edits),
             mappings: None,
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1389,14 +1877,493 @@ mod tests {
     }
 
     #[test]
-    fn local_permission_automation_is_rejected_without_emitting_a_step() {
-        let mut app = proposed_app(&facts());
+    fn local_permission_automation_partitions_sets_and_emits_app_aware_steps() {
+        let mut app = proposed_app(&facts(), "apk");
         app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.CAMERA".to_string(),
+                        requires_root: false,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.WRITE_SECURE_SETTINGS".to_string(),
+                        requires_root: true,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                ],
+                app_ops: vec![AppOpPermissionSelection {
+                    permission_name: "android.permission.PACKAGE_USAGE_STATS".to_string(),
+                    operation_name: "android:get_usage_stats".to_string(),
+                    mode: "allow".to_string(),
+                    requires_root: false,
+                    android_api_min: 23,
+                    android_api_max: None,
+                }],
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:?}", draft.diagnostics);
+        let sets = draft.app.permission_sets.as_ref().expect("permission sets");
+        let baseline = sets.baseline.as_ref().expect("baseline set");
+        assert_eq!(baseline.runtime.len(), 1);
+        assert_eq!(baseline.runtime[0].permission, "android.permission.CAMERA");
+        assert_eq!(baseline.app_ops.len(), 1);
+        assert_eq!(baseline.app_ops[0].op, "android:get_usage_stats");
+        let elevated = sets.elevated.as_ref().expect("elevated set");
+        assert_eq!(elevated.runtime.len(), 1);
+        assert_eq!(
+            elevated.runtime[0].permission,
+            "android.permission.WRITE_SECURE_SETTINGS"
+        );
+        let recipe = draft.recipe_canonical_yaml.as_deref().unwrap();
+        assert!(recipe.contains("type: grant_permissions"));
+        assert!(recipe.contains("permission_set: baseline"));
+        assert!(recipe.contains("permission_set: elevated"));
+        assert!(recipe.contains("on_failure: warn"));
+        assert!(recipe.contains("app_ref: example_player"));
+        assert!(!recipe.contains("runtime:"));
+        assert!(!recipe.contains("com.example.player"));
+        assert!(!draft.app.metadata.contains_key("apk_inspection"));
+        let metadata = draft
+            .apk_inspection
+            .as_ref()
+            .expect("apk inspection evidence");
+        assert_eq!(
+            metadata["selected_runtime_permissions"],
+            json!([
+                {
+                    "permission_name": "android.permission.CAMERA",
+                    "requires_root": false
+                },
+                {
+                    "permission_name": "android.permission.WRITE_SECURE_SETTINGS",
+                    "requires_root": true
+                }
+            ])
+        );
+        assert_eq!(
+            metadata["selected_app_ops"],
+            json!([
+                {
+                    "permission_name": "android.permission.PACKAGE_USAGE_STATS",
+                    "operation_name": "android:get_usage_stats",
+                    "mode": "allow",
+                    "requires_root": false
+                }
+            ])
+        );
+        assert_pair_authority(&draft);
+    }
+
+    /// Build one generated new-App draft that opts into launching the app once
+    /// and carries both a non-root and a root-required runtime permission.
+    fn generated_additive_permission_draft() -> AppRecipeDraft {
+        let app = proposed_app(&facts(), "apk");
+        let mut recipe = proposed_recipe_edits(&app, "apk");
+        recipe.launch_enabled = true;
+        recipe.launcher_activity = Some("com.example.player/.MainActivity".to_string());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: Some(app),
+            recipe: Some(recipe),
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.CAMERA".to_string(),
+                        requires_root: false,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.WRITE_SECURE_SETTINGS".to_string(),
+                        requires_root: true,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                ],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:?}", draft.diagnostics);
+        draft
+    }
+
+    /// SHA-256 hex digest used for deterministic byte comparisons.
+    fn permission_sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(bytes);
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Canonical documents, diagnostics, and step lines of one generated draft.
+    fn permission_artifact_sections(draft: &AppRecipeDraft) -> [String; 4] {
+        [
+            draft
+                .app_canonical_yaml
+                .as_deref()
+                .unwrap_or("<none>")
+                .to_string(),
+            draft
+                .recipe_canonical_yaml
+                .as_deref()
+                .unwrap_or("<none>")
+                .to_string(),
+            serde_json::to_string(&draft.diagnostics).expect("diagnostics serialize"),
+            permission_step_lines(&draft.recipe),
+        ]
+    }
+
+    /// Deterministic text block pinning one draft document set for comparison.
+    fn permission_document_block(draft: &AppRecipeDraft) -> String {
+        use std::fmt::Write as _;
+        let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(draft);
+        let mut block = String::new();
+        writeln!(block, "APP_YAML").expect("block write");
+        writeln!(block, "{app_yaml}").expect("block write");
+        writeln!(block, "RECIPE_YAML").expect("block write");
+        writeln!(block, "{recipe_yaml}").expect("block write");
+        writeln!(block, "DIAGNOSTICS").expect("block write");
+        writeln!(block, "{diagnostics}").expect("block write");
+        writeln!(block, "STEPS").expect("block write");
+        writeln!(block, "{steps}").expect("block write");
+        block
+    }
+
+    /// One line per generated step: identifier, type, and dependencies.
+    fn permission_step_lines(recipe: &Value) -> String {
+        recipe
+            .get("steps")
+            .and_then(|steps| steps.as_array())
+            .map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| {
+                        let id = step
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("<none>");
+                        let type_name = step
+                            .get("type")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("<none>");
+                        let dependencies = step
+                            .get("dependencies")
+                            .and_then(|value| value.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|item| item.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            })
+                            .unwrap_or_default();
+                        format!("{id}|{type_name}|{dependencies}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn permission_step_generation_pins_local_canonical_documents_and_merge_diagnostics() {
+        let generated = generated_additive_permission_draft();
+        println!("=== CASE local:new-app ===");
+        println!("{}", permission_document_block(&generated));
+        println!("=== END CASE local:new-app ===");
+        let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(&generated);
+        assert_eq!(permission_sha256_hex(app_yaml.as_bytes()), "21b39e57cd1d75353241e3e9bfea7c01be3cfa71a6ac322b8995f5fb4e137064");
+        assert_eq!(permission_sha256_hex(recipe_yaml.as_bytes()), "669ffb6c0231d3472e26b7caf7f8588e6ec4f2821f34b794a21c09649bb42660");
+        assert_eq!(permission_sha256_hex(diagnostics.as_bytes()), "7cb7f244325c8fd86175ba28c9a645b3b47ac8f689a1a1039c7e4c77f0ef7d04");
+        assert_eq!(permission_sha256_hex(steps.as_bytes()), "37e96274a12976cf68212b8d46ca220d4c19fc87f99c2d157f5031ff7b282096");
+        println!(
+            "HASH local:new-app app={} recipe={} diagnostics={} steps={}",
+            permission_sha256_hex(app_yaml.as_bytes()),
+            permission_sha256_hex(recipe_yaml.as_bytes()),
+            permission_sha256_hex(diagnostics.as_bytes()),
+            permission_sha256_hex(steps.as_bytes()),
+        );
+
+        let mut existing = proposed_app(&facts(), "apk");
+        existing.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: vec![AppRuntimePermissionAction {
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            elevated: None,
+        });
+        let merged = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(existing),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.CAMERA".to_string(),
+                        requires_root: false,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.ACCESS_FINE_LOCATION".to_string(),
+                        requires_root: false,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                    RuntimePermissionSelection {
+                        permission_name: "android.permission.WRITE_SECURE_SETTINGS".to_string(),
+                        requires_root: true,
+                        android_api_min: 23,
+                        android_api_max: None,
+                    },
+                ],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        });
+        println!("=== CASE local:existing-app-merge ===");
+        println!("{}", permission_document_block(&merged));
+        println!("=== END CASE local:existing-app-merge ===");
+        let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(&merged);
+        assert_eq!(permission_sha256_hex(app_yaml.as_bytes()), "ceaadf3d8ace7df42f90254a75289e3d9c29992cf592bb929f819caa101c5812");
+        assert_eq!(permission_sha256_hex(recipe_yaml.as_bytes()), "6e9c960fd025b2e5b1cbceebc7e7b31d041c4c352987f3b56b07f14ad43abca7");
+        assert_eq!(permission_sha256_hex(diagnostics.as_bytes()), "15b177e49c63f04a12dedc9d197c34e3c31df52bc1ac89bccf68344255b3c689");
+        assert_eq!(permission_sha256_hex(steps.as_bytes()), "03e380f43ce50ebf6f1ef657333cc18fb2e85e9e894ae81ca046c76352870e9a");
+        println!(
+            "HASH local:existing-app-merge app={} recipe={} diagnostics={} steps={}",
+            permission_sha256_hex(app_yaml.as_bytes()),
+            permission_sha256_hex(recipe_yaml.as_bytes()),
+            permission_sha256_hex(diagnostics.as_bytes()),
+            permission_sha256_hex(steps.as_bytes()),
+        );
+    }
+
+    /// Look up one generated step id from the canonical Recipe YAML.
+    fn generated_recipe_step_id(draft: &AppRecipeDraft, type_name: &str, elevated: bool) -> String {
+        let yaml = draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .expect("generated recipe canonical yaml");
+        let mapping =
+            serde_yaml::from_str::<serde_yaml::Mapping>(yaml).expect("recipe yaml mapping");
+        let recipe =
+            crate::yaml::parse_recipe_mapping(&mapping, std::path::Path::new("recipe.yaml"))
+                .expect("generated recipe parses");
+        recipe
+            .steps
+            .iter()
+            .find(|step| step.type_name == type_name && step.id.ends_with("_elevated") == elevated)
+            .map(|step| step.id.clone())
+            .unwrap_or_else(|| {
+                panic!("generated recipe declares {type_name} step (elevated: {elevated})")
+            })
+    }
+
+    /// Plan the generated App/Recipe pair with the canonical planner and a
+    /// supplied local APK binding, using the same roadmap a device would.
+    fn generated_pair_planner_input(
+        draft: &AppRecipeDraft,
+        apk_path: &std::path::Path,
+        root_shell: bool,
+    ) -> PlannerInput {
+        let yaml = draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .expect("generated recipe canonical yaml");
+        let mapping =
+            serde_yaml::from_str::<serde_yaml::Mapping>(yaml).expect("recipe yaml mapping");
+        let recipe =
+            crate::yaml::parse_recipe_mapping(&mapping, std::path::Path::new("recipe.yaml"))
+                .expect("generated recipe parses");
+        let input_id = recipe
+            .inputs
+            .keys()
+            .next()
+            .expect("generated recipe declares one artifact input")
+            .clone();
+        let mut explicit_input_bindings = OrderedMap::new();
+        explicit_input_bindings.insert(
+            format!("{}/{}", recipe.id, input_id),
+            json!(apk_path.to_string_lossy().to_string()),
+        );
+        let recipe_ref = recipe.id.clone();
+        PlannerInput {
+            recipes: vec![recipe],
+            selected_recipe_refs: vec![recipe_ref],
+            explicit_input_bindings,
+            user_configuration_bindings: OrderedMap::new(),
+            device_plan_input_bindings: OrderedMap::new(),
+            plan_id: "plan.generated-pair".to_string(),
+            device_plan_ref: "example.device_plan".to_string(),
+            device_profile_ref: "example.device_profile".to_string(),
+            device_context: DeviceContext {
+                manufacturer: "Example".to_string(),
+                model: "Example Handheld".to_string(),
+                android_version: 13,
+                android_api_level: Some(33),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: true,
+                shared_storage_write: true,
+                app_launch: true,
+                shell_command: true,
+                package_remove_for_user: true,
+                root_shell,
+                app_data_write: true,
+            },
+            catalog_identity: None,
+            target_device: None,
+            device_plan_presentation: None,
+        }
+    }
+
+    #[test]
+    fn generated_pair_selects_elevated_permissions_only_for_root_capable_targets() {
+        let draft = generated_additive_permission_draft();
+        assert_pair_authority(&draft);
+        let install = generated_recipe_step_id(&draft, "install_apk", false);
+        let baseline = generated_recipe_step_id(&draft, "grant_permissions", false);
+        let elevated = generated_recipe_step_id(&draft, "grant_permissions", true);
+        let launch = generated_recipe_step_id(&draft, "launch_app", false);
+        let workspace = tempfile::tempdir().expect("generation test temp root");
+        let apk_path = workspace.path().join("example-player.apk");
+        std::fs::write(&apk_path, b"test apk").expect("write test apk");
+
+        let rooted = plan_execution_with_app_definitions(
+            generated_pair_planner_input(&draft, &apk_path, true),
+            std::slice::from_ref(&draft.app),
+        );
+        assert!(
+            rooted.errors.is_empty(),
+            "rooted plan diagnostics: {:?}",
+            rooted.errors
+        );
+        let plan = rooted.execution_plan.expect("rooted execution plan");
+        let step_ids = plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>();
+        for expected in [&install, &baseline, &elevated, &launch] {
+            assert!(
+                step_ids.iter().any(|id| id.ends_with(expected.as_str())),
+                "rooted plan is missing generated step {expected}: {step_ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_app_permission_merge_reuses_identical_actions_and_blocks_differing_policies() {
+        // The reviewed App already declares CAMERA with no API bounds. The
+        // selected action uses the same permission with explicit bounds, so the
+        // declaration is preserved and the differing policy is reported instead
+        // of appending a duplicate the persisted contract rejects.
+        let mut existing = proposed_app(&facts(), "apk");
+        existing.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: vec![AppRuntimePermissionAction {
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            elevated: None,
+        });
+        let request = AppRecipeDraftRequest {
+            existing_app: Some(existing),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![RuntimePermissionSelection {
+                    permission_name: "android.permission.CAMERA".to_string(),
+                    requires_root: false,
+                    android_api_min: 23,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        };
+        let unbounded = generate_app_recipe_draft(request);
+        assert!(unbounded.blocking, "{unbounded:#?}");
+        assert!(
+            diagnostic_codes(&unbounded).contains(&"app_permission_action_conflict"),
+            "{unbounded:#?}"
+        );
+        let kept = unbounded
+            .app
+            .permission_sets
+            .as_ref()
+            .unwrap()
+            .baseline
+            .as_ref()
+            .unwrap();
+        assert_eq!(kept.runtime.len(), 1, "no duplicate is manufactured");
+        assert_eq!(kept.runtime[0].android_api_min, None);
+        assert_eq!(kept.runtime[0].permission, "android.permission.CAMERA");
+
+        // An identical declaration is reused without a duplicate or diagnostic.
+        let mut identical = proposed_app(&facts(), "apk");
+        identical.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: vec![AppRuntimePermissionAction {
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: Some(23),
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            elevated: None,
+        });
+        let reuse = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(identical),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
             permission_automation: Some(PermissionAutomationSelection {
                 package_name: "com.example.player".to_string(),
                 runtime_permissions: vec![RuntimePermissionSelection {
@@ -1409,17 +2376,374 @@ mod tests {
             }),
             regenerate_identifiers: false,
         });
-        assert!(draft.blocking);
-        assert!(draft.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "apk_permission_automation_strategy_unsupported"
-        }));
-        assert!(!draft.recipe.to_string().contains("grant_permissions"));
-        assert!(draft.app.permission_sets.is_none());
-        assert!(!draft.app.metadata.contains_key("apk_inspection"));
-        assert_eq!(
-            draft.apk_inspection.as_ref().unwrap()["selected_runtime_permissions"],
-            json!([])
+        assert!(!reuse.blocking, "{reuse:#?}");
+        let reused = reuse
+            .app
+            .permission_sets
+            .as_ref()
+            .unwrap()
+            .baseline
+            .as_ref()
+            .unwrap();
+        assert_eq!(reused.runtime.len(), 1);
+        assert!(
+            !diagnostic_codes(&reuse).contains(&"app_permission_action_conflict"),
+            "{reuse:#?}"
         );
+
+        // App-ops follow the same canonical-identity rule: an existing
+        // operation with different Android API bounds is a conflict, never a
+        // duplicate.
+        let mut app_ops = proposed_app(&facts(), "apk");
+        app_ops.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: Vec::new(),
+                app_ops: vec![AppOpAction {
+                    op: "android:get_usage_stats".to_string(),
+                    mode: AppOpMode::Allow,
+                    android_api_min: Some(30),
+                    android_api_max: None,
+                }],
+            }),
+            elevated: None,
+        });
+        let op_conflict = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(app_ops),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: Vec::new(),
+                app_ops: vec![AppOpPermissionSelection {
+                    permission_name: "android.permission.PACKAGE_USAGE_STATS".to_string(),
+                    operation_name: "android:get_usage_stats".to_string(),
+                    mode: "allow".to_string(),
+                    requires_root: false,
+                    android_api_min: 31,
+                    android_api_max: None,
+                }],
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(op_conflict.blocking, "{op_conflict:#?}");
+        assert!(
+            diagnostic_codes(&op_conflict).contains(&"app_permission_action_conflict"),
+            "{op_conflict:#?}"
+        );
+        let kept_ops = op_conflict
+            .app
+            .permission_sets
+            .as_ref()
+            .unwrap()
+            .baseline
+            .as_ref()
+            .unwrap();
+        assert_eq!(kept_ops.app_ops.len(), 1);
+        assert_eq!(kept_ops.app_ops[0].android_api_min, Some(30));
+    }
+
+    #[test]
+    fn existing_app_app_op_merge_reuses_identical_actions_and_blocks_mode_conflicts() {
+        // App-op merging identifies an action by its operation name and treats
+        // mode plus Android API bounds as the declared policy. An identical
+        // declaration is reused, while a same-operation action whose selected
+        // mode cannot match the allow-only declaration blocks instead of
+        // appending a duplicate.
+
+        // An identical declaration (same operation, mode, and bounds) is reused
+        // without a duplicate or diagnostic.
+        let mut identical = proposed_app(&facts(), "apk");
+        identical.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: Vec::new(),
+                app_ops: vec![AppOpAction {
+                    op: "android:get_usage_stats".to_string(),
+                    mode: AppOpMode::Allow,
+                    android_api_min: Some(31),
+                    android_api_max: None,
+                }],
+            }),
+            elevated: None,
+        });
+        let reuse = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(identical),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: Vec::new(),
+                app_ops: vec![AppOpPermissionSelection {
+                    permission_name: "android.permission.PACKAGE_USAGE_STATS".to_string(),
+                    operation_name: "android:get_usage_stats".to_string(),
+                    mode: "allow".to_string(),
+                    requires_root: false,
+                    android_api_min: 31,
+                    android_api_max: None,
+                }],
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(!reuse.blocking, "{reuse:#?}");
+        let reused_ops = reuse
+            .app
+            .permission_sets
+            .as_ref()
+            .unwrap()
+            .baseline
+            .as_ref()
+            .unwrap();
+        assert_eq!(reused_ops.app_ops.len(), 1, "no duplicate is manufactured");
+        assert_eq!(reused_ops.app_ops[0].op, "android:get_usage_stats");
+        assert_eq!(reused_ops.app_ops[0].mode, AppOpMode::Allow);
+        assert_eq!(reused_ops.app_ops[0].android_api_min, Some(31));
+        assert!(
+            !diagnostic_codes(&reuse).contains(&"app_permission_action_conflict"),
+            "{reuse:#?}"
+        );
+
+        // Mode identity: the selected operation, its required permission, and
+        // its Android API bounds are identical, so only the mode differs. The
+        // allow-only schema cannot represent the selection, so generation
+        // blocks with a mode diagnostic and preserves the declaration.
+        let mut mode_declared = proposed_app(&facts(), "apk");
+        mode_declared.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: Vec::new(),
+                app_ops: vec![AppOpAction {
+                    op: "android:get_usage_stats".to_string(),
+                    mode: AppOpMode::Allow,
+                    android_api_min: Some(31),
+                    android_api_max: None,
+                }],
+            }),
+            elevated: None,
+        });
+        let mode_conflict = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(mode_declared),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: Vec::new(),
+                app_ops: vec![AppOpPermissionSelection {
+                    permission_name: "android.permission.PACKAGE_USAGE_STATS".to_string(),
+                    operation_name: "android:get_usage_stats".to_string(),
+                    mode: "deny".to_string(),
+                    requires_root: false,
+                    android_api_min: 31,
+                    android_api_max: None,
+                }],
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(mode_conflict.blocking, "{mode_conflict:#?}");
+        assert!(
+            mode_conflict.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "apk_permission_automation_invalid"
+                    && diagnostic.field == "recipe.permissionAutomation.appOps[0].mode"
+            }),
+            "{mode_conflict:#?}"
+        );
+        let kept_mode_ops = mode_conflict
+            .app
+            .permission_sets
+            .as_ref()
+            .unwrap()
+            .baseline
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            kept_mode_ops.app_ops.len(),
+            1,
+            "no duplicate is manufactured"
+        );
+        assert_eq!(kept_mode_ops.app_ops[0].mode, AppOpMode::Allow);
+        assert_eq!(kept_mode_ops.app_ops[0].android_api_min, Some(31));
+    }
+
+    #[test]
+    fn existing_app_permission_merge_rejects_actions_declared_in_the_sibling_set() {
+        // One App Definition permission identity cannot appear in both the
+        // baseline and elevated sets. When a selected root-required action
+        // targets the sibling set of an existing declaration, generation blocks
+        // and leaves both sets exactly as authored.
+
+        // App-op declared in the baseline set, selected as a root-required
+        // elevated action.
+        let mut op_sibling = proposed_app(&facts(), "apk");
+        op_sibling.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: Vec::new(),
+                app_ops: vec![AppOpAction {
+                    op: "android:get_usage_stats".to_string(),
+                    mode: AppOpMode::Allow,
+                    android_api_min: Some(30),
+                    android_api_max: None,
+                }],
+            }),
+            elevated: None,
+        });
+        let op_cross_set = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(op_sibling),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: Vec::new(),
+                app_ops: vec![AppOpPermissionSelection {
+                    permission_name: "android.permission.PACKAGE_USAGE_STATS".to_string(),
+                    operation_name: "android:get_usage_stats".to_string(),
+                    mode: "allow".to_string(),
+                    requires_root: true,
+                    android_api_min: 30,
+                    android_api_max: None,
+                }],
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(op_cross_set.blocking, "{op_cross_set:#?}");
+        assert!(
+            op_cross_set.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "app_permission_action_conflict"
+                    && diagnostic.field == "recipe.permissionAutomation.elevated.appOps"
+            }),
+            "{op_cross_set:#?}"
+        );
+        let op_sets = op_cross_set.app.permission_sets.as_ref().unwrap();
+        let op_baseline = op_sets.baseline.as_ref().unwrap();
+        assert_eq!(
+            op_baseline.app_ops.len(),
+            1,
+            "the declared entry is preserved"
+        );
+        assert_eq!(op_baseline.app_ops[0].android_api_min, Some(30));
+        assert!(
+            op_sets.elevated.is_none(),
+            "the sibling-set action is rejected, not appended"
+        );
+
+        // Runtime permission declared in the baseline set, selected as a
+        // root-required elevated action.
+        let mut runtime_sibling = proposed_app(&facts(), "apk");
+        runtime_sibling.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: vec![AppRuntimePermissionAction {
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            elevated: None,
+        });
+        let runtime_cross_set = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(runtime_sibling),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![RuntimePermissionSelection {
+                    permission_name: "android.permission.CAMERA".to_string(),
+                    requires_root: true,
+                    android_api_min: 23,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(runtime_cross_set.blocking, "{runtime_cross_set:#?}");
+        assert!(
+            runtime_cross_set.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "app_permission_action_conflict"
+                    && diagnostic.field == "recipe.permissionAutomation.elevated.runtime"
+            }),
+            "{runtime_cross_set:#?}"
+        );
+        let runtime_sets = runtime_cross_set.app.permission_sets.as_ref().unwrap();
+        let runtime_baseline = runtime_sets.baseline.as_ref().unwrap();
+        assert_eq!(
+            runtime_baseline.runtime.len(),
+            1,
+            "the declared entry is preserved"
+        );
+        assert_eq!(runtime_baseline.runtime[0].android_api_min, None);
+        assert!(
+            runtime_sets.elevated.is_none(),
+            "the sibling-set action is rejected, not appended"
+        );
+    }
+
+    #[test]
+    fn generated_pair_keeps_install_and_launch_when_elevated_permissions_are_pruned() {
+        let draft = generated_additive_permission_draft();
+        let install = generated_recipe_step_id(&draft, "install_apk", false);
+        let baseline = generated_recipe_step_id(&draft, "grant_permissions", false);
+        let elevated = generated_recipe_step_id(&draft, "grant_permissions", true);
+        let launch = generated_recipe_step_id(&draft, "launch_app", false);
+        let workspace = tempfile::tempdir().expect("generation test temp root");
+        let apk_path = workspace.path().join("example-player.apk");
+        std::fs::write(&apk_path, b"test apk").expect("write test apk");
+
+        let unrooted = plan_execution_with_app_definitions(
+            generated_pair_planner_input(&draft, &apk_path, false),
+            std::slice::from_ref(&draft.app),
+        );
+        assert!(
+            unrooted.errors.is_empty(),
+            "non-root plan diagnostics: {:?}",
+            unrooted.errors
+        );
+        let plan = unrooted.execution_plan.expect("non-root execution plan");
+        let step_ids = plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !step_ids.iter().any(|id| id.ends_with(elevated.as_str())),
+            "root-required permission step must not be planned for a non-root target: {step_ids:?}"
+        );
+        for expected in [&install, &baseline, &launch] {
+            assert!(
+                step_ids.iter().any(|id| id.ends_with(expected.as_str())),
+                "non-root plan is missing generated step {expected}: {step_ids:?}"
+            );
+        }
+        for step in &plan.steps {
+            for dependency in &step.dependencies {
+                assert!(
+                    step_ids.contains(&dependency.as_str()),
+                    "step {} depends on unplanned step {dependency}",
+                    step.id
+                );
+            }
+        }
     }
 
     fn generated_permission_execution_plan(
@@ -1618,13 +2942,17 @@ mod tests {
             reviewed_permission("android.permission.CAMERA"),
             reviewed_permission("android.permission.INTERNET"),
         ];
-        let mut app = proposed_app(&inspection);
+        let mut app = proposed_app(&inspection, "apk");
         app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: inspection,
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1652,8 +2980,11 @@ mod tests {
 
     #[test]
     fn structured_mapping_rows_replace_artifacts_and_targets_and_preserve_metadata_order() {
-        let app = proposed_app(&facts());
+        let app = proposed_app(&facts(), "apk");
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
             app: Some(app),
             recipe: None,
@@ -1685,6 +3016,7 @@ mod tests {
                 }],
                 metadata: r#"{"first":1,"last":2}"#.to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1710,8 +3042,11 @@ mod tests {
 
     #[test]
     fn mapping_rows_reject_empty_and_duplicate_ids() {
-        let app = proposed_app(&facts());
+        let app = proposed_app(&facts(), "apk");
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
             app: Some(app),
             recipe: None,
@@ -1742,6 +3077,7 @@ mod tests {
                 targets: Vec::new(),
                 metadata: "{}".to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1759,8 +3095,11 @@ mod tests {
 
     #[test]
     fn authored_metadata_rejects_the_reserved_inspection_key() {
-        let app = proposed_app(&facts());
+        let app = proposed_app(&facts(), "apk");
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
             app: Some(app),
             recipe: None,
@@ -1769,6 +3108,7 @@ mod tests {
                 targets: Vec::new(),
                 metadata: r#"{"apk_inspection":{"package_name":"com.example.player"}}"#.to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1785,13 +3125,17 @@ mod tests {
         let mut inspection = facts();
         inspection.calculated_sha256 = "publisher-value".to_string();
         inspection.checksum_status = "verified".to_string();
-        let mut app = proposed_app(&inspection);
+        let mut app = proposed_app(&inspection, "apk");
         app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: inspection,
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1829,13 +3173,17 @@ mod tests {
                 target_sdk_state: Some("future_state".to_string()),
             }),
         }];
-        let mut app = proposed_app(&inspection);
+        let mut app = proposed_app(&inspection, "apk");
         app.category = Some("utility".to_string());
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: inspection,
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1863,14 +3211,18 @@ mod tests {
         // Removing the local APK artifact leaves the generated recipe
         // installing a file the app definition no longer owns.
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
-            app: Some(proposed_app(&facts())),
+            app: Some(proposed_app(&facts(), "apk")),
             recipe: None,
             mappings: Some(AppMappingEdits {
                 artifacts: vec![],
                 targets: Vec::new(),
                 metadata: "{}".to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1882,8 +3234,11 @@ mod tests {
 
         // Retyping the artifact as a generic file contradicts the APK input.
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
-            app: Some(proposed_app(&facts())),
+            app: Some(proposed_app(&facts(), "apk")),
             recipe: None,
             mappings: Some(AppMappingEdits {
                 artifacts: vec![AppArtifactEdit {
@@ -1896,6 +3251,7 @@ mod tests {
                 targets: Vec::new(),
                 metadata: "{}".to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1907,8 +3263,11 @@ mod tests {
 
         // Swapping in a remote source contradicts the user-provided input.
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
-            app: Some(proposed_app(&facts())),
+            app: Some(proposed_app(&facts(), "apk")),
             recipe: None,
             mappings: Some(AppMappingEdits {
                 artifacts: vec![AppArtifactEdit {
@@ -1924,6 +3283,7 @@ mod tests {
                 targets: Vec::new(),
                 metadata: "{}".to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1933,32 +3293,67 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.code == "local_artifact_missing"));
 
-        // Renaming the artifact keeps one candidate, so generation still pairs
-        // the recipe input with it.
+        // Renaming the artifact registry entry while the draft still selects
+        // the default "apk" App Artifact ID blocks: the recipe must reference
+        // exactly the selected artifact.
+        let renamed_mappings = || AppMappingEdits {
+            artifacts: vec![AppArtifactEdit {
+                id: "player_apk".to_string(),
+                kind: AppArtifactKind::Apk,
+                name: None,
+                description: None,
+                source: AppArtifactSource::UserProvided,
+            }],
+            targets: Vec::new(),
+            metadata: "{}".to_string(),
+        };
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
-            app: Some(proposed_app(&facts())),
+            app: Some(proposed_app(&facts(), "apk")),
             recipe: None,
-            mappings: Some(AppMappingEdits {
-                artifacts: vec![AppArtifactEdit {
-                    id: "player_apk".to_string(),
-                    kind: AppArtifactKind::Apk,
-                    name: None,
-                    description: None,
-                    source: AppArtifactSource::UserProvided,
-                }],
-                targets: Vec::new(),
-                metadata: "{}".to_string(),
-            }),
+            mappings: Some(renamed_mappings()),
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_artifact_id_mismatch"));
+
+        // Selecting the renamed artifact ID keeps the generated pair
+        // consistent and admissible.
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: Some("player_apk".to_string()),
+            recipe_id: None,
+            facts: facts(),
+            app: Some(proposed_app(&facts(), "apk")),
+            recipe: None,
+            mappings: Some(renamed_mappings()),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        let recipe = draft.recipe_canonical_yaml.as_deref().unwrap();
+        assert!(recipe.contains("artifact: player_apk"));
+        assert!(recipe.contains("ref: artifacts.player_apk.local_path"));
+        assert!(recipe.contains("ref: inputs.example_player_player_apk_apk"));
+        assert!(!recipe.contains("artifacts.apk.local_path"));
+        assert_pair_authority(&draft);
 
         // Two renamed candidates leave the installed artifact ambiguous.
         let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
             facts: facts(),
-            app: Some(proposed_app(&facts())),
+            app: Some(proposed_app(&facts(), "apk")),
             recipe: None,
             mappings: Some(AppMappingEdits {
                 artifacts: vec![
@@ -1980,6 +3375,7 @@ mod tests {
                 targets: Vec::new(),
                 metadata: "{}".to_string(),
             }),
+            permission_automation_enabled: false,
             permission_automation: None,
             regenerate_identifiers: false,
         });
@@ -1988,5 +3384,354 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "local_artifact_ambiguous"));
+    }
+
+    #[test]
+    fn existing_app_generation_appends_artifact_and_preserves_app_facts() {
+        let mut base = proposed_app(&facts(), "apk");
+        base.id = "armsx1".to_string();
+        base.name = "Armsx1".to_string();
+        base.package_id = "com.armsx1".to_string();
+        base.launcher_activity = Some("com.armsx1.MainActivity".to_string());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(base),
+            app_artifact_id: Some("retroarch_apk".to_string()),
+            recipe_id: None,
+            facts: facts_with_package("com.armsx1"),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:?}", draft.diagnostics);
+        assert_eq!(draft.app.id, "armsx1");
+        assert_eq!(draft.app.package_id, "com.armsx1");
+        assert_eq!(
+            draft.app.launcher_activity.as_deref(),
+            Some("com.armsx1.MainActivity")
+        );
+        assert!(draft.app.artifacts.contains_key("apk"));
+        assert_eq!(draft.app.artifacts.len(), 2);
+        let added = draft
+            .app
+            .artifacts
+            .get("retroarch_apk")
+            .expect("appended artifact");
+        assert_eq!(added.kind, AppArtifactKind::Apk);
+        assert!(matches!(added.source, AppArtifactSource::UserProvided));
+        let recipe = draft.recipe_canonical_yaml.as_deref().unwrap();
+        assert!(recipe.contains("id: app.armsx1.retroarch_apk.install"));
+        assert!(recipe.contains("app_ref: armsx1"));
+        assert!(recipe.contains("artifact: retroarch_apk"));
+        assert!(recipe.contains("ref: artifacts.retroarch_apk.local_path"));
+        assert!(recipe.contains("ref: inputs.armsx1_retroarch_apk_apk"));
+        assert!(!recipe.contains("com.armsx1"));
+        assert_pair_authority(&draft);
+    }
+
+    #[test]
+    fn explicit_identifiers_are_retained_without_auto_renaming() {
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: Some("armsx1_apk".to_string()),
+            recipe_id: Some("app.armsx1.armsx1_apk.install".to_string()),
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: true,
+        });
+        assert!(!draft.blocking, "{:?}", draft.diagnostics);
+        assert!(draft.app.artifacts.contains_key("armsx1_apk"));
+        assert!(!draft.app.artifacts.contains_key("apk"));
+        let recipe = draft.recipe_canonical_yaml.as_deref().unwrap();
+        assert!(recipe.contains("id: app.armsx1.armsx1_apk.install"));
+        assert!(recipe.contains("artifact: armsx1_apk"));
+        assert!(recipe.contains("ref: artifacts.armsx1_apk.local_path"));
+        assert_pair_authority(&draft);
+    }
+
+    #[test]
+    fn existing_app_artifact_id_collision_blocks_without_replacing_the_artifact() {
+        let mut base = proposed_app(&facts(), "apk");
+        base.id = "armsx1".to_string();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(base),
+            app_artifact_id: Some("apk".to_string()),
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_artifact_id_collision"));
+        assert_eq!(draft.app.artifacts.len(), 1);
+        assert!(draft.app_canonical_yaml.is_none());
+    }
+
+    #[test]
+    fn existing_app_generation_blocks_mismatched_inspected_package() {
+        let mut base = proposed_app(&facts(), "apk");
+        base.id = "armsx1".to_string();
+        base.name = "Armsx1".to_string();
+        base.package_id = "com.armsx1".to_string();
+        base.launcher_activity = Some("com.armsx1.MainActivity".to_string());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(base),
+            app_artifact_id: Some("retroarch_apk".to_string()),
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_package_mismatch"));
+        assert!(draft.app_canonical_yaml.is_none());
+    }
+
+    #[test]
+    fn new_app_generation_blocks_authored_package_mismatch() {
+        let mut app = proposed_app(&facts(), "apk");
+        app.package_id = "com.other.app".to_string();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_package_mismatch"));
+        assert!(draft.app_canonical_yaml.is_none());
+    }
+
+    #[test]
+    fn local_permission_automation_requires_the_inspected_package() {
+        let mut app = proposed_app(&facts(), "apk");
+        app.category = Some("utility".to_string());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.other.package".to_string(),
+                runtime_permissions: vec![RuntimePermissionSelection {
+                    permission_name: "android.permission.CAMERA".to_string(),
+                    requires_root: false,
+                    android_api_min: 23,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "apk_permission_automation_package_mismatch"));
+        assert!(draft.app.permission_sets.is_none());
+        assert!(draft
+            .apk_inspection
+            .as_ref()
+            .is_some_and(|metadata| metadata["selected_runtime_permissions"] == json!([])));
+    }
+
+    /// Build one existing-App snapshot that declares a baseline runtime
+    /// permission and a root-required elevated app-op.
+    fn existing_app_with_declared_permission_sets() -> AppDefinitionV1 {
+        let mut app = proposed_app(&facts(), "apk");
+        app.permission_sets = Some(AppPermissionSets {
+            baseline: Some(AppPermissionSet {
+                runtime: vec![AppRuntimePermissionAction {
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: Some(23),
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            elevated: Some(AppPermissionSet {
+                runtime: Vec::new(),
+                app_ops: vec![AppOpAction {
+                    op: "android:write_secure_settings".to_string(),
+                    mode: AppOpMode::Allow,
+                    android_api_min: Some(23),
+                    android_api_max: None,
+                }],
+            }),
+        });
+        app
+    }
+
+    #[test]
+    fn absent_permission_automation_flag_preserves_declared_sets_without_grant_steps() {
+        let existing = existing_app_with_declared_permission_sets();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(existing),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{draft:#?}");
+        let sets = draft
+            .app
+            .permission_sets
+            .as_ref()
+            .expect("declared permission sets survive generation");
+        assert_eq!(
+            sets.baseline
+                .as_ref()
+                .map(|set| set.runtime[0].permission.as_str()),
+            Some("android.permission.CAMERA")
+        );
+        assert_eq!(sets.elevated.as_ref().map(|set| set.app_ops.len()), Some(1));
+        let yaml = draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .expect("generated recipe canonical yaml");
+        assert!(yaml.contains("type: install_apk"));
+        assert!(!yaml.contains("grant_permissions"));
+        assert!(!yaml.contains("permission_set"));
+        assert_pair_authority(&draft);
+    }
+
+    #[test]
+    fn disabled_permission_automation_blocks_selected_actions() {
+        let mut app = proposed_app(&facts(), "apk");
+        app.category = Some("utility".to_string());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: false,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![RuntimePermissionSelection {
+                    permission_name: "android.permission.CAMERA".to_string(),
+                    requires_root: false,
+                    android_api_min: 23,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking, "{draft:#?}");
+        assert!(
+            diagnostic_codes(&draft).contains(&"apk_permission_automation_disabled"),
+            "{draft:#?}"
+        );
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "apk_permission_automation_disabled"
+                && diagnostic.field == "recipe.permissionAutomation.enabled"
+        }));
+        assert!(draft.app.permission_sets.is_none());
+        assert!(draft.recipe_canonical_yaml.is_none());
+        assert!(draft
+            .apk_inspection
+            .as_ref()
+            .is_some_and(|metadata| metadata["selected_runtime_permissions"] == json!([])));
+    }
+
+    #[test]
+    fn enabled_permission_automation_without_selection_executes_declared_sets() {
+        let existing = existing_app_with_declared_permission_sets();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: Some(existing),
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: None,
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{draft:#?}");
+        let sets = draft
+            .app
+            .permission_sets
+            .as_ref()
+            .expect("declared permission sets survive generation");
+        assert_eq!(sets.baseline.as_ref().map(|set| set.runtime.len()), Some(1));
+        assert_eq!(sets.elevated.as_ref().map(|set| set.app_ops.len()), Some(1));
+        let yaml = draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .expect("generated recipe canonical yaml");
+        assert!(yaml.contains("type: grant_permissions"));
+        assert!(yaml.contains("permission_set: baseline"));
+        assert!(yaml.contains("permission_set: elevated"));
+        assert!(yaml.contains("on_failure: warn"));
+        assert_pair_authority(&draft);
+    }
+
+    #[test]
+    fn enabled_permission_automation_without_declared_sets_emits_no_grant_steps() {
+        let mut app = proposed_app(&facts(), "apk");
+        app.category = Some("utility".to_string());
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            existing_app: None,
+            app_artifact_id: None,
+            recipe_id: None,
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation_enabled: true,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{draft:#?}");
+        assert!(draft.app.permission_sets.is_none());
+        let yaml = draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .expect("generated recipe canonical yaml");
+        assert!(!yaml.contains("grant_permissions"));
+        assert!(!yaml.contains("permission_set"));
+        assert_pair_authority(&draft);
     }
 }

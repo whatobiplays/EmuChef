@@ -46,6 +46,12 @@ import type {
   AppRecipeSaveResult,
   AppGeneratorSourceMode,
   AppGeneratorInstallStrategy,
+  AppGeneratorExistingAppsResult,
+  AppGeneratorPublicationOutcomeDto,
+  AppGeneratorPublicationStatusResult,
+  AppGeneratorRequestContext,
+  AppGeneratorReviewResult,
+  ExistingAppSelectionResult,
   PermissionSelectionRequestDto,
   RemoteApkDownloadResult,
   RemoteSourceAnalysisResult,
@@ -453,6 +459,117 @@ export async function inspectAppGeneratorApk(
   return callApi("inspect_app_generator_apk", { sessionHandle, apkHandle });
 }
 
+/**
+ * Copy the additive generator request fields into one request payload.
+ *
+ * Absent identity fields are omitted instead of sent as null so a request
+ * never carries an empty stand-in for a value the native layer distinguishes.
+ * Permission automation intent is always written explicitly as a boolean; an
+ * absent or non-true value disables it, matching the native default.
+ */
+function generatorRequestFields(
+  context: AppGeneratorRequestContext,
+): Record<string, string | number | boolean> {
+  const fields: Record<string, string | number | boolean> = { requestId: context.requestId };
+  if (context.existingAppHandle) fields.existingAppHandle = context.existingAppHandle;
+  if (context.appArtifactId) fields.appArtifactId = context.appArtifactId;
+  if (context.recipeId) fields.recipeId = context.recipeId;
+  if (context.artifactName) fields.artifactName = context.artifactName;
+  fields.permissionAutomationEnabled = context.permissionAutomationEnabled === true;
+  return fields;
+}
+
+/** List catalog App Definitions that existing-app generation can extend. */
+export async function listAppGeneratorExistingApps(
+  sessionHandle: string,
+  rootHandle: string | null = null,
+): Promise<EditorApiResult<AppGeneratorExistingAppsResult>> {
+  return callApi("list_app_generator_existing_apps", { sessionHandle, rootHandle });
+}
+
+/** Bind one catalog App Definition as the target of existing-app generation. */
+export async function selectAppGeneratorExistingApp(
+  sessionHandle: string,
+  appPath: string,
+): Promise<EditorApiResult<ExistingAppSelectionResult>> {
+  return callApi("select_app_generator_existing_app", { sessionHandle, appPath });
+}
+
+export interface AppGeneratorReviewDraftInput {
+  sessionHandle: string;
+  apkHandle: string;
+  rootHandle: string | null;
+  context: AppGeneratorRequestContext;
+  app: AppDefinitionV1Dto | null;
+  recipe: AppRecipeEditsDto | null;
+  mappings: AppMappingEditsDto | null;
+  permissionSelection: PermissionSelectionRequestDto | null;
+  regenerateIdentifiers: boolean;
+}
+
+export interface AppGeneratorRemoteReviewDraftInput extends AppGeneratorReviewDraftInput {
+  assetHandle: string;
+  strategy: AppGeneratorInstallStrategy;
+  assetPattern: string | null;
+  includePrereleases: boolean;
+  trustedSha256: string | null;
+}
+
+/** Request the immutable combined review of a local-APK App and Recipe pair. */
+export async function reviewAppGeneratorDraft(
+  input: AppGeneratorReviewDraftInput,
+): Promise<EditorApiResult<AppGeneratorReviewResult>> {
+  return callApi("review_app_generator_draft", {
+    sessionHandle: input.sessionHandle,
+    apkHandle: input.apkHandle,
+    rootHandle: input.rootHandle,
+    permissionSelection: input.permissionSelection,
+    regenerateIdentifiers: input.regenerateIdentifiers,
+    ...(input.app ? { app: input.app } : {}),
+    ...(input.recipe ? { recipe: input.recipe } : {}),
+    ...(input.mappings ? { mappings: input.mappings } : {}),
+    ...generatorRequestFields(input.context),
+  });
+}
+
+/** Request the immutable combined review of a remote-source App and Recipe pair. */
+export async function reviewRemoteAppGeneratorDraft(
+  input: AppGeneratorRemoteReviewDraftInput,
+): Promise<EditorApiResult<AppGeneratorReviewResult>> {
+  return callApi("review_remote_app_generator_draft", {
+    sessionHandle: input.sessionHandle,
+    apkHandle: input.apkHandle,
+    rootHandle: input.rootHandle,
+    assetHandle: input.assetHandle,
+    strategy: input.strategy,
+    assetPattern: input.assetPattern,
+    includePrereleases: input.includePrereleases,
+    trustedSha256: input.trustedSha256,
+    permissionSelection: input.permissionSelection,
+    regenerateIdentifiers: input.regenerateIdentifiers,
+    ...(input.app ? { app: input.app } : {}),
+    ...(input.recipe ? { recipe: input.recipe } : {}),
+    ...(input.mappings ? { mappings: input.mappings } : {}),
+    ...generatorRequestFields(input.context),
+  });
+}
+
+/** Publish the files one immutable review handle describes. */
+export async function saveAppGeneratorReview(
+  sessionHandle: string,
+  reviewHandle: string,
+  requestId: number,
+): Promise<EditorApiResult<AppGeneratorPublicationOutcomeDto>> {
+  return callApi("save_app_generator_review", { sessionHandle, reviewHandle, requestId });
+}
+
+/** Read the recorded outcome of one publication operation. */
+export async function appGeneratorPublicationStatus(
+  operationId: string,
+): Promise<EditorApiResult<AppGeneratorPublicationStatusResult>> {
+  return callApi("app_generator_publication_status", { operationId });
+}
+
 export async function generateAppRecipeDraft(
   sessionHandle: string,
   apkHandle: string,
@@ -462,16 +579,18 @@ export async function generateAppRecipeDraft(
   permissionSelection: PermissionSelectionRequestDto | null,
   regenerateIdentifiers = false,
   rootHandle: string | null = null,
+  context: AppGeneratorRequestContext,
 ): Promise<EditorApiResult<AppRecipeDraftResult>> {
   return callApi("generate_app_recipe_draft", {
     sessionHandle,
     apkHandle,
-    app,
-    recipe,
-    mappings,
     permissionSelection,
     regenerateIdentifiers,
     rootHandle,
+    ...(app ? { app } : {}),
+    ...(recipe ? { recipe } : {}),
+    ...(mappings ? { mappings } : {}),
+    ...generatorRequestFields(context),
   });
 }
 
@@ -489,6 +608,7 @@ export async function generateRemoteAppRecipeDraft(
   permissionSelection: PermissionSelectionRequestDto | null,
   regenerateIdentifiers = false,
   rootHandle: string | null = null,
+  context: AppGeneratorRequestContext,
 ): Promise<EditorApiResult<AppRecipeDraftResult>> {
   return callApi("generate_remote_app_recipe_draft", {
     sessionHandle,
@@ -498,12 +618,13 @@ export async function generateRemoteAppRecipeDraft(
     assetPattern,
     includePrereleases,
     trustedSha256,
-    app,
-    recipe,
-    mappings,
     permissionSelection,
     regenerateIdentifiers,
     rootHandle,
+    ...(app ? { app } : {}),
+    ...(recipe ? { recipe } : {}),
+    ...(mappings ? { mappings } : {}),
+    ...generatorRequestFields(context),
   });
 }
 

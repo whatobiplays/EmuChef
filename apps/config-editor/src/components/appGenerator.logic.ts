@@ -13,15 +13,22 @@ import type {
   AppRecipeCollisionResult,
   AppRecipeDraftResult,
   AppRecipeEditsDto,
-  AppRecipeSaveResult,
   AppGeneratorDiagnosticDto,
+  AppGeneratorExistingAppsResult,
   AppGeneratorInstallStrategy,
+  AppGeneratorPublicationOutcomeDto,
+  AppGeneratorPublicationStatusResult,
+  AppGeneratorRequestContext,
+  AppGeneratorReviewResult,
   AppGeneratorSourceMode,
   AppReleaseProviderDto,
   AppTargetEditDto,
   AppTargetKindDto,
   AppTargetLocationDto,
   AppTargetV1Dto,
+  ExistingAppInventoryDto,
+  ExistingAppSelectionResult,
+  ExistingAppSummaryDto,
   PermissionSelectionRequestDto,
   ReleasePatternPreviewResult,
   RemoteAssetDto,
@@ -73,6 +80,14 @@ export function globalInspectionWarnings(
   inspection: ApkInspectionResult,
 ): ApkPermissionWarningDto[] {
   return inspection.warnings.filter((warning) => warning.permissionName === null);
+}
+
+/** Return declaration-specific warnings attached to one permission name. */
+export function permissionWarnings(
+  inspection: ApkInspectionResult,
+  permissionName: string,
+): ApkPermissionWarningDto[] {
+  return inspection.warnings.filter((warning) => warning.permissionName === permissionName);
 }
 
 /** Format structured permission applicability without inferring from permission names. */
@@ -147,13 +162,28 @@ function permissionApplicabilityDetails(
 }
 
 /** Return whether the inspected APK is the package-enforced artifact used at runtime. */
-export function permissionAutomationEligible(
-  sourceMode: AppGeneratorSourceMode,
-  installStrategy: AppGeneratorInstallStrategy,
-): boolean {
-  return sourceMode !== "local_apk"
-    && (installStrategy === "pinned_remote_asset"
-      || installStrategy === "latest_compatible_release");
+export interface InspectionPartition {
+  runtime: { baseline: number[]; elevated: number[] };
+  appOps: { baseline: number[]; elevated: number[] };
+}
+
+/**
+ * Partition inspected permission candidates by whether granting them requires root.
+ *
+ * Baseline candidates can run on an unrooted device. Elevated candidates are
+ * optional and never become a launch dependency. This grouping only drives
+ * presentation; the trusted review reports the authoritative partition.
+ */
+export function inspectionPartition(inspection: ApkInspectionResult): InspectionPartition {
+  const runtime = { baseline: [] as number[], elevated: [] as number[] };
+  const appOps = { baseline: [] as number[], elevated: [] as number[] };
+  inspection.runtimeGrantCandidates.forEach((candidate, index) => {
+    (candidate.requiresRoot ? runtime.elevated : runtime.baseline).push(index);
+  });
+  inspection.appOpCandidates.forEach((candidate, index) => {
+    (candidate.requiresRoot ? appOps.elevated : appOps.baseline).push(index);
+  });
+  return { runtime, appOps };
 }
 
 /** Serialize only selected candidate identities and the opaque inspection binding. */
@@ -203,8 +233,7 @@ export type AppGeneratorPhase =
   | "inspecting"
   | "editing"
   | "reviewing"
-  | "saving"
-  | "saved";
+  | "saving";
 
 /**
  * One editable App Artifact row.
@@ -375,11 +404,14 @@ export function targetRowForDefinition(id: string, target: AppTargetV1Dto): AppT
   return { id, kind: target.kind, location: target.location, path: target.path };
 }
 
+export type AppGeneratorTargetMode = "new_app" | "existing_app";
+
 export interface AppGeneratorState {
   phase: AppGeneratorPhase;
   sessionHandle: string | null;
   apkHandle: string | null;
   apkLabel: string | null;
+  targetMode: AppGeneratorTargetMode;
   sourceMode: AppGeneratorSourceMode;
   sourceUrl: string;
   includePrereleases: boolean;
@@ -395,7 +427,28 @@ export interface AppGeneratorState {
   draft: AppRecipeDraftResult | null;
   form: AppGeneratorFormState | null;
   collisions: AppRecipeCollisionResult | null;
-  saved: AppRecipeSaveResult | null;
+  existingApps: ExistingAppSummaryDto[] | null;
+  existingAppsInventory: ExistingAppInventoryDto | null;
+  existingApp: ExistingAppSelectionResult | null;
+  appArtifactId: string | null;
+  recipeId: string | null;
+  artifactName: string;
+  proposedArtifactId: string;
+  automationOptIn: boolean;
+  review: AppGeneratorReviewResult | null;
+  publication: AppGeneratorPublicationOutcomeDto | null;
+  publicationStatus: AppGeneratorPublicationStatusResult | null;
+  lastIssuedRequestId: number;
+  pendingPreviewRequestId: number | null;
+  pendingReviewRequestId: number | null;
+  pendingExistingAppsRequestId: number | null;
+  pendingExistingAppSelectRequestId: number | null;
+  previewPending: boolean;
+  reviewPending: boolean;
+  savePending: boolean;
+  existingAppsPending: boolean;
+  existingAppSelectPending: boolean;
+  publicationStatusPending: boolean;
   error: string | null;
 }
 
@@ -406,6 +459,11 @@ export type AppGeneratorAction =
       rootHandle?: string | null;
       rootLabel?: string | null;
     }
+  | { type: "target-mode"; mode: AppGeneratorTargetMode }
+  | { type: "existing-apps-request"; requestId: number }
+  | { type: "existing-apps-response"; requestId: number; result: AppGeneratorExistingAppsResult }
+  | { type: "existing-app-select-request"; requestId: number }
+  | { type: "existing-app-select-response"; requestId: number; result: ExistingAppSelectionResult }
   | { type: "apk-selected"; apkHandle: string; label: string }
   | { type: "source-mode"; mode: AppGeneratorSourceMode }
   | { type: "source-url"; value: string }
@@ -422,19 +480,31 @@ export type AppGeneratorAction =
   | { type: "inspected"; inspection: ApkInspectionResult }
   | { type: "runtime-candidate-selected"; index: number; selected: boolean }
   | { type: "app-op-candidate-selected"; index: number; selected: boolean }
-  | { type: "drafted"; draft: AppRecipeDraftResult }
+  | { type: "automation-opt-in"; value: boolean }
+  | { type: "artifact-id"; value: string }
+  | { type: "recipe-id"; value: string }
+  | { type: "artifact-name"; value: string }
+  | { type: "identity-reset" }
   | { type: "form"; form: AppGeneratorFormState }
   | { type: "root-selected"; rootHandle: string; label: string }
-  | { type: "reviewed"; draft: AppRecipeDraftResult; collisions: AppRecipeCollisionResult }
-  | { type: "saving" }
-  | { type: "saved"; result: AppRecipeSaveResult }
+  | { type: "preview-request"; requestId: number }
+  | { type: "preview-response"; requestId: number; draft: AppRecipeDraftResult }
+  | { type: "review-request"; requestId: number }
+  | { type: "review-response"; requestId: number; review: AppGeneratorReviewResult }
+  | { type: "save-request"; requestId: number }
+  | { type: "publication-response"; result: AppGeneratorPublicationOutcomeDto }
+  | { type: "publication-status-request" }
+  | { type: "publication-status-response"; result: AppGeneratorPublicationStatusResult }
   | { type: "failure"; message: string };
 
+/** App Artifact id generation proposes while the author keeps the default. */
+const DEFAULT_ARTIFACT_ID = "apk";
 export const initialAppGeneratorState: AppGeneratorState = {
   phase: "starting",
   sessionHandle: null,
   apkHandle: null,
   apkLabel: null,
+  targetMode: "new_app",
   sourceMode: "local_apk",
   sourceUrl: "",
   includePrereleases: false,
@@ -450,17 +520,175 @@ export const initialAppGeneratorState: AppGeneratorState = {
   draft: null,
   form: null,
   collisions: null,
-  saved: null,
+  existingApps: null,
+  existingAppsInventory: null,
+  existingApp: null,
+  appArtifactId: null,
+  recipeId: null,
+  artifactName: "",
+  proposedArtifactId: DEFAULT_ARTIFACT_ID,
+  automationOptIn: false,
+  review: null,
+  publication: null,
+  publicationStatus: null,
+  lastIssuedRequestId: 0,
+  pendingPreviewRequestId: null,
+  pendingReviewRequestId: null,
+  pendingExistingAppsRequestId: null,
+  pendingExistingAppSelectRequestId: null,
+  previewPending: false,
+  reviewPending: false,
+  savePending: false,
+  existingAppsPending: false,
+  existingAppSelectPending: false,
+  publicationStatusPending: false,
   error: null,
 };
 
 /**
- * Artifact id native generation proposes for a remote artifact source.
+ * Return the App Artifact id generation sends for one state.
  *
- * The backend always builds its proposal with this artifact id, so an artifact
- * the author keeps under it is the one a generated recipe installs.
+ * The value is either the author's explicit id or the stable proposal, and it
+ * is never re-derived from catalog contents, so preview, review, and save all
+ * name the same artifact and a collision always asks the author to choose a
+ * different id explicitly.
  */
-const PROPOSED_REMOTE_ARTIFACT_ID = "apk";
+export function effectiveArtifactId(state: AppGeneratorState): string {
+  const explicit = state.appArtifactId?.trim() ?? "";
+  if (explicit.length > 0) return explicit;
+  const proposed = state.proposedArtifactId.trim();
+  return proposed.length > 0 ? proposed : DEFAULT_ARTIFACT_ID;
+}
+
+/** Return the App id generation targets: the locked selection or the previewed form. */
+export function effectiveAppId(state: AppGeneratorState): string {
+  return state.existingApp?.appId ?? state.form?.app.id ?? state.draft?.app.id ?? "";
+}
+
+/** Return the default Recipe id one App and App Artifact identity compose. */
+export function proposedRecipeId(appId: string, artifactId: string): string {
+  return `app.${appId}.${artifactId}.install`;
+}
+
+/**
+ * Return the Recipe id generation sends for one state.
+ *
+ * An explicit author id wins; otherwise the stable App-id-derived proposal is
+ * used. An empty App id leaves the proposal unresolved until a preview or an
+ * existing-app selection supplies one, and generation then omits the field
+ * instead of inventing an identity.
+ */
+export function effectiveRecipeId(state: AppGeneratorState): string {
+  const explicit = state.recipeId?.trim() ?? "";
+  if (explicit.length > 0) return explicit;
+  const appId = effectiveAppId(state).trim();
+  if (appId.length === 0) return "";
+  return proposedRecipeId(appId, effectiveArtifactId(state));
+}
+
+/** Return the identity and permission-intent fields one preview or review request carries. */
+export function generatorRequestContext(
+  state: AppGeneratorState,
+  requestId: number,
+): AppGeneratorRequestContext {
+  const artifactName = state.artifactName.trim();
+  const recipeId = effectiveRecipeId(state);
+  return {
+    requestId,
+    existingAppHandle:
+      state.targetMode === "existing_app" ? state.existingApp?.appHandle ?? null : null,
+    appArtifactId: effectiveArtifactId(state),
+    recipeId: recipeId.length > 0 ? recipeId : null,
+    artifactName: artifactName.length > 0 ? artifactName : null,
+    permissionAutomationEnabled: state.automationOptIn,
+  };
+}
+
+/**
+ * Return the preview and review bookkeeping one author edit invalidates.
+ *
+ * Any edit that changes what generation would produce discards the immutable
+ * review and both pending response slots, so a late response for the replaced
+ * inputs can never be applied over newer author intent.
+ */
+function invalidatedReview(): Pick<
+  AppGeneratorState,
+  "review" | "pendingPreviewRequestId" | "pendingReviewRequestId"
+> {
+  return { review: null, pendingPreviewRequestId: null, pendingReviewRequestId: null };
+}
+
+/**
+ * Return whether an unknown publication still blocks a confident retry.
+ *
+ * A status lookup that resolves the recorded operation to saved or failed
+ * ends the uncertainty; until then the author is told the catalog may already
+ * contain the files, and no automatic resubmission happens.
+ */
+export function publicationUnresolved(state: AppGeneratorState): boolean {
+  if (state.publication?.outcome !== "unknown") return false;
+  const status = state.publicationStatus;
+  return status === null || status.outcome === "unknown";
+}
+
+/** Recovery facts one failed publication status recorded for the author. */
+export interface PublicationFailureRecovery {
+  /** Error message the failed attempt recorded, when the backend reported one. */
+  message: string | null;
+  /** Recipe path the attempt left for manual recovery, when reported. */
+  recipePath: string | null;
+  /** Whether the Recipe file the attempt created needs manual recovery. */
+  recipeRecoveryRequired: boolean;
+  /** Whether the created Recipe file was removed again during rollback. */
+  recipeRemoved: boolean;
+}
+
+/**
+ * Read the recorded failure facts of one publication status result.
+ *
+ * A failed attempt can leave the Recipe file behind for manual recovery, so the
+ * status panel reports the recorded rollback facts instead of claiming that no
+ * files remain. Missing or malformed detail fields fall back to safe values.
+ */
+export function publicationFailureRecovery(
+  status: AppGeneratorPublicationStatusResult,
+): PublicationFailureRecovery {
+  const detail = status.detail;
+  const rollbackValue = detail === null ? null : detail.rollback;
+  const errorValue = detail === null ? null : detail.error;
+  const rollback = isRecord(rollbackValue) ? rollbackValue : null;
+  const error = isRecord(errorValue) ? errorValue : null;
+  const message = typeof error?.message === "string" ? error.message.trim() : "";
+  const recipePath = typeof rollback?.recipePath === "string" ? rollback.recipePath.trim() : "";
+  return {
+    message: message.length > 0 ? message : null,
+    recipePath: recipePath.length > 0 ? recipePath : null,
+    recipeRecoveryRequired: rollback?.recipeRecoveryRequired === true,
+    recipeRemoved: rollback?.recipeRemoved === true,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Return the inspected package that does not match the selected existing App.
+ *
+ * Generating into an existing App locks its package id, so a different APK
+ * package is an actionable hard error that asks the author to create a
+ * different App instead of replacing or rewriting the selected one.
+ */
+export function selectedPackageMismatch(
+  state: AppGeneratorState,
+): { inspected: string; selected: string } | null {
+  if (state.targetMode !== "existing_app") return null;
+  const inspected = state.inspection?.manifest.packageName ?? "";
+  const selected = state.existingApp?.packageId ?? "";
+  if (inspected.length === 0 || selected.length === 0) return null;
+  return inspected === selected ? null : { inspected, selected };
+}
+
 
 /** Return the artifact source strategy one remote source strategy requires. */
 function artifactStrategyForRemoteSource(
@@ -479,30 +707,26 @@ function artifactStrategyForRemoteSource(
 }
 
 /**
- * Return the artifact row native generation pairs with the reviewed source.
+ * Return the artifact row generation pairs with the reviewed App Artifact id.
  *
- * The backend pairs the artifact its proposal names, which is the artifact id
- * it always proposes for a remote source, and otherwise accepts a sole artifact
- * with the expected source strategy. Several matching artifacts leave the
- * pairing unresolved, and a generated recipe blocks that catalog instead of
- * choosing one, so this rule never picks an artifact the recipe would not use.
+ * The pairing names the exact trimmed id the request carries and an APK kind,
+ * so the editable form and the reviewed artifact cannot drift apart through an
+ * implicit search for a matching source strategy. Zero or several matching
+ * rows leave the pairing unresolved, and source-step mirrors then leave the
+ * form untouched instead of rewriting a row the reviewed artifact would not
+ * use.
  */
-function pairedRemoteArtifactRow(
+function pairedArtifactRow(
   form: AppGeneratorFormState | null,
-  remoteSource: RemoteSourceDescriptorDto | null,
+  artifactId: string,
 ): AppArtifactRowEdits | null {
-  if (!form || !remoteSource) return null;
-  // Native generation pairs an APK artifact only, because the generated recipe
-  // installs an APK, and its proposed artifact id wins over a retained row that
-  // records another repository or URL.
-  const expected = artifactStrategyForRemoteSource(remoteSource);
-  const matching = form.mappings.artifacts.filter(
-    (row) => row.kind === "apk" && row.strategy === expected,
+  if (!form) return null;
+  const wanted = artifactId.trim();
+  if (wanted.length === 0) return null;
+  const matches = form.mappings.artifacts.filter(
+    (row) => row.kind === "apk" && row.id.trim() === wanted,
   );
-  // The submitted payload trims artifact ids, so the pairing trims them too.
-  const proposed = matching.find((row) => row.id.trim() === PROPOSED_REMOTE_ARTIFACT_ID);
-  if (proposed) return proposed;
-  return matching.length === 1 ? matching[0]! : null;
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 /** Compare publisher checksum text the way artifact rows store it. */
@@ -511,21 +735,21 @@ function normalizedSha256Text(value: string): string {
 }
 
 /**
- * Apply one source-step edit to the artifact rows of the selected remote
- * source. Rows the author customized are left untouched, so the editable form
- * and the source step cannot drift apart without the author saying so.
+ * Apply one source-step edit to the artifact row of the reviewed App Artifact
+ * id. Rows the author customized are left untouched, so the editable form and
+ * the source step cannot drift apart without the author saying so.
  */
 function mapSelectedRemoteArtifactRows(
-  form: AppGeneratorFormState | null,
-  remoteSource: RemoteSourceDescriptorDto | null,
+  state: AppGeneratorState,
   update: (row: AppArtifactRowEdits) => AppArtifactRowEdits,
 ): AppGeneratorFormState | null {
+  const form = state.form;
   if (!form) return null;
-  // Native generation pairs the reviewed source with one artifact and blocks a
-  // pairing it cannot resolve, so one source-step edit may rewrite only that
-  // artifact. Rewriting every row that merely shares the source identity would
-  // silently overwrite independent authored artifact policies.
-  const paired = pairedRemoteArtifactRow(form, remoteSource);
+  // Generation pairs the reviewed source with the artifact named by the exact
+  // App Artifact id, so a source-step edit may rewrite only that artifact.
+  // Rewriting every row that merely shares the source identity would silently
+  // overwrite independent authored artifact policies.
+  const paired = pairedArtifactRow(form, effectiveArtifactId(state));
   if (!paired) return form;
   const next = update(paired);
   if (next === paired) return form;
@@ -534,47 +758,44 @@ function mapSelectedRemoteArtifactRows(
 }
 
 /**
- * Mirror one source-step checksum edit into the selected artifact row when the
- * row still carries the previous checksum.
+ * Mirror one source-step checksum edit into the artifact row of the reviewed
+ * App Artifact id when the row still carries the previous checksum.
  */
 function mapSelectedChecksumRows(
   state: AppGeneratorState,
   update: (row: AppArtifactRowEdits) => AppArtifactRowEdits,
 ): AppGeneratorFormState | null {
   const previous = normalizedSha256Text(state.trustedSha256);
-  return mapSelectedRemoteArtifactRows(
-    state.form,
-    state.remoteSource,
-    (row) =>
+  return mapSelectedRemoteArtifactRows(state, (row) =>
     normalizedSha256Text(row.sha256) === previous ? update(row) : row,
   );
 }
 
 /**
- * Return the artifact row that represents the selected remote source, or null
- * when no row represents the selection.
+ * Return the artifact row the reviewed App Artifact id names, or null when no
+ * single row carries it.
  */
 function selectedRemoteArtifactRow(
   form: AppGeneratorFormState | null,
-  remoteSource: RemoteSourceDescriptorDto | null,
+  artifactId: string,
 ): AppArtifactRowEdits | null {
-  return pairedRemoteArtifactRow(form, remoteSource);
+  return pairedArtifactRow(form, artifactId);
 }
 
 /**
- * Return the checksum carried by the artifact row that represents the selected
- * remote source, or null when no row represents the selection.
+ * Return the checksum carried by the artifact row the reviewed App Artifact id
+ * names, or null when no single row carries it.
  */
 function selectedRemoteArtifactSha256(
   form: AppGeneratorFormState | null,
-  remoteSource: RemoteSourceDescriptorDto | null,
+  artifactId: string,
 ): string | null {
-  const row = selectedRemoteArtifactRow(form, remoteSource);
+  const row = selectedRemoteArtifactRow(form, artifactId);
   return row ? row.sha256 : null;
 }
 
 /**
- * Keep the source-step filename pattern and the selected artifact row showing
+ * Keep the source-step filename pattern and the reviewed artifact row showing
  * one value. Once a draft exists the reviewed artifact is authoritative for
  * the latest-release policy, so the source step mirrors the row instead of
  * drifting from it while the author edits either control.
@@ -583,14 +804,14 @@ function mirroredReleaseAssetPattern(
   state: AppGeneratorState,
   form: AppGeneratorFormState | null,
 ): string {
-  const row = selectedRemoteArtifactRow(form, state.remoteSource);
+  const row = selectedRemoteArtifactRow(form, effectiveArtifactId(state));
   return row && reviewedSourceCarriesReleasePolicy(state.remoteSource)
     ? row.assetPattern
     : state.assetPattern;
 }
 
 /**
- * Keep the source-step prerelease toggle and the selected artifact row showing
+ * Keep the source-step prerelease toggle and the reviewed artifact row showing
  * one value. The reviewed artifact row is authoritative the same way its
  * filename pattern is.
  */
@@ -598,7 +819,7 @@ function mirroredIncludePrereleases(
   state: AppGeneratorState,
   form: AppGeneratorFormState | null,
 ): boolean {
-  const row = selectedRemoteArtifactRow(form, state.remoteSource);
+  const row = selectedRemoteArtifactRow(form, effectiveArtifactId(state));
   return row && reviewedSourceCarriesReleasePolicy(state.remoteSource)
     ? row.prerelease
     : state.includePrereleases;
@@ -618,17 +839,18 @@ function reviewedSourceCarriesReleasePolicy(
 }
 
 /**
- * Keep the source-step checksum field and the selected artifact row showing
- * one value. Once a draft exists the reviewed artifact is authoritative, so
- * the field mirrors the row instead of drifting from it while the author edits
- * either control.
+ * Return the publisher checksum shown beside the reviewed source.
+ *
+ * The reviewed artifact row is authoritative once it exists; before that the
+ * source-step input holds the author's one-shot checksum and keeps showing the
+ * same value.
  */
 export function mirroredTrustedSha256(
   state: AppGeneratorState,
   form: AppGeneratorFormState | null,
 ): string {
   return (
-    selectedRemoteArtifactSha256(form, state.remoteSource) ??
+    selectedRemoteArtifactSha256(form, effectiveArtifactId(state)) ??
     state.trustedSha256
   );
 }
@@ -657,10 +879,11 @@ function normalizeRepositoryName(value: string): string {
  * latest-release artifact the generated documents resolve with.
  *
  * Editing an authored latest-release artifact's provider, service origin, or
- * repository leaves the analysis describing a different source, so its releases cannot
- * confirm or block the authored filename policy. Rust reports the same
- * retargeting as the nonblocking latest-release stale-analysis warning, so the
- * browser preview stops gating instead of blocking on stale evidence.
+ * repository leaves the analysis describing a different source, so its
+ * releases cannot confirm or block the authored filename policy. Rust reports
+ * the same retargeting as the nonblocking latest-release stale-analysis
+ * warning, so the browser preview stops gating instead of blocking on stale
+ * evidence.
  */
 export function releaseAnalysisDescribesReviewedPolicy(state: AppGeneratorState): boolean {
   const analysis = state.sourceAnalysis;
@@ -669,7 +892,7 @@ export function releaseAnalysisDescribesReviewedPolicy(state: AppGeneratorState)
   // Native generation validates the retained analysis against the artifact it
   // pairs with the reviewed source, so an unrelated latest-release artifact
   // cannot invalidate a policy the analysis still confirms.
-  const row = pairedRemoteArtifactRow(state.form, state.remoteSource);
+  const row = pairedArtifactRow(state.form, effectiveArtifactId(state));
   if (row) {
     return rowDescribesAnalyzedGithub(row, fullName);
   }
@@ -699,9 +922,68 @@ export function reduceAppGenerator(
         rootLabel: action.rootLabel ?? null,
         error: null,
       };
+    case "target-mode":
+      return {
+        ...state,
+        ...invalidatedReview(),
+        targetMode: action.mode,
+        existingApp: null,
+        existingApps: null,
+        existingAppsInventory: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        phase: state.phase === "reviewing" ? "editing" : state.phase,
+        error: null,
+      };
+    case "existing-apps-request":
+      return {
+        ...state,
+        existingAppsPending: true,
+        pendingExistingAppsRequestId: action.requestId,
+        lastIssuedRequestId: Math.max(state.lastIssuedRequestId, action.requestId),
+        error: null,
+      };
+    case "existing-apps-response": {
+      if (action.requestId !== state.pendingExistingAppsRequestId) return state;
+      return {
+        ...state,
+        existingAppsPending: false,
+        pendingExistingAppsRequestId: null,
+        existingApps: action.result.apps,
+        existingAppsInventory: action.result.inventory,
+        error: null,
+      };
+    }
+    case "existing-app-select-request":
+      return {
+        ...state,
+        existingAppSelectPending: true,
+        pendingExistingAppSelectRequestId: action.requestId,
+        lastIssuedRequestId: Math.max(state.lastIssuedRequestId, action.requestId),
+        error: null,
+      };
+    case "existing-app-select-response": {
+      if (action.requestId !== state.pendingExistingAppSelectRequestId) return state;
+      return {
+        ...state,
+        ...invalidatedReview(),
+        existingAppSelectPending: false,
+        pendingExistingAppSelectRequestId: null,
+        existingApp: action.result,
+        // A different target invalidates every preview built for the previous
+        // target while the inspected APK and its permission identities remain.
+        draft: null,
+        form: null,
+        collisions: null,
+        phase: state.phase === "reviewing" ? "editing" : state.phase,
+        error: null,
+      };
+    }
     case "source-mode":
       return {
         ...state,
+        ...invalidatedReview(),
         phase: "selecting",
         sourceMode: action.mode,
         sourceUrl: "",
@@ -716,12 +998,12 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "source-url":
       return {
         ...state,
+        ...invalidatedReview(),
         sourceUrl: action.value,
         sourceAnalysis: null,
         selectedAssetHandle: null,
@@ -733,7 +1015,6 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "include-prereleases": {
@@ -748,17 +1029,19 @@ export function reduceAppGenerator(
           selectedAsset !== undefined
           && (action.value || !selectedAsset.prerelease);
         const form = selectedAssetRemainsEligible
-          ? mapSelectedRemoteArtifactRows(
-              mapSelectedChecksumRows(state, (row) => ({ ...row, sha256: "" })),
-              state.remoteSource,
-              (row) =>
-                row.prerelease === state.includePrereleases
-                  ? { ...row, prerelease: action.value }
-                  : row,
-            )
+          ? mapSelectedRemoteArtifactRows(state, (row) => {
+              const cleared = normalizedSha256Text(row.sha256)
+                === normalizedSha256Text(state.trustedSha256)
+                ? { ...row, sha256: "" }
+                : row;
+              return cleared.prerelease === state.includePrereleases
+                ? { ...cleared, prerelease: action.value }
+                : cleared;
+            })
           : null;
         return {
           ...state,
+          ...invalidatedReview(),
           includePrereleases: action.value,
           selectedAssetHandle: selectedAssetRemainsEligible
             ? state.selectedAssetHandle
@@ -772,12 +1055,12 @@ export function reduceAppGenerator(
           draft: null,
           form,
           collisions: null,
-          saved: null,
           error: null,
         };
       }
       return {
         ...state,
+        ...invalidatedReview(),
         includePrereleases: action.value,
         sourceAnalysis: null,
         selectedAssetHandle: null,
@@ -789,13 +1072,13 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     }
     case "source-analyzing":
       return {
         ...state,
+        ...invalidatedReview(),
         phase: "inspecting",
         trustedSha256: "",
         form: mapSelectedChecksumRows(state, (row) => ({ ...row, sha256: "" })),
@@ -804,6 +1087,7 @@ export function reduceAppGenerator(
     case "source-analyzed":
       return {
         ...state,
+        ...invalidatedReview(),
         phase: "selecting",
         sourceAnalysis: action.analysis,
         selectedAssetHandle: action.analysis.preselectedAssetHandle,
@@ -819,12 +1103,12 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "asset-selected":
       return {
         ...state,
+        ...invalidatedReview(),
         selectedAssetHandle: action.assetHandle,
         assetPattern: suggestedPatternForHandle(state.sourceAnalysis, action.assetHandle),
         trustedSha256: "",
@@ -835,20 +1119,17 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "asset-pattern":
       return {
         ...state,
+        ...invalidatedReview(),
         assetPattern: action.value,
-        form: mapSelectedRemoteArtifactRows(
-          state.form,
-          state.remoteSource,
-          (row) =>
+        form: mapSelectedRemoteArtifactRows(state, (row) =>
           // The row still mirrors the source step when it carries either the
-          // previous source-step pattern or the pattern the selected source was
-          // resolved with; anything else is an author customization.
+          // previous source-step pattern or the pattern the selected source
+          // resolved with; anything else is author customization.
           row.assetPattern === state.assetPattern
           || row.assetPattern === (state.remoteSource?.assetPattern ?? "")
             ? { ...row, assetPattern: action.value }
@@ -856,29 +1137,28 @@ export function reduceAppGenerator(
         ),
         draft: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "trusted-sha256":
       return {
         ...state,
+        ...invalidatedReview(),
         trustedSha256: action.value,
         form: mapSelectedChecksumRows(state, (row) => ({ ...row, sha256: action.value })),
         draft: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "install-strategy":
       return {
         ...state,
+        ...invalidatedReview(),
         installStrategy: action.strategy,
         trustedSha256: "",
         inspection: clearPermissionSelections(state.inspection),
         draft: null,
         form: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "downloading":
@@ -886,6 +1166,7 @@ export function reduceAppGenerator(
     case "remote-downloaded":
       return {
         ...state,
+        ...invalidatedReview(),
         apkHandle: action.apkHandle,
         apkLabel: action.label,
         remoteSource: {
@@ -905,6 +1186,7 @@ export function reduceAppGenerator(
     case "apk-selected":
       return {
         ...state,
+        ...invalidatedReview(),
         apkHandle: action.apkHandle,
         apkLabel: action.label,
         trustedSha256: "",
@@ -916,38 +1198,46 @@ export function reduceAppGenerator(
       };
     case "inspecting":
       // Without a reviewed remote artifact the checksum is a one-shot source
-      // input, so a new inspection discards it. Once the row exists it stays
-      // authoritative, and the source step keeps showing the same value.
+      // input, so a new inspection discards it. Once the paired row exists it
+      // stays authoritative, and the source step keeps showing the same value.
       return {
         ...state,
+        ...invalidatedReview(),
         phase: "inspecting",
         trustedSha256:
-          selectedRemoteArtifactSha256(state.form, state.remoteSource) ??
-          "",
+          selectedRemoteArtifactSha256(state.form, effectiveArtifactId(state)) ?? "",
         error: null,
       };
     case "inspected":
-      return { ...state, phase: "editing", inspection: action.inspection, error: null };
+      return {
+        ...state,
+        ...invalidatedReview(),
+        phase: "editing",
+        inspection: action.inspection,
+        error: null,
+      };
     case "runtime-candidate-selected":
       if (!state.inspection) return state;
       return {
         ...state,
+        ...invalidatedReview(),
         phase: "editing",
         inspection: {
           ...state.inspection,
-          runtimeGrantCandidates: state.inspection.runtimeGrantCandidates.map((candidate, index) =>
-            index === action.index ? { ...candidate, selected: action.selected } : candidate,
+          runtimeGrantCandidates: state.inspection.runtimeGrantCandidates.map(
+            (candidate, index) =>
+              index === action.index ? { ...candidate, selected: action.selected } : candidate,
           ),
         },
         draft: null,
         collisions: null,
-        saved: null,
         error: null,
       };
     case "app-op-candidate-selected":
       if (!state.inspection) return state;
       return {
         ...state,
+        ...invalidatedReview(),
         phase: "editing",
         inspection: {
           ...state.inspection,
@@ -957,32 +1247,52 @@ export function reduceAppGenerator(
         },
         draft: null,
         collisions: null,
-        saved: null,
         error: null,
       };
-    case "drafted": {
-      const form = draftToForm(action.draft);
+    case "automation-opt-in":
       return {
         ...state,
-        phase: "editing",
-        draft: action.draft,
-        form,
-        assetPattern: mirroredReleaseAssetPattern(state, form),
-        includePrereleases: mirroredIncludePrereleases(state, form),
-        trustedSha256: mirroredTrustedSha256(state, form),
-        collisions: null,
+        ...invalidatedReview(),
+        automationOptIn: action.value,
         error: null,
       };
-    }
+    case "artifact-id":
+      return {
+        ...state,
+        ...invalidatedReview(),
+        appArtifactId: action.value,
+        error: null,
+      };
+    case "recipe-id":
+      return {
+        ...state,
+        ...invalidatedReview(),
+        recipeId: action.value,
+        error: null,
+      };
+    case "artifact-name":
+      return {
+        ...state,
+        ...invalidatedReview(),
+        artifactName: action.value,
+        error: null,
+      };
+    case "identity-reset":
+      return {
+        ...state,
+        ...invalidatedReview(),
+        appArtifactId: null,
+        recipeId: null,
+        artifactName: "",
+        error: null,
+      };
     case "form":
       return {
         ...state,
+        ...invalidatedReview(),
         form: action.form,
         assetPattern: mirroredReleaseAssetPattern(state, action.form),
-        includePrereleases: mirroredIncludePrereleases(
-          state,
-          action.form,
-        ),
+        includePrereleases: mirroredIncludePrereleases(state, action.form),
         trustedSha256: mirroredTrustedSha256(state, action.form),
         draft: null,
         collisions: null,
@@ -991,37 +1301,102 @@ export function reduceAppGenerator(
     case "root-selected":
       return {
         ...state,
+        ...invalidatedReview(),
         rootHandle: action.rootHandle,
         rootLabel: action.label,
         collisions: null,
         error: null,
       };
-    case "reviewed": {
-      const form = state.form
-        ? {
-            ...state.form,
-            app: structuredClone(action.draft.app),
-            recipe: structuredClone(action.draft.recipeEdits),
-          }
-        : draftToForm(action.draft);
+    case "preview-request":
       return {
         ...state,
-        phase: "reviewing",
+        previewPending: true,
+        pendingPreviewRequestId: action.requestId,
+        pendingReviewRequestId: null,
+        lastIssuedRequestId: Math.max(state.lastIssuedRequestId, action.requestId),
+        error: null,
+      };
+    case "preview-response": {
+      if (action.requestId !== state.pendingPreviewRequestId) return state;
+      const form = draftToForm(action.draft);
+      return {
+        ...state,
+        ...invalidatedReview(),
+        phase: "editing",
+        previewPending: false,
         draft: action.draft,
         form,
         assetPattern: mirroredReleaseAssetPattern(state, form),
         includePrereleases: mirroredIncludePrereleases(state, form),
         trustedSha256: mirroredTrustedSha256(state, form),
-        collisions: action.collisions,
+        collisions: action.draft.collisions,
         error: null,
       };
     }
-    case "saving":
-      return { ...state, phase: "saving", error: null };
-    case "saved":
-      return { ...state, phase: "saved", saved: action.result, error: null };
+    case "review-request":
+      return {
+        ...state,
+        reviewPending: true,
+        pendingReviewRequestId: action.requestId,
+        pendingPreviewRequestId: null,
+        lastIssuedRequestId: Math.max(state.lastIssuedRequestId, action.requestId),
+        error: null,
+      };
+    case "review-response": {
+      if (action.requestId !== state.pendingReviewRequestId) return state;
+      return {
+        ...state,
+        reviewPending: false,
+        pendingReviewRequestId: null,
+        review: action.review,
+        phase: "reviewing",
+        error: null,
+      };
+    }
+    case "save-request":
+      return {
+        ...state,
+        savePending: true,
+        pendingPreviewRequestId: null,
+        lastIssuedRequestId: Math.max(state.lastIssuedRequestId, action.requestId),
+        error: null,
+      };
+    case "publication-response":
+      return {
+        ...state,
+        savePending: false,
+        publication: action.result,
+        publicationStatus: null,
+        // The review handle is consumed by the attempt whether it resolved
+        // saved, failed, or unknown, so a retry always builds a new review
+        // with the same author-controlled identities.
+        review: null,
+        pendingReviewRequestId: null,
+        pendingPreviewRequestId: null,
+        phase: state.phase === "saving" ? "editing" : state.phase,
+        error: null,
+      };
+    case "publication-status-request":
+      return { ...state, publicationStatusPending: true, error: null };
+    case "publication-status-response":
+      return {
+        ...state,
+        publicationStatusPending: false,
+        publicationStatus: action.result,
+        error: null,
+      };
     case "failure":
-      return { ...state, phase: state.phase === "starting" ? "starting" : "editing", error: action.message };
+      return {
+        ...state,
+        phase: state.phase === "starting" ? "starting" : "editing",
+        previewPending: false,
+        reviewPending: false,
+        savePending: false,
+        existingAppsPending: false,
+        existingAppSelectPending: false,
+        publicationStatusPending: false,
+        error: action.message,
+      };
   }
 }
 

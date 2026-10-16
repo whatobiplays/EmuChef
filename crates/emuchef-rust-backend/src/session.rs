@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use crate::app_definition_admission::{admit_app_definition_save, AppDefinitionSaveDestination};
 use crate::app_definition_document::AppDefinitionDocument;
 use crate::app_definition_persistence::{persist_app_definition, OpenedAppDefinitionFile};
+use crate::app_generator_review::{self, AppGeneratorReviewState};
 use crate::commands;
 use crate::document::RecipeDocument;
 use crate::dto;
@@ -28,6 +29,7 @@ pub struct DocumentSessionManager {
     app_definitions: IndexMap<String, AppDefinitionDocument>,
     user_configurations: IndexMap<String, UserConfigurationDocument>,
     next_id: u64,
+    app_generator: AppGeneratorReviewState,
     executions: ExecutionSessionManager,
 }
 
@@ -82,6 +84,54 @@ impl DocumentSessionManager {
         let document_dto = dto::app_definition_document_to_dto(&document, &document_id);
         self.app_definitions.insert(document_id, document);
         Ok(json!({ "document": document_dto }))
+    }
+
+    /// Return the retained App Generator handle state.
+    pub(crate) fn app_generator(&self) -> &AppGeneratorReviewState {
+        &self.app_generator
+    }
+
+    /// Return the mutable App Generator handle state.
+    pub(crate) fn app_generator_mut(&mut self) -> &mut AppGeneratorReviewState {
+        &mut self.app_generator
+    }
+
+    /// Publish one reviewed generated App/Recipe pair for the native layer.
+    ///
+    /// The dirty-target guard runs at publication time across every active App
+    /// Definition document whose path matches the target catalog path. A
+    /// rejection mutates no draft and does not invalidate unsaved App intent.
+    pub fn save_generated_app_review(
+        &mut self,
+        operation_id: &str,
+        review_id: &str,
+        request_id: i64,
+    ) -> Result<Value, ApiError> {
+        if let Some(recorded) =
+            app_generator_review::operation_replay(&self.app_generator, operation_id)
+        {
+            return Ok(recorded);
+        }
+        // Pre-publication guards inspect the retained review without consuming
+        // it, so a refusal (blocking diagnostics or an unsaved App Definition
+        // document on the target path) leaves the reviewed candidate available
+        // for a later publication attempt.
+        let review =
+            app_generator_review::peek_review(&self.app_generator, review_id, request_id)?;
+        if review.blocking {
+            return Err(app_generator_review::review_blocking_error(review));
+        }
+        let dirty = self.app_definitions.values().any(|document| {
+            document.path() == review.pair.app_snapshot.destination.as_path() && document.is_dirty()
+        });
+        if dirty {
+            return Err(app_generator_review::dirty_app_document_error(review));
+        }
+        // A publication attempt consumes the review handle; recovery from a
+        // refused or unknown attempt goes through a fresh review.
+        let review =
+            app_generator_review::take_review(&mut self.app_generator, review_id, request_id)?;
+        app_generator_review::publish_review(&mut self.app_generator, operation_id, &review)
     }
 
     pub fn apply_app_definition_command(

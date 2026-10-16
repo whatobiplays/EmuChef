@@ -13,6 +13,7 @@ pub(crate) mod apk_manifest;
 pub mod app_definition_admission;
 pub mod app_definition_document;
 pub mod app_definition_persistence;
+mod app_generator_review;
 mod artifact_resolver;
 mod artifact_store;
 mod artifact_transport;
@@ -34,6 +35,8 @@ mod executor;
 mod executor_real_adb_tests;
 #[cfg(test)]
 mod executor_tests;
+#[cfg(test)]
+mod generated_pair_publication_tests;
 pub(crate) mod generation;
 pub mod jsonl;
 pub mod model;

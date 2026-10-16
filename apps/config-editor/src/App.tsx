@@ -8,6 +8,7 @@ import {
   applyRecipeCommand,
   emitYaml,
   getConfigEditorAuthoredRoot,
+  getDocument,
   openUserConfiguration as openUserConfigurationDocument,
   listStepSpecs,
   openAppDefinition as openAppDefinitionDocument,
@@ -29,7 +30,7 @@ import {
 import type {
   DiagnosticDto,
   AppDefinitionV1Dto,
-  AppRecipeSaveResult,
+  AppGeneratorPublicationOutcomeDto,
   EditorDocumentDto,
   SidecarStatusResult,
   StepSpecDto,
@@ -632,17 +633,41 @@ export default function App() {
     setAppGeneratorOpen(true);
   }
 
-  function handleGeneratedAppRecipeSaved(result: AppRecipeSaveResult) {
+  async function handleGeneratedAppRecipeSaved(result: AppGeneratorPublicationOutcomeDto) {
+    if (result.outcome !== "saved") return;
     setAppGeneratorOpen(false);
-    applyDocument(result.openedRecipe.document);
+    setStatusMessage("Saved " + result.app.appPath + " and " + result.recipe.recipePath + ".");
+    setErrorMessage(null);
+    if (result.recipe.documentId === null) {
+      // The catalog writes committed; only opening the new document failed. The
+      // author opens the saved file manually instead of another automatic try.
+      const openDetail = result.recipe.openError?.message;
+      const openFailure = openDetail
+        ? ": " + (openDetail.endsWith(".") ? openDetail : openDetail + ".")
+        : ".";
+      setStatusMessage(
+        "Saved " + result.app.appPath + " and " + result.recipe.recipePath
+        + ". The editor could not open the saved Recipe automatically"
+        + openFailure
+        + " Open " + result.recipe.recipePath + " manually to review it.",
+      );
+      return;
+    }
+    const opened = await getDocument(result.recipe.documentId);
+    if (opened.kind !== "success") {
+      setErrorMessage(
+        "Saved " + result.recipe.recipePath + ", but opening the saved Recipe failed: "
+        + (opened.kind === "api-error" ? opened.error.message : opened.message),
+      );
+      return;
+    }
+    applyDocument(opened.result.document);
     documentSessionValidRef.current = true;
     setDocumentSessionValid(true);
     sessionInvalidReasonRef.current = null;
     setSessionInvalidReason(null);
     setActiveView("overview");
-    setErrorMessage(null);
-    setStatusMessage(`Saved ${result.appRelativePath} and ${result.recipeRelativePath}.`);
-    void syncMenuState(result.openedRecipe.document, null, true);
+    void syncMenuState(opened.result.document, null, true);
   }
 
   async function openUserConfiguration() {

@@ -21,6 +21,16 @@ pub enum ApiErrorCode {
     ExecutionStartFailed,
     LaunchUnavailable,
     LaunchFailed,
+    ExistingAppOutsideRoot,
+    ExistingAppUnavailable,
+    ExistingAppInvalid,
+    AppCatalogInventoryIncomplete,
+    ReviewInvalidated,
+    ReviewBlocking,
+    StaleReview,
+    DirtyAppDocument,
+    PublicationDenied,
+    ExpiredSession,
 }
 
 /// JSON-serializable API failure payload used inside `ok: false` envelopes.
