@@ -125,6 +125,7 @@ function recipeDocument(): RecipeDocumentDto {
       allRefs: [],
       candidates: [],
     },
+    appCatalog: { status: "unbound", apps: [], diagnostics: [] },
   };
 }
 

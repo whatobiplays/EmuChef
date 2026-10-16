@@ -42,7 +42,16 @@ fn normalize_document_result(value: &Value) -> Value {
     match value {
         Value::Object(object) => {
             let mut normalized = serde_json::Map::new();
+            // Frozen v1 fixtures remain immutable compatibility evidence.
+            // Compare their legacy document projection while newer DTO fields
+            // receive Rust-native contract coverage in dedicated tests.
+            let editor_document = object.contains_key("recipe")
+                && object.contains_key("refIndex")
+                && object.contains_key("yaml");
             for (key, item) in object {
+                if editor_document && key == "appCatalog" {
+                    continue;
+                }
                 let value = match key.as_str() {
                     "documentId" => json!("<documentId>"),
                     "path" => json!("<path>"),
@@ -385,7 +394,9 @@ fn overview_name_and_description_commands_update_document_state() {
     assert_eq!(noop["document"]["canRedo"], false);
 
     assert_eq!(responses[5]["result"]["yaml"], noop["document"]["yaml"]);
-    assert_eq!(responses[6]["result"], json!({"diagnostics": []}));
+    let validated = &responses[6]["result"];
+    assert_eq!(validated["diagnostics"], json!([]));
+    assert_eq!(validated["document"], noop["document"]);
     assert_eq!(responses[7]["result"]["document"], noop["document"]);
 }
 

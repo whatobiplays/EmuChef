@@ -1181,13 +1181,32 @@ fn push_planner_diagnostic(
     ));
 }
 
-fn validate_permission_selection(
+/// One permission-selection rule violation for an app-aware
+/// `grant_permissions` step.
+///
+/// The same rule data serves save-time App Definition admission and ordinary
+/// Recipe validation, so both paths report identical codes, messages, and
+/// fields for the same authored Recipe.
+pub(crate) struct PermissionSelectionViolation {
+    /// Stable diagnostic code, for example `permission_set_missing`.
+    pub code: &'static str,
+    /// Human-readable explanation shown to the author.
+    pub message: String,
+    /// Param field the violation belongs to, for example `permission_set`.
+    pub field: String,
+}
+
+/// Checks the permission selection and policy of one app-aware
+/// `grant_permissions` step against the App Definition the step references.
+///
+/// Set existence is static, whereas permission action/API applicability
+/// belongs to execution planning, so an API-unknown action stays authorable.
+pub(crate) fn permission_selection_violations(
     app: &AppDefinitionV1,
     step: &Step,
-    file: &str,
-    diagnostics: &mut Vec<AppDefinitionSaveDiagnostic>,
-) {
-    validate_permission_policy(step, file, diagnostics);
+) -> Vec<PermissionSelectionViolation> {
+    let mut violations = Vec::new();
+    permission_policy_violations(step, &mut violations);
     let selected = match step.params.get("permission_set") {
         Some(ParamValue::Literal(Value::String(name)))
             if matches!(name.as_str(), "baseline" | "elevated") =>
@@ -1195,26 +1214,21 @@ fn validate_permission_selection(
             name.as_str()
         }
         Some(_) => {
-            push_recipe_diagnostic(
-                diagnostics,
-                "permission_set_required",
-                "The app-aware permission step must select the literal set name 'baseline' or 'elevated'.",
-                file,
-                &step.id,
-                "permission_set",
-            );
-            return;
+            violations.push(PermissionSelectionViolation {
+                code: "permission_set_required",
+                message: "The app-aware permission step must select the literal set name 'baseline' or 'elevated'."
+                    .to_string(),
+                field: "permission_set".to_string(),
+            });
+            return violations;
         }
         None => {
-            push_recipe_diagnostic(
-                diagnostics,
-                "permission_set_required",
-                "The app-aware permission step must select a permission set.",
-                file,
-                &step.id,
-                "permission_set",
-            );
-            return;
+            violations.push(PermissionSelectionViolation {
+                code: "permission_set_required",
+                message: "The app-aware permission step must select a permission set.".to_string(),
+                field: "permission_set".to_string(),
+            });
+            return violations;
         }
     };
     let exists = app
@@ -1226,15 +1240,75 @@ fn validate_permission_selection(
             _ => false,
         });
     if !exists {
-        push_recipe_diagnostic(
-            diagnostics,
-            "permission_set_missing",
-            &format!(
+        violations.push(PermissionSelectionViolation {
+            code: "permission_set_missing",
+            message: format!(
                 "The selected '{selected}' permission set is not defined by this App Definition."
             ),
+            field: "permission_set".to_string(),
+        });
+    }
+    violations
+}
+
+fn permission_policy_violations(step: &Step, violations: &mut Vec<PermissionSelectionViolation>) {
+    let policy = match step.params.get("policy") {
+        Some(ParamValue::Literal(Value::Object(policy))) => policy,
+        Some(_) => {
+            violations.push(PermissionSelectionViolation {
+                code: "invalid_param_value",
+                message: "Permission policy must be a literal object.".to_string(),
+                field: "policy".to_string(),
+            });
+            return;
+        }
+        None => {
+            violations.push(PermissionSelectionViolation {
+                code: "missing_required_param",
+                message: "App-aware permission steps require policy.on_failure.".to_string(),
+                field: "policy".to_string(),
+            });
+            return;
+        }
+    };
+    for field in policy.keys().filter(|field| field.as_str() != "on_failure") {
+        violations.push(PermissionSelectionViolation {
+            code: "invalid_param_value",
+            message: "App-aware permission policy contains an unsupported field.".to_string(),
+            field: format!("policy.{field}"),
+        });
+    }
+    match policy.get("on_failure") {
+        Some(Value::String(value)) if matches!(value.as_str(), "warn" | "fail") => {}
+        Some(_) => violations.push(PermissionSelectionViolation {
+            code: "invalid_enum_value",
+            message: "Permission policy.on_failure must be warn or fail.".to_string(),
+            field: "policy.on_failure".to_string(),
+        }),
+        None => violations.push(PermissionSelectionViolation {
+            code: "missing_required_param",
+            message: "App-aware permission steps require policy.on_failure.".to_string(),
+            field: "policy.on_failure".to_string(),
+        }),
+    }
+}
+
+/// Converts the shared permission-selection rules into the diagnostic list
+/// save-time App Definition admission returns.
+fn validate_permission_selection(
+    app: &AppDefinitionV1,
+    step: &Step,
+    file: &str,
+    diagnostics: &mut Vec<AppDefinitionSaveDiagnostic>,
+) {
+    for violation in permission_selection_violations(app, step) {
+        push_recipe_diagnostic(
+            diagnostics,
+            violation.code,
+            &violation.message,
             file,
             &step.id,
-            "permission_set",
+            &violation.field,
         );
     }
 }
@@ -1310,69 +1384,6 @@ fn selected_artifacts(recipe: &Recipe, step: &Step) -> Vec<String> {
         }
     }
     artifacts
-}
-
-/// Check the required authored failure policy without selecting device-specific
-/// permission actions or evaluating Android API applicability.
-fn validate_permission_policy(
-    step: &Step,
-    file: &str,
-    diagnostics: &mut Vec<AppDefinitionSaveDiagnostic>,
-) {
-    let policy = match step.params.get("policy") {
-        Some(ParamValue::Literal(Value::Object(policy))) => policy,
-        Some(_) => {
-            push_recipe_diagnostic(
-                diagnostics,
-                "invalid_param_value",
-                "Permission policy must be a literal object.",
-                file,
-                &step.id,
-                "policy",
-            );
-            return;
-        }
-        None => {
-            push_recipe_diagnostic(
-                diagnostics,
-                "missing_required_param",
-                "App-aware permission steps require policy.on_failure.",
-                file,
-                &step.id,
-                "policy",
-            );
-            return;
-        }
-    };
-    for field in policy.keys().filter(|field| field.as_str() != "on_failure") {
-        push_recipe_diagnostic(
-            diagnostics,
-            "invalid_param_value",
-            "App-aware permission policy contains an unsupported field.",
-            file,
-            &step.id,
-            &format!("policy.{field}"),
-        );
-    }
-    match policy.get("on_failure") {
-        Some(Value::String(value)) if matches!(value.as_str(), "warn" | "fail") => {}
-        Some(_) => push_recipe_diagnostic(
-            diagnostics,
-            "invalid_enum_value",
-            "Permission policy.on_failure must be warn or fail.",
-            file,
-            &step.id,
-            "policy.on_failure",
-        ),
-        None => push_recipe_diagnostic(
-            diagnostics,
-            "missing_required_param",
-            "App-aware permission steps require policy.on_failure.",
-            file,
-            &step.id,
-            "policy.on_failure",
-        ),
-    }
 }
 
 fn parse_app_bytes(bytes: &[u8]) -> Result<AppDefinitionV1, String> {

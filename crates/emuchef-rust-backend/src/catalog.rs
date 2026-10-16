@@ -70,6 +70,195 @@ pub struct AppDefinitionCatalog {
     pub diagnostics: Vec<Value>,
 }
 
+/// Editor-facing projection of the App Definition choices a catalog defines.
+///
+/// The projection is the only catalog representation the Config Editor
+/// consumes for structured App-aware controls. A document session computes it
+/// once per diagnostics refresh and reuses it for every DTO serialization so
+/// serializing a document never re-scans the authored catalog.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AppCatalogProjection {
+    status: AppCatalogStatus,
+    apps: Vec<ProjectedAppDefinition>,
+    diagnostics: Vec<Value>,
+}
+
+/// Whether structured App choices are currently available.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppCatalogStatus {
+    /// No authored root is bound to the document; no App choices exist.
+    #[default]
+    Unbound,
+    /// The catalog loaded without diagnostics; bounded choices are available.
+    Ready,
+    /// The catalog reported diagnostics; bounded choices are closed.
+    Invalid,
+}
+
+impl AppCatalogStatus {
+    fn name(self) -> &'static str {
+        match self {
+            AppCatalogStatus::Unbound => "unbound",
+            AppCatalogStatus::Ready => "ready",
+            AppCatalogStatus::Invalid => "invalid",
+        }
+    }
+}
+
+/// Sanitized selections one loaded App Definition offers to the editor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedAppDefinition {
+    pub id: String,
+    pub name: String,
+    pub artifacts: Vec<ProjectedAppArtifact>,
+    pub permission_sets: Vec<String>,
+    pub targets: Vec<ProjectedAppTarget>,
+    pub launcher_activity: Option<String>,
+}
+
+/// One App Definition artifact choice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedAppArtifact {
+    pub id: String,
+    pub kind: String,
+    pub requires_input: bool,
+}
+
+/// One App Definition target choice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedAppTarget {
+    pub id: String,
+    pub kind: String,
+    pub location: String,
+    pub path: String,
+}
+
+impl AppCatalogProjection {
+    /// Serialize the projection into the editor document protocol shape.
+    pub fn to_dto(&self) -> Value {
+        json!({
+            "status": self.status.name(),
+            "apps": self
+                .apps
+                .iter()
+                .map(|app| {
+                    json!({
+                        "id": app.id,
+                        "name": app.name,
+                        "artifacts": app
+                            .artifacts
+                            .iter()
+                            .map(|artifact| {
+                                json!({
+                                    "id": artifact.id,
+                                    "kind": artifact.kind,
+                                    "requiresInput": artifact.requires_input,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        "permissionSets": app.permission_sets,
+                        "targets": app
+                            .targets
+                            .iter()
+                            .map(|target| {
+                                json!({
+                                    "id": target.id,
+                                    "kind": target.kind,
+                                    "location": target.location,
+                                    "path": target.path,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        "launcherActivity": app.launcher_activity,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "diagnostics": self.diagnostics,
+        })
+    }
+}
+
+/// Project the catalog bound to one document session.
+///
+/// An unbound session reports no choices. A catalog with any diagnostic is
+/// invalid and reports no App choices at all so the editor can never present a
+/// partially trusted catalog. App ids are sorted so repeated loads produce
+/// identical projections.
+pub fn project_app_catalog(authored_root: Option<&Path>) -> AppCatalogProjection {
+    let Some(authored_root) = authored_root else {
+        return AppCatalogProjection::default();
+    };
+    let AppDefinitionCatalog {
+        entries,
+        diagnostics,
+    } = load_app_definition_catalog(authored_root);
+    if !diagnostics.is_empty() {
+        return AppCatalogProjection {
+            status: AppCatalogStatus::Invalid,
+            apps: Vec::new(),
+            diagnostics,
+        };
+    }
+    let mut apps = entries
+        .into_iter()
+        .map(|(_, app)| project_app_definition(&app))
+        .collect::<Vec<_>>();
+    apps.sort_by(|left, right| left.id.cmp(&right.id));
+    AppCatalogProjection {
+        status: AppCatalogStatus::Ready,
+        apps,
+        diagnostics,
+    }
+}
+
+fn project_app_definition(app: &AppDefinitionV1) -> ProjectedAppDefinition {
+    let mut permission_sets = Vec::new();
+    if let Some(sets) = &app.permission_sets {
+        if sets.baseline.is_some() {
+            permission_sets.push("baseline".to_string());
+        }
+        if sets.elevated.is_some() {
+            permission_sets.push("elevated".to_string());
+        }
+    }
+    ProjectedAppDefinition {
+        id: app.id.clone(),
+        name: app.name.clone(),
+        artifacts: app
+            .artifacts
+            .iter()
+            .map(|(id, artifact)| ProjectedAppArtifact {
+                id: id.clone(),
+                kind: serialized_enum_name(artifact.kind),
+                requires_input: matches!(
+                    artifact.source,
+                    crate::authored_models::AppArtifactSource::UserProvided
+                ),
+            })
+            .collect(),
+        permission_sets,
+        targets: app
+            .targets
+            .iter()
+            .map(|(id, target)| ProjectedAppTarget {
+                id: id.clone(),
+                kind: serialized_enum_name(target.kind),
+                location: serialized_enum_name(target.location),
+                path: target.path.clone(),
+            })
+            .collect(),
+        launcher_activity: app.launcher_activity.clone(),
+    }
+}
+
+/// Serialize a catalog enum using its canonical authored name.
+fn serialized_enum_name<T: serde::Serialize>(value: T) -> String {
+    match serde_json::to_value(value).expect("authored catalog enum should serialize") {
+        Value::String(name) => name,
+        other => unreachable!("authored catalog enum should serialize to a string, got {other}"),
+    }
+}
+
 /// Load and validate every top-level app definition in one authored root.
 ///
 /// Validation covers each file's semantic validity plus the catalog-global
@@ -287,6 +476,11 @@ impl ValidationCatalog {
                 .iter()
                 .map(|message| app_authority_diagnostic(file, recipe, message)),
         );
+        errors.extend(permission_selection_diagnostics(
+            file,
+            recipe,
+            &self.app_definitions,
+        ));
 
         for (index, dependency_ref) in recipe.recipe_dependencies.iter().enumerate() {
             if !recipes.contains_key(dependency_ref) {
@@ -360,6 +554,51 @@ fn app_authority_diagnostic(
         Some(&recipe.id),
         Some("steps"),
     )
+}
+
+/// Reports permission selection violations for `grant_permissions` steps.
+///
+/// Recipe validation reuses the save-time App Definition admission rules so a
+/// Recipe reports the same diagnostics whether it is edited directly or is
+/// referenced by an App Definition. The App Definition is resolved through
+/// the catalog by identifier, so a step whose app reference does not resolve
+/// keeps its existing app authority diagnostics. Invalid App Definitions are
+/// reported once by the app authority check and skipped here.
+fn permission_selection_diagnostics(
+    file: &str,
+    recipe: &Recipe,
+    app_definitions: &[AppDefinitionV1],
+) -> Vec<Value> {
+    let mut errors = Vec::new();
+    for step in recipe
+        .steps
+        .iter()
+        .filter(|step| step.type_name == "grant_permissions")
+    {
+        let Some(app) = step
+            .app_ref
+            .as_deref()
+            .and_then(|app_ref| app_definitions.iter().find(|app| app.id == app_ref))
+        else {
+            continue;
+        };
+        if !authored_models::validate_app_definition(app).is_empty() {
+            continue;
+        }
+        for violation in crate::app_definition_admission::permission_selection_violations(app, step)
+        {
+            errors.push(diagnostic(
+                "error",
+                violation.code,
+                &violation.message,
+                file,
+                Some("step"),
+                Some(&step.id),
+                Some(&violation.field),
+            ));
+        }
+    }
+    errors
 }
 
 fn validate_device_profile_path(authored_root: &Path, path: &Path) -> Vec<Value> {

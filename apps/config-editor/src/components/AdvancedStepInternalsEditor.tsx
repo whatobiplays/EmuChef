@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { EditorCommand } from "../api/commands";
-import type { StepDto } from "../api/types";
+import type { AppCatalogDto, StepDto } from "../api/types";
 import {
+  appConditionType,
+  buildAddAppPackageInstalledEntry,
+  buildAddAppTargetConditionEntry,
   buildAddConstraintValue,
   buildAddVerifyEntry,
   buildAdvancedInternalsCommand,
+  buildConditionAppTargetUpdate,
+  buildConditionLiteralUpdate,
   buildUpdateConstraintValue,
   classifyConstraintsDto,
   buildVerifyEntryJsonUpdate,
@@ -23,6 +28,13 @@ import {
   type SupportedVerifyType,
   type AdvancedInternalsField,
 } from "./advancedStepInternals.logic";
+import {
+  catalogApp,
+  conditionTargetOptions,
+  conditionTargetSeed,
+  type AppConditionType,
+  type AppTargetOption,
+} from "./appCatalog.logic";
 import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
 
 export interface AdvancedCommandResult {
@@ -31,6 +43,7 @@ export interface AdvancedCommandResult {
 }
 
 interface AdvancedStepInternalsEditorProps {
+  appCatalog: AppCatalogDto;
   readOnly?: boolean;
   step: StepDto;
   steps?: StepDto[];
@@ -51,6 +64,7 @@ const SECTIONS: SectionConfig[] = [
 ];
 
 export function AdvancedStepInternalsEditor({
+  appCatalog,
   readOnly = false,
   step,
   steps = [],
@@ -72,8 +86,11 @@ export function AdvancedStepInternalsEditor({
             Object.prototype.hasOwnProperty.call(stepRecord, section.property) &&
             stepRecord[section.property] !== undefined;
           return (
-            section.field === "verify" ? (
-              <VerifySectionEditor
+            section.field === "verify" || section.field === "skipIf" ? (
+              <ConditionSectionEditor
+                appCatalog={appCatalog}
+                appRef={step.appRef ?? null}
+                field={section.field}
                 hasValue={hasValue}
                 key={`${step.id}:${section.field}`}
                 readOnly={readOnly}
@@ -388,39 +405,123 @@ const VERIFY_TYPES: Array<{ type: SupportedVerifyType; label: string; fieldName:
   { type: "package_installed", label: "Package installed", fieldName: "package_name" },
 ];
 
+/**
+ * Add-entry kinds for one condition section.
+ *
+ * `package_installed` keeps the legacy form that authors a package name and
+ * is offered only by steps without App Definition context;
+ * `app_package_installed` authors the parameterless form that inherits the
+ * package from the enclosing step App Definition;
+ * `app_target_path_exists` and `app_target_file_exists` author App Target
+ * path checks that inherit the App Definition from the step. The app-aware
+ * kinds are offered only by app-context steps. Existing rows of every form
+ * stay readable and editable.
+ */
+type ConditionAddType =
+  | SupportedVerifyType
+  | "app_package_installed"
+  | "app_target_path_exists"
+  | "app_target_file_exists";
+
+const APP_PACKAGE_INSTALLED_LABEL = "Package installed (App Definition)";
+
+/** App Target add-entry kinds mapped to the condition type they author. */
+const APP_TARGET_ADD_TYPES: Partial<Record<ConditionAddType, AppConditionType>> = {
+  app_target_path_exists: "path_exists",
+  app_target_file_exists: "file_exists",
+};
+
+/** Add-entry options for App Target conditions, offered with step app context. */
+const APP_TARGET_ADD_TYPE_OPTIONS: Array<{ type: ConditionAddType; label: string }> = [
+  { type: "app_target_path_exists", label: "Path exists (App Target)" },
+  { type: "app_target_file_exists", label: "File exists (App Target)" },
+];
+
+/** The condition type an App Target add-entry kind authors, or null for other kinds. */
+function appTargetAddType(addType: ConditionAddType): AppConditionType | null {
+  return APP_TARGET_ADD_TYPES[addType] ?? null;
+}
+
 function verifyFieldLabel(fieldName: "path" | "package_name"): string {
   return fieldName === "package_name" ? "Package name" : "Path";
 }
 
-function VerifySectionEditor({
+/**
+ * Structured condition editor shared by `skip_if` and `verify`.
+ *
+ * Both fields author the same condition shape, so they share every row kind:
+ * literal path or package fields, App Target path checks, the canonical
+ * parameterless app-aware package check, and a raw JSON fallback for
+ * unsupported shapes that are never coerced.
+ */
+function ConditionSectionEditor({
+  appCatalog,
+  appRef,
+  field,
   readOnly,
   stepId,
   value,
   hasValue,
   onCommand,
 }: {
+  appCatalog: AppCatalogDto;
+  appRef: string | null;
+  field: "skipIf" | "verify";
   readOnly: boolean;
   stepId: string;
   value: unknown;
   hasValue: boolean;
   onCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }) {
-  const verify = Array.isArray(value) ? value : [];
-  const [addType, setAddType] = useState<SupportedVerifyType>("path_exists");
+  const entries = Array.isArray(value) ? value : [];
+  const [addType, setAddType] = useState<ConditionAddType>("path_exists");
   const [addDraft, setAddDraft] = useState("");
+  const [addTargetId, setAddTargetId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const appAwareAddSelected = addType === "app_package_installed";
+  const appTargetConditionType = appTargetAddType(addType);
+  const selectedApp = catalogApp(appCatalog, appRef);
+  const addTargetOptions =
+    appTargetConditionType === null ? [] : conditionTargetOptions(selectedApp, appTargetConditionType);
+  const addTargetSeed =
+    appTargetConditionType === null ? null : conditionTargetSeed(selectedApp, appTargetConditionType);
   const selectedType = VERIFY_TYPES.find((option) => option.type === addType) ?? VERIFY_TYPES[0];
+  // Steps with App Definition context may author the parameterless package
+  // check and App Target checks; the legacy parameterized package form stays
+  // readable in existing rows but is not offered for new checks there. Steps
+  // without app context keep only the literal forms.
+  const addTypeOptions: Array<{ type: ConditionAddType; label: string }> = [
+    ...(appRef === null
+      ? VERIFY_TYPES
+      : VERIFY_TYPES.filter((option) => option.type !== "package_installed")),
+    ...(appRef === null ? [] : APP_TARGET_ADD_TYPE_OPTIONS),
+    ...(appRef === null
+      ? []
+      : [{ type: "app_package_installed" as const, label: APP_PACKAGE_INSTALLED_LABEL }]),
+  ];
 
   useEffect(() => {
     setError(null);
   }, [value]);
 
-  async function submit(nextVerify: unknown[]) {
+  useEffect(() => {
+    if (appRef !== null && addType === "package_installed") {
+      setAddType("app_package_installed");
+    } else if (appRef === null && (addType === "app_package_installed" || appTargetAddType(addType) !== null)) {
+      setAddType("path_exists");
+    }
+  }, [addType, appRef]);
+
+  useEffect(() => {
+    setAddTargetId(addTargetSeed ?? "");
+  }, [addTargetSeed]);
+
+  async function submit(nextConditions: unknown[]) {
     if (submitting) {
       return false;
     }
-    const command = buildAdvancedInternalsCommand("verify", stepId, nextVerify, hasValue ? verify : undefined);
+    const command = buildAdvancedInternalsCommand(field, stepId, nextConditions, hasValue ? entries : undefined);
     if (command === null) {
       setError(null);
       return true;
@@ -440,7 +541,12 @@ function VerifySectionEditor({
   }
 
   async function addEntry() {
-    const result = buildAddVerifyEntry(verify, addType, addDraft);
+    const result =
+      appTargetConditionType !== null
+        ? buildAddAppTargetConditionEntry(entries, appTargetConditionType, addTargetId)
+        : appAwareAddSelected
+          ? buildAddAppPackageInstalledEntry(entries, appRef)
+          : buildAddVerifyEntry(entries, addType as SupportedVerifyType, addDraft);
     if (!result.ok) {
       setError(result.error);
       return;
@@ -452,7 +558,7 @@ function VerifySectionEditor({
   }
 
   async function updateKnownField(index: number, nextValue: string) {
-    const result = buildVerifyKnownFieldUpdate(verify, index, nextValue);
+    const result = buildVerifyKnownFieldUpdate(entries, index, nextValue);
     if (result === null) {
       setError(null);
       return true;
@@ -465,7 +571,7 @@ function VerifySectionEditor({
   }
 
   async function updateJsonEntry(index: number, draft: string) {
-    const result = buildVerifyEntryJsonUpdate(verify, index, draft);
+    const result = buildVerifyEntryJsonUpdate(entries, index, draft);
     if (result === null) {
       setError(null);
       return null;
@@ -477,35 +583,106 @@ function VerifySectionEditor({
     return ok ? null : { ok: false as const, error: "Edit failed." };
   }
 
+  async function updateAppTarget(index: number, targetId: string) {
+    const result = buildConditionAppTargetUpdate(entries, index, targetId);
+    if (result === null) {
+      setError(null);
+      return true;
+    }
+    if (!result.ok) {
+      setError(result.error);
+      return false;
+    }
+    return submit(result.value);
+  }
+
+  async function switchToLiteral(index: number) {
+    const result = buildConditionLiteralUpdate(entries, index, "");
+    if (result === null) {
+      setError(null);
+      return true;
+    }
+    if (!result.ok) {
+      setError(result.error);
+      return false;
+    }
+    return submit(result.value);
+  }
+
   return (
     <section className="grid gap-2">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Verify</h3>
-      {verify.length === 0 ? <p className="text-sm text-slate-500">No verify checks</p> : null}
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        {field === "verify" ? "Verify" : "skip_if"}
+      </h3>
+      {entries.length === 0 ? (
+        <p className="text-sm text-slate-500">{field === "verify" ? "No verify checks" : "No skip conditions"}</p>
+      ) : null}
       <div className="grid gap-2">
-        {verify.map((entry, index) => {
+        {entries.map((entry, index) => {
           const classification = classifyVerifyEntry(entry);
-          return classification.kind === "structured" ? (
-            <StructuredVerifyRow
-              classification={classification}
-              disabled={readOnly || submitting}
-              index={index}
-              key={index}
-              rowCount={verify.length}
-              onMoveDown={() => submit(moveVerifyEntry(verify, index, index + 1))}
-              onMoveUp={() => submit(moveVerifyEntry(verify, index, index - 1))}
-              onRemove={() => submit(removeVerifyEntry(verify, index))}
-              onUpdate={(nextValue) => updateKnownField(index, nextValue)}
-            />
-          ) : (
+          if (classification.kind === "structured") {
+            const pathConditionType = classification.fieldName === "path" ? appConditionType(classification.type) : null;
+            return (
+              <StructuredVerifyRow
+                appTargetSeed={
+                  pathConditionType !== null && appRef !== null
+                    ? conditionTargetSeed(selectedApp, pathConditionType)
+                    : null
+                }
+                classification={classification}
+                disabled={readOnly || submitting}
+                index={index}
+                key={index}
+                rowCount={entries.length}
+                onMoveDown={() => submit(moveVerifyEntry(entries, index, index + 1))}
+                onMoveUp={() => submit(moveVerifyEntry(entries, index, index - 1))}
+                onRemove={() => submit(removeVerifyEntry(entries, index))}
+                onUpdate={(nextValue) => updateKnownField(index, nextValue)}
+                onUseAppTarget={pathConditionType !== null && appRef !== null ? (id) => updateAppTarget(index, id) : null}
+              />
+            );
+          }
+          if (classification.kind === "app_target") {
+            return (
+              <AppTargetConditionRow
+                appRef={appRef}
+                classification={classification}
+                disabled={readOnly || submitting}
+                index={index}
+                key={index}
+                options={conditionTargetOptions(selectedApp, classification.type, classification.targetId)}
+                rowCount={entries.length}
+                onMoveDown={() => submit(moveVerifyEntry(entries, index, index + 1))}
+                onMoveUp={() => submit(moveVerifyEntry(entries, index, index - 1))}
+                onRemove={() => submit(removeVerifyEntry(entries, index))}
+                onSwitchToLiteral={() => switchToLiteral(index)}
+                onUpdateTarget={(id) => updateAppTarget(index, id)}
+              />
+            );
+          }
+          if (classification.kind === "app_package_installed") {
+            return (
+              <AppPackageInstalledRow
+                disabled={readOnly || submitting}
+                index={index}
+                key={index}
+                rowCount={entries.length}
+                onMoveDown={() => submit(moveVerifyEntry(entries, index, index + 1))}
+                onMoveUp={() => submit(moveVerifyEntry(entries, index, index - 1))}
+                onRemove={() => submit(removeVerifyEntry(entries, index))}
+              />
+            );
+          }
+          return (
             <JsonVerifyRow
               disabled={readOnly || submitting}
               entry={entry}
               index={index}
               key={index}
-              rowCount={verify.length}
-              onMoveDown={() => submit(moveVerifyEntry(verify, index, index + 1))}
-              onMoveUp={() => submit(moveVerifyEntry(verify, index, index - 1))}
-              onRemove={() => submit(removeVerifyEntry(verify, index))}
+              rowCount={entries.length}
+              onMoveDown={() => submit(moveVerifyEntry(entries, index, index + 1))}
+              onMoveUp={() => submit(moveVerifyEntry(entries, index, index - 1))}
+              onRemove={() => submit(removeVerifyEntry(entries, index))}
               onUpdate={(draft) => updateJsonEntry(index, draft)}
             />
           );
@@ -519,17 +696,46 @@ function VerifySectionEditor({
             disabled={readOnly || submitting}
             value={addType}
             onChange={(event) => {
-              setAddType(event.target.value as SupportedVerifyType);
+              setAddType(event.target.value as ConditionAddType);
               setError(null);
             }}
           >
-            {VERIFY_TYPES.map((option) => (
+            {addTypeOptions.map((option) => (
               <option key={option.type} value={option.type}>
                 {option.label}
               </option>
             ))}
           </select>
         </label>
+        {appTargetConditionType !== null ? (
+          <label className="grid gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">App Target</span>
+            <select
+              className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+              disabled={readOnly || submitting}
+              value={addTargetId}
+              onChange={(event) => {
+                setAddTargetId(event.target.value);
+                setError(null);
+              }}
+            >
+              {addTargetId === "" ? <option value="">Select an App Target</option> : null}
+              {addTargetOptions.map((option) => (
+                <option
+                  disabled={option.compatibility === "incompatible" && !option.retained}
+                  key={option.id}
+                  value={option.id}
+                >
+                  {option.reason === null ? option.label : `${option.label} — ${option.reason}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : appAwareAddSelected ? (
+          <p className="text-xs text-slate-500">
+            This check inherits the step App Definition and authors no package name.
+          </p>
+        ) : (
         <label className="grid gap-1">
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
             {verifyFieldLabel(selectedType.fieldName)}
@@ -551,6 +757,7 @@ function VerifySectionEditor({
             }}
           />
         </label>
+        )}
         <button
           className="w-fit rounded border border-slate-900 bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40 sm:w-auto"
           disabled={readOnly || submitting}
@@ -566,6 +773,7 @@ function VerifySectionEditor({
 }
 
 function StructuredVerifyRow({
+  appTargetSeed,
   classification,
   index,
   rowCount,
@@ -574,7 +782,9 @@ function StructuredVerifyRow({
   onMoveUp,
   onMoveDown,
   onRemove,
+  onUseAppTarget,
 }: {
+  appTargetSeed: string | null;
   classification: Extract<ReturnType<typeof classifyVerifyEntry>, { kind: "structured" }>;
   index: number;
   rowCount: number;
@@ -583,6 +793,7 @@ function StructuredVerifyRow({
   onMoveUp: () => Promise<boolean>;
   onMoveDown: () => Promise<boolean>;
   onRemove: () => Promise<boolean>;
+  onUseAppTarget: ((targetId: string) => Promise<boolean>) | null;
 }) {
   const [draft, setDraft] = useState(classification.fieldValue);
   const [error, setError] = useState<string | null>(null);
@@ -610,7 +821,7 @@ function StructuredVerifyRow({
       <div className="grid gap-2 sm:grid-cols-[minmax(9rem,12rem)_minmax(0,1fr)] sm:items-end">
         <div className="min-w-0">
           <div className="break-words text-sm font-medium text-slate-900">{classification.type}</div>
-          <div className="text-xs text-slate-500">Structured verify check</div>
+          <div className="text-xs text-slate-500">Structured check</div>
         </div>
         <label className="grid gap-1">
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -638,6 +849,20 @@ function StructuredVerifyRow({
             }}
           />
         </label>
+        {onUseAppTarget === null ? null : (
+          <button
+            className="w-fit rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 disabled:opacity-40"
+            disabled={disabled || appTargetSeed === null}
+            type="button"
+            onClick={() => {
+              if (appTargetSeed !== null) {
+                void onUseAppTarget(appTargetSeed);
+              }
+            }}
+          >
+            App Target
+          </button>
+        )}
       </div>
       <VerifyRowActions
         disabled={disabled}
@@ -689,7 +914,7 @@ function JsonVerifyRow({
     <div className="grid gap-2 rounded border border-slate-200 bg-slate-50 p-2">
       <div className="flex items-center justify-between gap-2">
         <div>
-          <div className="text-sm font-medium text-slate-900">JSON verify check</div>
+          <div className="text-sm font-medium text-slate-900">JSON check</div>
           <div className="text-xs text-slate-500">Unsupported shape</div>
         </div>
       </div>
@@ -733,6 +958,146 @@ function JsonVerifyRow({
         />
         {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * One verify check that inherits its package from the step App Definition.
+ *
+ * The row authors no parameter at all: the condition stays parameterless and
+ * resolves through the enclosing step `app_ref`, so it is never migrated to a
+ * `package_name` form. The row stays editable through the shared row actions.
+ */
+function AppPackageInstalledRow({
+  index,
+  rowCount,
+  disabled,
+  onMoveUp,
+  onMoveDown,
+  onRemove,
+}: {
+  index: number;
+  rowCount: number;
+  disabled: boolean;
+  onMoveUp: () => Promise<boolean>;
+  onMoveDown: () => Promise<boolean>;
+  onRemove: () => Promise<boolean>;
+}) {
+  return (
+    <div className="grid gap-2 rounded border border-slate-200 bg-slate-50 p-2">
+      <div className="min-w-0">
+        <div className="break-words text-sm font-medium text-slate-900">package_installed</div>
+        <div className="text-xs text-slate-500">
+          Inherits the step App Definition; authors no package name.
+        </div>
+      </div>
+      <VerifyRowActions
+        disabled={disabled}
+        index={index}
+        rowCount={rowCount}
+        onMoveDown={onMoveDown}
+        onMoveUp={onMoveUp}
+        onRemove={onRemove}
+      />
+    </div>
+  );
+}
+
+/**
+ * One App Target `path_exists` or `file_exists` check.
+ *
+ * The check stores its target under `path` and inherits the App Definition
+ * from the enclosing step `app_ref`, mirroring how the execution planner
+ * resolves it. Targets the condition kind rejects stay listed with the
+ * planner's reason and cannot be newly selected, while a retained target the
+ * catalog does not define stays selectable so the authored value is never
+ * lost. The literal switch replaces the target only when the author clicks it.
+ */
+function AppTargetConditionRow({
+  appRef,
+  classification,
+  disabled,
+  index,
+  options,
+  rowCount,
+  onMoveUp,
+  onMoveDown,
+  onRemove,
+  onSwitchToLiteral,
+  onUpdateTarget,
+}: {
+  appRef: string | null;
+  classification: Extract<ReturnType<typeof classifyVerifyEntry>, { kind: "app_target" }>;
+  disabled: boolean;
+  index: number;
+  options: AppTargetOption[];
+  rowCount: number;
+  onMoveUp: () => Promise<boolean>;
+  onMoveDown: () => Promise<boolean>;
+  onRemove: () => Promise<boolean>;
+  onSwitchToLiteral: () => Promise<boolean>;
+  onUpdateTarget: (targetId: string) => Promise<boolean>;
+}) {
+  const current = options.find((option) => option.id === classification.targetId) ?? null;
+  return (
+    <div className="grid gap-2 rounded border border-slate-200 bg-slate-50 p-2">
+      <div className="grid gap-2 sm:grid-cols-[minmax(9rem,12rem)_minmax(0,1fr)] sm:items-end">
+        <div className="min-w-0">
+          <div className="break-words text-sm font-medium text-slate-900">{classification.type}</div>
+          <div className="text-xs text-slate-500">Structured App Target check</div>
+        </div>
+        <label className="grid gap-1">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">App Target</span>
+          <select
+            className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+            disabled={disabled}
+            value={classification.targetId}
+            onChange={(event) => {
+              if (event.target.value !== classification.targetId) {
+                void onUpdateTarget(event.target.value);
+              }
+            }}
+          >
+            {options.map((option) => (
+              <option
+                disabled={option.compatibility === "incompatible" && !option.retained}
+                key={option.id}
+                value={option.id}
+              >
+                {option.reason === null ? option.label : `${option.label} — ${option.reason}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="w-fit rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 disabled:opacity-40"
+          disabled={disabled}
+          type="button"
+          onClick={() => void onSwitchToLiteral()}
+        >
+          Literal path
+        </button>
+      </div>
+      {appRef === null ? (
+        <p className="text-xs text-slate-500">Select an App Definition on the step to choose one of its App Targets.</p>
+      ) : null}
+      {current !== null && current.compatibility === "incompatible" && current.reason !== null ? (
+        <p className="text-xs text-amber-800">
+          This App Target is not compatible with the current check: {current.reason}
+        </p>
+      ) : null}
+      {current !== null && current.compatibility === "unknown" && current.reason !== null ? (
+        <p className="text-xs text-slate-500">{current.reason}</p>
+      ) : null}
+      <VerifyRowActions
+        disabled={disabled}
+        index={index}
+        rowCount={rowCount}
+        onMoveDown={onMoveDown}
+        onMoveUp={onMoveUp}
+        onRemove={onRemove}
+      />
     </div>
   );
 }

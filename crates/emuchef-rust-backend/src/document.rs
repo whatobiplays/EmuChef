@@ -13,8 +13,8 @@ use serde_json::Value;
 use crate::catalog;
 use crate::commands::{ArtifactField, InputField, OverviewField, OverviewValue, RecipeCommand};
 use crate::model::{
-    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeArtifact,
-    RemoteFileArtifact, Step, StepCondition, StepConstraints,
+    AppArtifactInputBinding, AppArtifactReference, InputDeclaration, InputValidation, OrderedMap,
+    ParamValue, Recipe, RecipeArtifact, RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
 use crate::step_specs;
 use crate::validation;
@@ -28,6 +28,11 @@ pub struct RecipeDocument {
     current_yaml: String,
     saved_yaml: String,
     diagnostics: Vec<Value>,
+    /// Catalog choices projected once per diagnostics refresh.
+    ///
+    /// Serializing the document reuses this value so DTO projections never
+    /// re-scan the authored catalog.
+    app_catalog: catalog::AppCatalogProjection,
     undo_stack: Vec<ContentSnapshot>,
     redo_stack: Vec<ContentSnapshot>,
 }
@@ -51,6 +56,7 @@ impl RecipeDocument {
         let authored_root = catalog::normalize_authored_root(authored_root, &path);
         let diagnostics =
             validation_diagnostics_for_recipe(&recipe, &path, authored_root.as_deref());
+        let app_catalog = catalog::project_app_catalog(authored_root.as_deref());
 
         Ok(Self {
             path,
@@ -59,6 +65,7 @@ impl RecipeDocument {
             saved_yaml: current_yaml.clone(),
             current_yaml,
             diagnostics,
+            app_catalog,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         })
@@ -88,6 +95,7 @@ impl RecipeDocument {
         let authored_root = catalog::normalize_authored_root(authored_root, &path);
         let diagnostics =
             validation_diagnostics_for_recipe(&recipe, &path, authored_root.as_deref());
+        let app_catalog = catalog::project_app_catalog(authored_root.as_deref());
 
         Ok(Self {
             path,
@@ -96,6 +104,7 @@ impl RecipeDocument {
             saved_yaml: current_yaml.clone(),
             current_yaml,
             diagnostics,
+            app_catalog,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         })
@@ -197,6 +206,11 @@ impl RecipeDocument {
         &self.diagnostics
     }
 
+    /// Catalog choices projected for the current authored root.
+    pub fn app_catalog(&self) -> &catalog::AppCatalogProjection {
+        &self.app_catalog
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.current_yaml != self.saved_yaml
     }
@@ -232,6 +246,12 @@ impl RecipeDocument {
             RecipeCommand::AddArtifact { artifact_id, url } => {
                 self.updated_add_artifact_recipe(artifact_id, url)
             }
+            RecipeCommand::AddAppArtifact {
+                artifact_id,
+                app_ref,
+                artifact,
+                input_id,
+            } => self.updated_add_app_artifact_recipe(artifact_id, app_ref, artifact, input_id),
             RecipeCommand::RenameArtifact {
                 artifact_id,
                 new_artifact_id,
@@ -496,6 +516,45 @@ impl RecipeDocument {
         Ok(recipe)
     }
 
+    /// Add one Recipe App Artifact that references an App Definition artifact.
+    ///
+    /// Only the Recipe-owned reference is authored. An optional bound input id
+    /// must already exist in the Recipe: the command never creates inputs,
+    /// resolvers, or dependencies as a side effect.
+    fn updated_add_app_artifact_recipe(
+        &self,
+        artifact_id: String,
+        app_ref: String,
+        artifact: String,
+        input_id: Option<String>,
+    ) -> Result<Recipe, String> {
+        let artifact_id = normalize_catalog_identifier(&artifact_id, "artifact id")?;
+        let app_ref = normalize_catalog_identifier(&app_ref, "app ref")?;
+        let artifact = normalize_catalog_identifier(&artifact, "App Definition artifact id")?;
+        let input = match input_id {
+            Some(input_id) => Some(AppArtifactInputBinding {
+                input_id: normalize_catalog_identifier(&input_id, "input id")?,
+            }),
+            None => None,
+        };
+        let mut recipe = self.recipe.clone();
+        if recipe.artifacts.contains_key(&artifact_id) {
+            return Err(format!("Artifact {artifact_id:?} already exists."));
+        }
+        recipe
+            .artifacts
+            .insert(
+                artifact_id,
+                RecipeArtifact::AppArtifact(AppArtifactReference {
+                    app_ref,
+                    artifact,
+                    input,
+                    cache: "default".to_string(),
+                }),
+            );
+        Ok(recipe)
+    }
+
     fn updated_rename_artifact_recipe(
         &self,
         artifact_id: String,
@@ -536,6 +595,14 @@ impl RecipeDocument {
         Ok(recipe)
     }
 
+    /// Updates one editable field of an existing Recipe artifact.
+    ///
+    /// Remote file artifacts own their URL and cache policy. App Artifacts own
+    /// only the Recipe-side reference (app ref, artifact name, and optional
+    /// user-provided input binding) plus cache policy: source and package facts
+    /// stay with the App Definition, so `url` updates are rejected for them.
+    /// Updating the app ref or artifact name never rewrites dependent values;
+    /// stale values stay visible and are reported by static validation.
     fn updated_artifact_field_recipe(
         &self,
         artifact_id: String,
@@ -557,9 +624,39 @@ impl RecipeDocument {
             (RecipeArtifact::AppArtifact(artifact), ArtifactField::Cache) => {
                 artifact.cache = coerce_artifact_cache(&value)?;
             }
+            (RecipeArtifact::AppArtifact(artifact), ArtifactField::AppRef) => {
+                artifact.app_ref =
+                    normalize_catalog_identifier(&required_text(&value, "app ref")?, "app ref")?;
+            }
+            (RecipeArtifact::AppArtifact(artifact), ArtifactField::AppArtifact) => {
+                artifact.artifact = normalize_catalog_identifier(
+                    &required_text(&value, "App Definition artifact id")?,
+                    "App Definition artifact id",
+                )?;
+            }
+            (RecipeArtifact::AppArtifact(artifact), ArtifactField::Input) => {
+                artifact.input = match &value {
+                    Value::Null => None,
+                    Value::String(input_id) => Some(AppArtifactInputBinding {
+                        input_id: normalize_catalog_identifier(input_id, "input id")?,
+                    }),
+                    _ => {
+                        return Err(
+                            "App Artifact input binding must be a Recipe input id or null.".into(),
+                        );
+                    }
+                };
+            }
             (RecipeArtifact::AppArtifact(_), ArtifactField::Url) => {
                 return Err(
                     "App Definition artifact source policy is owned by the App Definition.".into(),
+                );
+            }
+            (RecipeArtifact::RemoteFile(_), ArtifactField::AppRef)
+            | (RecipeArtifact::RemoteFile(_), ArtifactField::AppArtifact)
+            | (RecipeArtifact::RemoteFile(_), ArtifactField::Input) => {
+                return Err(
+                    "App Definition artifact references apply only to App Artifacts.".into(),
                 );
             }
         }
@@ -958,6 +1055,7 @@ impl RecipeDocument {
             &self.path,
             self.authored_root.as_deref(),
         );
+        self.app_catalog = catalog::project_app_catalog(self.authored_root.as_deref());
     }
 }
 
@@ -1260,6 +1358,21 @@ fn normalize_identifier(value: &str, label: &str) -> Result<String, String> {
     }
     Ok(normalized.to_string())
 }
+    /// Normalizes a value that names an authored catalog object.
+    ///
+    /// App-aware editor commands accept identifiers in the same lowercase
+    /// syntax the authored catalog loader enforces, so every accepted value can
+    /// later be resolved against a catalog entry. Values are trimmed before the
+    /// syntax check.
+    fn normalize_catalog_identifier(value: &str, label: &str) -> Result<String, String> {
+        let normalized = normalize_identifier(value, label)?;
+        if !crate::authored_models::is_valid_identifier(&normalized) {
+            return Err(format!(
+                "{label} {normalized:?} must use authored identifier syntax."
+            ));
+        }
+        Ok(normalized)
+    }
 
 fn normalize_identifier_list(values: Vec<String>, label: &str) -> Result<Vec<String>, String> {
     let normalized = values

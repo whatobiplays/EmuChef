@@ -1,0 +1,18 @@
+schema_version: 1
+kind: recipe
+id: demo.unknown_input_binding
+name: Unused binding to an input the Recipe does not declare
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  config:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: config
+    input:
+      ref: inputs.ghost
+artifact_groups: {}
+steps: []
+

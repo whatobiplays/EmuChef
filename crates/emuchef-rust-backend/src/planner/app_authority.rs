@@ -233,6 +233,10 @@ pub(crate) fn validate_recipe_app_authority(
         &selected_steps,
         &app_definitions,
     );
+    errors.extend(validate_declared_artifact_input_bindings(
+        recipe,
+        &app_definitions,
+    ));
     if let Err(target_errors) =
         super::app_targets::resolve_usage(&recipes, &expanded_recipe_refs, &app_definitions, None)
     {
@@ -405,9 +409,95 @@ fn execution_artifact_source(
     }
 }
 
+/// Static input-binding shape checks for one App Artifact declaration.
+///
+/// The rules describe the authored shape only, so they apply to every App
+/// Artifact a Recipe declares, whether or not a selected step consumes it: a
+/// user-provided artifact binds exactly one declared single-file Recipe input,
+/// and no other artifact source may bind one. Effective availability of the
+/// bound value stays in [`validate_selected_user_provided_inputs`], which only
+/// sees artifacts the plan selects.
+fn static_artifact_input_binding_errors(
+    recipe_ref: &str,
+    recipe: &Recipe,
+    artifact_id: &str,
+    reference: &AppArtifactReference,
+    app_artifact: &crate::authored_models::AppArtifactV1,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    if matches!(&app_artifact.source, AppArtifactSource::UserProvided) {
+        let Some(binding) = reference.input.as_ref() else {
+            errors.push(app_authority_error(
+                "app_artifact_input_binding_required",
+                "A user-provided App Artifact must bind one Recipe file input.",
+                json!({ "recipe_ref": recipe_ref, "artifact_id": artifact_id }),
+            ));
+            return errors;
+        };
+        let Some(declaration) = recipe.inputs.get(&binding.input_id) else {
+            errors.push(app_authority_error(
+                "app_artifact_input_binding_invalid",
+                "A user-provided App Artifact must bind an input declared by the same Recipe.",
+                json!({ "recipe_ref": recipe_ref, "artifact_id": artifact_id }),
+            ));
+            return errors;
+        };
+        if declaration.type_name != "file" || declaration.multiple {
+            errors.push(app_authority_error(
+                "app_artifact_input_binding_invalid",
+                "A user-provided App Artifact must bind one single-file Recipe input.",
+                json!({ "recipe_ref": recipe_ref, "artifact_id": artifact_id }),
+            ));
+        }
+    } else if reference.input.is_some() {
+        errors.push(app_authority_error(
+            "app_artifact_input_binding_unsupported",
+            "Only a user-provided App Artifact can bind a Recipe file input.",
+            json!({ "recipe_ref": recipe_ref, "artifact_id": artifact_id }),
+        ));
+    }
+    errors
+}
+
+/// Static binding-shape checks for every App Artifact one Recipe declares.
+///
+/// Ordinary Recipe validation runs without planning, so an artifact no step
+/// consumes must still report a missing, unknown, or incompatible binding.
+/// Declarations whose App Definition or artifact is unknown are skipped here
+/// because the authority pass already reports those as separate diagnostics.
+fn validate_declared_artifact_input_bindings(
+    recipe: &Recipe,
+    app_definitions: &HashMap<String, AppDefinitionV1>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    for (artifact_id, artifact) in &recipe.artifacts {
+        let RecipeArtifact::AppArtifact(reference) = artifact else {
+            continue;
+        };
+        let Some(app_artifact) = app_definitions
+            .get(&reference.app_ref)
+            .and_then(|app| app.artifacts.get(&reference.artifact))
+        else {
+            continue;
+        };
+        errors.extend(static_artifact_input_binding_errors(
+            &recipe.id,
+            recipe,
+            artifact_id,
+            reference,
+            app_artifact,
+        ));
+    }
+    errors
+}
+
 /// Validate selected user-provided App Artifacts against their Recipe inputs.
-/// Availability may defer an absent value, but malformed bindings and present
-/// values with invalid shapes remain planning errors.
+///
+/// The static binding shape is validated for every declaration through
+/// [`static_artifact_input_binding_errors`]; this pass adds the effective
+/// value rules that only apply to artifacts the plan selects. Availability may
+/// defer an absent value, but a present value with an invalid shape remains a
+/// planning error.
 pub(super) fn validate_selected_user_provided_inputs(
     recipes: &HashMap<String, Recipe>,
     selected_artifact_ids: &HashSet<String>,
@@ -432,49 +522,37 @@ pub(super) fn validate_selected_user_provided_inputs(
         else {
             continue;
         };
-        if matches!(&app_artifact.source, AppArtifactSource::UserProvided) {
-            let Some(binding) = reference.input.as_ref() else {
-                errors.push(app_authority_error(
-                    "app_artifact_input_binding_required",
-                    "A selected user-provided App Artifact must bind one Recipe file input.",
-                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
-                ));
-                continue;
-            };
-            let Some(declaration) = recipe.inputs.get(&binding.input_id) else {
-                errors.push(app_authority_error(
-                    "app_artifact_input_binding_invalid",
-                    "A selected user-provided App Artifact must bind an input declared by the same Recipe.",
-                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
-                ));
-                continue;
-            };
-            if declaration.type_name != "file" || declaration.multiple {
-                errors.push(app_authority_error(
-                    "app_artifact_input_binding_invalid",
-                    "A selected user-provided App Artifact must bind one single-file Recipe input.",
-                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
-                ));
-                continue;
-            }
-            let input_id = super::make_execution_input_id(recipe_id, &binding.input_id);
-            let value = super::binding_value(declaration, &input_id, effective_input_bindings);
-            if value.is_none() && allow_missing_value {
-                continue;
-            }
-            if !value
-                .is_some_and(|value| value.as_str().is_some_and(|path| !path.trim().is_empty()))
-            {
-                errors.push(app_authority_error(
-                    "app_artifact_input_binding_missing_value",
-                    "A selected user-provided App Artifact requires a value for its Recipe file input.",
-                    json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
-                ));
-            }
-        } else if reference.input.is_some() {
+        let binding_errors = static_artifact_input_binding_errors(
+            recipe_id,
+            recipe,
+            artifact_id,
+            reference,
+            app_artifact,
+        );
+        if !binding_errors.is_empty() {
+            errors.extend(binding_errors);
+            continue;
+        }
+        if !matches!(&app_artifact.source, AppArtifactSource::UserProvided) {
+            continue;
+        }
+        let Some(binding) = reference.input.as_ref() else {
+            continue;
+        };
+        let Some(declaration) = recipe.inputs.get(&binding.input_id) else {
+            continue;
+        };
+        let input_id = super::make_execution_input_id(recipe_id, &binding.input_id);
+        let value = super::binding_value(declaration, &input_id, effective_input_bindings);
+        if value.is_none() && allow_missing_value {
+            continue;
+        }
+        if !value
+            .is_some_and(|value| value.as_str().is_some_and(|path| !path.trim().is_empty()))
+        {
             errors.push(app_authority_error(
-                "app_artifact_input_binding_unsupported",
-                "Only a user-provided App Artifact can bind a Recipe file input.",
+                "app_artifact_input_binding_missing_value",
+                "A selected user-provided App Artifact requires a value for its Recipe file input.",
                 json!({ "recipe_ref": recipe_id, "artifact_id": artifact_id }),
             ));
         }

@@ -436,7 +436,13 @@ impl DocumentSessionManager {
         }
         let document = self.document_mut(document_id)?;
         document.validate();
-        Ok(json!({ "diagnostics": document.diagnostics() }))
+        // Successful Recipe validation returns the complete refreshed
+        // projection so the editor applies authoritative state instead of
+        // merging a diagnostics-only response.
+        Ok(json!({
+            "diagnostics": document.diagnostics(),
+            "document": dto::document_to_dto(document, document_id),
+        }))
     }
 
     pub fn get_ref_index(&self, document_id: &str) -> Result<Value, ApiError> {

@@ -1,0 +1,34 @@
+schema_version: 1
+kind: app_definition
+id: demo_app
+name: Demo App
+description: Catalog projection and App-aware editor validation fixture.
+category: emulator
+package_id: com.example.demo
+launcher_activity: com.example.demo.MainActivity
+artifacts:
+  apk:
+    kind: apk
+    name: Demo APK
+    source:
+      strategy: direct_url
+      url: https://example.com/demo.apk
+  config:
+    kind: file
+    name: Demo config
+    source:
+      strategy: user_provided
+permission_sets:
+  baseline:
+    app_ops:
+      - op: MANAGE_EXTERNAL_STORAGE
+        mode: allow
+targets:
+  system:
+    kind: directory
+    location: shared_storage
+    path: Demo/system
+  config_file:
+    kind: file
+    location: external_app_data
+    path: files/demo.cfg

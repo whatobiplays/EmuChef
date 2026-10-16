@@ -25,6 +25,7 @@ pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
         "yaml": document.yaml(),
         "diagnostics": document.diagnostics(),
         "refIndex": ref_index::ref_index_to_dto(document.recipe()),
+        "appCatalog": document.app_catalog().to_dto(),
     })
 }
 
@@ -137,6 +138,7 @@ fn artifact_to_dto(artifact_id: &str, artifact: &RecipeArtifact) -> Value {
             "type": "app_artifact",
             "appRef": artifact.app_ref,
             "artifact": artifact.artifact,
+                "input": artifact.input.as_ref().map(|binding| binding.input_id.as_str()),
             "cache": artifact.cache,
         }),
     }

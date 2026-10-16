@@ -1,0 +1,11 @@
+schema_version: 1
+kind: recipe
+id: demo.recipe
+name: Demo Recipe
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { EditorCommand } from "../api/commands";
 import type {
+  AppCatalogAppDto,
+  AppCatalogDto,
   ArtifactDto,
   RecipeDto,
   RefIndexDto,
@@ -20,6 +22,7 @@ import {
   buildStepRefDependencyWarning,
   buildUpdateStepParamsCommand,
   displayValueForObjectField,
+  isAppTargetValue,
   isAuthoredRefValue,
   literalSeedForParam,
   moveObjectListRow,
@@ -39,6 +42,16 @@ import {
   type RefPickerOption,
   type StepRefDependencyWarning,
 } from "./stepParams.logic";
+import {
+  appTargetOptions,
+  catalogApp,
+  copyPolicyValue,
+  installApkArtifactRefs,
+  permissionSetChoices,
+  refSourceValueType,
+  type AppChoiceOption,
+  type AppTargetOption,
+} from "./appCatalog.logic";
 import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
 
 interface StepParamsEditorProps {
@@ -47,6 +60,7 @@ interface StepParamsEditorProps {
   step: StepDto;
   stepSpec: StepSpecDto | null;
   refIndex: RefIndexDto;
+  appCatalog: AppCatalogDto;
   onCommand: (command: EditorCommand) => Promise<boolean>;
   onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
 }
@@ -57,6 +71,7 @@ export function StepParamsEditor({
   step,
   stepSpec,
   refIndex,
+  appCatalog,
   onCommand,
   onUpdateDependencies,
 }: StepParamsEditorProps) {
@@ -96,6 +111,7 @@ export function StepParamsEditor({
               refIndex={refIndex}
               step={step}
               stepSpec={stepSpec}
+              appCatalog={appCatalog}
               value={Object.prototype.hasOwnProperty.call(step.params, paramName) ? step.params[paramName] : undefined}
               hasParam={Object.prototype.hasOwnProperty.call(step.params, paramName)}
               onClear={() => clearParam(paramName)}
@@ -118,6 +134,7 @@ function StepParamRow({
   step,
   stepSpec,
   refIndex,
+  appCatalog,
   onUpdate,
   onClear,
   onUpdateDependencies,
@@ -130,6 +147,7 @@ function StepParamRow({
   step: StepDto;
   stepSpec: StepSpecDto | null;
   refIndex: RefIndexDto;
+  appCatalog: AppCatalogDto;
   onUpdate: (nextValue: unknown) => Promise<boolean>;
   onClear: () => Promise<boolean>;
   onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
@@ -138,13 +156,69 @@ function StepParamRow({
   const shape = paramSpec?.shape;
   const structuredKind = structuredParamEditorKind(stepSpec, paramName, value);
   const isStructuredParam = structuredKind !== null;
-  const enumValues = typeof value === "string" ? paramSpec?.enumValues ?? [] : [];
+  const enumValues =
+    typeof value === "string" || value === undefined ? paramSpec?.enumValues ?? [] : [];
   const acceptedSources = paramSpec?.acceptedSources ?? [];
   const allowedRefSources = acceptedSources.filter((source) => source !== "literal" && source !== "app_target");
   const allowedValueTypes = paramSpec?.acceptedValueTypes ?? [];
+  const selectedApp = catalogApp(appCatalog, step.appRef ?? null);
+  const isPermissionSetParam = step.type === "grant_permissions" && paramName === "permission_set";
+  const isAppTargetParam = acceptedSources.includes("app_target");
+  const isInstallApkAppParam = step.type === "install_apk" && paramName === "app";
+  // An app-aware APK install may only consume APK artifacts of its selected
+  // App Definition. Legacy steps without app context keep every ref.
+  const allowedInstallArtifactRefs =
+    isInstallApkAppParam && step.appRef
+      ? installApkArtifactRefs(appCatalog, recipe.artifacts, step.appRef)
+      : null;
+  const currentAppTargetId = isAppTargetValue(value) ? value.app_target : null;
+  // App Target compatibility mirrors planning: the sibling `source` param
+  // carries the copy origin type, and `copy_policy` decides whether a sync
+  // copy needs a directory target. An absent policy falls back to the step
+  // spec default and then to `merge`, matching the planner's fallback.
+  const appTargetChoices = isAppTargetParam
+    ? appTargetOptions(selectedApp, {
+        sourceValueType: refSourceValueType(refIndex, step.params.source),
+        copyPolicy: copyPolicyValue(step.params.copy_policy ?? stepSpec?.defaults.copy_policy ?? "merge"),
+        currentTargetId: currentAppTargetId,
+      })
+    : [];
+  // Seed a target the planner rules already accept, then fall back to a target
+  // whose compatibility is unknown until validation. Incompatible targets and
+  // retained values are never seeded.
+  const selectableTargets = appTargetChoices.filter(
+    (option) => !option.retained && option.compatibility !== "incompatible",
+  );
+  const appTargetSeed =
+    (selectableTargets.find((option) => option.compatibility === "compatible") ?? selectableTargets[0])?.id ?? null;
 
   let control: ReactNode;
-  if (structuredKind === "artifact-id-list" && shape) {
+  if (isPermissionSetParam && (value === undefined || typeof value === "string")) {
+    const options = permissionSetChoices(selectedApp, typeof value === "string" ? value : null);
+    control = (
+      <AppChoiceSelect
+        disabled={readOnly}
+        message={appOwnedChoiceMessage(step.appRef ?? null, selectedApp, options, {
+          missingApp: "Select an App Definition to choose one of its defined permission sets.",
+          none: "This App Definition defines no permission sets.",
+        })}
+        options={options}
+        value={typeof value === "string" ? value : ""}
+        onUpdate={onUpdate}
+      />
+    );
+  } else if (isAppTargetParam && (isAppTargetValue(value) || value === undefined)) {
+    control = (
+      <AppTargetSelect
+        appRef={step.appRef ?? null}
+        disabled={readOnly}
+        options={appTargetChoices}
+        selectedApp={selectedApp}
+        value={isAppTargetValue(value) ? value.app_target : ""}
+        onUpdate={onUpdate}
+      />
+    );
+  } else if (structuredKind === "artifact-id-list" && shape) {
     control = (
       <StringIdListParamInput
         addLabel="Add artifact"
@@ -172,18 +246,27 @@ function StepParamRow({
     control = <ObjectListParamInput disabled={readOnly} shape={shape} value={value} onUpdate={onUpdate} />;
   } else if (structuredKind === "object" && shape) {
     control = <ObjectParamInput disabled={readOnly} shape={shape} value={value} onUpdate={onUpdate} />;
-  } else if (isAuthoredRefValue(value)) {
-    const dependencyWarning = buildStepRefDependencyWarning({
-      refIndex,
-      currentStepId: step.id,
-      dependencyIds: step.dependencies,
-      value,
-    });
+  } else if (
+    isAuthoredRefValue(value) ||
+    (value === undefined && !acceptedSources.includes("literal") && allowedRefSources.length > 0)
+  ) {
+    // An absent ref parameter, such as the App Artifact of a newly added
+    // install_apk step, still renders the catalog-backed ref picker so the
+    // author never has to hand-author raw JSON to choose a value.
+    const dependencyWarning = isAuthoredRefValue(value)
+      ? buildStepRefDependencyWarning({
+          refIndex,
+          currentStepId: step.id,
+          dependencyIds: step.dependencies,
+          value,
+        })
+      : null;
     control = (
       <RefPicker
+        allowedArtifactRefs={allowedInstallArtifactRefs}
         allowedSources={allowedRefSources}
         allowedValueTypes={allowedValueTypes}
-        currentRef={value.ref}
+        currentRef={isAuthoredRefValue(value) ? value.ref : ""}
         dependencyWarning={dependencyWarning}
         disabled={readOnly}
         refIndex={refIndex}
@@ -193,8 +276,8 @@ function StepParamRow({
     );
   } else if (enumValues.length > 0) {
     control = <EnumParamInput disabled={readOnly} enumValues={enumValues} value={value} onUpdate={onUpdate} />;
-  } else if (typeof value === "boolean") {
-    control = <BooleanParamInput disabled={readOnly} value={value} onUpdate={onUpdate} />;
+  } else if (typeof value === "boolean" || (value === undefined && allowedValueTypes.includes("boolean"))) {
+    control = <BooleanParamInput disabled={readOnly} value={value === true} onUpdate={onUpdate} />;
   } else if (typeof value === "number") {
     control = <NumberParamInput readOnly={readOnly} value={value} onUpdate={onUpdate} />;
   } else if (typeof value === "string") {
@@ -203,7 +286,10 @@ function StepParamRow({
     control = <JsonValueEditor readOnly={readOnly} value={value} onUpdate={onUpdate} />;
   }
 
-  if (!isStructuredParam && acceptedSources.includes("literal") && allowedRefSources.length > 0) {
+  const showValueSourceToggle =
+    !isStructuredParam &&
+    ((acceptedSources.includes("literal") && allowedRefSources.length > 0) || isAppTargetParam);
+  if (showValueSourceToggle) {
     const compatibleRefs = buildRefPickerOptions(refIndex, {
       allowedSources: allowedRefSources,
       allowedValueTypes,
@@ -214,9 +300,14 @@ function StepParamRow({
     control = (
       <div className="grid gap-2">
         <div className="flex gap-1" role="group" aria-label={`${paramName} value source`}>
+          {acceptedSources.includes("literal") ? (
+          // Switching to a literal value is an explicit author action. An
+          // authored App Target or ref value stays untouched until this click,
+          // and an absent value seeds a default literal so a required parameter
+          // without App Target or ref choices remains authorable.
           <button
             className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
-            disabled={readOnly || !isAuthoredRefValue(value)}
+            disabled={readOnly || (value !== undefined && !isAuthoredRefValue(value) && !isAppTargetValue(value))}
             type="button"
             onClick={() =>
               void onUpdate(
@@ -226,6 +317,8 @@ function StepParamRow({
           >
             Literal
           </button>
+          ) : null}
+          {allowedRefSources.length > 0 ? (
           <button
             className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
             disabled={readOnly || isAuthoredRefValue(value) || refSeed === null}
@@ -238,8 +331,32 @@ function StepParamRow({
           >
             Ref
           </button>
+          ) : null}
+          {isAppTargetParam ? (
+            <button
+              className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
+              disabled={readOnly || isAppTargetValue(value) || appTargetSeed === null}
+              type="button"
+              onClick={() => {
+                if (appTargetSeed !== null) {
+                  void onUpdate({ app_target: appTargetSeed });
+                }
+              }}
+            >
+              App target
+            </button>
+          ) : null}
         </div>
         {control}
+        {isAppTargetParam && !isAppTargetValue(value) && appTargetSeed === null ? (
+          <p className="text-xs text-slate-500">
+            {selectedApp === null
+              ? "Select an App Definition to choose one of its App Targets."
+              : selectedApp.targets.length === 0
+                ? "This App Definition defines no App Targets."
+                : "Every App Target of this App Definition is incompatible with the current copy source."}
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -298,6 +415,145 @@ function ParamNameBlock({
           {paramSpec.required ? "Required" : "Optional"} · {paramSpec.acceptedSources.join(" / ")}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Explains why a structured App-owned choice list is narrowed or empty.
+ *
+ * A catalog that does not define the selected App Definition cannot list its
+ * choices, and a fully retained list means the App Definition defines no
+ * choices of that kind. The message never replaces a retained value, which
+ * stays rendered around it.
+ */
+function appOwnedChoiceMessage(
+  appRef: string | null,
+  selectedApp: AppCatalogAppDto | null,
+  options: Array<{ retained: boolean }>,
+  messages: { missingApp: string; none: string },
+): string | null {
+  if (selectedApp !== null) {
+    return options.some((option) => !option.retained) ? null : messages.none;
+  }
+  if (appRef) {
+    return `App Definition ${appRef} is not in the current catalog, so its choices cannot be listed.`;
+  }
+  return messages.missingApp;
+}
+
+/**
+ * Structured select for one literal value an App Definition owns.
+ *
+ * `grant_permissions` selects a permission set this way: only sets the
+ * selected App Definition defines are offered, and a retained current value
+ * stays visible when the catalog does not define it.
+ */
+function AppChoiceSelect({
+  disabled,
+  message,
+  options,
+  value,
+  onUpdate,
+}: {
+  disabled: boolean;
+  message: string | null;
+  options: AppChoiceOption[];
+  value: string;
+  onUpdate: (nextValue: string) => Promise<boolean>;
+}) {
+  if (options.length === 0) {
+    return <p className="text-sm text-slate-500">{message ?? "No choices are available."}</p>;
+  }
+  return (
+    <div className="grid gap-1">
+      <select
+        className="w-full border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+        disabled={disabled}
+        value={value}
+        onChange={(event) => {
+          if (event.target.value !== value) {
+            void onUpdate(event.target.value);
+          }
+        }}
+      >
+        {value === "" ? <option value="">Select a value</option> : null}
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {message !== null ? <p className="text-sm text-slate-500">{message}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * Structured select for a `copy_files` destination owned by an App Target.
+ *
+ * Only targets of the selected App Definition are offered. Targets the
+ * planner rules already reject for the current copy source or policy stay
+ * listed with their reason and cannot be newly selected. A target whose
+ * compatibility cannot be resolved yet is listed as unknown and stays
+ * selectable, and a retained target the catalog does not define stays
+ * selectable too, so authored values are never lost.
+ */
+function AppTargetSelect({
+  appRef,
+  disabled,
+  options,
+  selectedApp,
+  value,
+  onUpdate,
+}: {
+  appRef: string | null;
+  disabled: boolean;
+  options: AppTargetOption[];
+  selectedApp: AppCatalogAppDto | null;
+  value: string;
+  onUpdate: (nextValue: { app_target: string }) => Promise<boolean>;
+}) {
+  const message = appOwnedChoiceMessage(appRef, selectedApp, options, {
+    missingApp: "Select an App Definition to choose one of its App Targets.",
+    none: "This App Definition defines no App Targets.",
+  });
+  const current = options.find((option) => option.id === value) ?? null;
+  if (options.length === 0) {
+    return <p className="text-sm text-slate-500">{message}</p>;
+  }
+  return (
+    <div className="grid gap-1">
+      <select
+        className="w-full border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+        disabled={disabled}
+        value={value}
+        onChange={(event) => {
+          if (event.target.value !== value) {
+            void onUpdate({ app_target: event.target.value });
+          }
+        }}
+      >
+      {value === "" ? <option value="">Select an App Target</option> : null}
+        {options.map((option) => (
+          <option
+            disabled={option.compatibility === "incompatible" && !option.retained}
+            key={option.id}
+            value={option.id}
+          >
+            {option.reason === null ? option.label : `${option.label} — ${option.reason}`}
+          </option>
+        ))}
+      </select>
+      {current !== null && current.compatibility === "incompatible" && current.reason !== null ? (
+        <p className="text-xs text-amber-800">
+          This App Target is not compatible with the current copy source: {current.reason}
+        </p>
+      ) : null}
+      {current !== null && current.compatibility === "unknown" && current.reason !== null ? (
+        <p className="text-xs text-slate-500">{current.reason}</p>
+      ) : null}
+      {message !== null ? <p className="text-sm text-slate-500">{message}</p> : null}
     </div>
   );
 }
@@ -1090,8 +1346,9 @@ function EnumParamInput({
   disabled?: boolean;
   onUpdate: (nextValue: string) => Promise<boolean>;
 }) {
-  const stringValue = String(value);
-  const options = enumValues.includes(stringValue) ? enumValues : [stringValue, ...enumValues];
+  const stringValue = value === undefined ? "" : String(value);
+  const options =
+    stringValue === "" || enumValues.includes(stringValue) ? enumValues : [stringValue, ...enumValues];
 
   return (
     <select
@@ -1104,6 +1361,7 @@ function EnumParamInput({
         }
       }}
     >
+      {stringValue === "" ? <option value="">Select a value</option> : null}
       {options.map((option) => (
         <option key={option} value={option}>
           {option}
@@ -1133,6 +1391,7 @@ function BooleanParamInput({ disabled = false, value, onUpdate }: { disabled?: b
 }
 
 function RefPicker({
+  allowedArtifactRefs = null,
   currentRef,
   allowedSources,
   allowedValueTypes,
@@ -1142,6 +1401,7 @@ function RefPicker({
   onAddDependency,
   onUpdate,
 }: {
+  allowedArtifactRefs?: readonly string[] | null;
   currentRef: string;
   allowedSources: readonly string[];
   allowedValueTypes: readonly string[];
@@ -1153,8 +1413,15 @@ function RefPicker({
 }) {
   const [showAll, setShowAll] = useState(false);
   const options = useMemo(
-    () => buildRefPickerOptions(refIndex, { allowedSources, allowedValueTypes, currentRef, showAll }),
-    [allowedSources, allowedValueTypes, currentRef, refIndex, showAll],
+    () =>
+      buildRefPickerOptions(refIndex, {
+        allowedArtifactRefs,
+        allowedSources,
+        allowedValueTypes,
+        currentRef,
+        showAll,
+      }),
+    [allowedArtifactRefs, allowedSources, allowedValueTypes, currentRef, refIndex, showAll],
   );
 
   return (
@@ -1169,6 +1436,7 @@ function RefPicker({
           }
         }}
       >
+        {currentRef === "" ? <option value="">Select a ref</option> : null}
         {options.map((option) => (
           <option key={option.ref} value={option.ref}>
             {refOptionLabel(option)}

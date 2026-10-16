@@ -2,9 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  appConditionType,
   buildAdvancedInternalsCommand,
   buildAddConstraintValue,
+  buildAddAppPackageInstalledEntry,
+  buildAddAppTargetConditionEntry,
   buildAddVerifyEntry,
+  buildConditionAppTargetUpdate,
+  buildConditionLiteralUpdate,
   buildUpdateConstraintValue,
   classifyConstraintsDto,
   constraintsCommandValue,
@@ -378,4 +383,129 @@ test("verifyFieldForType exposes the structured parameter key for supported type
   assert.equal(verifyFieldForType("file_exists"), "path");
   assert.equal(verifyFieldForType("package_installed"), "package_name");
   assert.equal(verifyFieldForType("custom"), null);
+});
+
+test("classifyVerifyEntry recognizes the parameterless app-aware package check", () => {
+  assert.deepEqual(classifyVerifyEntry({ type: "package_installed", params: {} }), {
+    kind: "app_package_installed",
+    type: "package_installed",
+  });
+  assert.deepEqual(classifyVerifyEntry({ type: "package_installed", params: {}, future: true }), {
+    kind: "json",
+  });
+  assert.deepEqual(classifyVerifyEntry({ type: "path_exists", params: {} }), { kind: "json" });
+});
+
+test("app-aware package check authoring requires an App Definition and stays parameterless", () => {
+  assert.deepEqual(buildAddAppPackageInstalledEntry([], "demo_app"), {
+    ok: true,
+    value: [{ type: "package_installed", params: {} }],
+  });
+  assert.deepEqual(buildAddAppPackageInstalledEntry([], null), {
+    ok: false,
+    error: "Select an App Definition before adding an App Definition package check.",
+  });
+  assert.deepEqual(
+    buildAddAppPackageInstalledEntry([{ type: "file_exists", params: { path: "/tmp" } }], "demo_app"),
+    {
+      ok: true,
+      value: [
+        { type: "file_exists", params: { path: "/tmp" } },
+        { type: "package_installed", params: {} },
+      ],
+    },
+  );
+});
+
+test("classifyVerifyEntry types App Target path conditions and leaves other shapes as JSON", () => {
+  assert.deepEqual(classifyVerifyEntry({ type: "path_exists", params: { path: { app_target: "system" } } }), {
+    kind: "app_target",
+    type: "path_exists",
+    targetId: "system",
+  });
+  assert.deepEqual(classifyVerifyEntry({ type: "file_exists", params: { path: { app_target: "config_file" } } }), {
+    kind: "app_target",
+    type: "file_exists",
+    targetId: "config_file",
+  });
+  assert.deepEqual(
+    classifyVerifyEntry({ type: "path_exists", params: { path: { app_target: "system" }, extra: true } }),
+    { kind: "json" },
+  );
+  assert.deepEqual(classifyVerifyEntry({ type: "path_exists", params: { path: { app_target: 42 } } }), {
+    kind: "json",
+  });
+  assert.deepEqual(
+    classifyVerifyEntry({ type: "path_exists", params: { path: { app_target: "system", extra: true } } }),
+    { kind: "json" },
+  );
+  assert.deepEqual(classifyVerifyEntry({ type: "custom", params: { path: { app_target: "system" } } }), {
+    kind: "json",
+  });
+  assert.deepEqual(
+    classifyVerifyEntry({ type: "package_installed", params: { path: { app_target: "system" } } }),
+    { kind: "json" },
+  );
+});
+
+test("appConditionType narrows only the planner-supported App Target condition types", () => {
+  assert.equal(appConditionType("path_exists"), "path_exists");
+  assert.equal(appConditionType("file_exists"), "file_exists");
+  assert.equal(appConditionType("package_installed"), null);
+});
+
+test("App Target condition authoring seeds a planner-shaped path condition", () => {
+  assert.deepEqual(buildAddAppTargetConditionEntry([], "file_exists", "config_file"), {
+    ok: true,
+    value: [{ type: "file_exists", params: { path: { app_target: "config_file" } } }],
+  });
+  assert.deepEqual(buildAddAppTargetConditionEntry([], "path_exists", ""), {
+    ok: false,
+    error: "Select an App Target for this check.",
+  });
+});
+
+test("App Target condition edits switch between target and literal forms explicitly", () => {
+  const conditions = [
+    { type: "path_exists", params: { path: "/sdcard/RetroArch" } },
+    { type: "file_exists", params: { path: { app_target: "config_file" } } },
+  ];
+  assert.deepEqual(buildConditionAppTargetUpdate(conditions, 0, "system"), {
+    ok: true,
+    value: [
+      { type: "path_exists", params: { path: { app_target: "system" } } },
+      { type: "file_exists", params: { path: { app_target: "config_file" } } },
+    ],
+  });
+  assert.equal(buildConditionAppTargetUpdate(conditions, 1, "config_file"), null);
+  assert.deepEqual(buildConditionAppTargetUpdate(conditions, 1, "ghost_target"), {
+    ok: true,
+    value: [
+      { type: "path_exists", params: { path: "/sdcard/RetroArch" } },
+      { type: "file_exists", params: { path: { app_target: "ghost_target" } } },
+    ],
+  });
+  assert.deepEqual(buildConditionLiteralUpdate(conditions, 1, ""), {
+    ok: true,
+    value: [
+      { type: "path_exists", params: { path: "/sdcard/RetroArch" } },
+      { type: "file_exists", params: { path: "" } },
+    ],
+  });
+  assert.deepEqual(buildConditionAppTargetUpdate(conditions, 2, "system"), {
+    ok: false,
+    error: "Check entry does not exist.",
+  });
+  assert.deepEqual(
+    buildConditionAppTargetUpdate([{ type: "package_installed", params: { package_name: "org.retroarch" } }], 0, "system"),
+    { ok: false, error: "This check does not select an App Target." },
+  );
+  assert.deepEqual(buildConditionLiteralUpdate(conditions, 0, "ignored"), {
+    ok: false,
+    error: "This check does not select an App Target.",
+  });
+  assert.deepEqual(buildConditionAppTargetUpdate(conditions, 0, ""), {
+    ok: false,
+    error: "Select an App Target for this check.",
+  });
 });

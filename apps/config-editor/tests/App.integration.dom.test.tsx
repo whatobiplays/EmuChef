@@ -147,6 +147,7 @@ function recipeDocument(
       allRefs: [],
       candidates: [],
     },
+    appCatalog: { status: "unbound", apps: [], diagnostics: [] },
     ...overrides,
   };
 }
@@ -861,5 +862,47 @@ describe("Config Editor App Definition document integration", () => {
     expect(mocks.saveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: recipe.path }));
     expect(mocks.api.saveAppDefinitionAs).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("App Definition editor")).toBeNull();
+  });
+});
+
+describe("Recipe validation refresh", () => {
+  it("applies the full refreshed Recipe document returned by Validate", async () => {
+    await mountEditor();
+    const recipe = recipeDocument();
+    mocks.openDialog.mockResolvedValueOnce(recipe.path);
+    mocks.api.openRecipe.mockResolvedValueOnce(apiSuccess({ document: recipe }));
+    dispatchMenu("openRecipe");
+    await screen.findByRole("heading", { name: "Recipe" });
+    await waitFor(() =>
+      expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
+        "Demo Recipe",
+      ),
+    );
+
+    const refreshed = recipeDocument("recipe-session-1", {
+      dirty: true,
+      canUndo: true,
+      recipe: { ...recipe.recipe, name: "Refreshed Recipe" },
+    });
+    mocks.api.validate.mockResolvedValueOnce(
+      apiSuccess({ diagnostics: refreshed.diagnostics, document: refreshed }),
+    );
+
+    dispatchMenu("validate");
+    await waitFor(() => expect(mocks.api.validate).toHaveBeenCalledWith("recipe-session-1"));
+    await waitFor(() =>
+      expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
+        "Refreshed Recipe",
+      ),
+    );
+
+    // The refreshed projection drives menu state, proving the applied document
+    // is the one the sidecar returned rather than a diagnostics-only update.
+    expect(
+      mocks.api.updateMenuState.mock.calls.some(([state]) => {
+        const menuState = state as { canUndo?: boolean };
+        return menuState.canUndo === true;
+      }),
+    ).toBe(true);
   });
 });

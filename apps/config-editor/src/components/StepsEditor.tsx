@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { EditorCommand } from "../api/commands";
-import type { DiagnosticDto, RecipeDocumentDto, RecipeDto, StepDto, StepSpecDto } from "../api/types";
+import type {
+  AppCatalogDto,
+  DiagnosticDto,
+  RecipeDocumentDto,
+  RecipeDto,
+  StepDto,
+  StepSpecDto,
+} from "../api/types";
 import { AdvancedStepInternalsEditor, type AdvancedCommandResult } from "./AdvancedStepInternalsEditor";
+import { appContextControl, appRefOptions, catalogApp, launcherUnavailable } from "./appCatalog.logic";
 import { EditableTextField } from "./EditableTextField";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
 import { StepDependenciesEditor } from "./StepDependenciesEditor";
@@ -167,6 +175,7 @@ export function StepsEditor({
           steps={steps}
           recipe={document.recipe}
           refIndex={document.refIndex}
+          appCatalog={document.appCatalog}
           readOnly={readOnly}
           onCommand={onCommand}
           onAdvancedCommand={onAdvancedCommand}
@@ -279,12 +288,110 @@ function StepListRow({
   );
 }
 
+/**
+ * Catalog-backed control for the App Definition one step references.
+ *
+ * The control follows the step spec: required app context must select a
+ * catalog App Definition, optional app context may also select none, and steps
+ * without app context hide the control entirely. A retained app reference that
+ * the catalog does not define stays selectable, so the authored value remains
+ * visible next to its static validation diagnostic.
+ *
+ * A step whose type does not use App Definition context normally shows no
+ * control. When malformed content still carries an app reference, the value
+ * stays visible with an explanatory diagnostic and an explicit clear action
+ * that dispatches through the normal, undoable SetStepAppRef command.
+ */
+function StepAppContextControl({
+  appCatalog,
+  readOnly,
+  step,
+  stepSpec,
+  onCommand,
+}: {
+  appCatalog: AppCatalogDto;
+  readOnly: boolean;
+  step: StepDto;
+  stepSpec: StepSpecDto | null;
+  onCommand: (command: EditorCommand) => Promise<boolean>;
+}) {
+  const control = appContextControl(stepSpec);
+  if (control === "hidden") {
+    if (!step.appRef) {
+      return null;
+    }
+    return (
+      <div className="grid gap-2 rounded border border-amber-200 bg-amber-50 p-3">
+        <ReadonlyText label="App Definition context" value={step.appRef} />
+        <p className="text-xs text-amber-900">
+          The {step.type} step type does not use an App Definition, so this retained reference is
+          ignored. Clear it to remove the invalid content.
+        </p>
+        <button
+          className="w-fit rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+          disabled={readOnly}
+          type="button"
+          onClick={() => void onCommand({ type: "SetStepAppRef", stepId: step.id, appRef: null })}
+        >
+          Clear App Definition reference
+        </button>
+      </div>
+    );
+  }
+  const options = appRefOptions(appCatalog, step.appRef ?? null);
+  const selectedApp = catalogApp(appCatalog, step.appRef ?? null);
+  const launchUnavailable = step.type === "launch_app" && launcherUnavailable(selectedApp);
+  return (
+    <label className="grid gap-1">
+      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">App Definition</span>
+      <select
+        className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+        disabled={readOnly}
+        value={step.appRef ?? ""}
+        onChange={(event) => {
+          const appRef = event.target.value === "" ? null : event.target.value;
+          if (appRef === (step.appRef ?? null)) {
+            return;
+          }
+          void onCommand({ type: "SetStepAppRef", stepId: step.id, appRef });
+        }}
+      >
+        {control === "required" && !step.appRef ? (
+          <option disabled value="">
+            Select an App Definition
+          </option>
+        ) : null}
+        {control === "optional" ? <option value="">No App Definition (none)</option> : null}
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {launchUnavailable ? (
+        <span className="text-xs text-red-700">
+          This App Definition defines no launcher activity, so launch_app cannot start it. Choose an App
+          Definition that defines a launcher activity.
+        </span>
+      ) : null}
+      {!step.appRef && control === "required" && options.length === 0 ? (
+        <span className="text-xs text-slate-500">
+          {appCatalog.status === "invalid"
+            ? "App Definition choices stay closed until catalog diagnostics are resolved."
+            : "Bind an authored catalog root to select an App Definition."}
+        </span>
+      ) : null}
+    </label>
+  );
+}
+
 function StepDetailPanel({
   step,
   stepSpec,
   steps,
   recipe,
   refIndex,
+  appCatalog,
   readOnly,
   onCommand,
   onAdvancedCommand,
@@ -297,6 +404,7 @@ function StepDetailPanel({
   steps: StepDto[];
   recipe: RecipeDto;
   refIndex: RecipeDocumentDto["refIndex"];
+  appCatalog: AppCatalogDto;
   readOnly: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
   onAdvancedCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
@@ -315,23 +423,13 @@ function StepDetailPanel({
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadonlyText label="ID" value={step.id} />
         <ReadonlyText label="Type" value={step.type} />
-        {step.type === "launch_app" || step.type === "force_stop_app" ? (
-          <EditableTextField
-            label="App Definition ID"
-            placeholder="App Definition ID"
+          <StepAppContextControl
+            appCatalog={appCatalog}
             readOnly={readOnly}
-            value={step.appRef ?? ""}
-            onCommit={(value) => {
-              const appRef = value.trim() || null;
-              if (appRef === (step.appRef ?? null)) {
-                return false;
-              }
-              return onCommand({ type: "SetStepAppRef", stepId: step.id, appRef });
-            }}
+            step={step}
+            stepSpec={stepSpec}
+            onCommand={onCommand}
           />
-        ) : step.appRef ? (
-          <ReadonlyText label="App Definition context" value={step.appRef} />
-        ) : null}
         <EditableTextField
           label="Display Name"
           readOnly={readOnly}
@@ -362,6 +460,7 @@ function StepDetailPanel({
           readOnly={readOnly}
           recipe={recipe}
           refIndex={refIndex}
+          appCatalog={appCatalog}
           step={step}
           stepSpec={stepSpec}
           onCommand={onCommand}
@@ -369,7 +468,13 @@ function StepDetailPanel({
         />
       </div>
 
-      <AdvancedStepInternalsEditor readOnly={readOnly} step={step} steps={steps} onCommand={onAdvancedCommand} />
+      <AdvancedStepInternalsEditor
+        appCatalog={appCatalog}
+        readOnly={readOnly}
+        step={step}
+        steps={steps}
+        onCommand={onAdvancedCommand}
+      />
     </div>
   );
 }

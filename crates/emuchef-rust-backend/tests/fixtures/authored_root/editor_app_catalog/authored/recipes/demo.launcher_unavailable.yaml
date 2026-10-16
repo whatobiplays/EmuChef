@@ -1,0 +1,23 @@
+schema_version: 1
+kind: recipe
+id: demo.launcher_unavailable
+name: Launcher unavailable
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: launch_second
+    type: launch_app
+    name: Launch Second App
+    user_toggleable: true
+    app_ref: second_app
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params: {}
+    verify: []

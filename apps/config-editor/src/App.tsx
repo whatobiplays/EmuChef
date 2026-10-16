@@ -1121,7 +1121,11 @@ export default function App() {
     try {
       const response = await validateDocument(document.documentId);
       if (response.kind === "success") {
-        setDiagnostics(response.result.diagnostics);
+        if (response.result.document !== undefined) {
+          applyDocument(response.result.document);
+        } else {
+          setDiagnostics(response.result.diagnostics);
+        }
         setErrorMessage(null);
         setStatusMessage("Validation refreshed from the sidecar session.");
         await syncMenuState(currentDocumentRef.current);

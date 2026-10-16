@@ -1,0 +1,25 @@
+schema_version: 1
+kind: recipe
+id: demo.permission_set_without_app_ref
+name: Permission set without app context
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: grant_demo
+    type: grant_permissions
+    name: Grant Demo permissions
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      permission_set: baseline
+      policy:
+        on_failure: warn
+    verify: []

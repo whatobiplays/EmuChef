@@ -1,0 +1,26 @@
+schema_version: 1
+kind: recipe
+id: demo.undefined_permission_set
+name: Undefined permission set
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: grant_demo
+    type: grant_permissions
+    name: Grant Demo permissions
+    user_toggleable: false
+    app_ref: demo_app
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      permission_set: elevated
+      policy:
+        on_failure: warn
+    verify: []

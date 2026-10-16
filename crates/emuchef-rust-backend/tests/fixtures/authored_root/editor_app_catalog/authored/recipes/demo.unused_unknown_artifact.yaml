@@ -1,0 +1,15 @@
+schema_version: 1
+kind: recipe
+id: demo.unused_unknown_artifact
+name: Unused unknown App artifact
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  ghost:
+    type: app_artifact
+    app_ref: demo_app
+    artifact: missing_artifact
+artifact_groups: {}
+steps: []
