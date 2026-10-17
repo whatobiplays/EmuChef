@@ -4,18 +4,28 @@
 //! external replacement or edit before publishing a new canonical document.
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
+#[cfg(test)]
+use std::time::UNIX_EPOCH;
 
 use crate::app_definition_admission::{
     verify_admission_snapshot, AdmissionPublishKind, AppDefinitionSaveAdmission,
     GeneratedAppPairSnapshot,
 };
 use crate::authored_models::{emit_app_definition_yaml, AppDefinitionV1};
+use crate::catalog_change::{
+    CatalogChangeCoordinator, OperationPhase, OperationRecord, PublicationGuard,
+};
+use sha2::{Digest, Sha256};
 
 static APP_DEFINITION_PUBLISH_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static NEXT_GENERATED_PAIR_OPERATION: AtomicU64 = AtomicU64::new(1);
 
 /// A file revision contains its canonical path, original bytes, and identity.
 ///
@@ -214,7 +224,16 @@ pub fn persist_app_definition(
     value: &AppDefinitionV1,
     admission: &AppDefinitionSaveAdmission,
 ) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
-    persist_with_hook(value, admission, || {})
+    persist_with_hook(value, admission, None, || {})
+}
+
+/// Publish an admitted App Definition using an explicit application journal.
+pub(crate) fn persist_app_definition_with_storage(
+    value: &AppDefinitionV1,
+    admission: &AppDefinitionSaveAdmission,
+    storage_base: Option<&Path>,
+) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
+    persist_with_hook(value, admission, storage_base, || {})
 }
 
 /// Run persistence with a hook immediately before the final stale-input check.
@@ -230,17 +249,68 @@ pub fn persist_app_definition_with_hook<F>(
 where
     F: FnOnce(),
 {
-    persist_with_hook(value, admission, before_final_check)
+    persist_with_hook(value, admission, None, before_final_check)
 }
 
 fn persist_with_hook<BeforeCheck>(
     value: &AppDefinitionV1,
     admission: &AppDefinitionSaveAdmission,
+    storage_base: Option<&Path>,
     before_final_check: BeforeCheck,
 ) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError>
 where
     BeforeCheck: FnOnce(),
 {
+    let snapshot = admission.snapshot.as_ref().ok_or_else(|| {
+        AppDefinitionPersistenceError::new(
+            "app_definition_save_rejected",
+            "A complete App Definition admission snapshot is unavailable.",
+            None,
+        )
+    })?;
+    let root = snapshot
+        .directories
+        .first()
+        .and_then(|directory| directory.path.parent())
+        .or_else(|| snapshot.destination.parent())
+        .ok_or_else(|| {
+            AppDefinitionPersistenceError::new(
+                "app_definition_destination_invalid",
+                "The App Definition destination has no authored root.",
+                Some(&snapshot.destination),
+            )
+        })?;
+    let coordinator = match storage_base {
+        Some(storage_base) => CatalogChangeCoordinator::open_with_storage(root, storage_base),
+        None => CatalogChangeCoordinator::open(root),
+    }
+    .map_err(catalog_publication_error)?;
+    let guard = coordinator
+        .acquire_publication()
+        .map_err(catalog_publication_error)?;
+    persist_with_guard(value, admission, &coordinator, &guard, before_final_check)
+}
+
+fn catalog_publication_error(
+    error: crate::catalog_change::CatalogChangeError,
+) -> AppDefinitionPersistenceError {
+    AppDefinitionPersistenceError::new("catalog_publication_unavailable", error.to_string(), None)
+}
+
+/// Publish using a caller-owned catalog guard without acquiring it recursively.
+pub(crate) fn persist_with_guard<BeforeCheck>(
+    value: &AppDefinitionV1,
+    admission: &AppDefinitionSaveAdmission,
+    coordinator: &CatalogChangeCoordinator,
+    guard: &PublicationGuard,
+    before_final_check: BeforeCheck,
+) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError>
+where
+    BeforeCheck: FnOnce(),
+{
+    coordinator
+        .publish_with_guard(guard, |_| Ok(()))
+        .map_err(catalog_publication_error)?;
     let _guard = APP_DEFINITION_PUBLISH_LOCK.lock().map_err(|_| {
         AppDefinitionPersistenceError::new(
             "app_definition_publish_unavailable",
@@ -281,103 +351,113 @@ where
     verify_admission_snapshot(snapshot)?;
     validate_destination(snapshot)?;
 
-    let parent = snapshot.destination.parent().ok_or_else(|| {
-        AppDefinitionPersistenceError::new(
-            "app_definition_destination_invalid",
-            "The App Definition destination has no parent directory.",
-            Some(&snapshot.destination),
-        )
-    })?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
-        AppDefinitionPersistenceError::io(
-            "app_definition_publish_failed",
-            "A synchronized temporary file could not be created beside the App Definition",
-            parent,
-            error,
-        )
-    })?;
-    temporary
-        .write_all(canonical_yaml.as_bytes())
-        .map_err(|error| {
-            AppDefinitionPersistenceError::io(
-                "app_definition_publish_failed",
-                "Canonical App Definition YAML could not be written to the temporary file",
-                temporary.path(),
-                error,
-            )
-        })?;
-    #[cfg(unix)]
-    if snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile {
-        use std::os::unix::fs::PermissionsExt;
-        // Apply the captured mode after writing, since writing may clear special
-        // permission bits. The final snapshot check rejects intervening chmods.
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(
-                snapshot.opened_file.identity.permission_mode,
-            ))
-            .map_err(|error| {
-                AppDefinitionPersistenceError::io(
-                    "app_definition_publish_failed",
-                    "The opened App Definition permission bits could not be preserved",
-                    temporary.path(),
-                    error,
-                )
-            })?;
-    }
-    temporary.as_file().sync_all().map_err(|error| {
-        AppDefinitionPersistenceError::io(
-            "app_definition_publish_failed",
-            "The temporary App Definition file could not be synchronized",
-            temporary.path(),
-            error,
-        )
-    })?;
-    let temporary_identity =
-        FileIdentity::from_metadata(&temporary.as_file().metadata().map_err(|error| {
-            AppDefinitionPersistenceError::io(
-                "app_definition_publish_failed",
-                "The synchronized temporary App Definition identity could not be read",
-                temporary.path(),
-                error,
-            )
-        })?);
-
     before_final_check();
     verify_admission_snapshot(snapshot)?;
     validate_destination(snapshot)?;
-
-    let persistence_result = match snapshot.publish_kind {
-        AdmissionPublishKind::ReplaceOpenedFile => temporary.persist(&snapshot.destination),
+    let expected = match snapshot.publish_kind {
+        AdmissionPublishKind::ReplaceOpenedFile => {
+            let current = coordinator
+                .snapshot_file(&snapshot.destination)
+                .map_err(catalog_publication_error)?
+                .ok_or_else(|| stale_app_destination(snapshot))?;
+            if !matches_opened_file_snapshot(&current, &snapshot.opened_file) {
+                return Err(stale_app_destination(snapshot));
+            }
+            Some(current)
+        }
         AdmissionPublishKind::CreateCatalogApp => {
-            temporary.persist_noclobber(&snapshot.destination)
+            if coordinator
+                .snapshot_file(&snapshot.destination)
+                .map_err(catalog_publication_error)?
+                .is_some()
+            {
+                return Err(stale_app_destination(snapshot));
+            }
+            None
         }
     };
-    persistence_result.map_err(|error| {
-        if snapshot.publish_kind == AdmissionPublishKind::CreateCatalogApp
-            && error.error.kind() == std::io::ErrorKind::AlreadyExists
+    let writer_id = match expected.as_ref() {
+        Some(expected) => coordinator.stage_file_write_with_expected_snapshot(
+            guard,
+            &snapshot.destination,
+            expected,
+            canonical_yaml.as_bytes(),
+        ),
+        None => coordinator.stage_file_write_if_absent(
+            guard,
+            &snapshot.destination,
+            canonical_yaml.as_bytes(),
+        ),
+    }
+    .map_err(map_catalog_stage_error)?;
+    coordinator
+        .publish_staged_file_write(guard, &writer_id)
+        .map_err(catalog_publication_error)?;
+
+    let saved = capture_opened_app_definition_file(&snapshot.destination)?;
+    if saved.bytes != canonical_yaml.as_bytes() {
+        return Err(AppDefinitionPersistenceError::new(
+            "app_definition_stale_state",
+            "The App Definition changed immediately after publication; reopen it before continuing.",
+            Some(&snapshot.destination),
+        ));
+    }
+    Ok(saved)
+}
+
+fn stale_app_destination(
+    snapshot: &crate::app_definition_admission::AdmissionSnapshot,
+) -> AppDefinitionPersistenceError {
+    AppDefinitionPersistenceError::new(
+        "app_definition_stale_state",
+        "The App Definition destination changed after save admission; validate it again before saving.",
+        Some(&snapshot.destination),
+    )
+}
+
+fn map_catalog_stage_error(
+    error: crate::catalog_change::CatalogChangeError,
+) -> AppDefinitionPersistenceError {
+    match error {
+        crate::catalog_change::CatalogChangeError::InvalidOperation(message)
+            if message.contains("destination changed after its authoritative snapshot") =>
         {
             AppDefinitionPersistenceError::new(
                 "app_definition_stale_state",
-                "The requested App Definition destination appeared after save admission; validate again before saving.",
-                Some(&snapshot.destination),
-            )
-        } else {
-            AppDefinitionPersistenceError::io(
-                "app_definition_publish_failed",
-                "The App Definition could not be published atomically",
-                &snapshot.destination,
-                error.error,
+                "The App Definition destination changed after save admission; validate it again before saving.",
+                None,
             )
         }
-    })?;
-    sync_parent_best_effort(parent);
+        error => catalog_publication_error(error),
+    }
+}
 
-    Ok(OpenedAppDefinitionFile {
-        path: snapshot.destination.clone(),
-        bytes: canonical_yaml.into_bytes(),
-        identity: temporary_identity,
-    })
+fn matches_opened_file_snapshot(
+    snapshot: &crate::catalog_change::FileSnapshot,
+    opened: &OpenedAppDefinitionFile,
+) -> bool {
+    if snapshot.bytes != opened.bytes || snapshot.identity.length != opened.identity.length {
+        return false;
+    }
+    let modified = opened
+        .identity
+        .modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    if snapshot.identity.modified_unix_seconds != modified.map(|time| time.as_secs() as i64)
+        || snapshot.identity.modified_nanoseconds != modified.map(|time| time.subsec_nanos())
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        snapshot.identity.device == opened.identity.device
+            && snapshot.identity.inode == opened.identity.inode
+            && snapshot.identity.permission_mode == opened.identity.permission_mode
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Outcome of one successful generated App/Recipe pair publication.
@@ -413,22 +493,45 @@ pub(crate) enum GeneratedPairPersistFailure {
         error: AppDefinitionPersistenceError,
         rollback: GeneratedPairRollback,
     },
+    /// App and Recipe bytes were published, but their directory entry could
+    /// not be durably synchronized.
+    PublishedButUnsynchronized {
+        error: AppDefinitionPersistenceError,
+    },
 }
 
-/// Publish one admitted generated App/Recipe pair.
+/// Publish one admitted generated App/Recipe pair through a durable group
+/// journal.
 ///
-/// The App and the new Recipe are staged as synchronized temporary files,
-/// then the Recipe is created with no-clobber semantics first and the App is
-/// committed atomically last. Full combined verification runs before the
-/// first write; after that only the two destinations owned by this operation
-/// are re-checked, so the Recipe this publication creates never invalidates
-/// its own captured inventory. When the final App commit fails, the new
-/// Recipe is removed only while it still matches this publication's exact
-/// identity and content; any other state is preserved for recovery.
+/// Both files are durably staged before the first rename. The Recipe publishes
+/// first and the App second; the parent operation stays unresolved until the
+/// open App Definition session has reconciled to the committed revision. A
+/// restart can discover the parent and safely finish or retry the group using
+/// each destination's captured identity and staged-content digest.
+#[cfg(test)]
 pub(crate) fn persist_generated_app_pair(
     pair: &GeneratedAppPairSnapshot,
 ) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure> {
-    persist_generated_app_pair_with(pair, || {})
+    persist_generated_app_pair_with_operation(
+        pair,
+        &next_generated_pair_operation_id(),
+        None,
+        || {},
+        |_| Ok(()),
+    )
+}
+
+/// Publish one reviewed App/Recipe pair under its stable client operation id.
+pub(crate) fn persist_generated_app_pair_for_operation<Reconcile>(
+    pair: &GeneratedAppPairSnapshot,
+    operation_id: &str,
+    storage_base: Option<&Path>,
+    reconcile: Reconcile,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure>
+where
+    Reconcile: FnOnce(&GeneratedPairOutcome) -> Result<(), String>,
+{
+    persist_generated_app_pair_with_operation(pair, operation_id, storage_base, || {}, reconcile)
 }
 
 /// Run pair publication with a hook immediately before the final App commit.
@@ -436,6 +539,7 @@ pub(crate) fn persist_generated_app_pair(
 /// The hook runs after the Recipe commit is durable and before the App commit,
 /// so tests can deterministically simulate an external writer claiming a
 /// destination in that window without timing-dependent threads.
+#[cfg(test)]
 pub(crate) fn persist_generated_app_pair_with<BeforeCheck>(
     pair: &GeneratedAppPairSnapshot,
     before_final_check: BeforeCheck,
@@ -443,207 +547,507 @@ pub(crate) fn persist_generated_app_pair_with<BeforeCheck>(
 where
     BeforeCheck: FnOnce(),
 {
-    let refused = GeneratedPairPersistFailure::Refused;
-    let _guard = APP_DEFINITION_PUBLISH_LOCK
-        .lock()
-        .map_err(|_| {
-            refused(AppDefinitionPersistenceError::new(
-                "app_definition_publish_unavailable",
-                "App Definition saves are unavailable because the save lock was poisoned.",
+    persist_generated_app_pair_with_operation(
+        pair,
+        &next_generated_pair_operation_id(),
+        None,
+        before_final_check,
+        |_| Ok(()),
+    )
+}
+
+fn persist_generated_app_pair_with_operation<BeforeCheck, Reconcile>(
+    pair: &GeneratedAppPairSnapshot,
+    operation_id: &str,
+    storage_base: Option<&Path>,
+    before_final_check: BeforeCheck,
+    reconcile: Reconcile,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure>
+where
+    BeforeCheck: FnOnce(),
+    Reconcile: FnOnce(&GeneratedPairOutcome) -> Result<(), String>,
+{
+    let root = pair
+        .app_snapshot
+        .directories
+        .first()
+        .and_then(|directory| directory.path.parent())
+        .ok_or_else(|| {
+            GeneratedPairPersistFailure::Refused(AppDefinitionPersistenceError::new(
+                "app_definition_destination_invalid",
+                "The generated pair has no authored root.",
                 None,
             ))
         })?;
+    let coordinator = match storage_base {
+        Some(storage_base) => CatalogChangeCoordinator::open_with_storage(root, storage_base),
+        None => CatalogChangeCoordinator::open(root),
+    }
+    .map_err(|error| GeneratedPairPersistFailure::Refused(catalog_publication_error(error)))?;
+    let guard = coordinator
+        .acquire_publication()
+        .map_err(|error| GeneratedPairPersistFailure::Refused(catalog_publication_error(error)))?;
+    persist_generated_app_pair_with_guard_and_reconcile(
+        operation_id,
+        pair,
+        &coordinator,
+        &guard,
+        before_final_check,
+        reconcile,
+    )
+}
 
-    let app_snapshot = &pair.app_snapshot;
-    let canonical_app_yaml = emit_app_definition_yaml(&app_snapshot.candidate).map_err(|error| {
+/// Publish one generated pair through a durable parent/child journal.
+#[cfg(test)]
+pub(crate) fn persist_generated_app_pair_with_guard<BeforeCheck>(
+    operation_id: &str,
+    pair: &GeneratedAppPairSnapshot,
+    coordinator: &CatalogChangeCoordinator,
+    guard: &PublicationGuard,
+    before_final_check: BeforeCheck,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure>
+where
+    BeforeCheck: FnOnce(),
+{
+    persist_generated_app_pair_with_guard_inner(
+        operation_id,
+        pair,
+        coordinator,
+        guard,
+        false,
+        before_final_check,
+        |_| Ok(()),
+    )
+}
+
+fn persist_generated_app_pair_with_guard_and_reconcile<BeforeCheck, Reconcile>(
+    operation_id: &str,
+    pair: &GeneratedAppPairSnapshot,
+    coordinator: &CatalogChangeCoordinator,
+    guard: &PublicationGuard,
+    before_final_check: BeforeCheck,
+    reconcile: Reconcile,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure>
+where
+    BeforeCheck: FnOnce(),
+    Reconcile: FnOnce(&GeneratedPairOutcome) -> Result<(), String>,
+{
+    persist_generated_app_pair_with_guard_inner(
+        operation_id,
+        pair,
+        coordinator,
+        guard,
+        false,
+        before_final_check,
+        reconcile,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn persist_generated_app_pair_interrupt_after_recipe_for_test(
+    operation_id: &str,
+    pair: &GeneratedAppPairSnapshot,
+    coordinator: &CatalogChangeCoordinator,
+    guard: &PublicationGuard,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure> {
+    persist_generated_app_pair_with_guard_inner(
+        operation_id,
+        pair,
+        coordinator,
+        guard,
+        true,
+        || {},
+        |_| Ok(()),
+    )
+}
+
+fn persist_generated_app_pair_with_guard_inner<BeforeCheck, Reconcile>(
+    operation_id: &str,
+    pair: &GeneratedAppPairSnapshot,
+    coordinator: &CatalogChangeCoordinator,
+    guard: &PublicationGuard,
+    interrupt_after_recipe: bool,
+    before_final_check: BeforeCheck,
+    reconcile: Reconcile,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure>
+where
+    BeforeCheck: FnOnce(),
+    Reconcile: FnOnce(&GeneratedPairOutcome) -> Result<(), String>,
+{
+    coordinator
+        .publish_with_guard(guard, |_| Ok(()))
+        .map_err(|error| GeneratedPairPersistFailure::Refused(catalog_publication_error(error)))?;
+    let refused = GeneratedPairPersistFailure::Refused;
+    let _guard = APP_DEFINITION_PUBLISH_LOCK.lock().map_err(|_| {
         refused(AppDefinitionPersistenceError::new(
-            error.code(),
-            error.message(),
-            Some(&app_snapshot.destination),
+            "app_definition_publish_unavailable",
+            "App Definition saves are unavailable because the save lock was poisoned.",
+            None,
         ))
     })?;
 
+    let app_snapshot = &pair.app_snapshot;
+    let canonical_app_yaml =
+        emit_app_definition_yaml(&app_snapshot.candidate).map_err(|error| {
+            refused(AppDefinitionPersistenceError::new(
+                error.code(),
+                error.message(),
+                Some(&app_snapshot.destination),
+            ))
+        })?;
+    let request_digest = generated_pair_request_digest(pair, &canonical_app_yaml);
+    if coordinator
+        .operation(operation_id)
+        .map_err(|error| refused(catalog_publication_error(error)))?
+        .is_some()
+    {
+        let replay = coordinator
+            .begin_operation(
+                guard,
+                OperationRecord::new(operation_id, "app-generator-pair", &request_digest),
+            )
+            .map_err(|error| refused(catalog_publication_error(error)))?;
+        return match replay.phase {
+            OperationPhase::Completed => replay_generated_pair(pair, &canonical_app_yaml),
+            OperationPhase::Rejected => Err(refused(AppDefinitionPersistenceError::new(
+                "app_generator_operation_rejected",
+                "This App Generator operation was already rejected and cannot be published again.",
+                Some(&app_snapshot.destination),
+            ))),
+            _ => Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+                error: AppDefinitionPersistenceError::new(
+                    "catalog_recovery_required",
+                    "This App Generator operation already has an unresolved durable publication record. Resolve its catalog recovery before retrying.",
+                    Some(&app_snapshot.destination),
+                ),
+            }),
+        };
+    }
     verify_admission_snapshot(app_snapshot).map_err(refused)?;
     validate_destination(app_snapshot).map_err(refused)?;
     validate_generated_recipe_destination(pair).map_err(refused)?;
 
-    let app_parent = app_snapshot.destination.parent().ok_or_else(|| {
-        refused(AppDefinitionPersistenceError::new(
-            "app_definition_destination_invalid",
-            "The App Definition destination has no parent directory.",
-            Some(&app_snapshot.destination),
-        ))
-    })?;
-    let recipe_parent = pair.recipe_destination.parent().ok_or_else(|| {
-        refused(AppDefinitionPersistenceError::new(
-            "recipe_destination_invalid",
-            "The generated Recipe destination has no parent directory.",
-            Some(&pair.recipe_destination),
-        ))
-    })?;
-
-    let mut app_temporary = tempfile::NamedTempFile::new_in(app_parent).map_err(|error| {
-        refused(AppDefinitionPersistenceError::io(
-            "app_definition_publish_failed",
-            "A synchronized temporary file could not be created beside the App Definition",
-            app_parent,
-            error,
-        ))
-    })?;
-    app_temporary
-        .write_all(canonical_app_yaml.as_bytes())
-        .map_err(|error| {
-            refused(AppDefinitionPersistenceError::io(
-                "app_definition_publish_failed",
-                "Canonical App Definition YAML could not be written to the temporary file",
-                app_temporary.path(),
-                error,
+    let root = app_snapshot
+        .directories
+        .first()
+        .and_then(|directory| directory.path.parent())
+        .ok_or_else(|| {
+            refused(AppDefinitionPersistenceError::new(
+                "app_definition_destination_invalid",
+                "The generated pair has no authored catalog root.",
+                None,
             ))
         })?;
-    #[cfg(unix)]
-    if app_snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile {
-        use std::os::unix::fs::PermissionsExt;
-        // Apply the captured mode after writing, since writing may clear
-        // special permission bits.
-        app_temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(
-                app_snapshot.opened_file.identity.permission_mode,
-            ))
-            .map_err(|error| {
-                refused(AppDefinitionPersistenceError::io(
-                    "app_definition_publish_failed",
-                    "The opened App Definition permission bits could not be preserved",
-                    app_temporary.path(),
-                    error,
-                ))
-            })?;
-    }
-    app_temporary.as_file().sync_all().map_err(|error| {
-        refused(AppDefinitionPersistenceError::io(
-            "app_definition_publish_failed",
-            "The temporary App Definition file could not be synchronized",
-            app_temporary.path(),
-            error,
-        ))
-    })?;
-    let app_temporary_identity =
-        FileIdentity::from_metadata(&app_temporary.as_file().metadata().map_err(|error| {
-            refused(AppDefinitionPersistenceError::io(
-                "app_definition_publish_failed",
-                "The synchronized temporary App Definition identity could not be read",
-                app_temporary.path(),
-                error,
-            ))
-        })?);
-
-    let mut recipe_temporary = tempfile::NamedTempFile::new_in(recipe_parent).map_err(|error| {
-        refused(AppDefinitionPersistenceError::io(
-            "recipe_publish_failed",
-            "A synchronized temporary file could not be created beside the generated Recipe",
-            recipe_parent,
-            error,
-        ))
-    })?;
-    recipe_temporary
-        .write_all(pair.recipe_canonical_yaml.as_bytes())
-        .map_err(|error| {
-            refused(AppDefinitionPersistenceError::io(
-                "recipe_publish_failed",
-                "Canonical Recipe YAML could not be written to the temporary file",
-                recipe_temporary.path(),
-                error,
-            ))
-        })?;
-    recipe_temporary.as_file().sync_all().map_err(|error| {
-        refused(AppDefinitionPersistenceError::io(
-            "recipe_publish_failed",
-            "The temporary Recipe file could not be synchronized",
-            recipe_temporary.path(),
-            error,
-        ))
-    })?;
-    let recipe_temporary_identity =
-        FileIdentity::from_metadata(&recipe_temporary.as_file().metadata().map_err(|error| {
-            refused(AppDefinitionPersistenceError::io(
-                "recipe_publish_failed",
-                "The synchronized temporary Recipe identity could not be read",
-                recipe_temporary.path(),
-                error,
-            ))
-        })?);
-
-    // Re-check only the destinations this publication owns. The complete
-    // catalog verification above is authoritative for everything else;
-    // recapturing it here would reject the Recipe this operation creates.
-    verify_app_destination_identity(app_snapshot).map_err(refused)?;
-    validate_generated_recipe_destination(pair).map_err(refused)?;
-
-    if let Err(error) = recipe_temporary.persist_noclobber(&pair.recipe_destination) {
-        return Err(refused(if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            AppDefinitionPersistenceError::new(
-                "recipe_destination_exists",
-                "A file appeared at the generated Recipe destination before publication.",
-                Some(&pair.recipe_destination),
-            )
-        } else {
-            AppDefinitionPersistenceError::io(
-                "recipe_publish_failed",
-                "The generated Recipe could not be published without overwriting",
-                &pair.recipe_destination,
-                error.error,
-            )
-        }));
-    }
-    sync_parent_best_effort(recipe_parent);
-
-    before_final_check();
-    verify_catalog_state_before_final_commit(pair, &recipe_temporary_identity).map_err(|error| {
-        let rollback = rollback_created_recipe(pair, &recipe_temporary_identity);
-        GeneratedPairPersistFailure::RecipeCommitted { error, rollback }
-    })?;
-    let app_commit = match app_snapshot.publish_kind {
-        AdmissionPublishKind::ReplaceOpenedFile => {
-            app_temporary.persist(&app_snapshot.destination).map(|_| ())
-        }
-        AdmissionPublishKind::CreateCatalogApp => app_temporary
-            .persist_noclobber(&app_snapshot.destination)
-            .map(|_| ()),
-    };
-    if let Err(error) = app_commit {
-        let persistence_error = if app_snapshot.publish_kind == AdmissionPublishKind::CreateCatalogApp
-            && error.error.kind() == std::io::ErrorKind::AlreadyExists
+    let current_app = coordinator
+        .snapshot_file(&app_snapshot.destination)
+        .map_err(|error| refused(catalog_publication_error(error)))?;
+    match app_snapshot.publish_kind {
+        AdmissionPublishKind::ReplaceOpenedFile
+            if current_app.as_ref().is_none_or(|current| {
+                !matches_opened_file_snapshot(current, &app_snapshot.opened_file)
+            }) =>
         {
-            AppDefinitionPersistenceError::new(
-                "app_definition_stale_state",
-                "The requested App Definition destination appeared after save admission; validate again before saving.",
+            return Err(refused(stale_app_destination(app_snapshot)));
+        }
+        AdmissionPublishKind::CreateCatalogApp if current_app.is_some() => {
+            return Err(refused(stale_app_destination(app_snapshot)));
+        }
+        _ => {}
+    }
+    if coordinator
+        .snapshot_file(&pair.recipe_destination)
+        .map_err(|error| refused(catalog_publication_error(error)))?
+        .is_some()
+    {
+        return Err(refused(AppDefinitionPersistenceError::new(
+            "recipe_destination_exists",
+            "A file appeared at the generated Recipe destination before publication.",
+            Some(&pair.recipe_destination),
+        )));
+    }
+
+    let digest = generated_pair_request_digest(pair, &canonical_app_yaml);
+    let recipe_child = coordinator
+        .child_write_operation_id(operation_id, &pair.recipe_destination)
+        .map_err(|error| refused(catalog_publication_error(error)))?;
+    let app_child = coordinator
+        .child_write_operation_id(operation_id, &app_snapshot.destination)
+        .map_err(|error| refused(catalog_publication_error(error)))?;
+    let mut parent = OperationRecord::new(operation_id, "app-generator-pair", &digest);
+    parent.snapshot_digest = Some(digest);
+    parent.changed_files = vec![
+        pair.recipe_destination
+            .strip_prefix(root)
+            .map_err(|_| {
+                refused(AppDefinitionPersistenceError::new(
+                    "recipe_destination_invalid",
+                    "The generated Recipe destination is outside the authored root.",
+                    Some(&pair.recipe_destination),
+                ))
+            })?
+            .to_path_buf(),
+        app_snapshot
+            .destination
+            .strip_prefix(root)
+            .map_err(|_| {
+                refused(AppDefinitionPersistenceError::new(
+                    "app_definition_destination_invalid",
+                    "The App Definition destination is outside the authored root.",
+                    Some(&app_snapshot.destination),
+                ))
+            })?
+            .to_path_buf(),
+    ];
+    parent.child_operation_ids = vec![recipe_child.clone(), app_child.clone()];
+    if coordinator
+        .operation(operation_id)
+        .map_err(|error| refused(catalog_publication_error(error)))?
+        .is_some()
+    {
+        let existing = coordinator
+            .begin_operation(guard, parent)
+            .map_err(|error| refused(catalog_publication_error(error)))?;
+        debug_assert_eq!(existing.operation_id, operation_id);
+        return match existing.phase {
+            OperationPhase::Completed => replay_generated_pair(pair, &canonical_app_yaml),
+            OperationPhase::Rejected => Err(refused(AppDefinitionPersistenceError::new(
+                "app_generator_operation_rejected",
+                "This App Generator operation was already rejected and cannot be published again.",
                 Some(&app_snapshot.destination),
-            )
-        } else {
-            AppDefinitionPersistenceError::io(
-                "app_definition_publish_failed",
-                "The App Definition could not be published atomically",
-                &app_snapshot.destination,
-                error.error,
-            )
+            ))),
+            _ => Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+                error: AppDefinitionPersistenceError::new(
+                    "catalog_recovery_required",
+                    "This App Generator operation already has an unresolved durable publication record. Resolve its catalog recovery before retrying.",
+                    Some(&app_snapshot.destination),
+                ),
+            }),
         };
-        let rollback = rollback_created_recipe(pair, &recipe_temporary_identity);
-        return Err(GeneratedPairPersistFailure::RecipeCommitted {
-            error: persistence_error,
-            rollback,
+    }
+    coordinator
+        .begin_operation(guard, parent)
+        .map_err(|error| refused(catalog_publication_error(error)))?;
+
+    if let Err(error) = coordinator.stage_file_write_for_parent(
+        guard,
+        operation_id,
+        &pair.recipe_destination,
+        None,
+        pair.recipe_canonical_yaml.as_bytes(),
+    ) {
+        let _ = coordinator.reject_group_before_publication(guard, operation_id);
+        return Err(refused(map_catalog_stage_error(error)));
+    }
+    if let Err(error) = coordinator.stage_file_write_for_parent_with_permissions(
+        guard,
+        operation_id,
+        &app_snapshot.destination,
+        current_app.as_ref(),
+        canonical_app_yaml.as_bytes(),
+        None,
+    ) {
+        let _ = coordinator.reject_group_before_publication(guard, operation_id);
+        return Err(refused(map_catalog_stage_error(error)));
+    }
+    if let Err(error) = coordinator.transition(guard, operation_id, OperationPhase::Staged) {
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: catalog_publication_error(error),
         });
     }
-    sync_parent_best_effort(app_parent);
+    if let Err(error) = coordinator.transition(guard, operation_id, OperationPhase::Publishing) {
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: catalog_publication_error(error),
+        });
+    }
+    if let Err(error) = coordinator.publish_staged_file_write_until_reconciled(guard, &recipe_child)
+    {
+        let _ = coordinator.transition(guard, operation_id, OperationPhase::RecoveryRequired);
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: catalog_publication_error(error),
+        });
+    }
+    let recipe_snapshot = match capture_file_snapshot(&pair.recipe_destination) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = coordinator.transition(guard, operation_id, OperationPhase::RecoveryRequired);
+            return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized { error });
+        }
+    };
 
-    Ok(GeneratedPairOutcome {
-        app: OpenedAppDefinitionFile {
-            path: app_snapshot.destination.clone(),
-            bytes: canonical_app_yaml.into_bytes(),
-            identity: app_temporary_identity,
-        },
+    if interrupt_after_recipe {
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: AppDefinitionPersistenceError::new(
+                "catalog_recovery_required",
+                "The generated pair was interrupted after Recipe publication and requires catalog recovery.",
+                Some(&pair.recipe_destination),
+            ),
+        });
+    }
+
+    before_final_check();
+    if let Err(error) = verify_catalog_state_before_final_commit(pair, &recipe_snapshot.identity) {
+        return Err(GeneratedPairPersistFailure::RecipeCommitted {
+            error,
+            rollback: rollback_generated_recipe(
+                coordinator,
+                guard,
+                operation_id,
+                &recipe_child,
+                &pair.recipe_destination,
+            ),
+        });
+    }
+    if let Err(error) = coordinator.publish_staged_file_write_until_reconciled(guard, &app_child) {
+        return Err(GeneratedPairPersistFailure::RecipeCommitted {
+            error: catalog_publication_error(error),
+            rollback: rollback_generated_recipe(
+                coordinator,
+                guard,
+                operation_id,
+                &recipe_child,
+                &pair.recipe_destination,
+            ),
+        });
+    }
+    if let Err(error) = coordinator.transition(guard, operation_id, OperationPhase::Published) {
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: catalog_publication_error(error),
+        });
+    }
+    let app = capture_opened_app_definition_file(&app_snapshot.destination)
+        .map_err(|error| GeneratedPairPersistFailure::PublishedButUnsynchronized { error })?;
+    if app.bytes != canonical_app_yaml.as_bytes()
+        || recipe_snapshot.bytes != pair.recipe_canonical_yaml.as_bytes()
+    {
+        let _ = coordinator.transition(guard, operation_id, OperationPhase::RecoveryRequired);
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: AppDefinitionPersistenceError::new(
+                "catalog_recovery_required",
+                "The generated App/Recipe pair changed immediately after durable publication; inspect its catalog status before continuing.",
+                Some(&app_snapshot.destination),
+            ),
+        });
+    }
+    let outcome = GeneratedPairOutcome {
+        app,
         recipe_path: pair.recipe_destination.clone(),
         app_replaced: app_snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile,
+    };
+    if let Err(error) = reconcile(&outcome) {
+        let _ = coordinator.transition(guard, operation_id, OperationPhase::RecoveryRequired);
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: AppDefinitionPersistenceError::new(
+                "catalog_session_reconciliation_failed",
+                format!("The App/Recipe pair was published, but the open App Definition session could not be reconciled: {error}"),
+                Some(&app_snapshot.destination),
+            ),
+        });
+    }
+    for child in [&recipe_child, &app_child] {
+        if let Err(error) = coordinator.transition(guard, child, OperationPhase::Completed) {
+            return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+                error: catalog_publication_error(error),
+            });
+        }
+    }
+    if let Err(error) = coordinator.transition(guard, operation_id, OperationPhase::Completed) {
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: catalog_publication_error(error),
+        });
+    }
+    Ok(outcome)
+}
+
+#[cfg(test)]
+fn next_generated_pair_operation_id() -> String {
+    let sequence = NEXT_GENERATED_PAIR_OPERATION.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("app-generator-{timestamp}-{sequence}")
+}
+
+fn generated_pair_request_digest(
+    pair: &GeneratedAppPairSnapshot,
+    canonical_app_yaml: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        canonical_app_yaml.as_bytes(),
+        pair.recipe_canonical_yaml.as_bytes(),
+        pair.app_snapshot.destination.to_string_lossy().as_bytes(),
+        pair.recipe_destination.to_string_lossy().as_bytes(),
+        pair.app_snapshot.opened_file.raw_bytes(),
+        format!("{:?}", pair.app_snapshot.opened_file.identity()).as_bytes(),
+        format!("{:?}", pair.app_snapshot.directories).as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn replay_generated_pair(
+    pair: &GeneratedAppPairSnapshot,
+    canonical_app_yaml: &str,
+) -> Result<GeneratedPairOutcome, GeneratedPairPersistFailure> {
+    let app = capture_opened_app_definition_file(&pair.app_snapshot.destination)
+        .map_err(|error| GeneratedPairPersistFailure::PublishedButUnsynchronized { error })?;
+    let recipe = capture_file_snapshot(&pair.recipe_destination)
+        .map_err(|error| GeneratedPairPersistFailure::PublishedButUnsynchronized { error })?;
+    if app.bytes != canonical_app_yaml.as_bytes()
+        || recipe.bytes != pair.recipe_canonical_yaml.as_bytes()
+    {
+        return Err(GeneratedPairPersistFailure::PublishedButUnsynchronized {
+            error: AppDefinitionPersistenceError::new(
+                "catalog_recovery_required",
+                "The completed App Generator operation no longer matches its durable publication; inspect the catalog before continuing.",
+                Some(&pair.app_snapshot.destination),
+            ),
+        });
+    }
+    Ok(GeneratedPairOutcome {
+        app,
+        recipe_path: pair.recipe_destination.clone(),
+        app_replaced: pair.app_snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile,
     })
+}
+
+fn rollback_generated_recipe(
+    coordinator: &CatalogChangeCoordinator,
+    guard: &PublicationGuard,
+    parent_operation_id: &str,
+    recipe_child_id: &str,
+    recipe_path: &Path,
+) -> GeneratedPairRollback {
+    let recipe_was_present = fs::symlink_metadata(recipe_path).is_ok();
+    let rollback = coordinator.rollback_staged_file_write(guard, recipe_child_id);
+    if let Ok(Some(child)) = coordinator.operation(recipe_child_id) {
+        if child.phase != OperationPhase::RecoveryRequired && !child.phase.is_terminal() {
+            let _ =
+                coordinator.transition(guard, recipe_child_id, OperationPhase::RecoveryRequired);
+        }
+    }
+    if let Ok(Some(parent)) = coordinator.operation(parent_operation_id) {
+        if parent.phase != OperationPhase::RecoveryRequired && !parent.phase.is_terminal() {
+            let _ = coordinator.transition(
+                guard,
+                parent_operation_id,
+                OperationPhase::RecoveryRequired,
+            );
+        }
+    }
+    let recipe_present = fs::symlink_metadata(recipe_path).is_ok();
+    GeneratedPairRollback {
+        recipe_path: recipe_path.to_path_buf(),
+        recipe_removed: rollback.is_ok() && recipe_was_present && !recipe_present,
+        recipe_recovery_required: rollback.is_err() || recipe_present,
+    }
 }
 
 /// Re-check the captured catalog state and the already committed Recipe
@@ -835,45 +1239,6 @@ fn validate_generated_recipe_destination(
 /// this publication removing it, so nothing of this publication remains to
 /// recover. Any other mismatch means a foreign file occupies the destination:
 /// it is preserved and recovery is reported.
-fn rollback_created_recipe(
-    pair: &GeneratedAppPairSnapshot,
-    created_identity: &FileIdentity,
-) -> GeneratedPairRollback {
-    let recipe_path = pair.recipe_destination.clone();
-    if let Err(error) = fs::symlink_metadata(&recipe_path) {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return GeneratedPairRollback {
-                recipe_path,
-                recipe_removed: false,
-                recipe_recovery_required: false,
-            };
-        }
-    }
-    let matches_creation = capture_file_snapshot(&recipe_path).is_ok_and(|current| {
-        current.bytes == pair.recipe_canonical_yaml.as_bytes()
-            && &current.identity == created_identity
-    });
-    if !matches_creation {
-        return GeneratedPairRollback {
-            recipe_path,
-            recipe_removed: false,
-            recipe_recovery_required: true,
-        };
-    }
-    match fs::remove_file(&recipe_path) {
-        Ok(()) => GeneratedPairRollback {
-            recipe_path,
-            recipe_removed: true,
-            recipe_recovery_required: false,
-        },
-        Err(_) => GeneratedPairRollback {
-            recipe_path,
-            recipe_removed: false,
-            recipe_recovery_required: true,
-        },
-    }
-}
-
 fn validate_destination(
     snapshot: &crate::app_definition_admission::AdmissionSnapshot,
 ) -> Result<(), AppDefinitionPersistenceError> {
@@ -1162,15 +1527,6 @@ fn is_yaml_catalog_file(path: &Path) -> bool {
         path.extension().and_then(|extension| extension.to_str()),
         Some("yaml" | "yml")
     )
-}
-
-fn sync_parent_best_effort(parent: &Path) {
-    #[cfg(unix)]
-    if let Ok(directory) = File::open(parent) {
-        let _ = directory.sync_all();
-    }
-    #[cfg(not(unix))]
-    let _ = parent;
 }
 
 #[cfg(test)]

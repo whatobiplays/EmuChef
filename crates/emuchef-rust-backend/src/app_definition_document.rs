@@ -473,6 +473,44 @@ impl AppDefinitionDocument {
         self.validate();
     }
 
+    /// Refresh a clean editor session after App Generator publishes a newer
+    /// revision of the same App Definition.
+    ///
+    /// The captured file bytes are parsed before the session is changed. A
+    /// catalog App's identity and path must remain fixed; successful refresh
+    /// replaces its model and disk revision together and clears stale undo
+    /// history so a later save cannot overwrite the generated revision.
+    pub(crate) fn refresh_after_generator_publication(
+        &mut self,
+        opened_file: OpenedAppDefinitionFile,
+    ) -> Result<(), String> {
+        if opened_file.path() != self.path {
+            return Err("The generated App was published to a different document path.".into());
+        }
+        let source = std::str::from_utf8(opened_file.raw_bytes())
+            .map_err(|_| "The generated App Definition is not UTF-8 YAML.".to_string())?;
+        let candidate = authored_models::parse_app_definition_yaml(source).map_err(|error| {
+            format!("The generated App Definition could not be parsed: {error}")
+        })?;
+        if self.catalog_identity.as_ref().is_some_and(|identity| {
+            identity.id != candidate.id || identity.package_id != candidate.package_id
+        }) {
+            return Err("The generated App changed the identity of an open catalog App.".into());
+        }
+        let yaml = emit_app_definition_draft_yaml(&candidate).map_err(|error| {
+            format!("The generated App Definition could not be projected: {error}")
+        })?;
+
+        self.app_definition = candidate;
+        self.opened_file = opened_file;
+        self.current_yaml = yaml.clone();
+        self.saved_yaml = yaml;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.validate();
+        Ok(())
+    }
+
     pub fn set_saved_path(&mut self, path: PathBuf, authored_root: PathBuf) {
         self.path = path;
         self.authored_root = Some(authored_root.clone());
@@ -1003,4 +1041,35 @@ fn is_catalog_app_path(root: &Path, path: &Path) -> bool {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| matches!(extension, "yaml" | "yml"))
+}
+
+#[cfg(test)]
+mod generator_reconciliation_tests {
+    use super::*;
+    use crate::app_definition_persistence::capture_opened_app_definition_file;
+
+    #[test]
+    fn generator_publication_refreshes_a_clean_open_app_document() {
+        let root = tempfile::tempdir().unwrap();
+        let apps = root.path().join("apps");
+        fs::create_dir(&apps).unwrap();
+        let path = apps.join("armsx1.yaml");
+        fs::write(&path, include_str!("../../../authored/apps/armsx1.yaml")).unwrap();
+        let authored_root = root.path().to_string_lossy().into_owned();
+        let mut document = AppDefinitionDocument::open(&path, Some(&authored_root)).unwrap();
+        let mut updated = document.app_definition().clone();
+        updated.name.push_str(" Updated");
+        let canonical_yaml = authored_models::emit_app_definition_yaml(&updated).unwrap();
+        fs::write(&path, canonical_yaml).unwrap();
+        let opened = capture_opened_app_definition_file(&path).unwrap();
+
+        document
+            .refresh_after_generator_publication(opened)
+            .unwrap();
+
+        assert_eq!(document.app_definition().name, updated.name);
+        assert!(!document.is_dirty());
+        assert!(!document.can_undo());
+        assert!(!document.can_redo());
+    }
 }

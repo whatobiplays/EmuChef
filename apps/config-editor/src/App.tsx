@@ -5,14 +5,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppDefinitionCommand, EditorCommand } from "./api/commands";
 import {
   applyAppDefinitionCommand as applyAppDefinitionCommandApi,
+  applyCatalogChangeWithStatusRecovery as applyCatalogChangeApi,
   applyRecipeCommand,
   emitYaml,
   getConfigEditorAuthoredRoot,
   getDocument,
   openUserConfiguration as openUserConfigurationDocument,
   listStepSpecs,
+listCatalogChangeRecoveries,
   openAppDefinition as openAppDefinitionDocument,
   openRecipe as openRecipeDocument,
+previewCatalogChange as previewCatalogChangeApi,
+retryCatalogChangeRecovery as retryCatalogChangeRecoveryApi,
   redo as redoDocument,
   sidecarRestart,
   saveAppDefinition as saveAppDefinitionDocument,
@@ -31,6 +35,9 @@ import type {
   DiagnosticDto,
   AppDefinitionV1Dto,
   AppGeneratorPublicationOutcomeDto,
+CatalogChangeIntentDto,
+CatalogChangePreviewDto,
+CatalogChangeStatusDto,
   EditorDocumentDto,
   SidecarStatusResult,
   StepSpecDto,
@@ -119,6 +126,9 @@ export default function App() {
   const [userConfigurationDocument, setUserConfigurationDocument] = useState<UserConfigurationDocumentDto | null>(null);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [selectedAuthoredRoot, setSelectedAuthoredRoot] = useState<string | null>(null);
+  const [catalogRecoveries, setCatalogRecoveries] = useState<CatalogChangeStatusDto[]>([]);
+  const [catalogRecoveryError, setCatalogRecoveryError] = useState<string | null>(null);
+  const [catalogRecoveryRetrying, setCatalogRecoveryRetrying] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[]>([]);
   const [yaml, setYaml] = useState("");
   const [sidecarState, setSidecarState] = useState<SidecarStatusResult | null>(null);
@@ -1409,6 +1419,125 @@ export default function App() {
     }
   }
 
+  async function previewAppCatalogChange(intent: CatalogChangeIntentDto): Promise<CatalogChangePreviewDto> {
+    const document = currentDocumentRef.current;
+    if (document === null || !isAppDefinitionDocument(document)) {
+      throw new Error("No App Definition document is open.");
+    }
+    if (appDefinitionDraftDirtyRef.current) {
+      throw new Error("Apply or discard pending App Definition form input before previewing a catalog change.");
+    }
+    const response = await previewCatalogChangeApi(document.documentId, intent);
+    if (response.kind === "success") return response.result;
+    const classification = handleOperationFailure(response, "Catalog change preview failed.");
+    throw new Error(classification.message);
+  }
+
+  async function applyAppCatalogChange(operationId: string, previewToken: string): Promise<CatalogChangeStatusDto> {
+    const document = beginDocumentCommand("mutation", "Publishing catalog change", "editDocument");
+    if (document === null || !isAppDefinitionDocument(document)) {
+      throw new Error("No editable App Definition document is open.");
+    }
+    try {
+      if (document.authoredRoot === null) {
+        throw new Error("An authored root is required to recover catalog change status.");
+      }
+      const response = await applyCatalogChangeApi(
+        document.authoredRoot,
+        operationId,
+        previewToken,
+      );
+      if (response.kind !== "success") {
+        const classification = handleOperationFailure(response, "Catalog change publication failed.");
+        throw new Error(classification.message);
+      }
+      if (response.result.state === "completed") {
+        await refreshAfterCatalogChange(document.documentId);
+      }
+      return response.result;
+    } finally {
+      finishAppCommand();
+    }
+  }
+
+  const listCatalogRecoveriesForRoot = useCallback(async (authoredRoot: string): Promise<CatalogChangeStatusDto[]> => {
+    const response = await listCatalogChangeRecoveries(authoredRoot);
+    if (response.kind === "success") return response.result.recoveries;
+    const classification = handleOperationFailure(response, "Catalog recovery discovery failed.");
+    throw new Error(classification.message);
+  }, [handleOperationFailure]);
+
+  const listAppCatalogRecoveries = useCallback(async (): Promise<CatalogChangeStatusDto[]> => {
+    const document = currentDocumentRef.current;
+    const authoredRoot = document && isAppDefinitionDocument(document)
+      ? document.owningAuthoredRoot ?? document.authoredRoot ?? selectedAuthoredRootRef.current
+      : document?.authoredRoot ?? selectedAuthoredRootRef.current;
+    return authoredRoot === null ? [] : listCatalogRecoveriesForRoot(authoredRoot);
+  }, [listCatalogRecoveriesForRoot]);
+
+  const catalogRecoveryRoot = currentDocument && isAppDefinitionDocument(currentDocument)
+    ? currentDocument.owningAuthoredRoot ?? currentDocument.authoredRoot ?? selectedAuthoredRoot
+    : currentDocument?.authoredRoot ?? selectedAuthoredRoot;
+
+  useEffect(() => {
+    if (catalogRecoveryRoot === null) {
+      setCatalogRecoveries([]);
+      setCatalogRecoveryError(null);
+      return;
+    }
+    let active = true;
+    void listCatalogRecoveriesForRoot(catalogRecoveryRoot)
+      .then((items) => {
+        if (active) {
+          setCatalogRecoveries(items);
+          setCatalogRecoveryError(null);
+        }
+      })
+      .catch((reason) => {
+        if (active) setCatalogRecoveryError(reason instanceof Error ? reason.message : "Catalog recovery discovery failed.");
+      });
+    return () => { active = false; };
+  }, [catalogRecoveryRoot, listCatalogRecoveriesForRoot]);
+
+  async function retryAppCatalogRecovery(operationId: string): Promise<CatalogChangeStatusDto> {
+    const document = currentDocumentRef.current;
+    const authoredRoot = document && isAppDefinitionDocument(document)
+      ? document.owningAuthoredRoot ?? document.authoredRoot ?? selectedAuthoredRootRef.current
+      : document?.authoredRoot ?? selectedAuthoredRootRef.current;
+    if (authoredRoot === null) {
+      throw new Error("An authored root is required to retry catalog recovery.");
+    }
+    const response = await retryCatalogChangeRecoveryApi(authoredRoot, operationId);
+    if (response.kind !== "success") {
+      const classification = handleOperationFailure(response, "Catalog recovery retry failed.");
+      throw new Error(classification.message);
+    }
+    if (response.result.state === "completed") {
+      if (document !== null) await refreshAfterCatalogChange(document.documentId);
+    }
+    void listCatalogRecoveriesForRoot(authoredRoot)
+      .then(setCatalogRecoveries)
+      .catch((reason) => setCatalogRecoveryError(reason instanceof Error ? reason.message : "Catalog recovery discovery failed."));
+    return response.result;
+  }
+
+  async function refreshAfterCatalogChange(documentId: string): Promise<void> {
+    const refreshed = await getDocument(documentId);
+    if (refreshed.kind === "success") {
+      applyDocument(refreshed.result.document);
+      await syncMenuState(refreshed.result.document);
+      return;
+    }
+
+    currentDocumentRef.current = null;
+    setCurrentDocument(null);
+    setCurrentPath(null);
+    setDiagnostics([]);
+    setYaml("");
+    installAppDefinitionDraft(null);
+    await syncMenuState(null);
+  }
+
   function acceptAppDefinitionEditorDocument(appDefinition: AppDefinitionV1Dto) {
     const document = currentDocumentRef.current;
     if (document === null || !isAppDefinitionDocument(document)) {
@@ -1597,6 +1726,10 @@ export default function App() {
           onDraftChange={installAppDefinitionDraft}
           onApply={applyAppDefinitionEditorCommand}
           onDocumentAccepted={acceptAppDefinitionEditorDocument}
+          onPreviewCatalogChange={previewAppCatalogChange}
+          onApplyCatalogChange={applyAppCatalogChange}
+          onListCatalogChangeRecoveries={listAppCatalogRecoveries}
+          onRetryCatalogChangeRecovery={retryAppCatalogRecovery}
         />
       );
     }
@@ -1739,6 +1872,40 @@ export default function App() {
               stepSpecsCount={stepSpecsCount}
               stepSpecsLoading={stepSpecsLoading}
             />
+            {catalogRecoveryRoot !== null &&
+            (currentDocument === null || !isAppDefinitionDocument(currentDocument) || activeView === "stepSpecs") ? (
+              <>
+                {catalogRecoveryError ? (
+                  <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-900" role="alert">
+                    {catalogRecoveryError}
+                  </div>
+                ) : null}
+                {catalogRecoveries.length > 0 ? (
+                  <section className="space-y-2 border-b border-amber-300 bg-amber-50 px-4 py-3" aria-label="Catalog publication recovery">
+                    <p className="text-sm font-medium text-amber-950">Unresolved catalog publication blocks authored App and Recipe writes.</p>
+                    {catalogRecoveries.map((recovery) => (
+                      <div key={recovery.operationId} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                        <span>{recovery.operationId} ({recovery.state})</span>
+                        <button
+                          className="rounded border border-amber-600 bg-white px-2 py-1"
+                          type="button"
+                          disabled={catalogRecoveryRetrying !== null}
+                          onClick={() => {
+                            setCatalogRecoveryRetrying(recovery.operationId);
+                            setCatalogRecoveryError(null);
+                            void retryAppCatalogRecovery(recovery.operationId)
+                              .catch((reason) => setCatalogRecoveryError(reason instanceof Error ? reason.message : "Catalog recovery retry failed."))
+                              .finally(() => setCatalogRecoveryRetrying(null));
+                          }}
+                        >
+                          Retry recovery
+                        </button>
+                      </div>
+                    ))}
+                  </section>
+                ) : null}
+              </>
+            ) : null}
             {!documentSessionValid && currentDocument !== null ? (
               <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
                 <div className="flex flex-wrap items-center gap-3">

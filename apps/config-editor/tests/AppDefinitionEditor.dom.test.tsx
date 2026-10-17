@@ -1,9 +1,14 @@
 import { useState } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import type { AppDefinitionV1Dto } from "../src/api/types";
+import type {
+  AppDefinitionV1Dto,
+  CatalogChangeIntentDto,
+  CatalogChangePreviewDto,
+  CatalogChangeStatusDto,
+} from "../src/api/types";
 import { AppDefinitionEditor } from "../src/components/AppDefinitionEditor";
 import {
   type AppDefinitionCommand,
@@ -28,10 +33,34 @@ function EditorHarness({
   initial = semanticallyInvalidApp,
   onApply,
   identityEditable = true,
+  onPreviewCatalogChange = async (intent) => ({
+    operationId: "operation-1",
+    previewToken: "token-1",
+    intent,
+    references: [],
+    changedFiles: [],
+    blockers: [],
+    snapshotDigest: "digest",
+  }),
+  onApplyCatalogChange = async (operationId) => ({
+    operationId,
+    state: "completed",
+    changedFiles: [],
+  }),
+  onListCatalogChangeRecoveries = async () => [],
+  onRetryCatalogChangeRecovery = async (operationId) => ({
+    operationId,
+    state: "completed",
+    changedFiles: [],
+  }),
 }: {
   initial?: AppDefinitionV1Dto;
   onApply: (command: AppDefinitionCommand) => Promise<AppDefinitionV1Dto>;
   identityEditable?: boolean;
+  onPreviewCatalogChange?: (intent: CatalogChangeIntentDto) => Promise<CatalogChangePreviewDto>;
+  onApplyCatalogChange?: (operationId: string, previewToken: string) => Promise<CatalogChangeStatusDto>;
+  onListCatalogChangeRecoveries?: () => Promise<CatalogChangeStatusDto[]>;
+  onRetryCatalogChangeRecovery?: (operationId: string) => Promise<CatalogChangeStatusDto>;
 }) {
   const [appDefinition, setAppDefinition] = useState(initial);
   const [draft, setDraft] = useState(() => createAppDefinitionEditorDraft(appDefinition));
@@ -53,12 +82,190 @@ function EditorHarness({
         }}
         onApply={onApply}
         onDocumentAccepted={setAppDefinition}
+        onPreviewCatalogChange={onPreviewCatalogChange}
+        onApplyCatalogChange={onApplyCatalogChange}
+        onListCatalogChangeRecoveries={onListCatalogChangeRecoveries}
+        onRetryCatalogChangeRecovery={onRetryCatalogChangeRecovery}
       />
     </>
   );
 }
 
 describe("AppDefinitionEditor", () => {
+  it("previews exact typed impact before applying a single-use catalog operation", async () => {
+    const user = userEvent.setup();
+    const onPreviewCatalogChange = vi.fn(async (intent: CatalogChangeIntentDto) => ({
+      operationId: "operation-42",
+      previewToken: "single-use-token",
+      intent,
+      references: [{ path: "recipes/demo.yaml", object: "steps.install", field: "app_ref" }],
+      changedFiles: ["apps/demo.yaml", "recipes/demo.yaml"],
+      blockers: [],
+      snapshotDigest: "snapshot",
+    }));
+    const onApplyCatalogChange = vi.fn(async () => ({
+      operationId: "operation-42",
+      state: "completed" as const,
+      changedFiles: ["apps/demo.yaml", "recipes/demo.yaml"],
+    }));
+    render(
+      <EditorHarness
+        onApply={vi.fn(async () => semanticallyInvalidApp)}
+        onPreviewCatalogChange={onPreviewCatalogChange}
+        onApplyCatalogChange={onApplyCatalogChange}
+      />,
+    );
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Operation" }), "renameArtifact");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Existing ID" }), "installer");
+    await user.type(screen.getByRole("textbox", { name: "New ID" }), "primary");
+    await user.click(screen.getByRole("button", { name: "Preview catalog impact" }));
+
+    expect(onPreviewCatalogChange).toHaveBeenCalledWith({
+      kind: "renameArtifact",
+      appId: "Bad App ID",
+      artifactId: "installer",
+      newId: "primary",
+    });
+    expect(await screen.findByRole("dialog", { name: "Confirm catalog impact" })).toBeTruthy();
+expect(screen.getByText('Intent: Rename Artifact "installer" in App "Bad App ID" to "primary"')).toBeTruthy();
+expect(screen.getByRole("combobox", { name: "Operation" })).toHaveProperty("disabled", true);
+expect(screen.getByRole("combobox", { name: "Existing ID" })).toHaveProperty("disabled", true);
+expect(screen.getByRole("textbox", { name: "New ID" })).toHaveProperty("disabled", true);
+    expect(screen.getByText(/steps\.install\.app_ref/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Apply catalog change" }));
+    expect(onApplyCatalogChange).toHaveBeenCalledWith("operation-42", "single-use-token");
+  });
+
+  it("keeps keyboard focus within the impact dialog and restores the trigger on Escape", async () => {
+    const user = userEvent.setup();
+    render(
+      <EditorHarness
+        onApply={vi.fn(async () => semanticallyInvalidApp)}
+        onPreviewCatalogChange={async (intent) => ({
+          operationId: "operation-keyboard",
+          previewToken: "keyboard-token",
+          intent,
+          references: [],
+          changedFiles: ["apps/demo.yaml"],
+          blockers: [],
+          snapshotDigest: "snapshot",
+        })}
+      />,
+    );
+    await user.selectOptions(screen.getByRole("combobox", { name: "Operation" }), "renameArtifact");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Existing ID" }), "installer");
+    await user.type(screen.getByRole("textbox", { name: "New ID" }), "primary");
+    const trigger = screen.getByRole("button", { name: "Preview catalog impact" });
+    trigger.focus();
+    await user.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", { name: "Confirm catalog impact" });
+    expect(document.activeElement).toBe(dialog);
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Apply catalog change" }));
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Confirm catalog impact" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("shows affected dirty sessions before confirmation and blocks apply", async () => {
+    const user = userEvent.setup();
+    const onApplyCatalogChange = vi.fn();
+    render(
+      <EditorHarness
+        onApply={vi.fn(async () => semanticallyInvalidApp)}
+        onPreviewCatalogChange={async (intent) => ({
+          operationId: "operation-blocked",
+          previewToken: "blocked-token",
+          intent,
+          references: [],
+          changedFiles: ["apps/demo.yaml"],
+          blockers: [
+            {
+              path: "recipes/demo_recipe.yaml",
+              reason: "This Recipe has unsaved typed references affected by the catalog change.",
+            },
+          ],
+          snapshotDigest: "snapshot",
+        })}
+        onApplyCatalogChange={onApplyCatalogChange}
+      />,
+    );
+    await user.selectOptions(screen.getByRole("combobox", { name: "Operation" }), "renameArtifact");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Existing ID" }), "installer");
+    await user.type(screen.getByRole("textbox", { name: "New ID" }), "primary");
+    await user.click(screen.getByRole("button", { name: "Preview catalog impact" }));
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByText(/recipes\/demo_recipe\.yaml/)).toBeTruthy();
+    const apply = screen.getByRole("button", { name: "Apply catalog change" }) as HTMLButtonElement;
+    expect(apply.disabled).toBe(true);
+    expect(onApplyCatalogChange).not.toHaveBeenCalled();
+  });
+
+  it("discovers an unresolved relaunch recovery and retries it explicitly", async () => {
+    const user = userEvent.setup();
+    const onRetryCatalogChangeRecovery = vi.fn(async (operationId: string) => ({
+      operationId,
+      state: "completed" as const,
+      changedFiles: ["apps/demo.yaml"],
+    }));
+    render(
+      <EditorHarness
+        onApply={vi.fn(async () => semanticallyInvalidApp)}
+        onListCatalogChangeRecoveries={async () => [{
+          operationId: "recovery-1",
+          state: "recovery_required",
+          changedFiles: ["apps/demo.yaml"],
+        }]}
+        onRetryCatalogChangeRecovery={onRetryCatalogChangeRecovery}
+      />,
+    );
+
+    expect(await screen.findByText(/Unresolved catalog publication/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Retry recovery" }));
+    expect(onRetryCatalogChangeRecovery).toHaveBeenCalledWith("recovery-1");
+  });
+
+  it("discovers a newly unresolved publication immediately after apply", async () => {
+    const user = userEvent.setup();
+    const onListCatalogChangeRecoveries = vi
+      .fn<() => Promise<CatalogChangeStatusDto[]>>()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          operationId: "operation-1",
+          state: "recovery_required",
+          changedFiles: ["apps/demo.yaml"],
+        },
+      ]);
+
+    render(
+      <EditorHarness
+        onApply={vi.fn(async () => semanticallyInvalidApp)}
+        onApplyCatalogChange={async (operationId) => ({
+          operationId,
+          state: "recovery_required",
+          changedFiles: ["apps/demo.yaml"],
+        })}
+        onListCatalogChangeRecoveries={onListCatalogChangeRecoveries}
+      />,
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "New ID" }), "renamed_app");
+    await user.click(screen.getByRole("button", { name: "Preview catalog impact" }));
+    await user.click(await screen.findByRole("button", { name: "Apply catalog change" }));
+
+    expect(await screen.findByText(/unresolved and requires recovery/)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Retry recovery" })).toBeTruthy();
+    expect(onListCatalogChangeRecoveries).toHaveBeenCalledTimes(2);
+  });
+
   it("opens semantic errors unchanged and submits one corrected field without validating the whole app", async () => {
     const user = userEvent.setup();
     const onApply = vi.fn(async () => ({ ...semanticallyInvalidApp, name: "Fixed app" }));

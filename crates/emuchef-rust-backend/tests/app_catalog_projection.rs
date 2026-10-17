@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -61,7 +63,11 @@ fn copy_dir_all(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("source directory should be readable") {
         let entry = entry.expect("source entry should be readable");
         let target = destination.join(entry.file_name());
-        if entry.file_type().expect("file type should be readable").is_dir() {
+        if entry
+            .file_type()
+            .expect("file type should be readable")
+            .is_dir()
+        {
             copy_dir_all(&entry.path(), &target);
         } else {
             fs::copy(entry.path(), &target).expect("fixture file should copy");
@@ -69,7 +75,11 @@ fn copy_dir_all(source: &Path, destination: &Path) {
     }
 }
 
-fn open_recipe(sessions: &mut DocumentSessionManager, path: &Path, authored_root: Option<&Path>) -> Value {
+fn open_recipe(
+    sessions: &mut DocumentSessionManager,
+    path: &Path,
+    authored_root: Option<&Path>,
+) -> Value {
     let response = request::handle_sidecar_value(
         json!({
             "id": "open",
@@ -81,7 +91,10 @@ fn open_recipe(sessions: &mut DocumentSessionManager, path: &Path, authored_root
         }),
         sessions,
     );
-    assert_eq!(response["ok"], true, "openRecipe should succeed: {response}");
+    assert_eq!(
+        response["ok"], true,
+        "openRecipe should succeed: {response}"
+    );
     response["result"]["document"].clone()
 }
 
@@ -98,7 +111,10 @@ fn request_document(
         }),
         sessions,
     );
-    assert_eq!(response["ok"], true, "{request_type} should succeed: {response}");
+    assert_eq!(
+        response["ok"], true,
+        "{request_type} should succeed: {response}"
+    );
     response["result"]["document"].clone()
 }
 
@@ -111,7 +127,12 @@ fn app_ids(catalog: &Value) -> Vec<String> {
         .as_array()
         .expect("appCatalog.apps should be an array")
         .iter()
-        .map(|app| app["id"].as_str().expect("app id should be a string").to_string())
+        .map(|app| {
+            app["id"]
+                .as_str()
+                .expect("app id should be a string")
+                .to_string()
+        })
         .collect()
 }
 
@@ -127,7 +148,7 @@ fn app<'a>(catalog: &'a Value, app_id: &str) -> &'a Value {
 #[test]
 fn ready_catalog_projects_app_selections_deterministically() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document = open_recipe(
         &mut sessions,
         &workspace.recipe_path("demo_recipe.yaml"),
@@ -174,7 +195,7 @@ fn unbound_document_projects_unbound_catalog() {
     let loose_recipe = workspace.dir.join("loose_recipe.yaml");
     fs::copy(workspace.recipe_path("demo_recipe.yaml"), &loose_recipe)
         .expect("recipe should copy outside the authored tree");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document = open_recipe(&mut sessions, &loose_recipe, None);
 
     let catalog = app_catalog(&document);
@@ -192,7 +213,7 @@ fn invalid_catalog_fails_closed_with_relative_diagnostics() {
     )
     .expect("broken app definition should be written");
 
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document = open_recipe(
         &mut sessions,
         &workspace.recipe_path("demo_recipe.yaml"),
@@ -214,7 +235,7 @@ fn invalid_catalog_fails_closed_with_relative_diagnostics() {
 #[test]
 fn get_document_does_not_rescan_catalog_and_validate_refreshes_deterministically() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document = open_recipe(
         &mut sessions,
         &workspace.recipe_path("demo_recipe.yaml"),
@@ -231,7 +252,10 @@ fn get_document_does_not_rescan_catalog_and_validate_refreshes_deterministically
 
     let reserialized = request_document(&mut sessions, "getDocument", &document_id);
     assert_eq!(app_catalog(&reserialized)["status"], "ready");
-    assert_eq!(app_ids(app_catalog(&reserialized)), vec!["demo_app", "second_app"]);
+    assert_eq!(
+        app_ids(app_catalog(&reserialized)),
+        vec!["demo_app", "second_app"]
+    );
 
     let refreshed = request::handle_sidecar_value(
         json!({
@@ -254,7 +278,7 @@ fn authored_root_change_retains_authored_values_and_refreshes_catalog() {
     fs::remove_file(workspace_b.app_path("second_app.yaml"))
         .expect("second app fixture should be removable");
 
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document = open_recipe(
         &mut sessions,
         &workspace_a.recipe_path("demo.app.install.yaml"),
@@ -289,10 +313,16 @@ fn authored_root_change_retains_authored_values_and_refreshes_catalog() {
         }),
         &mut sessions,
     );
-    assert_eq!(response["ok"], true, "setDocumentAuthoredRoot should succeed: {response}");
+    assert_eq!(
+        response["ok"], true,
+        "setDocumentAuthoredRoot should succeed: {response}"
+    );
     let rebound = &response["result"]["document"];
 
-    assert!(rebound["yaml"].as_str().unwrap().contains("app_ref: second_app"));
+    assert!(rebound["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("app_ref: second_app"));
     assert_eq!(rebound["canUndo"], true);
     assert_eq!(rebound["canRedo"], false);
     assert_eq!(rebound["dirty"], true);
@@ -300,24 +330,32 @@ fn authored_root_change_retains_authored_values_and_refreshes_catalog() {
 
     let diagnostics = rebound["diagnostics"].as_array().unwrap();
     assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic["code"] == "app_definition_unknown"),
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "app_definition_unknown"),
         "retained unknown app reference should stay visible with a diagnostic: {diagnostics:?}"
     );
 
     let undone = request_document(&mut sessions, "undo", &document_id);
-    assert!(undone["yaml"].as_str().unwrap().contains("app_ref: demo_app"));
+    assert!(undone["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("app_ref: demo_app"));
     assert_eq!(app_ids(app_catalog(&undone)), vec!["demo_app"]);
     assert_eq!(undone["canRedo"], true);
 
     let redone = request_document(&mut sessions, "redo", &document_id);
-    assert!(redone["yaml"].as_str().unwrap().contains("app_ref: second_app"));
+    assert!(redone["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("app_ref: second_app"));
     assert_eq!(redone["canRedo"], false);
 }
 
 #[test]
 fn validate_returns_the_full_refreshed_recipe_document_after_external_app_definition_change() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document = open_recipe(
         &mut sessions,
         &workspace.recipe_path("demo_recipe.yaml"),
@@ -325,7 +363,10 @@ fn validate_returns_the_full_refreshed_recipe_document_after_external_app_defini
     );
     let document_id = document["documentId"].as_str().unwrap().to_string();
     assert_eq!(app_catalog(&document)["status"], "ready");
-    assert_eq!(app_ids(app_catalog(&document)), vec!["demo_app", "second_app"]);
+    assert_eq!(
+        app_ids(app_catalog(&document)),
+        vec!["demo_app", "second_app"]
+    );
 
     fs::write(
         workspace.app_path("third_app.yaml"),
@@ -363,3 +404,179 @@ fn validate_returns_the_full_refreshed_recipe_document_after_external_app_defini
     assert!(refreshed["diagnostics"].as_array().is_some());
 }
 
+#[test]
+fn catalog_change_refreshes_an_unrelated_dirty_recipe_without_replacing_its_model() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let recipes = workspace.authored_root().join("recipes");
+    for entry in fs::read_dir(&recipes).expect("recipes should be readable") {
+        let path = entry.expect("recipe entry").path();
+        let keep = matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("demo.launcher_unavailable.yaml" | "demo.target_usage.yaml")
+        );
+        if !keep {
+            fs::remove_file(path).expect("unused fixture recipe should be removable");
+        }
+    }
+
+    let mut sessions = common::test_sessions();
+    let unrelated = open_recipe(
+        &mut sessions,
+        &workspace.recipe_path("demo.launcher_unavailable.yaml"),
+        Some(&workspace.authored_root()),
+    );
+    let unrelated_id = unrelated["documentId"].as_str().unwrap().to_string();
+    let edited = request::handle_sidecar_value(
+        json!({
+            "id": "edit-unrelated",
+            "type": "applyRecipeCommand",
+            "payload": {
+                "documentId": unrelated_id,
+                "command": {
+                    "type": "SetOverviewField",
+                    "field": "name",
+                    "value": "Unsaved launcher name"
+                }
+            }
+        }),
+        &mut sessions,
+    );
+    assert_eq!(edited["ok"], true, "edit should succeed: {edited}");
+    let edited_document = &edited["result"]["document"];
+    assert_eq!(edited_document["dirty"], true);
+    assert_eq!(edited_document["canUndo"], true);
+    let edited_yaml = edited_document["yaml"].as_str().unwrap().to_string();
+    assert!(edited_yaml.contains("name: Unsaved launcher name"));
+    assert!(edited_yaml.contains("app_ref: second_app"));
+
+    let opened_app = request::handle_sidecar_value(
+        json!({
+            "id": "open-app",
+            "type": "openAppDefinition",
+            "payload": {
+                "path": workspace.app_path("demo_app.yaml"),
+                "authoredRoot": workspace.authored_root().to_string_lossy()
+            }
+        }),
+        &mut sessions,
+    );
+    assert_eq!(opened_app["ok"], true, "App open failed: {opened_app}");
+    let app_document_id = opened_app["result"]["document"]["documentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let preview = request::handle_sidecar_value(
+        json!({
+            "id": "preview-app-rename",
+            "type": "previewCatalogChange",
+            "payload": {
+                "documentId": app_document_id,
+                "intent": {
+                    "kind": "renameApp",
+                    "appId": "demo_app",
+                    "newId": "renamed_demo_app"
+                }
+            }
+        }),
+        &mut sessions,
+    );
+    assert_eq!(preview["ok"], true, "preview failed: {preview}");
+    let preview_result = &preview["result"];
+    assert_eq!(preview_result["blockers"], json!([]));
+    assert!(preview_result["changedFiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|path| !path.as_str().unwrap().starts_with('/')));
+    assert!(preview_result["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|reference| !reference["path"].as_str().unwrap().starts_with('/')));
+    let app_operation = preview_result["operationId"].as_str().unwrap().to_string();
+    let app_token = preview_result["previewToken"].as_str().unwrap().to_string();
+    let applied = request::handle_sidecar_value(
+        json!({
+            "id": "apply-app-rename",
+            "type": "applyCatalogChange",
+            "payload": {"operationId": app_operation, "previewToken": app_token}
+        }),
+        &mut sessions,
+    );
+    assert_eq!(applied["ok"], true, "apply failed: {applied}");
+    assert_eq!(applied["result"]["state"], "completed");
+
+    let refreshed = request_document(&mut sessions, "getDocument", &unrelated_id);
+    assert_eq!(refreshed["yaml"], edited_yaml);
+    assert_eq!(refreshed["dirty"], true);
+    assert_eq!(refreshed["canUndo"], true);
+    assert_eq!(
+        app_ids(app_catalog(&refreshed)),
+        vec!["renamed_demo_app", "second_app"]
+    );
+    let renamed = app(app_catalog(&refreshed), "renamed_demo_app");
+    assert!(renamed["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|target| target["id"] == "config_file"));
+
+    let target_preview = request::handle_sidecar_value(
+        json!({
+            "id": "preview-target-rename",
+            "type": "previewCatalogChange",
+            "payload": {
+                "documentId": app_document_id,
+                "intent": {
+                    "kind": "renameTarget",
+                    "appId": "renamed_demo_app",
+                    "targetId": "config_file",
+                    "newId": "config_path"
+                }
+            }
+        }),
+        &mut sessions,
+    );
+    assert_eq!(
+        target_preview["ok"], true,
+        "target preview failed: {target_preview}"
+    );
+    let target_preview_result = &target_preview["result"];
+    assert_eq!(target_preview_result["blockers"], json!([]));
+    let target_operation = target_preview_result["operationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let target_token = target_preview_result["previewToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let target_applied = request::handle_sidecar_value(
+        json!({
+            "id": "apply-target-rename",
+            "type": "applyCatalogChange",
+            "payload": {"operationId": target_operation, "previewToken": target_token}
+        }),
+        &mut sessions,
+    );
+    assert_eq!(
+        target_applied["ok"], true,
+        "target apply failed: {target_applied}"
+    );
+    assert_eq!(target_applied["result"]["state"], "completed");
+
+    let refreshed = request_document(&mut sessions, "getDocument", &unrelated_id);
+    assert_eq!(refreshed["yaml"], edited_yaml);
+    assert_eq!(refreshed["dirty"], true);
+    assert_eq!(refreshed["canUndo"], true);
+    let renamed = app(app_catalog(&refreshed), "renamed_demo_app");
+    let target_ids = renamed["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|target| target["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(target_ids.contains(&"config_path"));
+    assert!(!target_ids.contains(&"config_file"));
+}

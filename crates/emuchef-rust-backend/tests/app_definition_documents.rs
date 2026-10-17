@@ -4,6 +4,8 @@ use emuchef_rust_backend::request::handle_sidecar_value;
 use emuchef_rust_backend::session::DocumentSessionManager;
 use serde_json::{json, Value};
 
+mod common;
+
 fn request(sessions: &mut DocumentSessionManager, request_type: &str, payload: Value) -> Value {
     handle_sidecar_value(
         json!({
@@ -21,7 +23,7 @@ fn semantically_invalid_app_documents_open_and_can_be_repaired_incrementally() {
     let path = directory.path().join("invalid-app.yaml");
     let original = "schema_version: 1\nkind: app_definition\nid: Invalid_ID\nname: ' '\npackage_id: invalid-package\n";
     fs::write(&path, original).expect("invalid app definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request(
         &mut sessions,
@@ -157,7 +159,7 @@ fn malformed_commands_and_invalid_changed_fields_are_atomic() {
     let path = directory.path().join("invalid-app.yaml");
     let original = "schema_version: 1\nkind: app_definition\nid: retroarch\nname: ' '\npackage_id: com.retroarch.aarch64\n";
     fs::write(&path, original).expect("invalid app definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(&mut sessions, "openAppDefinition", json!({ "path": path }));
     assert_eq!(opened["ok"], true);
     let baseline_yaml = opened["result"]["document"]["yaml"].clone();
@@ -194,7 +196,7 @@ fn app_history_noops_preserve_redo_and_shared_lifecycle_rejects_recipe_only_call
         "schema_version: 1\nkind: app_definition\nid: retroarch\nname: RetroArch\npackage_id: com.retroarch.aarch64\n",
     )
     .expect("app definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(&mut sessions, "openAppDefinition", json!({ "path": path }));
     assert_eq!(opened["ok"], true);
 
@@ -245,7 +247,7 @@ fn catalog_app_identity_remains_locked_when_session_root_changes() {
     .expect("catalog app definition should be written");
     let other_root = directory.path().join("other-authored");
     fs::create_dir_all(other_root.join("recipes")).expect("other root should be created");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(
         &mut sessions,
         "openAppDefinition",
@@ -306,7 +308,7 @@ fn physical_catalog_owner_keeps_identity_and_dependency_admission_when_another_r
         "schema_version: 1\nkind: recipe\nid: dependent\nname: Dependent\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: sample\n    artifact: missing\n",
     )
     .expect("dependent Recipe should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request(
         &mut sessions,
@@ -445,7 +447,7 @@ fn app_open_rejects_a_symlinked_selected_root_apps_directory() {
         "schema_version: 1\nkind: app_definition\nid: sample\nname: Sample\npackage_id: com.example.sample\n",
     )
     .expect("App Definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request(
         &mut sessions,
@@ -498,7 +500,7 @@ fn app_open_rejects_a_symlinked_physical_apps_directory_despite_another_selected
         "schema_version: 1\nkind: app_definition\nid: sample\nname: Sample\npackage_id: com.example.sample\n",
     )
     .expect("App Definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request(
         &mut sessions,
@@ -547,7 +549,7 @@ fn app_save_as_requires_selected_root_and_rejects_a_different_destination_root()
     }
     let selected_destination = selected.join("apps/sample.yaml");
     let other_destination = other.join("apps/sample.yaml");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(
         &mut sessions,
         "openAppDefinition",
@@ -633,7 +635,7 @@ fn app_save_as_availability_requires_an_existing_directory_root() {
     let invalid_file = directory.path().join("file");
     fs::write(&invalid_file, "not a directory").unwrap();
     let absent_root = directory.path().join("absent");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(
         &mut sessions,
         "openAppDefinition",
@@ -708,7 +710,7 @@ fn app_save_as_availability_rejects_symlinked_catalog_directories() {
         };
         fs::create_dir_all(root.join(real_directory)).unwrap();
         std::os::unix::fs::symlink(&outside, root.join(linked_directory)).unwrap();
-        let mut sessions = DocumentSessionManager::default();
+        let mut sessions = common::test_sessions();
         let opened = request(&mut sessions, "openAppDefinition", json!({"path": source}));
         assert_eq!(opened["ok"], true);
         let selected = request(
@@ -766,7 +768,7 @@ fn app_save_as_availability_requires_both_catalog_directories_and_refreshes_afte
             "apps"
         };
         fs::create_dir_all(root.join(existing_directory)).unwrap();
-        let mut sessions = DocumentSessionManager::default();
+        let mut sessions = common::test_sessions();
         let opened = request(
             &mut sessions,
             "openAppDefinition",
@@ -838,7 +840,7 @@ fn rejected_referenced_artifact_removal_keeps_document_diagnostics_unchanged() {
         "schema_version: 1\nkind: recipe\nid: dependent\nname: Dependent\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: sample\n    artifact: installer\n",
     )
     .expect("dependent Recipe should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(
         &mut sessions,
         "openAppDefinition",
@@ -886,7 +888,7 @@ fn referenced_target_removal_in_conditions_is_atomic() {
         let path = root.join("apps/sample.yaml");
         fs::write(&path, "schema_version: 1\nkind: app_definition\nid: sample\nname: Sample\npackage_id: com.example.sample\ntargets:\n  save:\n    kind: file\n    location: app_data\n    path: save.dat\n").unwrap();
         fs::write(root.join("recipes/dependent.yaml"), format!("schema_version: 1\nkind: recipe\nid: dependent\nname: Dependent\nsteps:\n  - id: launch\n    name: Launch\n    type: launch_app\n    user_toggleable: false\n    app_ref: sample\n    {condition_section}:\n      - type: path_exists\n        params:\n          path: {{app_target: save}}\n")).unwrap();
-        let mut sessions = DocumentSessionManager::default();
+        let mut sessions = common::test_sessions();
         let opened = request(
             &mut sessions,
             "openAppDefinition",
@@ -921,7 +923,7 @@ fn unreferenced_entries_can_be_removed_despite_other_invalid_references() {
     fs::write(&path, "schema_version: 1\nkind: app_definition\nid: sample\nname: Sample\npackage_id: com.example.sample\nartifacts:\n  unused:\n    kind: apk\n    source: {strategy: user_provided}\ntargets:\n  unused:\n    kind: file\n    location: app_data\n    path: unused.dat\n").unwrap();
     let disk_before = fs::read(&path).unwrap();
     fs::write(root.join("recipes/dependent.yaml"), "schema_version: 1\nkind: recipe\nid: dependent\nname: Dependent\nartifacts:\n  missing:\n    type: app_artifact\n    app_ref: sample\n    artifact: missing\nsteps:\n  - id: launch\n    name: Launch\n    type: launch_app\n    user_toggleable: false\n    app_ref: sample\n    skip_if:\n      - type: path_exists\n        params:\n          path: {app_target: missing}\n").unwrap();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(
         &mut sessions,
         "openAppDefinition",
@@ -953,7 +955,7 @@ fn permission_actions_cannot_be_duplicated_across_baseline_and_elevated_sets() {
         "schema_version: 1\nkind: app_definition\nid: sample\nname: Sample\npackage_id: com.example.sample\n",
     )
     .expect("App Definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(&mut sessions, "openAppDefinition", json!({ "path": path }));
     assert_eq!(opened["ok"], true);
 
@@ -1008,7 +1010,7 @@ fn malformed_app_definition_cannot_open_into_a_session() {
         "schema_version: 1\nkind: app_definition\nunknown: true\n",
     )
     .expect("malformed app definition should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(&mut sessions, "openAppDefinition", json!({ "path": path }));
     assert_eq!(opened["ok"], false);
     let missing = request(
@@ -1040,7 +1042,7 @@ fn incompatible_app_definition_headers_fail_open_with_field_diagnostics() {
     ] {
         let path = directory.path().join(file_name);
         fs::write(&path, source).expect("incompatible App Definition should be written");
-        let mut sessions = DocumentSessionManager::default();
+        let mut sessions = common::test_sessions();
         let opened = request(
             &mut sessions,
             "openAppDefinition",
@@ -1096,7 +1098,7 @@ fn draft_history_never_replaces_the_opened_raw_byte_baseline() {
 
 #[test]
 fn app_document_operations_are_advertised_by_the_sidecar_protocol() {
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let hello = handle_sidecar_value(json!({ "id": "hello", "type": "hello" }), &mut sessions);
     assert_eq!(hello["ok"], true);
     let capabilities = hello["result"]["capabilities"].as_array().unwrap();
@@ -1114,7 +1116,7 @@ fn entry_commands_repair_independently_of_invalid_siblings() {
         "schema_version: 1\nkind: app_definition\nid: retroarch\nname: RetroArch\npackage_id: com.retroarch.aarch64\nartifacts:\n  bad_source:\n    kind: apk\n    source: {strategy: direct_url, url: 'http://invalid'}\ntargets:\n  bad_target:\n    kind: file\n    location: app_data\n    path: ../invalid\npermission_sets:\n  baseline: {}\nmetadata:\n  id: reserved\n  name: reserved\n",
     )
     .expect("semantically invalid app should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(&mut sessions, "openAppDefinition", json!({ "path": path }));
     assert_eq!(opened["ok"], true);
 
@@ -1196,7 +1198,7 @@ fn same_code_invalid_artifact_and_target_replacements_are_rejected_atomically() 
         "schema_version: 1\nkind: app_definition\nid: retroarch\nname: RetroArch\npackage_id: com.retroarch.aarch64\nartifacts:\n  bad_source:\n    kind: apk\n    source: {strategy: direct_url, url: 'http://invalid'}\ntargets:\n  bad_target:\n    kind: file\n    location: app_data\n    path: ../invalid\n",
     )
     .expect("semantically invalid app should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let opened = request(&mut sessions, "openAppDefinition", json!({ "path": path }));
     assert_eq!(opened["ok"], true);
     let before_yaml = opened["result"]["document"]["yaml"].clone();
@@ -1242,7 +1244,7 @@ fn save_as_discards_history_that_could_restore_a_different_catalog_identity() {
     fs::create_dir_all(root.join("apps")).expect("apps directory should be created");
     fs::create_dir_all(root.join("recipes")).expect("recipes directory should be created");
     let destination = root.join("apps/sample.yaml");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request(
         &mut sessions,
@@ -1335,7 +1337,7 @@ fn app_diagnostic_locations_are_camel_case_on_open_edit_and_validate() {
         "schema_version: 1\nkind: recipe\nid: dependent\nname: Dependent\nsteps:\n  - id: launch\n    type: launch_app\n    name: Launch\n    user_toggleable: false\n    app_ref: sample\n    skip_if:\n      - type: path_exists\n        params:\n          path:\n            app_target: missing_dest\n",
     )
     .expect("dependent Recipe should be written");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request(
         &mut sessions,

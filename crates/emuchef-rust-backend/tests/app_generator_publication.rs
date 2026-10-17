@@ -61,6 +61,10 @@ fn authored_root(catalog: &tempfile::TempDir) -> String {
         .into_owned()
 }
 
+fn sessions_for(catalog: &tempfile::TempDir) -> DocumentSessionManager {
+    DocumentSessionManager::with_catalog_storage(catalog.path().join(".test-application-state"))
+}
+
 fn review_new_app(
     sessions: &mut DocumentSessionManager,
     catalog: &tempfile::TempDir,
@@ -120,9 +124,47 @@ fn diagnostic_codes(review: &Value) -> Vec<String> {
 }
 
 #[test]
+fn generated_pair_is_rejected_while_catalog_recovery_is_unresolved() {
+    use emuchef_rust_backend::catalog_change::{CatalogChangeCoordinator, OperationRecord};
+    let catalog = catalog();
+    let storage_base = catalog.path().join(".test-application-state");
+    let mut sessions = DocumentSessionManager::with_catalog_storage(&storage_base);
+    let review = review_new_app(&mut sessions, &catalog, 1);
+    assert_eq!(review["blocking"], false, "{review:#}");
+    let coordinator =
+        CatalogChangeCoordinator::open_with_storage(catalog.path(), &storage_base).unwrap();
+    let guard = coordinator.acquire_publication().unwrap();
+    coordinator
+        .begin_operation(&guard, OperationRecord::new("pending", "test", "digest"))
+        .unwrap();
+    drop(guard);
+    let saved = call(
+        &mut sessions,
+        "saveAppGeneratorReview",
+        json!({
+            "operationId": "blocked-pair", "reviewId": review["reviewId"], "requestId": 1,
+        }),
+    );
+    assert!(
+        saved["ok"] == false || saved["result"]["ok"] == false,
+        "{saved:#}"
+    );
+    assert_eq!(
+        fs::read_dir(catalog.path().join("apps")).unwrap().count(),
+        0
+    );
+    assert_eq!(
+        fs::read_dir(catalog.path().join("recipes"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn reviewed_new_app_pair_publishes_once_and_reports_its_outcome() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let review = review_new_app(&mut sessions, &catalog, 1);
     assert_eq!(review["blocking"], false, "{review:#}");
     assert_eq!(review["target"]["mode"], "new_app");
@@ -145,7 +187,11 @@ fn reviewed_new_app_pair_publishes_once_and_reports_its_outcome() {
         "reviewId": review["reviewId"],
         "requestId": 1,
     });
-    let saved = success(&mut sessions, "saveAppGeneratorReview", save_request.clone());
+    let saved = success(
+        &mut sessions,
+        "saveAppGeneratorReview",
+        save_request.clone(),
+    );
     assert_eq!(saved["ok"], true);
     assert_eq!(saved["outcome"], "saved");
     assert_eq!(saved["app"]["appPath"], json!(app_path));
@@ -159,7 +205,10 @@ fn reviewed_new_app_pair_publishes_once_and_reports_its_outcome() {
     assert!(app_text.contains("com.example.player"), "{app_text}");
     assert!(app_text.contains("user_provided"), "{app_text}");
     let recipe_text = fs::read_to_string(catalog.path().join(&recipe_path)).unwrap();
-    assert!(recipe_text.contains("app_ref: example_player"), "{recipe_text}");
+    assert!(
+        recipe_text.contains("app_ref: example_player"),
+        "{recipe_text}"
+    );
     assert!(recipe_text.contains("app_artifact"), "{recipe_text}");
 
     // A repeated attempt replays the recorded outcome instead of publishing
@@ -187,7 +236,7 @@ fn reviewed_new_app_pair_publishes_once_and_reports_its_outcome() {
 #[test]
 fn existing_app_publication_appends_the_reviewed_artifact_and_preserves_the_file() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let baseline = review_new_app(&mut sessions, &catalog, 11);
     let app_relative = write_existing_app(&catalog, &baseline);
 
@@ -229,10 +278,7 @@ fn existing_app_publication_appends_the_reviewed_artifact_and_preserves_the_file
     assert_eq!(review["artifact"]["appArtifactId"], "extra");
     assert_eq!(review["artifact"]["change"], "added");
     assert_eq!(review["recipe"]["id"], "app.example_player.extra_install");
-    assert_eq!(
-        review["changeImpact"]["addedArtifactIds"],
-        json!(["extra"])
-    );
+    assert_eq!(review["changeImpact"]["addedArtifactIds"], json!(["extra"]));
     assert!(
         review["changeImpact"]["preservedArtifactIds"]
             .as_array()
@@ -270,13 +316,76 @@ fn existing_app_publication_appends_the_reviewed_artifact_and_preserves_the_file
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(mode, 0o640, "the published App must keep its original file mode");
+    assert_eq!(
+        mode, 0o640,
+        "the published App must keep its original file mode"
+    );
+}
+
+#[test]
+fn existing_app_publication_reconciles_a_clean_open_document_before_success() {
+    let catalog = catalog();
+    let mut sessions = sessions_for(&catalog);
+    let baseline = review_new_app(&mut sessions, &catalog, 13);
+    let app_relative = write_existing_app(&catalog, &baseline);
+    let app_path = catalog.path().join(&app_relative);
+    let opened = success(
+        &mut sessions,
+        "openAppDefinition",
+        json!({
+            "path": app_path.to_string_lossy(),
+            "authoredRoot": authored_root(&catalog),
+        }),
+    );
+    let document_id = opened["document"]["documentId"]
+        .as_str()
+        .expect("document id")
+        .to_string();
+    let selection = select_existing_app(&mut sessions, &catalog, &app_relative);
+    let review = success(
+        &mut sessions,
+        "reviewAppGeneratorDraft",
+        json!({
+            "authoredRoot": authored_root(&catalog),
+            "requestId": 14,
+            "facts": facts("com.example.player", json!([])),
+            "existingAppSnapshotId": selection["appSnapshotId"],
+            "appArtifactId": "extra",
+            "recipeId": "app.example_player.extra_install",
+            "artifactName": "Extra APK",
+        }),
+    );
+    assert_eq!(review["blocking"], false, "{review:#}");
+
+    let published = success(
+        &mut sessions,
+        "saveAppGeneratorReview",
+        json!({
+            "operationId": "publish-existing-app-with-open-session",
+            "reviewId": review["reviewId"],
+            "requestId": 14,
+        }),
+    );
+    assert_eq!(published["outcome"], "saved");
+
+    let refreshed = success(
+        &mut sessions,
+        "getDocument",
+        json!({ "documentId": document_id }),
+    );
+    assert_eq!(refreshed["document"]["dirty"], false);
+    assert!(
+        serde_json::to_string(&refreshed["document"]["appDefinition"])
+            .unwrap()
+            .contains("extra"),
+        "the open document must include the generated App artifact: {refreshed:#}"
+    );
 }
 
 #[test]
 fn dirty_open_app_document_blocks_publication_until_the_draft_is_discarded() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let baseline = review_new_app(&mut sessions, &catalog, 21);
     let app_relative = write_existing_app(&catalog, &baseline);
     let app_path = catalog.path().join(&app_relative);
@@ -324,7 +433,11 @@ fn dirty_open_app_document_blocks_publication_until_the_draft_is_discarded() {
         "requestId": 22,
     });
 
-    let refused = call(&mut sessions, "saveAppGeneratorReview", save_request.clone());
+    let refused = call(
+        &mut sessions,
+        "saveAppGeneratorReview",
+        save_request.clone(),
+    );
     assert_eq!(refused["ok"], false, "{refused:#}");
     assert_eq!(refused["error"]["code"], "dirty_app_document");
 
@@ -333,7 +446,10 @@ fn dirty_open_app_document_blocks_publication_until_the_draft_is_discarded() {
         "getDocument",
         json!({ "documentId": document_id }),
     );
-    assert_eq!(after_refusal["document"]["dirty"], true, "{after_refusal:#}");
+    assert_eq!(
+        after_refusal["document"]["dirty"], true,
+        "{after_refusal:#}"
+    );
     assert_eq!(
         after_refusal["document"]["appDefinition"]["name"],
         "Renamed Player"
@@ -363,7 +479,7 @@ fn dirty_open_app_document_blocks_publication_until_the_draft_is_discarded() {
 #[test]
 fn save_requires_the_review_request_identity_and_keeps_the_handle_after_refusal() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let review = review_new_app(&mut sessions, &catalog, 31);
 
     let refusal = call(
@@ -401,7 +517,7 @@ fn save_requires_the_review_request_identity_and_keeps_the_handle_after_refusal(
 #[test]
 fn colliding_recipe_identity_blocks_without_renaming_the_generated_recipe() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     fs::write(
         catalog.path().join("recipes/app.example_player.install.yaml"),
         "schema_version: 1\nkind: recipe\nid: app.example_player.install\nname: Existing Install\nsteps: []\n",
@@ -420,7 +536,7 @@ fn colliding_recipe_identity_blocks_without_renaming_the_generated_recipe() {
 #[test]
 fn colliding_artifact_identity_blocks_without_renaming_the_reviewed_artifact() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let baseline = review_new_app(&mut sessions, &catalog, 51);
     let app_relative = write_existing_app(&catalog, &baseline);
     let selection = select_existing_app(&mut sessions, &catalog, &app_relative);
@@ -448,7 +564,7 @@ fn colliding_artifact_identity_blocks_without_renaming_the_reviewed_artifact() {
 #[test]
 fn existing_app_review_blocks_when_the_inspected_package_differs() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let baseline = review_new_app(&mut sessions, &catalog, 61);
     let app_relative = write_existing_app(&catalog, &baseline);
     let selection = select_existing_app(&mut sessions, &catalog, &app_relative);
@@ -471,7 +587,7 @@ fn existing_app_review_blocks_when_the_inspected_package_differs() {
 #[test]
 fn permission_automation_review_separates_baseline_and_elevated_actions() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let declarations = json!([
         { "name": "android.permission.CAMERA", "declarationKind": "uses_permission" },
         { "name": "android.permission.WRITE_SECURE_SETTINGS", "declarationKind": "uses_permission" },
@@ -562,7 +678,7 @@ fn permission_automation_review_separates_baseline_and_elevated_actions() {
 #[test]
 fn permission_automation_review_reports_the_request_intent_flag() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let declarations = json!([
         { "name": "android.permission.CAMERA", "declarationKind": "uses_permission" },
     ]);
@@ -643,7 +759,10 @@ fn permission_automation_review_reports_the_request_intent_flag() {
     let enabled_yaml = enabled["recipeCanonicalYaml"]
         .as_str()
         .expect("canonical Recipe YAML");
-    assert!(enabled_yaml.contains("permission_set: baseline"), "{enabled_yaml}");
+    assert!(
+        enabled_yaml.contains("permission_set: baseline"),
+        "{enabled_yaml}"
+    );
 
     let contradicted = success(
         &mut sessions,
@@ -679,7 +798,7 @@ fn permission_automation_review_reports_the_request_intent_flag() {
 #[test]
 fn unreadable_catalog_entry_blocks_existing_app_selection() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let unreadable = catalog.path().join("apps/blocked.yaml");
     fs::write(&unreadable, "schema_version: 1\nkind: app_definition\n").unwrap();
     let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
@@ -725,7 +844,7 @@ fn remote_source() -> Value {
 #[test]
 fn remote_review_uses_the_same_stateful_handles_and_publishes_the_pair() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let review = success(
         &mut sessions,
         "reviewRemoteAppGeneratorDraft",
@@ -818,7 +937,7 @@ fn remote_preview_payload(
 #[test]
 fn previews_resolve_the_retained_existing_app_snapshot_for_local_and_remote_sources() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let snapshot_id = existing_app_snapshot(&mut sessions, &catalog, 91);
 
     let local = success(
@@ -863,7 +982,7 @@ fn previews_resolve_the_retained_existing_app_snapshot_for_local_and_remote_sour
 #[test]
 fn previews_block_when_the_inspected_package_differs_from_the_selected_app() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let snapshot_id = existing_app_snapshot(&mut sessions, &catalog, 92);
 
     let local = success(
@@ -899,7 +1018,7 @@ fn previews_block_when_the_inspected_package_differs_from_the_selected_app() {
 #[test]
 fn previews_reject_an_unknown_or_mismatched_existing_app_snapshot_handle() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     existing_app_snapshot(&mut sessions, &catalog, 93);
 
     let unknown = call(
@@ -914,7 +1033,10 @@ fn previews_reject_an_unknown_or_mismatched_existing_app_snapshot_handle() {
         }),
     );
     assert_eq!(unknown["ok"], false, "{unknown:#}");
-    assert_eq!(unknown["error"]["code"], "review_invalidated", "{unknown:#}");
+    assert_eq!(
+        unknown["error"]["code"], "review_invalidated",
+        "{unknown:#}"
+    );
 
     let mismatched = call(
         &mut sessions,
@@ -959,7 +1081,7 @@ fn write_dependent_recipe(catalog: &tempfile::TempDir, baseline: &Value) -> Stri
 #[test]
 fn existing_app_review_reports_affected_recipes_and_added_action_sets() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let baseline = review_new_app(&mut sessions, &catalog, 81);
     let app_relative = write_existing_app(&catalog, &baseline);
     let dependent = write_dependent_recipe(&catalog, &baseline);
@@ -1055,13 +1177,13 @@ fn existing_app_review_reports_affected_recipes_and_added_action_sets() {
 #[test]
 fn previews_reject_a_valid_snapshot_handle_from_another_root_or_session() {
     let catalog_a = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog_a);
     let snapshot_id = existing_app_snapshot(&mut sessions, &catalog_a, 94);
 
     // A real, canonical catalog that even holds an identical App Definition:
     // only the selected root differs, so the retained handle must still refuse.
     let catalog_b = catalog();
-    let mut catalog_b_sessions = DocumentSessionManager::default();
+    let mut catalog_b_sessions = sessions_for(&catalog_b);
     let baseline_b = review_new_app(&mut catalog_b_sessions, &catalog_b, 95);
     write_existing_app(&catalog_b, &baseline_b);
 
@@ -1083,7 +1205,7 @@ fn previews_reject_a_valid_snapshot_handle_from_another_root_or_session() {
     );
 
     // The handle is also bound to the stateful session that captured it.
-    let mut other_sessions = DocumentSessionManager::default();
+    let mut other_sessions = sessions_for(&catalog_a);
     let other_session = call(
         &mut other_sessions,
         "generateAppRecipeDraft",
@@ -1105,7 +1227,7 @@ fn previews_reject_a_valid_snapshot_handle_from_another_root_or_session() {
 #[test]
 fn existing_app_review_blocks_when_a_dependent_recipe_cannot_be_classified() {
     let catalog = catalog();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = sessions_for(&catalog);
     let baseline = review_new_app(&mut sessions, &catalog, 83);
     let app_relative = write_existing_app(&catalog, &baseline);
     fs::write(
@@ -1138,4 +1260,3 @@ fn existing_app_review_blocks_when_a_dependent_recipe_cannot_be_classified() {
         "a blocked review never yields a publishable handle: {review:#}"
     );
 }
-

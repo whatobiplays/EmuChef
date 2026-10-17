@@ -31,6 +31,12 @@ import {
   saveRecipeAs,
   selectAppGeneratorExistingApp,
   setAppGeneratorAuthoredRoot,
+  previewCatalogChange,
+  applyCatalogChange,
+applyCatalogChangeWithStatusRecovery,
+  catalogChangeStatus,
+  listCatalogChangeRecoveries,
+  retryCatalogChangeRecovery,
 } from "../src/api/editorApi";
 
 describe("document save API routes", () => {
@@ -50,6 +56,54 @@ describe("document save API routes", () => {
       ["save_app_definition", { documentId: "app-1" }],
       ["save_app_definition_as", { documentId: "app-1", path: "/tmp/app.yaml" }],
     ]);
+  });
+});
+
+describe("catalog change API routes", () => {
+  beforeEach(() => {
+    mocks.invoke.mockReset();
+    mocks.invoke.mockResolvedValue({ ok: true, result: {} });
+  });
+
+  it("forwards preview, apply, durable status, discovery, and retry arguments exactly", async () => {
+    await previewCatalogChange("app-1", { kind: "renameApp", appId: "old", newId: "new" });
+    await applyCatalogChange("operation-1", "token-1");
+    await catalogChangeStatus("/catalog", "operation-1");
+    await listCatalogChangeRecoveries("/catalog");
+    await retryCatalogChangeRecovery("/catalog", "operation-1");
+
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["preview_catalog_change", { documentId: "app-1", intent: { kind: "renameApp", appId: "old", newId: "new" } }],
+      ["apply_catalog_change", { operationId: "operation-1", previewToken: "token-1" }],
+      ["catalog_change_status", { authoredRoot: "/catalog", operationId: "operation-1" }],
+      ["list_catalog_change_recoveries", { authoredRoot: "/catalog" }],
+      ["retry_catalog_change_recovery", { authoredRoot: "/catalog", operationId: "operation-1" }],
+    ]);
+  });
+
+  it("recovers a lost apply response from durable operation status", async () => {
+    const completed = { operationId: "operation-1", state: "completed", changedFiles: [] } as const;
+    mocks.invoke
+      .mockRejectedValueOnce(new Error("sidecar response lost"))
+      .mockResolvedValueOnce({ ok: true, result: { operation: completed } });
+
+    const result = await applyCatalogChangeWithStatusRecovery("/catalog", "operation-1", "token-1");
+
+    expect(result).toEqual({ kind: "success", result: completed });
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["apply_catalog_change", { operationId: "operation-1", previewToken: "token-1" }],
+      ["catalog_change_status", { authoredRoot: "/catalog", operationId: "operation-1" }],
+    ]);
+  });
+
+  it("preserves the apply transport error when durable status has no operation", async () => {
+    mocks.invoke
+      .mockRejectedValueOnce(new Error("sidecar response lost"))
+      .mockResolvedValueOnce({ ok: true, result: { operation: null } });
+
+    const result = await applyCatalogChangeWithStatusRecovery("/catalog", "operation-1", "token-1");
+
+    expect(result).toEqual({ kind: "transport-error", message: "sidecar response lost" });
   });
 });
 

@@ -13,14 +13,18 @@ use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use crate::app_definition_admission::{
-    admit_generated_app_pair_save, classify_affected_recipes, AppDefinitionSaveDiagnostic,
-    GeneratedAppPairSnapshot, GeneratedAppSaveContext,
+    admit_generated_app_pair_save, classify_affected_recipes, AdmissionPublishKind,
+    AppDefinitionSaveDiagnostic, GeneratedAppPairSnapshot, GeneratedAppSaveContext,
 };
 use crate::app_definition_persistence::{
-    capture_opened_app_definition_file, persist_generated_app_pair, GeneratedPairPersistFailure,
-    OpenedAppDefinitionFile,
+    capture_opened_app_definition_file, persist_generated_app_pair_for_operation,
+    GeneratedPairOutcome, GeneratedPairPersistFailure, OpenedAppDefinitionFile,
 };
 use crate::authored_models::{self, AppDefinitionV1};
+use crate::catalog_change::{
+    CatalogChangeCoordinator, OperationPhase as DurableOperationPhase,
+    OperationRecord as DurableOperationRecord,
+};
 use crate::errors::ApiError;
 use crate::generation::{AppRecipeDraft, ProposedDestination};
 use crate::yaml;
@@ -70,9 +74,17 @@ pub(crate) struct AppGeneratorReviewState {
     reviews: IndexMap<String, StoredReview>,
     operations: IndexMap<String, OperationRecord>,
     next_id: u64,
+    catalog_storage_base: Option<PathBuf>,
 }
 
 impl AppGeneratorReviewState {
+    pub(crate) fn with_catalog_storage(storage_base: impl AsRef<Path>) -> Self {
+        Self {
+            catalog_storage_base: Some(storage_base.as_ref().to_path_buf()),
+            ..Self::default()
+        }
+    }
+
     fn allocate(&mut self, prefix: &str) -> String {
         self.next_id += 1;
         format!("{prefix}_{}", self.next_id)
@@ -166,7 +178,11 @@ pub(crate) fn select_existing_app(
         } else {
             crate::errors::ApiErrorCode::ExistingAppUnavailable
         };
-        ApiError::new(code, error.message.clone(), json!({ "appPath": relative, "reason": error.code }))
+        ApiError::new(
+            code,
+            error.message.clone(),
+            json!({ "appPath": relative, "reason": error.code }),
+        )
     })?;
     let text = std::str::from_utf8(opened.raw_bytes()).map_err(|_| {
         ApiError::new(
@@ -382,7 +398,8 @@ fn resolve_catalog_relative_path(root: &Path, app_path: &str) -> Result<PathBuf,
         && candidate
             .components()
             .all(|component| matches!(component, Component::Normal(_)));
-    let inside_apps = matches!(components.next(), Some(Component::Normal(first)) if first == "apps");
+    let inside_apps =
+        matches!(components.next(), Some(Component::Normal(first)) if first == "apps");
     if !safe || !inside_apps || !is_yaml_catalog_file(candidate) {
         return Err(ApiError::new(
             crate::errors::ApiErrorCode::ExistingAppOutsideRoot,
@@ -522,7 +539,10 @@ pub(crate) fn review_from_candidate(
     intent: ReviewIntent,
 ) -> Result<Value, ApiError> {
     let root = intent.authored_root.clone();
-    let previous_app = intent.existing.as_ref().map(|snapshot| snapshot.app.clone());
+    let previous_app = intent
+        .existing
+        .as_ref()
+        .map(|snapshot| snapshot.app.clone());
     let artifact_id = draft
         .recipe
         .get("artifacts")
@@ -603,12 +623,7 @@ pub(crate) fn review_from_candidate(
             .filter(|diagnostic| diagnostic.severity == "warning")
             .map(|diagnostic| json!({ "code": diagnostic.code, "message": diagnostic.message }))
             .collect();
-        diagnostics.extend(
-            admission
-                .diagnostics
-                .iter()
-                .map(admission_ui_diagnostic),
-        );
+        diagnostics.extend(admission.diagnostics.iter().map(admission_ui_diagnostic));
         pair_snapshot = admission.snapshot.take();
     }
     let blocking = draft.blocking
@@ -706,7 +721,9 @@ pub(crate) fn take_review(
     review_id: &str,
     request_id: i64,
 ) -> Result<StoredReview, ApiError> {
-    let review = state.take_review(review_id).ok_or_else(review_invalidated_error)?;
+    let review = state
+        .take_review(review_id)
+        .ok_or_else(review_invalidated_error)?;
     if review.request_id != request_id {
         return Err(review_invalidated_error());
     }
@@ -724,7 +741,9 @@ pub(crate) fn peek_review<'a>(
     review_id: &str,
     request_id: i64,
 ) -> Result<&'a StoredReview, ApiError> {
-    let review = state.review(review_id).ok_or_else(review_invalidated_error)?;
+    let review = state
+        .review(review_id)
+        .ok_or_else(review_invalidated_error)?;
     if review.request_id != request_id {
         return Err(review_invalidated_error());
     }
@@ -762,8 +781,13 @@ pub(crate) fn dirty_app_document_error(review: &StoredReview) -> ApiError {
 }
 
 /// Replay a previously recorded publication result for one operation.
-pub(crate) fn operation_replay(state: &AppGeneratorReviewState, operation_id: &str) -> Option<Value> {
-    state.operation(operation_id).map(|record| record.detail.clone())
+pub(crate) fn operation_replay(
+    state: &AppGeneratorReviewState,
+    operation_id: &str,
+) -> Option<Value> {
+    state
+        .operation(operation_id)
+        .map(|record| record.detail.clone())
 }
 
 /// Publish one reviewed pair and record its outcome under the operation id.
@@ -772,11 +796,15 @@ pub(crate) fn operation_replay(state: &AppGeneratorReviewState, operation_id: &s
 /// repeated attempt for the same operation never publishes twice. Pre-publication
 /// refusals leave no record: nothing was written and the native layer may show
 /// the refusal directly.
-pub(crate) fn publish_review(
+pub(crate) fn publish_review<Reconcile>(
     state: &mut AppGeneratorReviewState,
     operation_id: &str,
     review: &StoredReview,
-) -> Result<Value, ApiError> {
+    reconcile: Reconcile,
+) -> Result<Value, ApiError>
+where
+    Reconcile: FnOnce(&GeneratedPairOutcome) -> Result<(), String>,
+{
     if let Some(record) = state.operation(operation_id) {
         return Ok(record.detail.clone());
     }
@@ -794,7 +822,12 @@ pub(crate) fn publish_review(
             }),
         },
     );
-    match persist_generated_app_pair(&review.pair) {
+    match persist_generated_app_pair_for_operation(
+        &review.pair,
+        operation_id,
+        state.catalog_storage_base.as_deref(),
+        reconcile,
+    ) {
         Ok(outcome) => {
             // Report the published destinations from the committed outcome so
             // the result reflects the files this publication actually owns.
@@ -869,12 +902,79 @@ pub(crate) fn publish_review(
             );
             Ok(payload)
         }
+        Err(GeneratedPairPersistFailure::PublishedButUnsynchronized { error }) => {
+            let app_path = review.app_relative_path.clone();
+            let recipe_path = review.recipe_relative_path.clone();
+            let app_replaced =
+                review.pair.app_snapshot.publish_kind == AdmissionPublishKind::ReplaceOpenedFile;
+            let created_files = if app_replaced {
+                vec![recipe_path.clone()]
+            } else {
+                vec![recipe_path.clone(), app_path.clone()]
+            };
+            let replaced_files = if app_replaced {
+                vec![app_path.clone()]
+            } else {
+                Vec::new()
+            };
+            let payload = json!({
+                "ok": true,
+                "outcome": "failed",
+                "operationId": operation_id,
+                "app": { "appPath": app_path },
+                "recipe": { "recipePath": recipe_path },
+                "createdFiles": created_files,
+                "replacedFiles": replaced_files,
+                "rollback": Value::Null,
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                    "details": { "reason": error.code, "durability": "unresolved" },
+                },
+                "message": "The files may be present. Verify both destinations before retrying.",
+            });
+            state.record_operation(
+                operation_id,
+                OperationRecord {
+                    outcome: "failed",
+                    confirmed: true,
+                    recorded_at: now_iso8601(),
+                    detail: payload.clone(),
+                },
+            );
+            Ok(payload)
+        }
     }
 }
 
-/// Report the recorded status of one native publication operation.
-pub(crate) fn publication_status(state: &AppGeneratorReviewState, operation_id: &str) -> Value {
-    match state.operation(operation_id) {
+/// Report one publication operation. The durable catalog journal takes
+/// precedence over process-local review state so status remains truthful
+/// after a sidecar restart.
+pub(crate) fn publication_status(
+    state: &AppGeneratorReviewState,
+    operation_id: &str,
+) -> Result<Value, ApiError> {
+    let durable = match state.catalog_storage_base.as_deref() {
+        Some(storage_base) => {
+            CatalogChangeCoordinator::find_operation_at(storage_base, operation_id)
+        }
+        None => CatalogChangeCoordinator::find_operation(operation_id),
+    }
+    .map_err(|_| {
+        ApiError::command_failed(
+            "App Generator publication status could not be read.",
+            json!({ "operationId": operation_id }),
+        )
+    })?;
+    if durable.is_some() {
+        return Ok(publication_status_from_journal(
+            state,
+            operation_id,
+            durable,
+        ));
+    }
+
+    Ok(match state.operation(operation_id) {
         Some(record) => json!({
             "operationId": operation_id,
             "outcome": record.outcome,
@@ -889,10 +989,70 @@ pub(crate) fn publication_status(state: &AppGeneratorReviewState, operation_id: 
             "recordedAt": Value::Null,
             "detail": { "reason": "no_record" },
         }),
-    }
+    })
 }
 
-fn refusal_error(error: &crate::app_definition_persistence::AppDefinitionPersistenceError) -> ApiError {
+fn publication_status_from_journal(
+    state: &AppGeneratorReviewState,
+    operation_id: &str,
+    durable: Option<DurableOperationRecord>,
+) -> Value {
+    let Some(durable) = durable else {
+        return json!({
+            "operationId": operation_id,
+            "outcome": "unknown",
+            "confirmed": false,
+            "recordedAt": Value::Null,
+            "detail": { "reason": "no_record" },
+        });
+    };
+
+    let (outcome, confirmed, message) = match durable.phase {
+        DurableOperationPhase::Completed => (
+            "saved",
+            true,
+            "The App Generator publication completed and was reconciled.",
+        ),
+        DurableOperationPhase::Rejected => (
+            "failed",
+            true,
+            "The App Generator publication was rejected before publishing.",
+        ),
+        DurableOperationPhase::Prepared
+        | DurableOperationPhase::Staged
+        | DurableOperationPhase::Publishing
+        | DurableOperationPhase::Published
+        | DurableOperationPhase::RecoveryRequired => (
+            "unknown",
+            false,
+            "The App Generator publication is unresolved; inspect catalog recovery status.",
+        ),
+    };
+    let local_record = state
+        .operation(operation_id)
+        .filter(|record| record.confirmed && record.outcome == outcome);
+    let detail = local_record
+        .map(|record| record.detail.clone())
+        .unwrap_or_else(|| {
+            json!({
+                "ok": true,
+                "outcome": outcome,
+                "operationId": operation_id,
+                "message": message,
+            })
+        });
+    json!({
+        "operationId": operation_id,
+        "outcome": outcome,
+        "confirmed": confirmed,
+        "recordedAt": local_record.map(|record| record.recorded_at.clone()),
+        "detail": detail,
+    })
+}
+
+fn refusal_error(
+    error: &crate::app_definition_persistence::AppDefinitionPersistenceError,
+) -> ApiError {
     let code = match error.code.as_str() {
         "app_definition_stale_state" | "recipe_destination_exists" => {
             crate::errors::ApiErrorCode::StaleReview
@@ -1106,15 +1266,39 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     } else {
         month_prime - 9
     };
-    (if month <= 2 { year + 1 } else { year }, month as u32, day as u32)
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog_change::{OperationPhase, OperationRecord as DurableOperationRecord};
     use std::io;
 
     const READABLE_APP: &str = "schema_version: 1\nkind: app_definition\nid: minimal\nname: Minimal\npackage_id: com.example.minimal\nartifacts:\n  apk:\n    kind: apk\n    source:\n      strategy: user_provided\n";
+
+    #[test]
+    fn durable_completed_pair_status_replays_after_process_relaunch() {
+        let mut durable = DurableOperationRecord::new(
+            "app-generator-pair-42",
+            "app-generator-pair",
+            "request-digest",
+        );
+        durable.phase = OperationPhase::Completed;
+
+        let status = publication_status_from_journal(
+            &AppGeneratorReviewState::default(),
+            "app-generator-pair-42",
+            Some(durable),
+        );
+
+        assert_eq!(status["outcome"], "saved");
+        assert_eq!(status["confirmed"], true);
+    }
 
     #[test]
     fn directory_entry_error_marks_inventory_incomplete_and_refuses_selection() {
@@ -1155,13 +1339,11 @@ mod tests {
         );
         assert_eq!(scan.summaries[0]["appPath"], "apps/readable.yaml");
 
-        let refusal =
-            ensure_inventory_complete(&scan).expect_err("incomplete inventory must refuse selection");
+        let refusal = ensure_inventory_complete(&scan)
+            .expect_err("incomplete inventory must refuse selection");
         assert_eq!(
             refusal.code,
             crate::errors::ApiErrorCode::AppCatalogInventoryIncomplete
         );
     }
 }
-
-

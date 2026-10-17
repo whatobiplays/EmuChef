@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::app_generator_review::{self, SelectedExistingApp};
+use crate::catalog_refactor::CatalogChangeIntent;
 use crate::catalog_source::{CatalogIdentity, CatalogSnapshot, CatalogSource, LocalCatalogSource};
 use crate::envelope;
 use crate::errors::ApiError;
@@ -105,7 +106,9 @@ fn handle_validated_sidecar_object(
         "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object, Some(sessions)),
-        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object, Some(sessions)),
+        "generateRemoteAppRecipeDraft" => {
+            handle_generate_remote_app_recipe_draft(object, Some(sessions))
+        }
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "listAppGeneratorExistingApps" => handle_list_app_generator_existing_apps(object),
@@ -161,6 +164,11 @@ fn handle_validated_sidecar_object(
         "saveDocumentAs" => handle_save_document_as(object, sessions),
         "applyRecipeCommand" => handle_apply_recipe_command(object, sessions),
         "applyAppDefinitionCommand" => handle_apply_app_definition_command(object, sessions),
+        "previewCatalogChange" => handle_preview_catalog_change(object, sessions),
+        "applyCatalogChange" => handle_apply_catalog_change(object, sessions),
+        "catalogChangeStatus" => handle_catalog_change_status(object, sessions),
+        "listCatalogChangeRecoveries" => handle_list_catalog_change_recoveries(object, sessions),
+        "retryCatalogChangeRecovery" => handle_retry_catalog_change_recovery(object, sessions),
         "undo" => handle_undo(object, sessions),
         "redo" => handle_redo(object, sessions),
         "emitYaml" => handle_emit_yaml(object, sessions),
@@ -480,15 +488,14 @@ fn handle_generate_app_recipe_draft(
     sessions: Option<&DocumentSessionManager>,
 ) -> Result<Value, ApiError> {
     let payload = resolve_draft_generator_payload(object, sessions)?;
-    let draft_request = serde_json::from_value::<crate::generation::AppRecipeDraftRequest>(
-        Value::Object(payload),
-    )
-    .map_err(|error| {
-        ApiError::invalid_request_with_details(
-            format!("App-and-recipe draft input is invalid: {error}"),
-            json!({ "field": "payload" }),
-        )
-    })?;
+    let draft_request =
+        serde_json::from_value::<crate::generation::AppRecipeDraftRequest>(Value::Object(payload))
+            .map_err(|error| {
+                ApiError::invalid_request_with_details(
+                    format!("App-and-recipe draft input is invalid: {error}"),
+                    json!({ "field": "payload" }),
+                )
+            })?;
     let result = serde_json::to_value(crate::generation::generate_app_recipe_draft(draft_request))
         .map_err(|_| {
             ApiError::command_failed(
@@ -531,14 +538,15 @@ fn handle_generate_remote_app_recipe_draft(
             json!({ "field": "payload" }),
         )
     })?;
-    let result =
-        serde_json::to_value(crate::generation::generate_remote_app_recipe_draft(draft_request))
-            .map_err(|_| {
-                ApiError::command_failed(
-                    "Remote app-and-recipe draft could not be represented.",
-                    json!({ "reason": "remote_app_recipe_draft_serialization_failed" }),
-                )
-            })?;
+    let result = serde_json::to_value(crate::generation::generate_remote_app_recipe_draft(
+        draft_request,
+    ))
+    .map_err(|_| {
+        ApiError::command_failed(
+            "Remote app-and-recipe draft could not be represented.",
+            json!({ "reason": "remote_app_recipe_draft_serialization_failed" }),
+        )
+    })?;
     Ok(envelope::success(result))
 }
 
@@ -548,9 +556,7 @@ fn handle_generate_remote_app_recipe_draft(
 /// could be read. An incomplete inventory blocks existing-App selection,
 /// because the generator cannot rule out duplicate identities when part of the
 /// catalog is unreadable.
-fn handle_list_app_generator_existing_apps(
-    object: &Map<String, Value>,
-) -> Result<Value, ApiError> {
+fn handle_list_app_generator_existing_apps(object: &Map<String, Value>) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let authored_root = required_string(payload, "authoredRoot")?;
     Ok(envelope::success(app_generator_review::list_existing_apps(
@@ -570,11 +576,13 @@ fn handle_select_app_generator_existing_app(
     let payload = payload_object(object)?;
     let authored_root = required_string(payload, "authoredRoot")?;
     let app_path = required_string(payload, "appPath")?;
-    Ok(envelope::success(app_generator_review::select_existing_app(
-        sessions.app_generator_mut(),
-        Path::new(authored_root),
-        app_path,
-    )?))
+    Ok(envelope::success(
+        app_generator_review::select_existing_app(
+            sessions.app_generator_mut(),
+            Path::new(authored_root),
+            app_path,
+        )?,
+    ))
 }
 
 /// One parsed App Generator request.
@@ -787,7 +795,7 @@ fn handle_app_generator_publication_status(
     Ok(envelope::success(app_generator_review::publication_status(
         sessions.app_generator(),
         operation_id,
-    )))
+    )?))
 }
 
 fn handle_generate_device_profile_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
@@ -1621,6 +1629,72 @@ fn handle_apply_app_definition_command(
     Ok(envelope::success(
         sessions.apply_app_definition_command(document_id, command)?,
     ))
+}
+
+fn handle_preview_catalog_change(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let intent = payload.get("intent").ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request payload is missing required field: intent",
+            json!({ "field": "intent" }),
+        )
+    })?;
+    let intent: CatalogChangeIntent = serde_json::from_value(intent.clone()).map_err(|error| {
+        ApiError::invalid_request_with_details(
+            format!("Request field 'intent' is invalid: {error}"),
+            json!({ "field": "intent" }),
+        )
+    })?;
+    Ok(envelope::success(
+        sessions.preview_catalog_change(document_id, intent)?,
+    ))
+}
+
+fn handle_apply_catalog_change(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.apply_catalog_change(
+        required_string(payload, "operationId")?,
+        required_string(payload, "previewToken")?,
+    )?))
+}
+
+fn handle_catalog_change_status(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.catalog_change_status(
+        required_string(payload, "authoredRoot")?,
+        required_string(payload, "operationId")?,
+    )?))
+}
+
+fn handle_list_catalog_change_recoveries(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.list_catalog_change_recoveries(
+        required_string(payload, "authoredRoot")?,
+    )?))
+}
+
+fn handle_retry_catalog_change_recovery(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.retry_catalog_change_recovery(
+        required_string(payload, "authoredRoot")?,
+        required_string(payload, "operationId")?,
+    )?))
 }
 
 fn handle_undo(

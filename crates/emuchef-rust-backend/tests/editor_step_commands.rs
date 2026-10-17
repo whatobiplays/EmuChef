@@ -8,6 +8,8 @@ use emuchef_rust_backend::errors::ApiErrorCode;
 use emuchef_rust_backend::{jsonl, protocol};
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_path(name: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -27,6 +29,7 @@ fn fixture_root() -> String {
 }
 
 fn sidecar_responses(input: &str) -> Vec<Value> {
+    common::test_application_data();
     jsonl::process_jsonl(input)
         .lines()
         .map(|line| serde_json::from_str(line).expect("sidecar response should be valid JSON"))
@@ -214,6 +217,11 @@ fn capabilities_stay_on_editor_session_surface() {
             "closeDocument",
             "applyRecipeCommand",
             "applyAppDefinitionCommand",
+            "previewCatalogChange",
+            "applyCatalogChange",
+            "catalogChangeStatus",
+            "listCatalogChangeRecoveries",
+            "retryCatalogChangeRecovery",
             "undo",
             "redo",
             "emitYaml",

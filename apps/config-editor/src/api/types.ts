@@ -46,6 +46,52 @@ export interface CommandResultDto {
   changed: boolean;
 }
 
+/** One explicit App-owned identity operation supported by the atomic catalog refactor API. */
+export type CatalogChangeIntentDto =
+  | { kind: "renameApp"; appId: string; newId: string }
+  | { kind: "renameArtifact"; appId: string; artifactId: string; newId: string }
+  | { kind: "renameTarget"; appId: string; targetId: string; newId: string }
+  | { kind: "deleteApp"; appId: string };
+
+/** Exact typed reference that would be rewritten by a catalog operation. */
+export interface CatalogReferenceSiteDto {
+  path: string;
+  object: string;
+  field: string;
+}
+
+/** One open unsaved session that blocks a catalog identity operation. */
+export interface CatalogChangeBlockerDto {
+  path: string;
+  reason: string;
+}
+
+export interface CatalogChangePreviewDto {
+  operationId: string;
+  previewToken: string;
+  intent: CatalogChangeIntentDto;
+  references: CatalogReferenceSiteDto[];
+  changedFiles: string[];
+  blockers: CatalogChangeBlockerDto[];
+  snapshotDigest: string;
+}
+
+export type CatalogChangeStateDto = "rejected" | "completed" | "recovery_required" | "in_progress";
+
+export interface CatalogChangeStatusDto {
+  operationId: string;
+  state: CatalogChangeStateDto;
+  changedFiles: string[];
+}
+
+export interface CatalogChangeStatusResult {
+  operation: CatalogChangeStatusDto | null;
+}
+
+export interface CatalogChangeRecoveriesResult {
+  recoveries: CatalogChangeStatusDto[];
+}
+
 export interface InputDto {
   id: string;
   recipeId: string;

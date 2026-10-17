@@ -8,6 +8,8 @@ use emuchef_rust_backend::user_configuration::{
 use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
+mod common;
+
 const EXPECTED_AUTHORED_RECIPES: &[&str] = &[
     "app.armsx1.install.yaml",
     "app.obtainium.install.yaml",
@@ -161,7 +163,7 @@ fn run_editor_session_flow(recipe_name: &str, authored_root: Value) {
     } else {
         Some(repo_authored_root())
     };
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let open = sidecar_response(
         &mut sessions,

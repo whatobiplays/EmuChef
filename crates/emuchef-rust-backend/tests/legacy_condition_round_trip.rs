@@ -20,6 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -67,7 +69,11 @@ fn copy_dir_all(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("source directory should be readable") {
         let entry = entry.expect("source entry should be readable");
         let target = destination.join(entry.file_name());
-        if entry.file_type().expect("file type should be readable").is_dir() {
+        if entry
+            .file_type()
+            .expect("file type should be readable")
+            .is_dir()
+        {
             copy_dir_all(&entry.path(), &target);
         } else {
             fs::copy(entry.path(), &target).expect("fixture file should copy");
@@ -77,7 +83,7 @@ fn copy_dir_all(source: &Path, destination: &Path) {
 
 /// Opens one fixture Recipe on a fresh session and returns its projected document.
 fn open_recipe(workspace: &TempWorkspace, file_name: &str) -> (String, Value) {
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     open_fixture(&mut sessions, workspace, file_name)
 }
 
@@ -99,7 +105,10 @@ fn open_fixture(
         }),
         sessions,
     );
-    assert_eq!(response["ok"], true, "openRecipe should succeed: {response}");
+    assert_eq!(
+        response["ok"], true,
+        "openRecipe should succeed: {response}"
+    );
     let document = response["result"]["document"].clone();
     let document_id = document["documentId"]
         .as_str()
@@ -129,9 +138,12 @@ fn step<'a>(document: &'a Value, step_id: &str) -> &'a Value {
 #[test]
 fn legacy_package_condition_round_trips_without_migration() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (document_id, document) =
-        open_fixture(&mut sessions, &workspace, "demo.legacy_package_condition.yaml");
+    let mut sessions = common::test_sessions();
+    let (document_id, document) = open_fixture(
+        &mut sessions,
+        &workspace,
+        "demo.legacy_package_condition.yaml",
+    );
     let yaml = document["yaml"].as_str().expect("yaml should be a string");
     assert!(
         yaml.contains("package_name: com.example.demo"),
@@ -179,9 +191,8 @@ fn legacy_package_condition_round_trips_without_migration() {
 #[test]
 fn app_aware_parameterless_condition_round_trips_parameterless() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (document_id, document) =
-        open_fixture(&mut sessions, &workspace, "demo.app.install.yaml");
+    let mut sessions = common::test_sessions();
+    let (document_id, document) = open_fixture(&mut sessions, &workspace, "demo.app.install.yaml");
     let yaml = document["yaml"].as_str().expect("yaml should be a string");
     assert!(
         yaml.contains("type: package_installed\n    params: {}"),
@@ -233,9 +244,8 @@ fn app_aware_parameterless_condition_round_trips_parameterless() {
 #[test]
 fn app_target_conditions_round_trip_without_migration() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (document_id, document) =
-        open_fixture(&mut sessions, &workspace, "demo.target_usage.yaml");
+    let mut sessions = common::test_sessions();
+    let (document_id, document) = open_fixture(&mut sessions, &workspace, "demo.target_usage.yaml");
     assert_eq!(step(&document, "copy_payload")["verify"], json!([]));
     assert_eq!(step(&document, "copy_payload")["skipIf"], json!([]));
 
@@ -254,11 +264,11 @@ fn app_target_conditions_round_trip_without_migration() {
         }),
         &mut sessions,
     );
-    assert_eq!(applied["ok"], true, "the App Target verify command must succeed: {applied}");
     assert_eq!(
-        applied["result"]["commandResult"],
-        json!({"changed": true})
+        applied["ok"], true,
+        "the App Target verify command must succeed: {applied}"
     );
+    assert_eq!(applied["result"]["commandResult"], json!({"changed": true}));
     let updated = applied["result"]["document"].clone();
     assert_eq!(
         step(&updated, "copy_payload")["verify"][0]["params"]["path"]["app_target"],
@@ -280,7 +290,10 @@ fn app_target_conditions_round_trip_without_migration() {
         }),
         &mut sessions,
     );
-    assert_eq!(applied["ok"], true, "the App Target skip_if command must succeed: {applied}");
+    assert_eq!(
+        applied["ok"], true,
+        "the App Target skip_if command must succeed: {applied}"
+    );
     let updated = applied["result"]["document"].clone();
     assert_eq!(
         step(&updated, "copy_payload")["skipIf"][0]["params"]["path"]["app_target"],
@@ -313,4 +326,3 @@ fn app_target_conditions_round_trip_without_migration() {
         "reopening must reproduce the same document projection"
     );
 }
-

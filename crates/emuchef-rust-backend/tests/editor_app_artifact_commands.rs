@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -53,7 +55,11 @@ fn copy_dir_all(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("source directory should be readable") {
         let entry = entry.expect("source entry should be readable");
         let target = destination.join(entry.file_name());
-        if entry.file_type().expect("file type should be readable").is_dir() {
+        if entry
+            .file_type()
+            .expect("file type should be readable")
+            .is_dir()
+        {
             copy_dir_all(&entry.path(), &target);
         } else {
             fs::copy(entry.path(), &target).expect("fixture file should copy");
@@ -61,7 +67,10 @@ fn copy_dir_all(source: &Path, destination: &Path) {
     }
 }
 
-fn open_app_aware_recipe(sessions: &mut DocumentSessionManager, workspace: &TempWorkspace) -> String {
+fn open_app_aware_recipe(
+    sessions: &mut DocumentSessionManager,
+    workspace: &TempWorkspace,
+) -> String {
     let response = request::handle_sidecar_value(
         json!({
             "id": "open",
@@ -73,7 +82,10 @@ fn open_app_aware_recipe(sessions: &mut DocumentSessionManager, workspace: &Temp
         }),
         sessions,
     );
-    assert_eq!(response["ok"], true, "openRecipe should succeed: {response}");
+    assert_eq!(
+        response["ok"], true,
+        "openRecipe should succeed: {response}"
+    );
     response["result"]["document"]["documentId"]
         .as_str()
         .expect("document id should be a string")
@@ -139,7 +151,7 @@ fn diagnostic_codes(document: &Value) -> Vec<String> {
 #[test]
 fn add_app_artifact_binds_existing_input_without_creating_inputs() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document_id = open_app_aware_recipe(&mut sessions, &workspace);
 
     let response = apply_command(
@@ -171,7 +183,10 @@ fn add_app_artifact_binds_existing_input_without_creating_inputs() {
     assert_eq!(input_ids, vec!["config".to_string()]);
 
     let yaml = document["yaml"].as_str().expect("yaml should be a string");
-    assert!(yaml.contains("input:\n      ref: inputs.config"), "yaml should bind the input: {yaml}");
+    assert!(
+        yaml.contains("input:\n      ref: inputs.config"),
+        "yaml should bind the input: {yaml}"
+    );
 
     let undone = request::handle_sidecar_value(
         json!({"id": "undo", "type": "undo", "payload": {"documentId": document_id}}),
@@ -185,13 +200,16 @@ fn add_app_artifact_binds_existing_input_without_creating_inputs() {
         &mut sessions,
     );
     assert_eq!(redone["ok"], true);
-    assert_eq!(artifact(&redone["result"]["document"], "extra_config")["input"], "config");
+    assert_eq!(
+        artifact(&redone["result"]["document"], "extra_config")["input"],
+        "config"
+    );
 }
 
 #[test]
 fn add_app_artifact_adds_parameterless_binding_variants() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document_id = open_app_aware_recipe(&mut sessions, &workspace);
 
     let response = apply_command(
@@ -208,14 +226,17 @@ fn add_app_artifact_adds_parameterless_binding_variants() {
     let extra = artifact(document, "extra_apk");
     assert_eq!(extra["appRef"], "second_app");
     assert_eq!(extra["artifact"], "apk");
-    assert!(extra["input"].is_null(), "an omitted input should stay absent: {extra}");
+    assert!(
+        extra["input"].is_null(),
+        "an omitted input should stay absent: {extra}"
+    );
     assert_eq!(extra["cache"], "default");
 }
 
 #[test]
 fn add_app_artifact_rejects_invalid_identifier_syntax_without_mutating_the_document() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document_id = open_app_aware_recipe(&mut sessions, &workspace);
 
     for (artifact_id, app_ref, artifact_name) in [
@@ -233,7 +254,10 @@ fn add_app_artifact_rejects_invalid_identifier_syntax_without_mutating_the_docum
                 "artifact": artifact_name
             }),
         );
-        assert_eq!(response["ok"], false, "invalid identifiers should be rejected: {response}");
+        assert_eq!(
+            response["ok"], false,
+            "invalid identifiers should be rejected: {response}"
+        );
     }
 
     let document = request::handle_sidecar_value(
@@ -248,7 +272,7 @@ fn add_app_artifact_rejects_invalid_identifier_syntax_without_mutating_the_docum
 #[test]
 fn update_app_artifact_fields_retain_dependent_values_and_surface_diagnostics() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document_id = open_app_aware_recipe(&mut sessions, &workspace);
 
     apply_command(
@@ -275,7 +299,10 @@ fn update_app_artifact_fields_retain_dependent_values_and_surface_diagnostics() 
     let document = command_document(&rebound);
     let extra = artifact(document, "extra");
     assert_eq!(extra["appRef"], "second_app");
-    assert_eq!(extra["artifact"], "apk", "dependent values must not be rewritten");
+    assert_eq!(
+        extra["artifact"], "apk",
+        "dependent values must not be rewritten"
+    );
     assert!(
         !diagnostic_codes(document).contains(&"app_artifact_unknown".to_string()),
         "second_app defines apk: {:?}",
@@ -294,7 +321,10 @@ fn update_app_artifact_fields_retain_dependent_values_and_surface_diagnostics() 
     );
     let document = command_document(&unknown_artifact);
     let extra = artifact(document, "extra");
-    assert_eq!(extra["artifact"], "config", "the retained value stays visible");
+    assert_eq!(
+        extra["artifact"], "config",
+        "the retained value stays visible"
+    );
     assert!(
         diagnostic_codes(document).contains(&"app_artifact_unknown".to_string()),
         "an App Definition that does not define the artifact must produce an actionable diagnostic: {:?}",
@@ -305,7 +335,7 @@ fn update_app_artifact_fields_retain_dependent_values_and_surface_diagnostics() 
 #[test]
 fn update_app_artifact_input_binding_binds_clears_and_rejects_remote_files() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document_id = open_app_aware_recipe(&mut sessions, &workspace);
 
     apply_command(
@@ -329,7 +359,10 @@ fn update_app_artifact_input_binding_binds_clears_and_rejects_remote_files() {
             "value": "config"
         }),
     );
-    assert_eq!(artifact(command_document(&bound), "extra")["input"], "config");
+    assert_eq!(
+        artifact(command_document(&bound), "extra")["input"],
+        "config"
+    );
 
     let cleared = apply_command(
         &mut sessions,
@@ -353,7 +386,10 @@ fn update_app_artifact_input_binding_binds_clears_and_rejects_remote_files() {
             "value": "Bad Input"
         }),
     );
-    assert_eq!(remote_file["ok"], false, "invalid input syntax should be rejected");
+    assert_eq!(
+        remote_file["ok"], false,
+        "invalid input syntax should be rejected"
+    );
 
     let installer = apply_command(
         &mut sessions,
@@ -365,7 +401,10 @@ fn update_app_artifact_input_binding_binds_clears_and_rejects_remote_files() {
             "value": "second_app"
         }),
     );
-    assert_eq!(installer["ok"], true, "app artifacts accept App-owned field updates");
+    assert_eq!(
+        installer["ok"], true,
+        "app artifacts accept App-owned field updates"
+    );
 
     let unknown_field = apply_command(
         &mut sessions,
@@ -386,7 +425,7 @@ fn update_app_artifact_input_binding_binds_clears_and_rejects_remote_files() {
 #[test]
 fn app_artifact_rename_duplicate_and_delete_rewrite_recipe_use_with_undo() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let document_id = open_app_aware_recipe(&mut sessions, &workspace);
 
     // A group that selects the installer artifact gives rename and delete a
@@ -411,27 +450,45 @@ fn app_artifact_rename_duplicate_and_delete_rewrite_recipe_use_with_undo() {
     let document = command_document(&renamed);
     assert!(artifact(document, "installer").is_null());
     assert_eq!(artifact(document, "installer_v2")["appRef"], "demo_app");
-    assert_eq!(document["recipe"]["artifactGroups"]["bundle"], json!(["installer_v2"]));
+    assert_eq!(
+        document["recipe"]["artifactGroups"]["bundle"],
+        json!(["installer_v2"])
+    );
     assert_eq!(
         step(document, "install_demo")["params"]["app"]["ref"],
         "artifacts.installer_v2.local_path"
     );
-    assert_eq!(step(document, "resolve_demo_apk")["params"]["artifacts"], json!(["installer_v2"]));
+    assert_eq!(
+        step(document, "resolve_demo_apk")["params"]["artifacts"],
+        json!(["installer_v2"])
+    );
 
     // Undo restores every rewritten reference; redo re-applies the rename.
     let undone = undo(&mut sessions, &document_id);
     let document = command_document(&undone);
-    assert!(!artifact(document, "installer").is_null(), "undo restores the artifact");
-    assert_eq!(document["recipe"]["artifactGroups"]["bundle"], json!(["installer"]));
+    assert!(
+        !artifact(document, "installer").is_null(),
+        "undo restores the artifact"
+    );
+    assert_eq!(
+        document["recipe"]["artifactGroups"]["bundle"],
+        json!(["installer"])
+    );
     assert_eq!(
         step(document, "install_demo")["params"]["app"]["ref"],
         "artifacts.installer.local_path"
     );
-    assert_eq!(step(document, "resolve_demo_apk")["params"]["artifacts"], json!(["installer"]));
+    assert_eq!(
+        step(document, "resolve_demo_apk")["params"]["artifacts"],
+        json!(["installer"])
+    );
 
     let redone = redo(&mut sessions, &document_id);
     let document = command_document(&redone);
-    assert!(!artifact(document, "installer_v2").is_null(), "redo re-applies the rename");
+    assert!(
+        !artifact(document, "installer_v2").is_null(),
+        "redo re-applies the rename"
+    );
 
     // Duplicate clones the artifact only: dependent step references keep
     // pointing at the source artifact.
@@ -460,16 +517,27 @@ fn app_artifact_rename_duplicate_and_delete_rewrite_recipe_use_with_undo() {
     assert!(artifact(document, "installer_v2").is_null());
     assert_eq!(document["recipe"]["artifactGroups"]["bundle"], json!([]));
     assert!(step(document, "install_demo")["params"]["app"].is_null());
-    assert_eq!(step(document, "resolve_demo_apk")["params"]["artifacts"], json!([]));
-    assert!(!artifact(document, "installer_copy").is_null(), "other artifacts stay");
+    assert_eq!(
+        step(document, "resolve_demo_apk")["params"]["artifacts"],
+        json!([])
+    );
+    assert!(
+        !artifact(document, "installer_copy").is_null(),
+        "other artifacts stay"
+    );
 
     let restored = undo(&mut sessions, &document_id);
     let document = command_document(&restored);
-    assert!(!artifact(document, "installer_v2").is_null(), "undo restores the deletion");
-    assert_eq!(document["recipe"]["artifactGroups"]["bundle"], json!(["installer_v2"]));
+    assert!(
+        !artifact(document, "installer_v2").is_null(),
+        "undo restores the deletion"
+    );
+    assert_eq!(
+        document["recipe"]["artifactGroups"]["bundle"],
+        json!(["installer_v2"])
+    );
     assert_eq!(
         step(document, "install_demo")["params"]["app"]["ref"],
         "artifacts.installer_v2.local_path"
     );
 }
-

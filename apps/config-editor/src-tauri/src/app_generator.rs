@@ -9,6 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -42,6 +43,7 @@ const GITHUB_API_ROOT: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 /// Reject retry hints beyond one day so untrusted headers cannot produce absurd guidance.
 const MAX_RATE_LIMIT_ADVISORY_SECONDS: u64 = 24 * 60 * 60;
+static NEXT_PUBLICATION_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -330,6 +332,11 @@ impl GeneratorRegistry {
         format!("{prefix}-{}", self.next_handle)
     }
 
+    fn allocate_publication(&mut self) -> String {
+        let sequence = NEXT_PUBLICATION_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        publication_operation_id(SystemTime::now(), std::process::id(), sequence)
+    }
+
     fn begin(&mut self) -> String {
         let handle = self.allocate("app-generator");
         self.sessions
@@ -346,6 +353,14 @@ impl GeneratorRegistry {
             .get_mut(handle)
             .ok_or_else(expired_session_error)
     }
+}
+
+fn publication_operation_id(created_at: SystemTime, process_id: u32, sequence: u64) -> String {
+    let created_at_nanos = created_at
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("publication-{created_at_nanos:x}-{process_id:x}-{sequence:x}")
 }
 
 #[tauri::command]
@@ -3034,7 +3049,7 @@ fn publish_review_via_transport(
             }
             Err(SaveGate::Blocking(record)) => return Ok(review_blocking_error(&record)),
             Ok(record) => {
-                let operation_id = registry.allocate("publication");
+                let operation_id = registry.allocate_publication();
                 registry.publications.insert(
                     operation_id.clone(),
                     PublicationRecord {
@@ -3215,6 +3230,15 @@ fn publication_status_via_transport(
         registry.publications.get(operation_id).cloned()
     };
     let Some(record) = record else {
+        let response = transport.request(
+            "appGeneratorPublicationStatus",
+            json!({ "operationId": operation_id }),
+        );
+        if let Ok(response) = response {
+            if let Some(result) = success_result(&response) {
+                return Ok(success(result.clone()));
+            }
+        }
         return Ok(success(publication_status_value(
             operation_id,
             "unknown",
@@ -4350,6 +4374,24 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn publication_operation_ids_do_not_repeat_after_registry_restart() {
+        let first = GeneratorRegistry::default().allocate_publication();
+        let after_restart = GeneratorRegistry::default().allocate_publication();
+
+        assert_ne!(first, after_restart);
+        assert!(first.starts_with("publication-"));
+        assert!(after_restart.starts_with("publication-"));
+    }
+
+    #[test]
+    fn publication_operation_ids_distinguish_a_restart_with_reused_pid_and_sequence() {
+        let before_restart = publication_operation_id(UNIX_EPOCH + Duration::from_nanos(1), 7, 1);
+        let after_restart = publication_operation_id(UNIX_EPOCH + Duration::from_nanos(2), 7, 1);
+
+        assert_ne!(before_restart, after_restart);
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     struct CapturedGitHubRequest {
@@ -6347,19 +6389,25 @@ mod tests {
     }
 
     #[test]
-    fn unknown_operation_ids_report_no_record_without_backend_contact() {
+    fn status_uses_durable_backend_record_after_native_process_relaunch() {
         let state = AppGeneratorState::default();
-        let transport =
-            ScriptedTransport::new(|operation, _| panic!("unexpected operation {operation}"));
+        let transport = ScriptedTransport::new(|operation, _| match operation {
+            "appGeneratorPublicationStatus" => Ok(success(json!({
+                "operationId": "publication-42",
+                "outcome": "saved",
+                "confirmed": true,
+                "recordedAt": null,
+                "detail": { "outcome": "saved", "operationId": "publication-42" },
+            }))),
+            other => panic!("unexpected operation {other}"),
+        });
         let status =
-            publication_status_via_transport(&transport, &state, "publication-404").unwrap();
+            publication_status_via_transport(&transport, &state, "publication-42").unwrap();
         let status = success_result(&status).unwrap();
-        assert_eq!(status["operationId"], "publication-404");
-        assert_eq!(status["outcome"], "unknown");
-        assert_eq!(status["confirmed"], false);
-        assert_eq!(status["recordedAt"], Value::Null);
-        assert_eq!(status["detail"]["reason"], "no_record");
-        assert_eq!(transport.request_count(), 0);
+        assert_eq!(status["operationId"], "publication-42");
+        assert_eq!(status["outcome"], "saved");
+        assert_eq!(status["confirmed"], true);
+        assert_eq!(transport.request_count(), 1);
     }
 
     #[test]

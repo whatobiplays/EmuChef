@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -61,7 +63,11 @@ fn copy_dir_all(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("source directory should be readable") {
         let entry = entry.expect("source entry should be readable");
         let target = destination.join(entry.file_name());
-        if entry.file_type().expect("file type should be readable").is_dir() {
+        if entry
+            .file_type()
+            .expect("file type should be readable")
+            .is_dir()
+        {
             copy_dir_all(&entry.path(), &target);
         } else {
             fs::copy(entry.path(), &target).expect("fixture file should copy");
@@ -86,7 +92,10 @@ fn open_recipe(
         }),
         sessions,
     );
-    assert_eq!(response["ok"], true, "openRecipe should succeed: {response}");
+    assert_eq!(
+        response["ok"], true,
+        "openRecipe should succeed: {response}"
+    );
     let document = response["result"]["document"].clone();
     let document_id = document["documentId"]
         .as_str()
@@ -147,7 +156,7 @@ fn document_yaml(document: &Value) -> &str {
 #[test]
 fn undefined_permission_set_is_reported_without_device_planning() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (_, document) = open_recipe(
         &mut sessions,
         &workspace,
@@ -164,7 +173,7 @@ fn undefined_permission_set_is_reported_without_device_planning() {
 #[test]
 fn missing_permission_set_selection_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (_, document) = open_recipe(
         &mut sessions,
         &workspace,
@@ -176,9 +185,8 @@ fn missing_permission_set_selection_is_reported() {
 #[test]
 fn permission_set_diagnostics_refresh_after_editor_commands() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (document_id, document) =
-        open_recipe(&mut sessions, &workspace, "demo.app.install.yaml");
+    let mut sessions = common::test_sessions();
+    let (document_id, document) = open_recipe(&mut sessions, &workspace, "demo.app.install.yaml");
     assert_missing_code(&document, "permission_set_missing");
 
     let selected = apply_command(
@@ -219,12 +227,8 @@ fn permission_set_diagnostics_refresh_after_editor_commands() {
 #[test]
 fn unknown_app_reference_is_retained_with_actionable_diagnostic() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (_, document) = open_recipe(
-        &mut sessions,
-        &workspace,
-        "demo.retained_unknown_app.yaml",
-    );
+    let mut sessions = common::test_sessions();
+    let (_, document) = open_recipe(&mut sessions, &workspace, "demo.retained_unknown_app.yaml");
     assert_has_code(&document, "app_definition_unknown");
     assert_eq!(
         document["recipe"]["steps"][0]["appRef"], "ghost_app",
@@ -240,7 +244,7 @@ fn unknown_app_reference_is_retained_with_actionable_diagnostic() {
 #[test]
 fn unused_unknown_app_artifact_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (_, document) = open_recipe(
         &mut sessions,
         &workspace,
@@ -256,31 +260,23 @@ fn unused_unknown_app_artifact_is_reported() {
 #[test]
 fn cross_app_install_provenance_is_rejected() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (_, document) = open_recipe(
-        &mut sessions,
-        &workspace,
-        "demo.cross_app_artifact.yaml",
-    );
+    let mut sessions = common::test_sessions();
+    let (_, document) = open_recipe(&mut sessions, &workspace, "demo.cross_app_artifact.yaml");
     assert_has_code(&document, "app_install_artifact_provenance_invalid");
 }
 
 #[test]
 fn launcher_unavailable_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (_, document) = open_recipe(
-        &mut sessions,
-        &workspace,
-        "demo.launcher_unavailable.yaml",
-    );
+    let mut sessions = common::test_sessions();
+    let (_, document) = open_recipe(&mut sessions, &workspace, "demo.launcher_unavailable.yaml");
     assert_has_code(&document, "app_launcher_activity_required");
 }
 
 #[test]
 fn app_context_inapplicable_is_reported_after_editor_command() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (document_id, _) = open_recipe(&mut sessions, &workspace, "demo.app.install.yaml");
 
     let response = apply_command(
@@ -309,7 +305,7 @@ fn app_context_inapplicable_is_reported_after_editor_command() {
 #[test]
 fn parameterless_condition_without_app_context_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (document_id, _) = open_recipe(&mut sessions, &workspace, "demo.target_usage.yaml");
 
     apply_command(
@@ -326,13 +322,16 @@ fn parameterless_condition_without_app_context_is_reported() {
             "verify": [{"type": "package_installed", "params": {}}]
         }),
     );
-    assert_has_code(command_document(&response), "app_condition_context_required");
+    assert_has_code(
+        command_document(&response),
+        "app_condition_context_required",
+    );
 }
 
 #[test]
 fn valid_app_aware_recipe_has_no_app_authority_diagnostics() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     for file_name in ["demo.app.install.yaml", "demo.target_usage.yaml"] {
         let (_, document) = open_recipe(&mut sessions, &workspace, file_name);
         let codes = diagnostic_codes(&document);
@@ -348,7 +347,7 @@ fn valid_app_aware_recipe_has_no_app_authority_diagnostics() {
 #[test]
 fn app_target_usage_is_valid_and_retained_after_app_change() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (document_id, document) = open_recipe(&mut sessions, &workspace, "demo.target_usage.yaml");
     let codes = diagnostic_codes(&document);
     assert!(
@@ -393,7 +392,7 @@ fn assert_artifact_code(document: &Value, artifact_id: &str, code: &str) {
 #[test]
 fn unused_user_provided_artifact_without_binding_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (_, document) = open_recipe(
         &mut sessions,
         &workspace,
@@ -405,34 +404,40 @@ fn unused_user_provided_artifact_without_binding_is_reported() {
 #[test]
 fn unused_binding_to_unknown_recipe_input_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
-    let (_, document) = open_recipe(
-        &mut sessions,
-        &workspace,
-        "demo.unknown_input_binding.yaml",
-    );
+    let mut sessions = common::test_sessions();
+    let (_, document) = open_recipe(&mut sessions, &workspace, "demo.unknown_input_binding.yaml");
     assert_artifact_code(&document, "config", "app_artifact_input_binding_invalid");
 }
 
 #[test]
 fn unused_bindings_to_incompatible_recipe_inputs_are_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (_, document) = open_recipe(
         &mut sessions,
         &workspace,
         "demo.incompatible_input_binding.yaml",
     );
-    assert_artifact_code(&document, "config_folder", "app_artifact_input_binding_invalid");
-    assert_artifact_code(&document, "config_many", "app_artifact_input_binding_invalid");
+    assert_artifact_code(
+        &document,
+        "config_folder",
+        "app_artifact_input_binding_invalid",
+    );
+    assert_artifact_code(
+        &document,
+        "config_many",
+        "app_artifact_input_binding_invalid",
+    );
 }
 
 #[test]
 fn binding_on_non_user_provided_artifact_is_reported() {
     let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
     let (_, document) = open_recipe(&mut sessions, &workspace, "demo.unsupported_binding.yaml");
-    assert_artifact_code(&document, "installer", "app_artifact_input_binding_unsupported");
+    assert_artifact_code(
+        &document,
+        "installer",
+        "app_artifact_input_binding_unsupported",
+    );
 }
-
-
