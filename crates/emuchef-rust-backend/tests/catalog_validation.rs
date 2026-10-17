@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use emuchef_rust_backend::{
-    jsonl, protocol, request, run_with_args_and_input, session::DocumentSessionManager,
+    protocol, request, run_with_args_and_input, session::DocumentSessionManager,
 };
 use serde_json::{json, Value};
+
+mod common;
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -65,17 +67,10 @@ fn one_shot_response(request: Value) -> Value {
 }
 
 fn sidecar_responses(requests: Vec<Value>) -> Vec<Value> {
-    let input = format!(
-        "{}\n",
-        requests
-            .into_iter()
-            .map(|request| request.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    jsonl::process_jsonl(&input)
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("sidecar response should be valid JSON"))
+    let mut sessions = common::test_sessions();
+    requests
+        .into_iter()
+        .map(|request| request::handle_sidecar_value(request, &mut sessions))
         .collect()
 }
 
@@ -239,6 +234,11 @@ fn capabilities_include_catalog_context_session_update() {
             "closeDocument",
             "applyRecipeCommand",
             "applyAppDefinitionCommand",
+            "previewCatalogChange",
+            "applyCatalogChange",
+            "catalogChangeStatus",
+            "listCatalogChangeRecoveries",
+            "retryCatalogChangeRecovery",
             "undo",
             "redo",
             "emitYaml",
@@ -535,7 +535,7 @@ fn set_document_authored_root_preserves_in_memory_content_when_disk_changes() {
     let recipe_path = workspace.recipe_path("main.yaml");
     let original_disk_yaml =
         fs::read_to_string(&recipe_path).expect("copied recipe should be readable");
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = common::test_sessions();
 
     let opened = request::handle_sidecar_value(
         json!({

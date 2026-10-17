@@ -3,6 +3,9 @@
 //! The suite exercises the registered backend modules and the same scoped
 //! Recipe validators used by execution planning.
 
+use emuchef_rust_backend::catalog_change::{
+    CatalogChangeCoordinator, OperationPhase, OperationRecord,
+};
 use emuchef_rust_backend::{app_definition_admission, app_definition_persistence, authored_models};
 
 use std::fs;
@@ -20,6 +23,8 @@ use authored_models::{
 };
 use indexmap::IndexMap;
 use tempfile::TempDir;
+
+mod common;
 
 fn app(id: &str, package_id: &str) -> AppDefinitionV1 {
     AppDefinitionV1 {
@@ -69,6 +74,7 @@ fn save_as_context(root: &Path, opened_path: &Path) -> AppDefinitionSaveContext 
 }
 
 fn catalog() -> TempDir {
+    common::test_application_data();
     let root = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("apps")).unwrap();
     fs::create_dir(root.path().join("recipes")).unwrap();
@@ -275,6 +281,55 @@ fn app_permission_parameters_exclude_legacy_actions_using_the_step_spec() {
     let recipe = recipe_with_step("  - id: permissions\n    type: grant_permissions\n    name: Permissions\n    user_toggleable: false\n    app_ref: sample\n    params:\n      permission_set: baseline\n      policy: {on_failure: warn}\n  - id: unrelated\n    type: grant_permissions\n    name: Unrelated\n    user_toggleable: false\n    app_ref: other_app\n    params:\n      runtime: {}\n      appops: {}\n");
     let admission = admission_for_recipe(&recipe, AppTargetKind::Directory);
     assert!(!admission.can_save(), "{:?}", admission.diagnostics);
+}
+
+#[test]
+fn app_definition_save_is_rejected_while_catalog_recovery_is_unresolved() {
+    let root = catalog();
+    let path = root.path().join("apps/sample.yaml");
+    let original = app("sample", "com.example.sample");
+    write_app(&path, &original);
+    let coordinator = CatalogChangeCoordinator::open(root.path()).expect("catalog coordinator");
+    let guard = coordinator
+        .acquire_publication()
+        .expect("publication guard");
+    coordinator
+        .begin_operation(
+            &guard,
+            OperationRecord::new("pending-app-save", "catalog-refactor", "request"),
+        )
+        .expect("journal operation");
+    coordinator
+        .transition(&guard, "pending-app-save", OperationPhase::Staged)
+        .expect("stage operation");
+    drop(guard);
+
+    let mut updated = original.clone();
+    updated.name = "Changed Name".to_string();
+    let admission =
+        admit_app_definition_save(&updated, &catalog_context(root.path(), &path, &original));
+    assert!(
+        admission.can_save(),
+        "admission: {:?}",
+        admission.diagnostics
+    );
+
+    let error = persist_app_definition(&updated, &admission)
+        .expect_err("unresolved catalog recovery must block ordinary App saves");
+    assert!(error.message.contains("recovery"), "{error}");
+    coordinator
+        .retry_recovery("pending-app-save", |guard, _record| {
+            coordinator.transition(guard, "pending-app-save", OperationPhase::Rejected)
+        })
+        .expect("reject test operation");
+    assert!(coordinator
+        .list_recoveries()
+        .expect("cleanup test journal")
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        authored_models::emit_app_definition_yaml(&original).unwrap()
+    );
 }
 
 #[test]

@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use emuchef_rust_backend::{jsonl, protocol, run_with_args_and_input};
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_path(name: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -23,6 +25,7 @@ fn parse_stdout_json(stdout: &str) -> Value {
 }
 
 fn one_shot_response(request: Value) -> Value {
+    common::test_application_data();
     let output = run_with_args_and_input(&[request.to_string()], "");
     assert_eq!(output.exit_code, 0);
     assert_eq!(output.stderr, "");
@@ -30,6 +33,7 @@ fn one_shot_response(request: Value) -> Value {
 }
 
 fn sidecar_responses(input: &str) -> Vec<Value> {
+    common::test_application_data();
     jsonl::process_jsonl(input)
         .lines()
         .map(|line| serde_json::from_str(line).expect("sidecar response should be valid JSON"))
@@ -267,6 +271,11 @@ fn capabilities_include_additive_product_runtime_surface() {
             "closeDocument",
             "applyRecipeCommand",
             "applyAppDefinitionCommand",
+            "previewCatalogChange",
+            "applyCatalogChange",
+            "catalogChangeStatus",
+            "listCatalogChangeRecoveries",
+            "retryCatalogChangeRecovery",
             "undo",
             "redo",
             "emitYaml",

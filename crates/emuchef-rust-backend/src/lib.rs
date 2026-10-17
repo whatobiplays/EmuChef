@@ -19,6 +19,8 @@ mod artifact_store;
 mod artifact_transport;
 pub mod authored_models;
 pub mod catalog;
+pub mod catalog_change;
+pub mod catalog_refactor;
 pub mod catalog_source;
 mod cli;
 pub mod commands;

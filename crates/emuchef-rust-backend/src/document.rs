@@ -5,12 +5,15 @@
 //! planner behavior and executor behavior out of this document abstraction
 //! slice while preserving the stored authoredRoot needed for validation refresh.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::catalog;
+use crate::catalog_change::{
+    snapshot_existing_file, CatalogChangeCoordinator, CatalogChangeError, FileSnapshot,
+    PublicationGuard,
+};
 use crate::commands::{ArtifactField, InputField, OverviewField, OverviewValue, RecipeCommand};
 use crate::model::{
     AppArtifactInputBinding, AppArtifactReference, InputDeclaration, InputValidation, OrderedMap,
@@ -24,6 +27,7 @@ use crate::yaml::{self, RecipeLoadError};
 pub struct RecipeDocument {
     path: PathBuf,
     authored_root: Option<PathBuf>,
+    persisted_snapshot: FileSnapshot,
     recipe: Recipe,
     current_yaml: String,
     saved_yaml: String,
@@ -44,13 +48,108 @@ struct ContentSnapshot {
     diagnostics: Vec<Value>,
 }
 
+fn with_destination_publication<T>(
+    authored_root: Option<&Path>,
+    destination: &Path,
+    storage_base: Option<&Path>,
+    publish: impl FnOnce(&CatalogChangeCoordinator, &PublicationGuard) -> Result<T, CatalogChangeError>,
+) -> Result<T, CatalogChangeError> {
+    let destination_coordinator =
+        CatalogChangeCoordinator::for_destination_with_storage(None, destination, storage_base)?;
+    let Some(authored_root) = authored_root else {
+        return destination_coordinator
+            .with_publication(|guard| publish(&destination_coordinator, guard));
+    };
+
+    let source_coordinator = match storage_base {
+        Some(storage_base) => {
+            CatalogChangeCoordinator::open_with_storage(authored_root, storage_base)
+        }
+        None => CatalogChangeCoordinator::open(authored_root),
+    }?;
+    CatalogChangeCoordinator::with_two_publications(
+        &source_coordinator,
+        &destination_coordinator,
+        |_source_guard, destination_guard| publish(&destination_coordinator, destination_guard),
+    )
+}
+
+fn with_recipe_publications<T>(
+    authored_root: Option<&Path>,
+    source_path: &Path,
+    destination: &Path,
+    storage_base: Option<&Path>,
+    publish: impl FnOnce(
+        &CatalogChangeCoordinator,
+        &PublicationGuard,
+        &CatalogChangeCoordinator,
+        &PublicationGuard,
+    ) -> Result<T, CatalogChangeError>,
+) -> Result<T, CatalogChangeError> {
+    let mut coordinators = Vec::with_capacity(3);
+    if let Some(authored_root) = authored_root {
+        coordinators.push(match storage_base {
+            Some(storage_base) => {
+                CatalogChangeCoordinator::open_with_storage(authored_root, storage_base)?
+            }
+            None => CatalogChangeCoordinator::open(authored_root)?,
+        });
+    }
+    let source_index = coordinators.len();
+    coordinators.push(CatalogChangeCoordinator::for_destination_with_storage(
+        None,
+        source_path,
+        storage_base,
+    )?);
+    let destination_index = coordinators.len();
+    coordinators.push(CatalogChangeCoordinator::for_destination_with_storage(
+        None,
+        destination,
+        storage_base,
+    )?);
+    let coordinator_refs = coordinators.iter().collect::<Vec<_>>();
+
+    CatalogChangeCoordinator::with_publications(&coordinator_refs, |guards| {
+        publish(
+            &coordinators[source_index],
+            guards[source_index],
+            &coordinators[destination_index],
+            guards[destination_index],
+        )
+    })
+}
+
+/// Capture the bytes and filesystem identity that must remain current after a
+/// Recipe publication completes.
+fn published_snapshot(
+    coordinator: &CatalogChangeCoordinator,
+    path: &Path,
+    expected_bytes: &[u8],
+) -> Result<FileSnapshot, CatalogChangeError> {
+    let snapshot = coordinator.snapshot_file(path)?.ok_or_else(|| {
+        CatalogChangeError::InvalidOperation(
+            "the published Recipe disappeared before its revision could be recorded".into(),
+        )
+    })?;
+    if snapshot.bytes != expected_bytes {
+        return Err(CatalogChangeError::InvalidOperation(
+            "the published Recipe changed before its revision could be recorded".into(),
+        ));
+    }
+    Ok(snapshot)
+}
+
 impl RecipeDocument {
+    /// Open the exact Recipe file revision that the document will later protect
+    /// from overwriting if another process changes it first.
     pub fn open(
         path: impl AsRef<Path>,
         authored_root: Option<&str>,
     ) -> Result<Self, RecipeLoadError> {
         let input_path = path.as_ref();
-        let recipe = yaml::load_recipe_from_path(input_path)?;
+        let persisted_snapshot = snapshot_existing_file(input_path)
+            .map_err(|error| RecipeLoadError::io(error.to_string()))?;
+        let recipe = yaml::load_recipe_from_bytes(&persisted_snapshot.bytes, input_path)?;
         let current_yaml = yaml::emit_recipe_yaml(&recipe)?;
         let path = PathBuf::from(yaml::resolved_path_string(input_path));
         let authored_root = catalog::normalize_authored_root(authored_root, &path);
@@ -61,6 +160,7 @@ impl RecipeDocument {
         Ok(Self {
             path,
             authored_root,
+            persisted_snapshot,
             recipe,
             saved_yaml: current_yaml.clone(),
             current_yaml,
@@ -84,13 +184,67 @@ impl RecipeDocument {
         recipe_id: &str,
         authored_root: Option<&str>,
     ) -> Result<Self, String> {
+        Self::create_from_template_with_storage(
+            template_path,
+            destination_path,
+            recipe_id,
+            authored_root,
+            None,
+        )
+    }
+
+    pub(crate) fn create_from_template_with_storage(
+        template_path: impl AsRef<Path>,
+        destination_path: impl AsRef<Path>,
+        recipe_id: &str,
+        authored_root: Option<&str>,
+        storage_base: Option<&Path>,
+    ) -> Result<Self, String> {
         let template_path = template_path.as_ref();
         let destination_path = destination_path.as_ref();
+        with_destination_publication(
+            authored_root.map(Path::new),
+            destination_path,
+            storage_base,
+            |coordinator, guard| {
+                coordinator.validate_destination(destination_path)?;
+                Self::create_from_template_uncoordinated(
+                    template_path,
+                    destination_path,
+                    recipe_id,
+                    authored_root,
+                    &coordinator,
+                    guard,
+                )
+                .map_err(CatalogChangeError::InvalidOperation)
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn create_from_template_uncoordinated(
+        template_path: &Path,
+        destination_path: &Path,
+        recipe_id: &str,
+        authored_root: Option<&str>,
+        coordinator: &CatalogChangeCoordinator,
+        guard: &PublicationGuard,
+    ) -> Result<Self, String> {
         let mut recipe =
             yaml::load_recipe_from_path(template_path).map_err(|error| error.to_string())?;
         recipe.id = recipe_id.to_string();
         let current_yaml = yaml::emit_recipe_yaml(&recipe).map_err(|error| error.to_string())?;
-        fs::write(destination_path, &current_yaml).map_err(|error| error.to_string())?;
+        Self::publish_recipe_bytes(
+            coordinator,
+            guard,
+            destination_path,
+            current_yaml.as_bytes(),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let persisted_snapshot =
+            published_snapshot(coordinator, destination_path, current_yaml.as_bytes())
+                .map_err(|error| error.to_string())?;
         let path = PathBuf::from(yaml::resolved_path_string(destination_path));
         let authored_root = catalog::normalize_authored_root(authored_root, &path);
         let diagnostics =
@@ -100,6 +254,7 @@ impl RecipeDocument {
         Ok(Self {
             path,
             authored_root,
+            persisted_snapshot,
             recipe,
             saved_yaml: current_yaml.clone(),
             current_yaml,
@@ -110,23 +265,158 @@ impl RecipeDocument {
         })
     }
 
+    /// Save this document only if its opened file revision is still current.
     pub fn save(&mut self) -> Result<(), String> {
-        self.current_yaml =
+        self.save_with_storage(None)
+    }
+
+    pub(crate) fn save_with_storage(&mut self, storage_base: Option<&Path>) -> Result<(), String> {
+        let authored_root = self.authored_root.clone();
+        let path = self.path.clone();
+        with_recipe_publications(
+            authored_root.as_deref(),
+            &path,
+            &path,
+            storage_base,
+            |source, source_guard, destination, destination_guard| {
+                source.publish_with_guard(source_guard, |_| {
+                    self.ensure_persisted_snapshot_current(source)
+                })?;
+                self.save_with_guard(destination, destination_guard)
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Save while a caller already owns the authored-root publication lock.
+    pub(crate) fn save_with_guard(
+        &mut self,
+        coordinator: &CatalogChangeCoordinator,
+        guard: &PublicationGuard,
+    ) -> Result<(), CatalogChangeError> {
+        coordinator.publish_with_guard(guard, |_| {
+            coordinator.validate_destination(&self.path)?;
+            self.save_uncoordinated(coordinator, guard)
+                .map_err(CatalogChangeError::InvalidOperation)
+        })
+    }
+
+    fn save_uncoordinated(
+        &mut self,
+        coordinator: &CatalogChangeCoordinator,
+        guard: &PublicationGuard,
+    ) -> Result<(), String> {
+        let current_yaml =
             yaml::emit_recipe_yaml(&self.recipe).map_err(|error| error.to_string())?;
-        fs::write(&self.path, &self.current_yaml).map_err(|error| error.to_string())?;
+        Self::publish_recipe_bytes(
+            coordinator,
+            guard,
+            &self.path,
+            current_yaml.as_bytes(),
+            Some(&self.persisted_snapshot),
+        )
+        .map_err(|error| error.to_string())?;
+        self.persisted_snapshot =
+            published_snapshot(coordinator, &self.path, current_yaml.as_bytes())
+                .map_err(|error| error.to_string())?;
+        self.current_yaml = current_yaml;
         self.saved_yaml = self.current_yaml.clone();
         self.refresh_diagnostics();
         Ok(())
     }
 
+    /// Save a current Recipe revision to a new path while coordinating both
+    /// the source and destination roots.
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
+        self.save_as_with_storage(path, None)
+    }
+
+    pub(crate) fn save_as_with_storage(
+        &mut self,
+        path: impl AsRef<Path>,
+        storage_base: Option<&Path>,
+    ) -> Result<(), String> {
+        let path = path.as_ref();
+        let authored_root = self.authored_root.clone();
+        let source_path = self.path.clone();
+        with_recipe_publications(
+            authored_root.as_deref(),
+            &source_path,
+            path,
+            storage_base,
+            |source, source_guard, destination, destination_guard| {
+                source.publish_with_guard(source_guard, |_| {
+                    self.ensure_persisted_snapshot_current(source)
+                })?;
+                self.save_as_with_guard(destination, destination_guard, path)
+            },
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Save As while a caller already owns the authored-root publication lock.
+    pub(crate) fn save_as_with_guard(
+        &mut self,
+        coordinator: &CatalogChangeCoordinator,
+        guard: &PublicationGuard,
+        path: &Path,
+    ) -> Result<(), CatalogChangeError> {
+        coordinator.publish_with_guard(guard, |_| {
+            coordinator.validate_destination(path)?;
+            self.save_as_uncoordinated(coordinator, guard, path)
+                .map_err(CatalogChangeError::InvalidOperation)
+        })
+    }
+
+    fn save_as_uncoordinated(
+        &mut self,
+        coordinator: &CatalogChangeCoordinator,
+        guard: &PublicationGuard,
+        path: &Path,
+    ) -> Result<(), String> {
         let current_yaml =
             yaml::emit_recipe_yaml(&self.recipe).map_err(|error| error.to_string())?;
-        fs::write(path.as_ref(), &current_yaml).map_err(|error| error.to_string())?;
+        Self::publish_recipe_bytes(coordinator, guard, path, current_yaml.as_bytes(), None)
+            .map_err(|error| error.to_string())?;
+        let persisted_snapshot = published_snapshot(coordinator, path, current_yaml.as_bytes())
+            .map_err(|error| error.to_string())?;
         self.path = PathBuf::from(yaml::resolved_path_string(path.as_ref()));
+        self.persisted_snapshot = persisted_snapshot;
         self.current_yaml = current_yaml;
         self.saved_yaml = self.current_yaml.clone();
         self.refresh_diagnostics();
+        Ok(())
+    }
+
+    fn publish_recipe_bytes(
+        coordinator: &CatalogChangeCoordinator,
+        guard: &PublicationGuard,
+        destination: &Path,
+        bytes: &[u8],
+        expected: Option<&FileSnapshot>,
+    ) -> Result<(), CatalogChangeError> {
+        let operation_id = match expected {
+            Some(expected) => coordinator.stage_file_write_with_expected_snapshot(
+                guard,
+                destination,
+                expected,
+                bytes,
+            )?,
+            None => coordinator.stage_file_write(guard, destination, bytes)?,
+        };
+        coordinator.publish_staged_file_write(guard, &operation_id)
+    }
+
+    fn ensure_persisted_snapshot_current(
+        &self,
+        coordinator: &CatalogChangeCoordinator,
+    ) -> Result<(), CatalogChangeError> {
+        if coordinator.snapshot_file(&self.path)?.as_ref() != Some(&self.persisted_snapshot) {
+            return Err(CatalogChangeError::InvalidOperation(
+                "the Recipe changed on disk since it was opened or last saved; reload before saving"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -541,17 +831,15 @@ impl RecipeDocument {
         if recipe.artifacts.contains_key(&artifact_id) {
             return Err(format!("Artifact {artifact_id:?} already exists."));
         }
-        recipe
-            .artifacts
-            .insert(
-                artifact_id,
-                RecipeArtifact::AppArtifact(AppArtifactReference {
-                    app_ref,
-                    artifact,
-                    input,
-                    cache: "default".to_string(),
-                }),
-            );
+        recipe.artifacts.insert(
+            artifact_id,
+            RecipeArtifact::AppArtifact(AppArtifactReference {
+                app_ref,
+                artifact,
+                input,
+                cache: "default".to_string(),
+            }),
+        );
         Ok(recipe)
     }
 
@@ -1057,6 +1345,12 @@ impl RecipeDocument {
         );
         self.app_catalog = catalog::project_app_catalog(self.authored_root.as_deref());
     }
+
+    /// Refresh catalog-backed choices and diagnostics without replacing the
+    /// recipe model, YAML buffer, dirty baseline, or undo/redo history.
+    pub(crate) fn refresh_catalog_projection(&mut self) {
+        self.refresh_diagnostics();
+    }
 }
 
 fn validation_diagnostics_for_recipe(
@@ -1358,21 +1652,21 @@ fn normalize_identifier(value: &str, label: &str) -> Result<String, String> {
     }
     Ok(normalized.to_string())
 }
-    /// Normalizes a value that names an authored catalog object.
-    ///
-    /// App-aware editor commands accept identifiers in the same lowercase
-    /// syntax the authored catalog loader enforces, so every accepted value can
-    /// later be resolved against a catalog entry. Values are trimmed before the
-    /// syntax check.
-    fn normalize_catalog_identifier(value: &str, label: &str) -> Result<String, String> {
-        let normalized = normalize_identifier(value, label)?;
-        if !crate::authored_models::is_valid_identifier(&normalized) {
-            return Err(format!(
-                "{label} {normalized:?} must use authored identifier syntax."
-            ));
-        }
-        Ok(normalized)
+/// Normalizes a value that names an authored catalog object.
+///
+/// App-aware editor commands accept identifiers in the same lowercase
+/// syntax the authored catalog loader enforces, so every accepted value can
+/// later be resolved against a catalog entry. Values are trimmed before the
+/// syntax check.
+fn normalize_catalog_identifier(value: &str, label: &str) -> Result<String, String> {
+    let normalized = normalize_identifier(value, label)?;
+    if !crate::authored_models::is_valid_identifier(&normalized) {
+        return Err(format!(
+            "{label} {normalized:?} must use authored identifier syntax."
+        ));
     }
+    Ok(normalized)
+}
 
 fn normalize_identifier_list(values: Vec<String>, label: &str) -> Result<Vec<String>, String> {
     let normalized = values
@@ -1589,5 +1883,219 @@ fn coerce_allowed_extensions(value: &Value) -> Result<Vec<String>, String> {
             Ok(extensions)
         }
         _ => Err("allowed_extensions must be a string, list, or tuple.".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod catalog_coordination_tests {
+    use super::*;
+    use crate::catalog_change::{CatalogChangeCoordinator, OperationPhase, OperationRecord};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn save_as_can_publish_to_another_catalog() {
+        let source = authored_root();
+        let other = authored_root();
+        let destination = other.path().join("escaped.yaml");
+        let mut document =
+            RecipeDocument::open(source.path().join("recipe.yaml"), source.path().to_str())
+                .unwrap();
+        document.save_as(&destination).unwrap();
+        assert!(destination.is_file());
+    }
+
+    #[test]
+    fn template_can_publish_to_another_catalog() {
+        let source = authored_root();
+        let other = authored_root();
+        let destination = other.path().join("escaped.yaml");
+        RecipeDocument::create_from_template(
+            source.path().join("recipe.yaml"),
+            &destination,
+            "new.recipe",
+            source.path().to_str(),
+        )
+        .unwrap();
+        assert!(destination.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_as_rejects_dangling_destination_symlink() {
+        let root = authored_root();
+        let target = root.path().join("missing.yaml");
+        let destination = root.path().join("symlink.yaml");
+        std::os::unix::fs::symlink(&target, &destination).unwrap();
+        let mut document =
+            RecipeDocument::open(root.path().join("recipe.yaml"), root.path().to_str()).unwrap();
+        assert!(document.save_as(&destination).is_err());
+        assert!(!target.exists());
+    }
+
+    fn authored_root() -> TempDir {
+        let temp = TempDir::new().expect("authored root");
+        fs::write(
+            temp.path().join("recipe.yaml"),
+            include_str!("../../../templates/authored/recipe.blank.template.yaml"),
+        )
+        .expect("write recipe fixture");
+        temp
+    }
+
+    fn leave_unresolved(root: &Path) -> CatalogChangeCoordinator {
+        let coordinator = CatalogChangeCoordinator::open(root).expect("coordinator");
+        let guard = coordinator.acquire_publication().expect("publication lock");
+        coordinator
+            .begin_operation(
+                &guard,
+                OperationRecord::new("writer-gate", "test", "stable-request"),
+            )
+            .expect("journal operation");
+        coordinator
+            .transition(&guard, "writer-gate", OperationPhase::Staged)
+            .expect("stage operation");
+        drop(guard);
+        coordinator
+    }
+
+    fn clear_test_recovery(coordinator: &CatalogChangeCoordinator) {
+        coordinator
+            .retry_recovery("writer-gate", |guard, _record| {
+                coordinator.transition(guard, "writer-gate", OperationPhase::Rejected)
+            })
+            .expect("terminalize test recovery");
+        let _guard = coordinator
+            .acquire_publication()
+            .expect("clean terminal test record");
+    }
+
+    #[test]
+    fn ordinary_recipe_save_is_rejected_when_recovery_is_unresolved() {
+        let root = authored_root();
+        let mut document = RecipeDocument::open(
+            root.path().join("recipe.yaml"),
+            Some(root.path().to_str().expect("utf8 temp path")),
+        )
+        .expect("open recipe");
+        let recovery = leave_unresolved(root.path());
+        let before = fs::read(root.path().join("recipe.yaml")).expect("original bytes");
+        assert!(document.save().is_err());
+        assert_eq!(
+            fs::read(root.path().join("recipe.yaml")).expect("unchanged bytes"),
+            before
+        );
+        clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn recipe_save_rejects_external_changes_since_open_without_overwriting_them() {
+        let root = authored_root();
+        let path = root.path().join("recipe.yaml");
+        let mut document =
+            RecipeDocument::open(&path, Some(root.path().to_str().expect("utf8 temp path")))
+                .expect("open recipe");
+        document.recipe.name = "stale local edit".to_string();
+        let external_bytes = b"external catalog rewrite\n";
+        fs::write(&path, external_bytes).expect("simulate another process rewrite");
+
+        let error = document
+            .save()
+            .expect_err("a stale Recipe buffer must not overwrite a concurrent rewrite");
+        assert!(error.contains("changed on disk"), "{error}");
+        assert_eq!(
+            fs::read(path).expect("external bytes remain"),
+            external_bytes
+        );
+    }
+
+    #[test]
+    fn recipe_save_as_is_rejected_when_recovery_is_unresolved() {
+        let root = authored_root();
+        let mut document = RecipeDocument::open(
+            root.path().join("recipe.yaml"),
+            Some(root.path().to_str().expect("utf8 temp path")),
+        )
+        .expect("open recipe");
+        let recovery = leave_unresolved(root.path());
+        let destination = root.path().join("save-as.yaml");
+        assert!(document.save_as(&destination).is_err());
+        assert!(!destination.exists());
+        clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn recipe_template_creation_is_rejected_when_recovery_is_unresolved() {
+        let root = authored_root();
+        let recovery = leave_unresolved(root.path());
+        let destination = root.path().join("from-template.yaml");
+        assert!(RecipeDocument::create_from_template(
+            root.path().join("recipe.yaml"),
+            &destination,
+            "new.recipe",
+            Some(root.path().to_str().expect("utf8 temp path")),
+        )
+        .is_err());
+        assert!(!destination.exists());
+        clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn save_as_outside_source_root_is_blocked_by_source_recovery() {
+        let source = authored_root();
+        let destination_dir = TempDir::new().expect("destination directory");
+        let destination = destination_dir.path().join("saved.yaml");
+        let mut document = RecipeDocument::open(
+            source.path().join("recipe.yaml"),
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect("open recipe");
+        let recovery = leave_unresolved(source.path());
+
+        let error = document
+            .save_as(&destination)
+            .expect_err("source recovery must block Save As");
+        assert!(error.to_lowercase().contains("recovery"), "{error}");
+        assert!(!destination.exists());
+        clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn save_as_into_another_catalog_is_blocked_by_destination_recovery() {
+        let source = authored_root();
+        let target = authored_root();
+        let destination = target.path().join("saved.yaml");
+        let mut document = RecipeDocument::open(
+            source.path().join("recipe.yaml"),
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect("open recipe");
+        let recovery = leave_unresolved(target.path());
+
+        let error = document
+            .save_as(&destination)
+            .expect_err("destination recovery must block Save As");
+        assert!(error.to_lowercase().contains("recovery"), "{error}");
+        assert!(!destination.exists());
+        clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn template_outside_source_root_is_blocked_by_source_recovery() {
+        let source = authored_root();
+        let destination_dir = TempDir::new().expect("destination directory");
+        let destination = destination_dir.path().join("from-template.yaml");
+        let recovery = leave_unresolved(source.path());
+
+        let error = RecipeDocument::create_from_template(
+            source.path().join("recipe.yaml"),
+            &destination,
+            "new.recipe",
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect_err("source recovery must block template publication");
+        assert!(error.to_lowercase().contains("recovery"), "{error}");
+        assert!(!destination.exists());
+        clear_test_recovery(&recovery);
     }
 }

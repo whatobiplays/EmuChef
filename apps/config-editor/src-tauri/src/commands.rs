@@ -379,6 +379,70 @@ pub fn apply_app_definition_command(
 }
 
 #[tauri::command]
+pub fn preview_catalog_change(
+    state: State<'_, SidecarState>,
+    document_id: String,
+    intent: Value,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "previewCatalogChange",
+        Some(json!({ "documentId": document_id, "intent": intent })),
+    )
+}
+
+#[tauri::command]
+pub fn apply_catalog_change(
+    state: State<'_, SidecarState>,
+    operation_id: String,
+    preview_token: String,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "applyCatalogChange",
+        Some(json!({ "operationId": operation_id, "previewToken": preview_token })),
+    )
+}
+
+#[tauri::command]
+pub fn catalog_change_status(
+    state: State<'_, SidecarState>,
+    authored_root: String,
+    operation_id: String,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "catalogChangeStatus",
+        Some(json!({ "authoredRoot": authored_root, "operationId": operation_id })),
+    )
+}
+
+#[tauri::command]
+pub fn list_catalog_change_recoveries(
+    state: State<'_, SidecarState>,
+    authored_root: String,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "listCatalogChangeRecoveries",
+        Some(json!({ "authoredRoot": authored_root })),
+    )
+}
+
+#[tauri::command]
+pub fn retry_catalog_change_recovery(
+    state: State<'_, SidecarState>,
+    authored_root: String,
+    operation_id: String,
+) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
+        "retryCatalogChangeRecovery",
+        Some(json!({ "authoredRoot": authored_root, "operationId": operation_id })),
+    )
+}
+
+#[tauri::command]
 pub fn undo(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
     request_without_transport_id(
         &state,

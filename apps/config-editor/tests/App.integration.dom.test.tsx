@@ -19,14 +19,18 @@ const mocks = vi.hoisted(() => ({
   closeWindow: vi.fn(),
   api: {
     applyAppDefinitionCommand: vi.fn(),
+    applyCatalogChangeWithStatusRecovery: vi.fn(),
     applyRecipeCommand: vi.fn(),
     emitYaml: vi.fn(),
     getConfigEditorAuthoredRoot: vi.fn(),
+    getDocument: vi.fn(),
+    listCatalogChangeRecoveries: vi.fn(),
     listStepSpecs: vi.fn(),
     openAppDefinition: vi.fn(),
     openRecipe: vi.fn(),
     openUserConfiguration: vi.fn(),
     redo: vi.fn(),
+    retryCatalogChangeRecovery: vi.fn(),
     saveAppDefinition: vi.fn(),
     saveAppDefinitionAs: vi.fn(),
     saveRecipe: vi.fn(),
@@ -320,14 +324,18 @@ beforeEach(() => {
   mocks.menuListener.mockReset();
   mocks.closeWindow.mockReset();
   mocks.api.applyAppDefinitionCommand.mockReset();
+  mocks.api.applyCatalogChangeWithStatusRecovery.mockReset();
   mocks.api.applyRecipeCommand.mockReset();
   mocks.api.emitYaml.mockReset();
   mocks.api.getConfigEditorAuthoredRoot.mockReset();
+  mocks.api.getDocument.mockReset();
+  mocks.api.listCatalogChangeRecoveries.mockReset();
   mocks.api.listStepSpecs.mockReset();
   mocks.api.openAppDefinition.mockReset();
   mocks.api.openRecipe.mockReset();
   mocks.api.openUserConfiguration.mockReset();
   mocks.api.redo.mockReset();
+  mocks.api.retryCatalogChangeRecovery.mockReset();
   mocks.api.saveAppDefinition.mockReset();
   mocks.api.saveAppDefinitionAs.mockReset();
   mocks.api.saveRecipe.mockReset();
@@ -350,6 +358,7 @@ beforeEach(() => {
     return Promise.resolve(() => undefined);
   });
   mocks.api.getConfigEditorAuthoredRoot.mockResolvedValue(apiSuccess({ authoredRoot: null }));
+  mocks.api.listCatalogChangeRecoveries.mockResolvedValue(apiSuccess({ recoveries: [] }));
   mocks.api.listStepSpecs.mockResolvedValue(apiSuccess({ stepSpecs: [] }));
   mocks.api.sidecarStatus.mockResolvedValue(
     apiSuccess({ running: true, pid: 123, compatible: true, protocolVersion: 1 }),
@@ -904,5 +913,63 @@ describe("Recipe validation refresh", () => {
         return menuState.canUndo === true;
       }),
     ).toBe(true);
+  });
+});
+
+describe("catalog recovery session reconciliation", () => {
+  it("surfaces and retries catalog recovery while a Recipe is active", async () => {
+    const user = userEvent.setup();
+    await mountEditor();
+    const recipe = recipeDocument();
+    mocks.openDialog.mockResolvedValueOnce(recipe.path);
+    mocks.api.openRecipe.mockResolvedValueOnce(apiSuccess({ document: recipe }));
+    mocks.api.listCatalogChangeRecoveries.mockResolvedValueOnce(apiSuccess({
+      recoveries: [{ operationId: "recipe-recovery", state: "recovery_required", changedFiles: [recipe.path] }],
+    }));
+    dispatchMenu("openRecipe");
+    await screen.findByRole("textbox", { name: "Name" });
+
+    mocks.api.retryCatalogChangeRecovery.mockResolvedValueOnce(apiSuccess({
+      operationId: "recipe-recovery",
+      state: "completed",
+      changedFiles: [recipe.path],
+    }));
+    mocks.api.getDocument.mockResolvedValueOnce(apiSuccess({ document: recipe }));
+    await user.click(await screen.findByRole("button", { name: "Retry recovery" }));
+
+    await waitFor(() => expect(mocks.api.retryCatalogChangeRecovery).toHaveBeenCalledWith(
+      "/catalog",
+      "recipe-recovery",
+    ));
+    expect(await screen.findByRole("textbox", { name: "Name" })).toBeTruthy();
+  });
+
+  it("closes a deleted App document when recovery completes but reload fails", async () => {
+    const user = userEvent.setup();
+    await mountEditor();
+    const document = appDocument("deleted-app-session", {
+      path: "/catalog/apps/deleted.yaml",
+      authoredRoot: "/catalog",
+      owningAuthoredRoot: "/catalog",
+      appDefinition: appDefinition({ id: "deleted", name: "Deleted", package_id: "com.example.deleted" }),
+    });
+    mocks.api.listCatalogChangeRecoveries.mockResolvedValueOnce(apiSuccess({
+      recoveries: [{ operationId: "delete-operation", state: "recovery_required", changedFiles: [document.path] }],
+    }));
+    await openAppDefinitionDocument(document);
+    mocks.api.retryCatalogChangeRecovery.mockResolvedValueOnce(apiSuccess({
+      operationId: "delete-operation",
+      state: "completed",
+      changedFiles: [document.path],
+    }));
+    mocks.api.getDocument.mockResolvedValueOnce(apiFailure("The App Definition file no longer exists."));
+    await user.click(await screen.findByRole("button", { name: "Retry recovery" }));
+
+    await waitFor(() => expect(mocks.api.retryCatalogChangeRecovery).toHaveBeenCalledWith(
+      "/catalog",
+      "delete-operation",
+    ));
+    await waitFor(() => expect(mocks.api.getDocument).toHaveBeenCalledWith(document.documentId));
+    await waitFor(() => expect(screen.queryByLabelText("App Definition editor")).toBeNull());
   });
 });

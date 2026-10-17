@@ -56,6 +56,11 @@ import type {
   RemoteApkDownloadResult,
   RemoteSourceAnalysisResult,
   RemoteSourceDescriptorDto,
+  CatalogChangeIntentDto,
+  CatalogChangePreviewDto,
+  CatalogChangeStatusDto,
+  CatalogChangeStatusResult,
+  CatalogChangeRecoveriesResult,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -136,6 +141,56 @@ export async function applyAppDefinitionCommand(
   command: AppDefinitionCommand,
 ): Promise<EditorApiResult<ApplyAppDefinitionCommandResult>> {
   return callApi<ApplyAppDefinitionCommandResult>("apply_app_definition_command", { documentId, command });
+}
+
+export async function previewCatalogChange(
+  documentId: string,
+  intent: CatalogChangeIntentDto,
+): Promise<EditorApiResult<CatalogChangePreviewDto>> {
+  return callApi<CatalogChangePreviewDto>("preview_catalog_change", { documentId, intent });
+}
+
+export async function applyCatalogChange(
+  operationId: string,
+  previewToken: string,
+): Promise<EditorApiResult<CatalogChangeStatusDto>> {
+  return callApi<CatalogChangeStatusDto>("apply_catalog_change", { operationId, previewToken });
+}
+
+/** Recover an apply response loss by reading the durable operation record. */
+export async function applyCatalogChangeWithStatusRecovery(
+  authoredRoot: string,
+  operationId: string,
+  previewToken: string,
+): Promise<EditorApiResult<CatalogChangeStatusDto>> {
+  const applied = await applyCatalogChange(operationId, previewToken);
+  if (applied.kind === "success") return applied;
+
+  const durableStatus = await catalogChangeStatus(authoredRoot, operationId);
+if (durableStatus.kind === "success" && durableStatus.result.operation !== null) {
+    return { kind: "success", result: durableStatus.result.operation };
+  }
+  return applied;
+}
+
+export async function catalogChangeStatus(
+  authoredRoot: string,
+  operationId: string,
+): Promise<EditorApiResult<CatalogChangeStatusResult>> {
+  return callApi<CatalogChangeStatusResult>("catalog_change_status", { authoredRoot, operationId });
+}
+
+export async function listCatalogChangeRecoveries(
+  authoredRoot: string,
+): Promise<EditorApiResult<CatalogChangeRecoveriesResult>> {
+  return callApi<CatalogChangeRecoveriesResult>("list_catalog_change_recoveries", { authoredRoot });
+}
+
+export async function retryCatalogChangeRecovery(
+  authoredRoot: string,
+  operationId: string,
+): Promise<EditorApiResult<CatalogChangeStatusDto>> {
+  return callApi<CatalogChangeStatusDto>("retry_catalog_change_recovery", { authoredRoot, operationId });
 }
 
 export async function undo(documentId: string): Promise<EditorApiResult<ApplyEditorCommandResult>> {

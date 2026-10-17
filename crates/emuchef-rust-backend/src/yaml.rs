@@ -57,7 +57,7 @@ impl RecipeLoadError {
         }
     }
 
-    fn io(message: impl Into<String>) -> Self {
+    pub(crate) fn io(message: impl Into<String>) -> Self {
         Self {
             kind: LoadErrorKind::Io,
             message: message.into(),
@@ -92,8 +92,30 @@ pub fn load_recipe_from_path(path: impl AsRef<Path>) -> Result<Recipe, RecipeLoa
     Ok(recipe)
 }
 
+/// Parse one captured Recipe file revision without reopening its path.
+///
+/// Editor sessions use this when opening a document so the parsed model and
+/// the saved filesystem identity refer to the same bytes.
+pub fn load_recipe_from_bytes(bytes: &[u8], path: &Path) -> Result<Recipe, RecipeLoadError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| RecipeLoadError::io(format!("recipe is not valid UTF-8: {error}")))?;
+    let raw = parse_yaml_mapping(text, path)?;
+    let recipe = parse_recipe_mapping(&raw, path)?;
+    if let Some(issue) = unsupported_step_issue(&recipe) {
+        return Err(RecipeLoadError::authored_data(
+            "Authored data validation failed",
+            issue,
+        ));
+    }
+    Ok(recipe)
+}
+
 pub fn load_yaml_mapping(path: &Path) -> Result<Mapping, RecipeLoadError> {
     let text = fs::read_to_string(path).map_err(|error| RecipeLoadError::io(error.to_string()))?;
+    parse_yaml_mapping(&text, path)
+}
+
+fn parse_yaml_mapping(text: &str, path: &Path) -> Result<Mapping, RecipeLoadError> {
     let value = serde_yaml::from_str::<YamlValue>(&text)
         .map_err(|error| RecipeLoadError::yaml_parse(error.to_string()))?;
     match value {

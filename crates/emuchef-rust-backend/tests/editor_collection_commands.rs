@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use emuchef_rust_backend::jsonl;
 use serde_json::{json, Value};
 
+mod common;
+
 fn fixture_path(name: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -39,6 +41,7 @@ fn read_golden(name: &str) -> Value {
 }
 
 fn sidecar_responses(input: &str) -> Vec<Value> {
+    common::test_application_data();
     jsonl::process_jsonl(input)
         .lines()
         .map(|line| serde_json::from_str(line).expect("sidecar response should be valid JSON"))
@@ -614,7 +617,11 @@ fn save_after_non_step_command_preserves_history_and_updates_baseline() {
     assert_eq!(undone["canUndo"], false);
     assert_eq!(undone["canRedo"], true);
 
-    assert_eq!(responses[3]["ok"], true);
+    assert_eq!(
+        responses[3]["ok"], true,
+        "save request failed: {:#?}",
+        responses[3]
+    );
     let saved = &responses[3]["result"]["document"];
     assert_eq!(saved["dirty"], false);
     assert_eq!(saved["canUndo"], false);

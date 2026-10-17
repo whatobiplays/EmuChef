@@ -13,10 +13,13 @@ use crate::app_definition_admission::{
     admit_generated_app_pair_save, GeneratedAppPairSnapshot, GeneratedAppSaveContext,
 };
 use crate::app_definition_persistence::{
-    capture_opened_app_definition_file, persist_generated_app_pair, persist_generated_app_pair_with,
-    GeneratedPairPersistFailure, OpenedAppDefinitionFile,
+    capture_opened_app_definition_file, persist_generated_app_pair,
+    persist_generated_app_pair_interrupt_after_recipe_for_test, persist_generated_app_pair_with,
+    persist_generated_app_pair_with_guard, GeneratedPairPersistFailure, OpenedAppDefinitionFile,
 };
 use crate::authored_models::{self, AppDefinitionV1};
+use crate::catalog_change::CatalogChangeCoordinator;
+use crate::catalog_refactor::{CatalogChangeState, CatalogRefactorSession};
 use crate::generation::{generate_app_recipe_draft, AppRecipeDraftRequest};
 use crate::model::Recipe;
 use crate::yaml;
@@ -109,6 +112,79 @@ fn catalog() -> tempfile::TempDir {
     fs::create_dir(root.path().join("apps")).unwrap();
     fs::create_dir(root.path().join("recipes")).unwrap();
     root
+}
+
+#[test]
+fn generated_pair_recovers_after_restart_between_recipe_and_app_publication() {
+    let catalog = catalog();
+    let root = catalog.path().canonicalize().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = pair_fixture(root.as_path(), "com.example.player");
+    let snapshot = admit(&fixture, root.as_path(), None);
+    let coordinator = CatalogChangeCoordinator::open_with_storage(&root, storage.path()).unwrap();
+    let operation_id = "app-generator-crash-after-recipe";
+
+    let guard = coordinator.acquire_publication().unwrap();
+    let interrupted = persist_generated_app_pair_interrupt_after_recipe_for_test(
+        operation_id,
+        &snapshot,
+        &coordinator,
+        &guard,
+    );
+    assert!(matches!(
+        interrupted,
+        Err(GeneratedPairPersistFailure::PublishedButUnsynchronized { .. })
+    ));
+    drop(guard);
+    assert!(fixture.recipe_destination.exists());
+    assert!(!fixture.app_destination.exists());
+
+    let restarted = CatalogRefactorSession::with_storage(storage.path().to_path_buf());
+    let discovered = restarted.list_recoveries(&root).unwrap();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].operation_id, operation_id);
+    assert_eq!(discovered[0].state, CatalogChangeState::RecoveryRequired);
+
+    let recovered = restarted
+        .retry_recovery(&root, operation_id, |_| Ok(()))
+        .unwrap();
+    assert_eq!(recovered.state, CatalogChangeState::Completed);
+    assert!(fixture.app_destination.exists());
+    assert_eq!(
+        fs::read_to_string(&fixture.recipe_destination).unwrap(),
+        fixture.recipe_canonical_yaml
+    );
+    let app_yaml = authored_models::emit_app_definition_yaml(&fixture.app).unwrap();
+    assert_eq!(
+        fs::read_to_string(&fixture.app_destination).unwrap(),
+        app_yaml
+    );
+    let committed_inode = fs::metadata(&fixture.app_destination).unwrap().ino();
+
+    let coordinator = CatalogChangeCoordinator::open_with_storage(&root, storage.path()).unwrap();
+    let guard = coordinator.acquire_publication().unwrap();
+    let replay = persist_generated_app_pair_with_guard(
+        operation_id,
+        &snapshot,
+        &coordinator,
+        &guard,
+        || panic!("terminal replay must not publish again"),
+    )
+    .unwrap();
+    drop(guard);
+    assert_eq!(replay.app.raw_bytes(), app_yaml.as_bytes());
+    assert_eq!(
+        fs::metadata(&fixture.app_destination).unwrap().ino(),
+        committed_inode
+    );
+    assert_eq!(
+        restarted
+            .status(&root, operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        CatalogChangeState::Completed
+    );
 }
 
 #[test]
@@ -258,8 +334,14 @@ fn generated_pair_publication_refuses_a_recipe_destination_that_already_exists()
 fn write_affected_recipe(root: &Path, fixture: &PairFixture) -> PathBuf {
     let canonical = fixture
         .recipe_canonical_yaml
-        .replace("app.example_player.install", "app.example_player.extra_install")
-        .replace("name: Install Example Player", "name: Existing Extra Install");
+        .replace(
+            "app.example_player.install",
+            "app.example_player.extra_install",
+        )
+        .replace(
+            "name: Install Example Player",
+            "name: Existing Extra Install",
+        );
     let path = root.join("recipes/app.example_player.extra_install.yaml");
     fs::write(&path, canonical).unwrap();
     path
@@ -344,7 +426,8 @@ fn generated_pair_publication_refuses_a_late_edit_to_an_affected_persisted_recip
 }
 
 #[test]
-fn generated_pair_publication_reports_recovery_when_the_recipe_inode_changed_under_identical_bytes() {
+fn generated_pair_publication_reports_recovery_when_the_recipe_inode_changed_under_identical_bytes()
+{
     let catalog = catalog();
     let root = catalog.path().canonicalize().unwrap();
     let fixture = pair_fixture(root.as_path(), "com.example.player");
@@ -360,9 +443,7 @@ fn generated_pair_publication_reports_recovery_when_the_recipe_inode_changed_und
         // hand the just-freed inode out again.
         let owned_inode = fs::metadata(&recipe_destination).unwrap().ino();
         fs::write(&replacement_source, fs::read(&recipe_destination).unwrap()).unwrap();
-        let replacement_inode = fs::metadata(&replacement_source)
-            .unwrap()
-            .ino();
+        let replacement_inode = fs::metadata(&replacement_source).unwrap().ino();
         assert_ne!(
             owned_inode, replacement_inode,
             "the replacement is a distinct inode"

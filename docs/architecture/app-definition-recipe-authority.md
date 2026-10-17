@@ -2,7 +2,7 @@
 
 **Status:** Accepted final v1 target architecture. The completed contract has no transitional legacy authority forms or fallback semantics. Implementation is proceeding incrementally, so some transitional forms remain until the final authored-data cutover; this document does not claim that every described capability is available today.
 
-The App Definition document editor and App Generator components already exist. Their complete authority-aware workflows, planner-derived Recipe availability ([#19](https://github.com/whatobiplays/EmuChef/issues/19)), catalog-backed Recipe controls ([#21](https://github.com/whatobiplays/EmuChef/issues/21)), atomic catalog refactors ([#22](https://github.com/whatobiplays/EmuChef/issues/22)), and final authored-data/contract cutover ([#23](https://github.com/whatobiplays/EmuChef/issues/23)) remain migration work. Generator workflow completion is tracked in [#20](https://github.com/whatobiplays/EmuChef/issues/20).
+The App Definition document editor, App Generator workflows, planner-derived Recipe availability ([#19](https://github.com/whatobiplays/EmuChef/issues/19)), catalog-backed Recipe controls ([#21](https://github.com/whatobiplays/EmuChef/issues/21)), and atomic catalog refactors ([#22](https://github.com/whatobiplays/EmuChef/issues/22)) are implemented. The final authored-data and v1 compatibility cutover remains pending under [#23](https://github.com/whatobiplays/EmuChef/issues/23).
 
 ## 1. Authority model
 
@@ -673,7 +673,17 @@ Generator inspection evidence is review-time data only and is not persisted as `
 
 ## 19. Catalog references and refactors
 
-In the target architecture, App Definition IDs, App Artifact IDs, and App Target IDs are stable cross-document identities that may be renamed through explicit **catalog refactor** operations. Implementing these operations remains migration work tracked by Issue #22.
+Issue #22 implements App, App Artifact, and App Target identity refactors as explicit preview-and-apply operations. The backend discovers references from typed Recipe fields only, returns the exact affected locations and canonical changed-file set, and binds a backend-generated single-use preview token to the operation ID and authoritative snapshot. Whole-App deletion uses the same dependency check and publication machinery and never cascades into Recipe or device deletion.
+
+All authored App and Recipe writers share one authored-root publication boundary. The boundary combines a process-local guard with a cross-process file lock, so ordinary Recipe save, Save As, template creation, App Definition save, and App Generator publication coordinate across editor instances and sidecar processes without reacquiring a lock already held by a grouped operation.
+
+Grouped publication stages files in the stable, private application-owned journal directory, synchronizes staged files and containing directories, rechecks the authoritative snapshot under the lock, and publishes by same-filesystem rename. Coordinators discover each root's journal by hashing its canonical authored path beneath the application data directory, so recovery does not depend on the working directory, catalog-local state, or a prior sidecar process. If application staging and the authored destination are on different filesystems, the operation is rejected before publication rather than falling back to an unsafe copy. Restrictive permissions, no-follow file access, ownership digests, and fail-closed unresolved recovery preserve safe replay across sidecar restart and complete application relaunch. The number of terminal `.json` records is count-bounded; older full records are renamed to `.receipt` files and retained for outcome replay and operation-ID reuse protection. Receipt storage therefore grows with terminal operations; pruning it requires a retention or acknowledgement policy that preserves the promised replay behavior.
+
+Preview rejection, completed publication, and unresolved recovery are distinct durable states. Repeating a completed apply request returns its terminal receipt from stable storage without republishing, including after the editor and sidecar have restarted. Staged overlay validation checks the changed App identity and typed reference closure plus catalog-global App identity and package uniqueness; it preserves unrelated pre-existing Recipe errors. Recovery discovery and retry are public editor operations. Retry re-scans the affected dependency closure under the recovery lock and fails closed when a Recipe added after preview introduces another reference to the old identity. It rolls safe work forward and rolls back only destinations whose current digest proves the operation still owns them. External edits are never overwritten. Clean affected sessions refresh after publication, including an App path change, while any dirty affected Recipe or App Definition blocks the operation as one aggregate conflict.
+
+This implemented refactor behavior does not perform the final schema-v1 authored-data or compatibility cutover. Those changes remain Issue #23 work.
+
+In the accepted architecture, App Definition IDs, App Artifact IDs, and App Target IDs are stable cross-document identities that may be renamed through explicit **catalog refactor** operations. Issue #22 implements that behavior; the detailed rules below define its current contract.
 
 An App Definition ID rename:
 - renames the App Definition ID;

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 
 import type {
   AppArtifactKindDto,
@@ -8,6 +8,9 @@ import type {
   AppReleaseProviderDto,
   AppTargetKindDto,
   AppTargetLocationDto,
+  CatalogChangeIntentDto,
+  CatalogChangePreviewDto,
+  CatalogChangeStatusDto,
 } from "../api/types";
 import {
   appArtifactFromDraft,
@@ -46,6 +49,12 @@ export interface AppDefinitionEditorProps {
   readonly onApply: (command: AppDefinitionCommand) => Promise<AppDefinitionV1Dto>;
   /** Installs an accepted command result in the parent document session. */
   readonly onDocumentAccepted: (appDefinition: AppDefinitionV1Dto) => void;
+  /** Requests an authoritative, single-use impact preview for an identity operation. */
+  readonly onPreviewCatalogChange: (intent: CatalogChangeIntentDto) => Promise<CatalogChangePreviewDto>;
+  /** Applies an exact preview and refreshes the open document session after durable publication. */
+  readonly onApplyCatalogChange: (operationId: string, previewToken: string) => Promise<CatalogChangeStatusDto>;
+  readonly onListCatalogChangeRecoveries: () => Promise<CatalogChangeStatusDto[]>;
+  readonly onRetryCatalogChangeRecovery: (operationId: string) => Promise<CatalogChangeStatusDto>;
 }
 
 /** Accessible schema-v1 forms that apply one typed command at a time. */
@@ -57,6 +66,10 @@ export function AppDefinitionEditor({
   onDraftChange,
   onApply,
   onDocumentAccepted,
+  onPreviewCatalogChange,
+  onApplyCatalogChange,
+  onListCatalogChangeRecoveries,
+  onRetryCatalogChangeRecovery,
 }: AppDefinitionEditorProps) {
   const [applying, setApplying] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -181,6 +194,16 @@ export function AppDefinitionEditor({
             </button>
           </div>
         ) : null}
+
+        <CatalogIdentitySection
+          appDefinition={appDefinition}
+          disabled={controlDisabled}
+          hasPendingFormInput={isAppDefinitionEditorDraftDirty(draft, appDefinition)}
+          onPreview={onPreviewCatalogChange}
+          onApply={onApplyCatalogChange}
+          onListRecoveries={onListCatalogChangeRecoveries}
+          onRetryRecovery={onRetryCatalogChangeRecovery}
+        />
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <EditorField
             label="App ID"
@@ -291,6 +314,270 @@ export function AppDefinitionEditor({
         applyCommand={applyCommand}
       />
     </div>
+  );
+}
+
+type CatalogIdentityOperation = "renameApp" | "renameArtifact" | "renameTarget" | "deleteApp";
+
+/** Explicit preview/confirm surface for App-owned identity changes. */
+function describeCatalogChangeIntent(intent: CatalogChangeIntentDto): string {
+  switch (intent.kind) {
+    case "renameApp":
+      return `Rename App "${intent.appId}" to "${intent.newId}"`;
+    case "renameArtifact":
+      return `Rename Artifact "${intent.artifactId}" in App "${intent.appId}" to "${intent.newId}"`;
+    case "renameTarget":
+      return `Rename Target "${intent.targetId}" in App "${intent.appId}" to "${intent.newId}"`;
+    case "deleteApp":
+      return `Delete App "${intent.appId}"`;
+  }
+}
+
+function CatalogIdentitySection({
+  appDefinition,
+  disabled,
+  hasPendingFormInput,
+  onPreview,
+  onApply,
+  onListRecoveries,
+  onRetryRecovery,
+}: {
+  readonly appDefinition: AppDefinitionV1Dto;
+  readonly disabled: boolean;
+  readonly hasPendingFormInput: boolean;
+  readonly onPreview: (intent: CatalogChangeIntentDto) => Promise<CatalogChangePreviewDto>;
+  readonly onApply: (operationId: string, previewToken: string) => Promise<CatalogChangeStatusDto>;
+  readonly onListRecoveries: () => Promise<CatalogChangeStatusDto[]>;
+  readonly onRetryRecovery: (operationId: string) => Promise<CatalogChangeStatusDto>;
+}) {
+  const [operation, setOperation] = useState<CatalogIdentityOperation>("renameApp");
+  const [memberId, setMemberId] = useState("");
+  const [newId, setNewId] = useState("");
+  const [preview, setPreview] = useState<CatalogChangePreviewDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
+  const [recoveries, setRecoveries] = useState<CatalogChangeStatusDto[]>([]);
+  const artifacts = Object.keys(appDefinition.artifacts ?? {});
+  const targets = Object.keys(appDefinition.targets ?? {});
+  const memberOptions = operation === "renameArtifact" ? artifacts : targets;
+
+  useEffect(() => {
+    let active = true;
+    void onListRecoveries()
+      .then((items) => { if (active) setRecoveries(items); })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Catalog recovery discovery failed."); });
+    return () => { active = false; };
+  }, [appDefinition.id, onListRecoveries]);
+
+  const impactDialogRef = useRef<HTMLDivElement>(null);
+  const previewOpen = preview !== null;
+  useEffect(() => {
+    if (!previewOpen) return;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    impactDialogRef.current?.focus();
+    return () => {
+      previousFocus?.focus();
+    };
+  }, [previewOpen]);
+
+  const handleImpactDialogKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!working) setPreview(null);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (
+      event.shiftKey &&
+      (document.activeElement === first || document.activeElement === event.currentTarget)
+    ) {
+      event.preventDefault();
+      last.focus();
+    } else if (
+      !event.shiftKey &&
+      (document.activeElement === last || document.activeElement === event.currentTarget)
+    ) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const buildIntent = (): CatalogChangeIntentDto => {
+    if (operation === "renameApp") return { kind: operation, appId: appDefinition.id, newId };
+    if (operation === "deleteApp") return { kind: operation, appId: appDefinition.id };
+    if (operation === "renameArtifact") {
+      return { kind: operation, appId: appDefinition.id, artifactId: memberId, newId };
+    }
+    return { kind: operation, appId: appDefinition.id, targetId: memberId, newId };
+  };
+
+  const requestPreview = async () => {
+    setError(null);
+    if (hasPendingFormInput) {
+      setError("Apply or discard pending App Definition form input before previewing a catalog change.");
+      return;
+    }
+    if (operation !== "deleteApp" && !newId.trim()) {
+      setError("A new ID is required.");
+      return;
+    }
+    if ((operation === "renameArtifact" || operation === "renameTarget") && !memberId) {
+      setError("Select the App-owned identity to rename.");
+      return;
+    }
+    setWorking(true);
+    try {
+      setPreview(await onPreview(buildIntent()));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Catalog change preview failed.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const applyPreview = async () => {
+    if (preview === null) return;
+    setWorking(true);
+    setError(null);
+    let refreshRecoveries = false;
+    try {
+      const status = await onApply(preview.operationId, preview.previewToken);
+      if (status.state !== "completed") {
+        refreshRecoveries = true;
+        setPreview(null);
+        setNewId("");
+        setMemberId("");
+        const message =
+          status.state === "rejected"
+            ? "Catalog change was rejected before publication."
+            : status.state === "recovery_required"
+              ? "Catalog change is unresolved and requires recovery."
+              : "Catalog change is still in progress; check its durable status before retrying.";
+        throw new Error(message);
+      }
+      setPreview(null);
+      setNewId("");
+      setMemberId("");
+    } catch (reason) {
+      refreshRecoveries = true;
+      setError(reason instanceof Error ? reason.message : "Catalog change apply failed.");
+    } finally {
+      if (refreshRecoveries) {
+        try {
+          setRecoveries(await onListRecoveries());
+        } catch {
+          // Preserve the publication error as the primary recovery message.
+        }
+      }
+      setWorking(false);
+    }
+  };
+
+  return (
+    <section className="mt-4 space-y-3 rounded border border-slate-300 bg-slate-50 p-3" aria-labelledby="catalog-identity-heading">
+      <h3 id="catalog-identity-heading" className="font-semibold">Catalog identity operations</h3>
+      <p className="text-sm text-slate-600">Preview every typed Recipe reference and changed file before publishing an App, Artifact, or Target identity change.</p>
+      <div className="grid gap-3 md:grid-cols-3">
+        <SelectInput
+          label="Operation"
+          value={operation}
+          disabled={disabled || working || preview !== null}
+          options={[
+            { value: "renameApp", label: "Rename App" },
+            { value: "renameArtifact", label: "Rename Artifact" },
+            { value: "renameTarget", label: "Rename Target" },
+            { value: "deleteApp", label: "Delete whole App" },
+          ]}
+          onChange={(value) => { setOperation(value as CatalogIdentityOperation); setMemberId(""); setPreview(null); }}
+        />
+        {operation === "renameArtifact" || operation === "renameTarget" ? (
+          <SelectInput label="Existing ID" value={memberId} disabled={disabled || working || preview !== null} options={memberOptions.map((value) => ({ value, label: value }))} onChange={setMemberId} />
+        ) : null}
+        {operation !== "deleteApp" ? (
+          <TextInput label="New ID" value={newId} disabled={disabled || working || preview !== null} onChange={setNewId} />
+        ) : null}
+      </div>
+      <button className="rounded border border-slate-400 bg-white px-3 py-1.5 text-sm font-medium" type="button" disabled={disabled || working || preview !== null || hasPendingFormInput} onClick={() => { void requestPreview(); }}>
+        Preview catalog impact
+      </button>
+      {hasPendingFormInput ? <p className="text-sm text-amber-800">Catalog changes are blocked while this form has unapplied input.</p> : null}
+      <InlineError message={error ?? undefined} />
+      {recoveries.length > 0 ? (
+        <div className="space-y-2 rounded border border-amber-400 bg-amber-50 p-3" role="status">
+          <p className="text-sm font-medium text-amber-950">Unresolved catalog publication blocks authored App and Recipe writes.</p>
+          {recoveries.map((recovery) => (
+            <div key={recovery.operationId} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+              <span>{recovery.operationId} ({recovery.state})</span>
+              <button
+                className="rounded border border-amber-600 bg-white px-2 py-1"
+                type="button"
+                disabled={working}
+                onClick={() => {
+                  setWorking(true);
+                  setError(null);
+                  void onRetryRecovery(recovery.operationId)
+                    .then((status) => setRecoveries((current) => current.filter((item) => item.operationId !== status.operationId || status.state !== "completed")))
+                    .catch((reason) => setError(reason instanceof Error ? reason.message : "Catalog recovery retry failed."))
+                    .finally(() => setWorking(false));
+                }}
+              >
+                Retry recovery
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {preview !== null ? (
+        <div
+          ref={impactDialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="catalog-impact-heading"
+          className="space-y-3 rounded border border-slate-500 bg-white p-4 shadow"
+          tabIndex={-1}
+          onKeyDown={handleImpactDialogKeyDown}
+        >
+          <h4 id="catalog-impact-heading" className="font-semibold">Confirm catalog impact</h4>
+          <p className="text-sm font-medium">Intent: {describeCatalogChangeIntent(preview.intent)}</p>
+          <p className="text-sm">{preview.references.length} typed reference{preview.references.length === 1 ? "" : "s"} across {preview.changedFiles.length} changed file{preview.changedFiles.length === 1 ? "" : "s"}.</p>
+          <ul className="max-h-40 list-disc overflow-auto pl-5 text-sm">
+            {preview.references.map((reference) => <li key={`${reference.path}:${reference.object}:${reference.field}`}>{reference.path}: {reference.object}.{reference.field}</li>)}
+          </ul>
+          <ul className="max-h-32 list-disc overflow-auto pl-5 text-sm text-slate-600">
+            {preview.changedFiles.map((path) => <li key={path}>{path}</li>)}
+          </ul>
+          {preview.blockers.length > 0 ? (
+            <div role="alert" className="rounded border border-amber-500 bg-amber-50 p-3 text-sm text-amber-950">
+              <p className="font-medium">Resolve these unsaved sessions before applying:</p>
+              <ul className="mt-2 list-disc pl-5">
+                {preview.blockers.map((blocker) => (
+                  <li key={`${blocker.path}:${blocker.reason}`}>
+                    <span className="font-mono">{blocker.path}</span>: {blocker.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <div className="flex gap-2">
+            <button className="rounded border border-red-600 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-800" type="button" disabled={working || preview.blockers.length > 0} onClick={() => { void applyPreview(); }}>Apply catalog change</button>
+            <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" disabled={working} onClick={() => setPreview(null)}>Cancel</button>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

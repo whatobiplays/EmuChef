@@ -178,10 +178,11 @@ fn admit_app_definition_save_inner(
         })
         .collect::<Vec<_>>();
 
-    let mut snapshot = match prepare_save_snapshot(value, context, &mut diagnostics, expect_new_destination) {
-        Some(snapshot) => Some(snapshot),
-        None => None,
-    };
+    let mut snapshot =
+        match prepare_save_snapshot(value, context, &mut diagnostics, expect_new_destination) {
+            Some(snapshot) => Some(snapshot),
+            None => None,
+        };
 
     if let Some(current) = snapshot.as_ref() {
         if let Err(error) = verify_admission_snapshot(current) {
@@ -508,9 +509,7 @@ pub fn admit_generated_app_pair_save(
                 return GeneratedAppPairAdmission {
                     diagnostics: vec![diagnostic(
                         "app_definition_stale_state",
-                        format!(
-                            "The opened App Definition can no longer be identified: {message}"
-                        ),
+                        format!("The opened App Definition can no longer be identified: {message}"),
                         Some(&opened.path),
                         Some("app_definition"),
                         None,
@@ -656,9 +655,7 @@ fn validate_proposed_recipe_overlay(
                 Err(message) => {
                     diagnostics.push(diagnostic(
                         "app_dependency_classification_incomplete",
-                        format!(
-                            "Recipe references cannot be classified from this file: {message}"
-                        ),
+                        format!("Recipe references cannot be classified from this file: {message}"),
                         Some(&file.path),
                         Some("recipe"),
                         None,
@@ -680,9 +677,7 @@ fn validate_proposed_recipe_overlay(
                 Err(message) => {
                     diagnostics.push(diagnostic(
                         "app_dependency_classification_incomplete",
-                        format!(
-                            "App references cannot be classified from this file: {message}"
-                        ),
+                        format!("App references cannot be classified from this file: {message}"),
                         Some(&file.path),
                         Some("app_definition"),
                         None,
@@ -769,7 +764,6 @@ pub(crate) fn classify_affected_recipes(
     }
     summaries
 }
-
 
 fn canonical_authored_root(root: &Path) -> Result<PathBuf, AppDefinitionPersistenceError> {
     let metadata = fs::symlink_metadata(root).map_err(|error| {
