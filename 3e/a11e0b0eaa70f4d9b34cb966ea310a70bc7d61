@@ -1,0 +1,19 @@
+docs/testing/phase-6d6/ui-binding-index.json
+  s_f5b75fc174c523::t_1d81b084c16e8c 6,203
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3ea11e0b0eaa70f4d9b34cb966ea310a70bc7d61",
+  "prompts": {},
+  "sessions": {
+    "s_f5b75fc174c523": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c05-9763-7f90-9bc7-8b4deb3560fe",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
