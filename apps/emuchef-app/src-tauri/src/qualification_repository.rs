@@ -535,6 +535,7 @@ impl QualificationRepository {
     }
 
     /// Returns the normalized trusted repository root used for every operation.
+    #[cfg(test)]
     pub(crate) fn repo_root(&self) -> &Path {
         &self.repo_root
     }

@@ -27,9 +27,7 @@ use crate::executor::{
     ProgressPhase, ProgressStatus, SandboxRoots, StepFailureKind, StepRunStatus,
 };
 use crate::model::OrderedMap;
-use crate::planner::{
-    ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, RuntimeValue, TargetDeviceBinding,
-};
+use crate::planner::{ExecutionArtifactSource, ExecutionPlan, RuntimeValue, TargetDeviceBinding};
 
 /// Filesystem and executable policy fixed when the sidecar starts.
 #[derive(Clone, Debug)]
@@ -582,42 +580,20 @@ fn eligible_launch_candidate(
         if step.type_name != "launch_app" || !succeeded_steps.contains(step.id.as_str()) {
             continue;
         }
-        if step.app_id.is_some() {
-            let candidate =
-                crate::planner::validated_plan_lifecycle_target(&report.reviewed_plan, step)
-                    .map_err(|reason| {
-                        ApiError::new(
-                            ApiErrorCode::LaunchUnavailable,
-                            "The retained app launch does not match its reviewed App snapshot.",
-                            json!({ "reason": reason }),
-                        )
-                    })?;
-            candidates.insert(candidate);
+        if step.app_id.is_none() {
             continue;
         }
-        let Some(ExecutionParamValue::Literal {
-            value: package_name,
-        }) = step.params.get("package_name")
-        else {
-            continue;
-        };
-        let Some(package_name) = package_name
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            continue;
-        };
-        let activity = match step.params.get("activity") {
-            None | Some(ExecutionParamValue::Literal { value: Value::Null }) => None,
-            Some(ExecutionParamValue::Literal { value }) => {
-                let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) else {
-                    continue;
-                };
-                Some(value.to_string())
-            }
-            Some(ExecutionParamValue::Ref { .. }) => continue,
-        };
-        candidates.insert((package_name.to_string(), activity));
+        let candidate =
+            crate::planner::validated_plan_lifecycle_target(&report.reviewed_plan, step).map_err(
+                |reason| {
+                    ApiError::new(
+                        ApiErrorCode::LaunchUnavailable,
+                        "The retained app launch does not match its reviewed App snapshot.",
+                        json!({ "reason": reason }),
+                    )
+                },
+            )?;
+        candidates.insert(candidate);
     }
 
     if candidates.len() != 1 {
@@ -1008,12 +984,20 @@ fn redact_host_path_value(value: &mut Value) -> bool {
             *value = json!("[redacted]");
             true
         }
-        Value::Array(values) => values.iter_mut().fold(false, |redacted, value| {
-            redact_host_path_value(value) || redacted
-        }),
-        Value::Object(values) => values.values_mut().fold(false, |redacted, value| {
-            redact_host_path_value(value) || redacted
-        }),
+        Value::Array(values) => {
+            let mut redacted = false;
+            for value in values {
+                redacted |= redact_host_path_value(value);
+            }
+            redacted
+        }
+        Value::Object(values) => {
+            let mut redacted = false;
+            for value in values.values_mut() {
+                redacted |= redact_host_path_value(value);
+            }
+            redacted
+        }
         Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
@@ -2382,32 +2366,26 @@ mod tests {
         };
         let mut plan = test_plan("__test_execution_transport_failure__");
         plan.target_device = Some(target.clone());
-        let mut first_params = OrderedMap::new();
-        first_params.insert(
-            "runtime".to_string(),
-            ExecutionParamValue::Literal {
-                value: json!([{
-                    "package_name": "com.example.first",
-                    "name": "android.permission.CAMERA",
-                    "required": true
-                }]),
+        plan.apps = vec![
+            crate::planner::ExecutionAppSnapshot {
+                id: "app.first".to_string(),
+                name: "First".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.example.first".to_string(),
             },
-        );
-        let mut second_params = OrderedMap::new();
-        second_params.insert(
-            "runtime".to_string(),
-            ExecutionParamValue::Literal {
-                value: json!([{
-                    "package_name": "com.example.second",
-                    "name": "android.permission.CAMERA",
-                    "required": true
-                }]),
+            crate::planner::ExecutionAppSnapshot {
+                id: "app.second".to_string(),
+                name: "Second".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.example.second".to_string(),
             },
-        );
-        let grant = |id: &str, name: &str, params: OrderedMap<ExecutionParamValue>| ExecutionStep {
+        ];
+        let grant = |id: &str, name: &str, app_id: &str, package_name: &str| ExecutionStep {
             id: id.to_string(),
             recipe_ref: "recipe.example".to_string(),
-            app_id: None,
+            app_id: Some(app_id.to_string()),
             type_name: "grant_permissions".to_string(),
             name: name.to_string(),
             note: name.to_string(),
@@ -2416,14 +2394,34 @@ mod tests {
                 capabilities: Vec::new(),
                 conflicts_with: Vec::new(),
             },
-            permission_plan: None,
-            params,
+            permission_plan: Some(crate::planner::PermissionPlan {
+                permission_set: crate::planner::PermissionSetKind::Baseline,
+                on_failure: crate::planner::PermissionFailurePolicy::Fail,
+                actions: vec![crate::planner::PermissionPlanAction::RuntimePermission {
+                    package_name: package_name.to_string(),
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                    applicability: crate::planner::PermissionActionApplicability::Applicable,
+                }],
+            }),
+            params: OrderedMap::new(),
             skip_if: Vec::new(),
             verify: Vec::new(),
         };
         plan.steps = vec![
-            grant("recipe.example/first", "First", first_params),
-            grant("recipe.example/transport", "Transport", second_params),
+            grant(
+                "recipe.example/first",
+                "First",
+                "app.first",
+                "com.example.first",
+            ),
+            grant(
+                "recipe.example/transport",
+                "Transport",
+                "app.second",
+                "com.example.second",
+            ),
             ExecutionStep {
                 id: "recipe.example/unrelated".to_string(),
                 recipe_ref: "recipe.example".to_string(),
@@ -2946,16 +2944,47 @@ mod tests {
         report
     }
 
+    fn app_aware_eligible_report(status: ExecutionStatus) -> ExecutionReport {
+        let mut report = eligible_report(status);
+        report.reviewed_plan.steps[0].app_id = Some("example-app".to_string());
+        report.reviewed_plan.steps[0].params.insert(
+            "activity".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!("com.example.app.MainActivity"),
+            },
+        );
+        report
+            .reviewed_plan
+            .apps
+            .push(crate::planner::ExecutionAppSnapshot {
+                id: "example-app".to_string(),
+                name: "Example App".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.example.app".to_string(),
+            });
+        report
+    }
+
+    #[test]
+    fn app_less_reviewed_launch_does_not_establish_launch_candidate() {
+        let report = eligible_report(ExecutionStatus::Succeeded);
+        assert_eq!(
+            eligible_launch_candidate(&report).unwrap_err().code,
+            ApiErrorCode::LaunchUnavailable
+        );
+    }
+
     #[test]
     fn launch_candidate_is_rederived_without_sidecar_consumption() {
-        let report = eligible_report(ExecutionStatus::SucceededWithWarnings);
+        let report = app_aware_eligible_report(ExecutionStatus::SucceededWithWarnings);
         let first = eligible_launch_candidate(&report).unwrap();
         let second = eligible_launch_candidate(&report).unwrap();
         assert_eq!(
             first,
             (
                 "com.example.app".to_string(),
-                Some(".MainActivity".to_string())
+                Some("com.example.app.MainActivity".to_string())
             )
         );
         assert_eq!(first, second);
@@ -2963,7 +2992,7 @@ mod tests {
 
     #[test]
     fn launch_candidate_rejects_non_success_dynamic_and_ambiguous_plans() {
-        let mut failed = eligible_report(ExecutionStatus::Failed);
+        let mut failed = app_aware_eligible_report(ExecutionStatus::Failed);
         assert_eq!(
             eligible_launch_candidate(&failed).unwrap_err().code,
             ApiErrorCode::LaunchUnavailable
@@ -2978,15 +3007,32 @@ mod tests {
         );
         assert!(eligible_launch_candidate(&failed).is_err());
 
-        let mut ambiguous = eligible_report(ExecutionStatus::Succeeded);
+        let mut ambiguous = app_aware_eligible_report(ExecutionStatus::Succeeded);
         let mut second = ambiguous.reviewed_plan.steps[0].clone();
         second.id = "recipe.example/launch-two".to_string();
+        second.app_id = Some("other-app".to_string());
         second.params.insert(
             "package_name".to_string(),
             ExecutionParamValue::Literal {
                 value: json!("com.example.other"),
             },
         );
+        second.params.insert(
+            "activity".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!("com.example.other.MainActivity"),
+            },
+        );
+        ambiguous
+            .reviewed_plan
+            .apps
+            .push(crate::planner::ExecutionAppSnapshot {
+                id: "other-app".to_string(),
+                name: "Other App".to_string(),
+                description: None,
+                category: None,
+                package_id: "com.example.other".to_string(),
+            });
         ambiguous.reviewed_plan.steps.push(second);
         let mut second_report = ambiguous.recipes[0].steps[0].clone();
         second_report.step_id = "recipe.example/launch-two".to_string();

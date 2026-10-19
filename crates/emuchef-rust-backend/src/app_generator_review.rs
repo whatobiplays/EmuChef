@@ -173,11 +173,7 @@ pub(crate) fn select_existing_app(
     let resolved = resolve_catalog_relative_path(&canonical_root, app_path)?;
     let relative = relative_path(&canonical_root, &resolved);
     let opened = capture_opened_app_definition_file(&resolved).map_err(|error| {
-        let code = if error.code == "app_definition_path_invalid" {
-            crate::errors::ApiErrorCode::ExistingAppUnavailable
-        } else {
-            crate::errors::ApiErrorCode::ExistingAppUnavailable
-        };
+        let code = crate::errors::ApiErrorCode::ExistingAppUnavailable;
         ApiError::new(
             code,
             error.message.clone(),
@@ -558,10 +554,7 @@ pub(crate) fn review_from_candidate(
     let canonical_app_yaml = match authored_models::emit_app_definition_yaml(&draft.app) {
         Ok(yaml) => Some(yaml),
         Err(error) => {
-            diagnostics.push(simple_diagnostic(
-                "app_definition_invalid",
-                &error.message(),
-            ));
+            diagnostics.push(simple_diagnostic("app_definition_invalid", error.message()));
             None
         }
     };
@@ -1122,7 +1115,7 @@ fn permission_actions(set: Option<&authored_models::AppPermissionSet>) -> Vec<Va
                 "kind": "app_op",
                 "permission": action.op,
                 "op": action.op,
-                "mode": serde_json::to_value(&action.mode).unwrap_or(Value::Null),
+                "mode": serde_json::to_value(action.mode).unwrap_or(Value::Null),
                 "androidApiMin": action.android_api_min,
                 "androidApiMax": action.android_api_max,
             }));
@@ -1220,7 +1213,7 @@ fn added_actions(
                     "kind": "app_op",
                     "permission": action.op,
                     "op": action.op,
-                    "mode": serde_json::to_value(&action.mode).unwrap_or(Value::Null),
+                    "mode": serde_json::to_value(action.mode).unwrap_or(Value::Null),
                     "androidApiMin": action.android_api_min,
                     "androidApiMax": action.android_api_max,
                 }));

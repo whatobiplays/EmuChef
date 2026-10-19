@@ -2848,6 +2848,7 @@ fn legacy_session_for_recovery(value: &Value) -> Result<QualificationSession, St
 /// Qualification failures never propagate to the caller: the session either
 /// records the transition, becomes invalid, or becomes poisoned/non-recordable.
 /// When no attempt is active this is a no-persistence no-op.
+#[cfg(test)]
 pub(crate) fn observe(state: &AppState, observation: QualificationLifecycleObservation) {
     let transition = crate::commands::qualification_transition_lock(state);
     observe_in_transition(state, observation);
@@ -3889,14 +3890,6 @@ fn forget_current_process_provenance(state: &AppState, candidate_handle: &str) {
     }
 }
 
-/// Reset all process-local qualification session authority for a new frontend
-/// session. Persisted candidates are unaffected.
-pub(crate) fn reset(state: &AppState) {
-    let transition = crate::commands::qualification_transition_lock(state);
-    reset_in_transition(state);
-    drop(transition);
-}
-
 /// Clear process-local qualification authority while the caller owns the
 /// product-transition gate.
 pub(crate) fn reset_in_transition(state: &AppState) {
@@ -3909,6 +3902,7 @@ pub(crate) fn reset_in_transition(state: &AppState) {
 /// When the device an attempt is associated with is no longer present, the
 /// product has dropped that device's authority, so the attempt can no longer
 /// prove it ran against the same device and fails closed.
+#[cfg(test)]
 pub(crate) fn observe_device_inventory(
     state: &AppState,
     generation: u64,
@@ -6144,11 +6138,7 @@ mod tests {
 
         let adb_before = {
             let adb = state.adb.lock().unwrap();
-            (
-                adb.revision(),
-                adb.is_app_managed(),
-                adb.status().status.clone(),
-            )
+            (adb.revision(), adb.is_app_managed(), adb.status().status)
         };
 
         for active in [false, true] {
@@ -6168,11 +6158,7 @@ mod tests {
 
             let adb_after = {
                 let adb = state.adb.lock().unwrap();
-                (
-                    adb.revision(),
-                    adb.is_app_managed(),
-                    adb.status().status.clone(),
-                )
+                (adb.revision(), adb.is_app_managed(), adb.status().status)
             };
             assert_eq!(
                 adb_after, adb_before,
@@ -6850,7 +6836,7 @@ mod tests {
         );
 
         let second = create_run_candidate(
-            &app.state::<AppState>()
+            app.state::<AppState>()
                 .qualification_repository
                 .get()
                 .unwrap(),
@@ -10754,7 +10740,6 @@ mod tests {
                     response: json!({ "plan": { "id": "plan" } }),
                     target: json!({ "deviceHandle": device_handle.clone() }),
                     catalog_identity: json!({ "sourceId": "catalog" }),
-                    catalog_digest: "sha256:catalog".to_string(),
                     plan_digest: "sha256:plan".to_string(),
                     device_handle: device_handle.clone(),
                     qualification_context: Some(old_context.clone()),
@@ -11292,7 +11277,7 @@ mod tests {
             .expect("the begin failure must remain a sanitized IPC error");
         assert_eq!(public_error["code"], "qualification_session_unavailable");
         {
-            let mut store = state.qualification_sessions.lock().unwrap();
+            let store = state.qualification_sessions.lock().unwrap();
             assert!(store.active_candidate().is_none());
             assert!(store.associated_device_handle().is_none());
             assert!(!store.is_pending(&failed_candidate));

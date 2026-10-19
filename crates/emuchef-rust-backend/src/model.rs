@@ -142,8 +142,9 @@ pub struct Step {
     pub user_toggleable: bool,
     /// App Definition identity that supplies app-specific step behavior.
     ///
-    /// This field is absent on transitional Recipes that still use their
-    /// existing form-based parameters and package conditions.
+    /// Schema-v1 app-aware steps use this reference for App Definition
+    /// authority. Retired package-based install, lifecycle, and permission
+    /// forms are invalid and are never normalized into this reference.
     pub app_ref: Option<String>,
     pub dependencies: Vec<String>,
     pub constraints: StepConstraints,

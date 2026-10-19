@@ -132,8 +132,13 @@ fn blocked_plan_yaml() -> String {
     )
 }
 
+// Mirror the reviewed plan shape: permission actions belong to an App snapshot
+// and the step's permission plan, rather than duplicate Recipe parameters.
 fn permission_plan_yaml() -> String {
     minimal_plan_yaml().replace(
+        "runtime_capabilities:\n",
+        "apps:\n- id: example.app\n  name: Example App\n  package_id: com.example.app\nruntime_capabilities:\n",
+    ).replace(
         r#"steps:
 - id: example.recipe/wait
   recipe_ref: example.recipe
@@ -152,26 +157,34 @@ fn permission_plan_yaml() -> String {
         r#"steps:
 - id: example.recipe/grant
   recipe_ref: example.recipe
+  app_id: example.app
   type: grant_permissions
   name: Grant
   dependencies: []
   constraints:
     capabilities: []
     conflicts_with: []
-  params:
-    runtime:
-      value:
-      - package_name: com.example.app
-        name: android.permission.POST_NOTIFICATIONS
-        required: false
-    appops:
-      value:
-      - package_name: com.example.app
-        op: MANAGE_EXTERNAL_STORAGE
-        mode: allow
-        required: false
-        when:
-          rooted: false
+  permission_plan:
+    permission_set: baseline
+    on_failure: warn
+    actions:
+    - kind: runtime_permission
+      package_name: com.example.app
+      permission: android.permission.POST_NOTIFICATIONS
+      applicability:
+        status: applicable
+    - kind: app_op
+      package_name: com.example.app
+      op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      android_api_min: 34
+      applicability:
+        status: not_applicable
+        reason:
+          reason: android_api_below_minimum
+          actual: 33
+          minimum: 34
+  params: {}
   skip_if: []
   verify: []
 "#,
@@ -301,6 +314,7 @@ fn validate_without_path_is_cli_usage_error_not_one_shot_json() {
 
     assert_eq!(output.exit_code, 2);
     assert_eq!(output.stdout, "");
+    assert!(output.stderr.starts_with("usage: emuchef validate"));
     assert!(output.stderr.contains("requires an explicit recipe path"));
     assert!(!output.stderr.contains("\"ok\":false"));
 }

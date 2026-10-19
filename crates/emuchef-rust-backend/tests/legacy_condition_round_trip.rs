@@ -1,17 +1,9 @@
-//! Round-trip coverage for `package_installed` conditions.
+//! Coverage for canonical and retired `package_installed` conditions.
 //!
-//! The document session parses authored YAML and re-emits it in a canonical
-//! layout of its own, so a hand-authored file is not byte-identical to the
-//! canonical emission. These tests therefore prove the two properties the
-//! editor depends on:
-//!
-//! 1. Legacy conditions keep their authored `package_name` parameter and gain
-//!    no app context, while app-aware conditions stay parameterless and
-//!    inherit their package from the enclosing step `app_ref`.
-//! 2. Saving and reopening a document reproduces the same canonical YAML and
-//!    the same document projection, so a load/save cycle never migrates a
-//!    condition silently.
-
+//! Retired fields remain visible when a document is opened so an author can
+//! repair them, but validation errors block Save and Save As without rewriting
+//! the source. Canonical conditions are parameterless and inherit package
+//! identity from the enclosing step `app_ref`.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,8 +128,10 @@ fn step<'a>(document: &'a Value, step_id: &str) -> &'a Value {
 }
 
 #[test]
-fn legacy_package_condition_round_trips_without_migration() {
-    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+fn retired_package_condition_remains_inspectable_but_cannot_be_saved() {
+    let workspace = TempWorkspace::copy_fixture("retired_recipe_forms");
+    let recipe_path = workspace.recipe_path("demo.legacy_package_condition.yaml");
+    let original = fs::read_to_string(&recipe_path).expect("retired Recipe should read");
     let mut sessions = common::test_sessions();
     let (document_id, document) = open_fixture(
         &mut sessions,
@@ -157,34 +151,142 @@ fn legacy_package_condition_round_trips_without_migration() {
     );
     assert_eq!(
         wait_step["verify"][0]["params"]["package_name"], "com.example.demo",
-        "the projection must retain the legacy parameter: {wait_step}"
+        "invalid authored content must remain visible for manual repair: {wait_step}"
     );
     let codes = diagnostic_codes(&document);
     assert!(
-        !codes.contains(&"app_condition_package_parameter_forbidden".to_string()),
-        "a legacy condition on a step without an app context must stay accepted: {codes:?}"
+        codes.contains(&"app_condition_context_required".to_string()),
+        "a package condition must require App Definition context: {codes:?}"
     );
 
     let saved = request::handle_sidecar_value(
         json!({"id": "save", "type": "saveRecipe", "payload": {"documentId": document_id}}),
         &mut sessions,
     );
-    assert_eq!(saved["ok"], true, "saveRecipe should succeed: {saved}");
     assert_eq!(
-        fs::read_to_string(workspace.recipe_path("demo.legacy_package_condition.yaml"))
-            .expect("saved recipe should read"),
-        yaml,
-        "saving must write the canonical YAML"
+        saved["ok"], false,
+        "saveRecipe must reject retired schema-v1 conditions: {saved}"
+    );
+    assert_eq!(
+        fs::read_to_string(recipe_path).expect("retired Recipe should remain readable"),
+        original,
+        "a rejected save must not rewrite or normalize retired fields"
     );
 
-    let (_, reopened) = open_recipe(&workspace, "demo.legacy_package_condition.yaml");
-    assert_eq!(
-        reopened["yaml"], yaml,
-        "reopening must reproduce the same canonical YAML"
+    let save_as_path = workspace.recipe_path("retired-condition-copy.yaml");
+    let saved_as = request::handle_sidecar_value(
+        json!({
+            "id": "save-as",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": document_id, "path": save_as_path},
+        }),
+        &mut sessions,
     );
     assert_eq!(
-        reopened["recipe"], document["recipe"],
-        "reopening must reproduce the same document projection"
+        saved_as["ok"], false,
+        "saveRecipeAs must reject retired schema-v1 conditions: {saved_as}"
+    );
+    assert!(
+        !save_as_path.exists(),
+        "a rejected Save As must not create a canonical copy"
+    );
+}
+
+#[test]
+fn app_aware_legacy_package_condition_is_rejected_without_catalog_context() {
+    let workspace = TempWorkspace::copy_fixture("retired_recipe_forms");
+    let recipe_path = workspace
+        .dir
+        .join("standalone_app_legacy_package_condition.yaml");
+    let original = fs::read(&recipe_path).expect("standalone Recipe should read");
+    let mut sessions = common::test_sessions();
+    let opened = request::handle_sidecar_value(
+        json!({
+            "id": "open-standalone",
+            "type": "openRecipe",
+            "payload": {"path": recipe_path},
+        }),
+        &mut sessions,
+    );
+    assert_eq!(opened["ok"], true, "openRecipe should succeed: {opened}");
+    let document = opened["result"]["document"].clone();
+    let document_id = document["documentId"]
+        .as_str()
+        .expect("document id should be a string")
+        .to_string();
+    assert_eq!(document["authoredRoot"], Value::Null);
+    assert_eq!(
+        step(&document, "wait_for_legacy")["appRef"],
+        "demo_app",
+        "standalone app context must remain inspectable"
+    );
+    assert_eq!(
+        step(&document, "wait_for_legacy")["verify"][0]["params"]["package_name"],
+        "com.example.demo"
+    );
+
+    let validation = request::handle_sidecar_value(
+        json!({
+            "id": "validate-standalone",
+            "type": "validate",
+            "payload": {"documentId": document_id},
+        }),
+        &mut sessions,
+    );
+    assert_eq!(
+        validation["ok"], true,
+        "validate should succeed: {validation}"
+    );
+    let codes = validation["result"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be an array")
+        .iter()
+        .filter_map(|diagnostic| diagnostic["code"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == "app_condition_package_parameter_forbidden")
+            .count(),
+        2,
+        "standalone validation must reject retired package parameters: {codes:?}"
+    );
+
+    let saved = request::handle_sidecar_value(
+        json!({"id": "save-standalone", "type": "saveRecipe", "payload": {"documentId": document_id}}),
+        &mut sessions,
+    );
+    assert_eq!(
+        saved["ok"], false,
+        "saveRecipe must reject the legacy field: {saved}"
+    );
+    assert_eq!(
+        fs::read(&recipe_path).expect("standalone Recipe should remain readable"),
+        original,
+        "a rejected save must leave the original bytes unchanged"
+    );
+
+    let save_as_path = workspace.dir.join("standalone-legacy-copy.yaml");
+    let saved_as = request::handle_sidecar_value(
+        json!({
+            "id": "save-as-standalone",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": document_id, "path": save_as_path},
+        }),
+        &mut sessions,
+    );
+    assert_eq!(
+        saved_as["ok"], false,
+        "saveRecipeAs must reject the legacy field: {saved_as}"
+    );
+    assert!(
+        !save_as_path.exists(),
+        "rejected Save As must not create a file"
+    );
+    assert_eq!(
+        fs::read(&recipe_path).expect("standalone Recipe should remain readable"),
+        original,
+        "a rejected Save As must leave the original bytes unchanged"
     );
 }
 

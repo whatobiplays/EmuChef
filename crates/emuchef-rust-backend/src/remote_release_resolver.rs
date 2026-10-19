@@ -1,11 +1,7 @@
 //! Deterministic runtime resolution for supported remote release providers.
 
-use std::io::Read;
-use std::time::Duration;
-
 use regex::Regex;
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, ACCEPT, LINK, USER_AGENT};
+use reqwest::header::{HeaderMap, LINK};
 use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use url::Url;
@@ -13,9 +9,6 @@ use url::Url;
 use crate::artifact_transport::{HttpArtifactTransport, MetadataResponse};
 
 const MAX_METADATA_BYTES: u64 = 2 * 1024 * 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const USER_AGENT_VALUE: &str = "EmuChef-Runtime/0.1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedRemoteRelease {
@@ -28,82 +21,15 @@ pub(crate) struct ResolvedRemoteRelease {
     pub size: Option<u64>,
 }
 
-pub(crate) fn resolve_github_latest(
-    repository: &str,
-    include_prereleases: bool,
-    asset_pattern: &str,
-) -> Result<ResolvedRemoteRelease, String> {
-    validate_repository(repository)?;
-    let matcher = Regex::new(asset_pattern)
-        .map_err(|_| "remote_asset_pattern_invalid: APK filename pattern is invalid".to_string())?;
-    let client = Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| {
-            "remote_release_client_failed: Network access could not be initialized".to_string()
-        })?;
-    let endpoint = format!("https://api.github.com/repos/{repository}/releases?per_page=30");
-    let releases = get_json_bounded(&client, &endpoint)?;
-    select_github_release_asset(&releases, include_prereleases, &matcher)
-}
-
-fn select_github_release_asset(
-    releases: &Value,
-    include_prereleases: bool,
-    matcher: &Regex,
-) -> Result<ResolvedRemoteRelease, String> {
-    let mut candidates = releases
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|release| release.get("draft").and_then(Value::as_bool) != Some(true))
-        .filter(|release| {
-            include_prereleases || release.get("prerelease").and_then(Value::as_bool) != Some(true)
-        })
-        .filter_map(|release| {
-            let tag = release.get("tag_name")?.as_str()?.to_string();
-            let published_at = release.get("published_at").and_then(Value::as_str)?;
-            let published_at_time = OffsetDateTime::parse(published_at, &Rfc3339).ok()?;
-            Some((published_at_time, published_at.to_string(), tag, release))
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.2.cmp(&left.2)));
-    let Some((_, published_at, release_tag, release)) = candidates.into_iter().next() else {
-        return Err("remote_release_not_found: No eligible GitHub release was found".to_string());
-    };
-    let matches = release
-        .get("assets")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|asset| {
-            let name = asset.get("name")?.as_str()?;
-            if !name.to_ascii_lowercase().ends_with(".apk") || !matcher.is_match(name) {
-                return None;
-            }
-            let download_url = asset.get("browser_download_url")?.as_str()?;
-            let parsed = Url::parse(download_url).ok()?;
-            if parsed.scheme() != "https"
-                || parsed.host_str() != Some("github.com")
-                || !parsed.username().is_empty()
-                || parsed.password().is_some()
-            {
-                return None;
-            }
-            Some(ResolvedRemoteRelease {
-                download_url: download_url.to_string(),
-                asset_name: name.to_string(),
-                release_tag: release_tag.clone(),
-                published_at: Some(published_at.clone()),
-                created_at: None,
-                timestamp_source: "published_at",
-                size: asset.get("size").and_then(Value::as_u64),
-            })
-        })
-        .collect::<Vec<_>>();
-    require_single_match(matches)
+/// Controls prerelease inclusion and asset-name matching for a remote release lookup.
+#[derive(Clone, Copy)]
+pub(crate) struct RemoteReleaseOptions<'a> {
+    /// Whether prerelease releases can be selected.
+    pub(crate) include_prereleases: bool,
+    /// Optional asset filename expression used to select a release asset.
+    pub(crate) asset_pattern: Option<&'a str>,
+    /// Whether matching assets are excluded instead of selected.
+    pub(crate) invert_asset_pattern: bool,
 }
 
 pub(crate) fn resolve_remote_latest(
@@ -112,28 +38,29 @@ pub(crate) fn resolve_remote_latest(
     base_url: &str,
     repository: &str,
     artifact_kind: &str,
-    include_prereleases: bool,
-    asset_pattern: Option<&str>,
-    invert_asset_pattern: bool,
+    options: RemoteReleaseOptions<'_>,
 ) -> Result<ResolvedRemoteRelease, String> {
     validate_remote_release_policy(
         provider,
         base_url,
         repository,
         artifact_kind,
-        asset_pattern,
-        invert_asset_pattern,
+        options.asset_pattern,
+        options.invert_asset_pattern,
     )?;
     let provider = ReleaseProvider::parse(provider)?;
     let endpoint = ProviderEndpoint::new(provider, base_url, repository)?;
-    let matcher = asset_pattern.map(compiled_asset_pattern).transpose()?;
+    let matcher = options
+        .asset_pattern
+        .map(compiled_asset_pattern)
+        .transpose()?;
     resolve_release_pages(
         provider,
         &endpoint,
         artifact_kind,
-        include_prereleases,
+        options.include_prereleases,
         matcher.as_ref(),
-        invert_asset_pattern,
+        options.invert_asset_pattern,
         |url| fetch_provider_page(transport, url),
     )
 }
@@ -144,9 +71,7 @@ pub(crate) fn resolve_remote_latest_from_fixture(
     base_url: &str,
     repository: &str,
     artifact_kind: &str,
-    include_prereleases: bool,
-    asset_pattern: Option<&str>,
-    invert_asset_pattern: bool,
+    options: RemoteReleaseOptions<'_>,
     releases: &Value,
 ) -> Result<ResolvedRemoteRelease, String> {
     validate_remote_release_policy(
@@ -154,12 +79,15 @@ pub(crate) fn resolve_remote_latest_from_fixture(
         base_url,
         repository,
         artifact_kind,
-        asset_pattern,
-        invert_asset_pattern,
+        options.asset_pattern,
+        options.invert_asset_pattern,
     )?;
     let provider = ReleaseProvider::parse(provider)?;
     let endpoint = ProviderEndpoint::new(provider, base_url, repository)?;
-    let matcher = asset_pattern.map(compiled_asset_pattern).transpose()?;
+    let matcher = options
+        .asset_pattern
+        .map(compiled_asset_pattern)
+        .transpose()?;
     let releases = releases.as_array().cloned().ok_or_else(|| {
         "remote_release_response_invalid: Provider release metadata was not a list".to_string()
     })?;
@@ -168,9 +96,9 @@ pub(crate) fn resolve_remote_latest_from_fixture(
         provider,
         &endpoint,
         artifact_kind,
-        include_prereleases,
+        options.include_prereleases,
         matcher.as_ref(),
-        invert_asset_pattern,
+        options.invert_asset_pattern,
         move |url| {
             if url != &first_url {
                 return Err(
@@ -613,10 +541,7 @@ fn gitlab_order_timestamp(release: &Value) -> Result<Option<OffsetDateTime>, Str
         })
 }
 
-fn required_release_tag<'a>(
-    release: &'a Value,
-    provider: ReleaseProvider,
-) -> Result<&'a str, String> {
+fn required_release_tag(release: &Value, provider: ReleaseProvider) -> Result<&str, String> {
     release
         .get("tag_name")
         .and_then(Value::as_str)
@@ -807,9 +732,7 @@ fn next_page_url(
                 } else {
                     None
                 }
-            } else if page.releases.len() < PAGE_SIZE {
-                None
-            } else if latest_proven {
+            } else if page.releases.len() < PAGE_SIZE || latest_proven {
                 None
             } else {
                 return Err("remote_release_history_ambiguous: GitLab did not provide a conclusive pagination marker".to_string());
@@ -986,22 +909,6 @@ fn compiled_asset_pattern(asset_pattern: &str) -> Result<Regex, String> {
         .map_err(|_| "remote_asset_pattern_invalid: Asset filename pattern is invalid".to_string())
 }
 
-fn require_single_match(
-    matches: Vec<ResolvedRemoteRelease>,
-) -> Result<ResolvedRemoteRelease, String> {
-    match matches.as_slice() {
-        [single] => Ok(single.clone()),
-        [] => Err(
-            "remote_asset_no_match: Latest release contains no APK matching the saved pattern"
-                .to_string(),
-        ),
-        _ => Err(
-            "remote_asset_ambiguous: Latest release contains multiple APKs matching the saved pattern"
-                .to_string(),
-        ),
-    }
-}
-
 fn validate_gitlab_repository(repository: &str) -> Result<(), String> {
     let parts = repository.split('/').collect::<Vec<_>>();
     let valid = (2..=20).contains(&parts.len())
@@ -1046,47 +953,6 @@ fn validate_repository(repository: &str) -> Result<(), String> {
     } else {
         Err("remote_repository_invalid: GitHub repository identity is invalid".to_string())
     }
-}
-
-fn get_json_bounded(client: &Client, url: &str) -> Result<Value, String> {
-    let mut response = client
-        .get(url)
-        .header(USER_AGENT, USER_AGENT_VALUE)
-        .header(ACCEPT, "application/vnd.github+json")
-        .send()
-        .map_err(|_| {
-            "remote_release_request_failed: GitHub releases could not be retrieved".to_string()
-        })?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "remote_release_http_status: GitHub returned HTTP {}",
-            response.status().as_u16()
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_METADATA_BYTES)
-    {
-        return Err(
-            "remote_release_response_too_large: GitHub metadata exceeded the limit".to_string(),
-        );
-    }
-    let mut bytes = Vec::new();
-    response
-        .by_ref()
-        .take(MAX_METADATA_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
-            "remote_release_response_failed: GitHub metadata could not be read".to_string()
-        })?;
-    if bytes.len() as u64 > MAX_METADATA_BYTES {
-        return Err(
-            "remote_release_response_too_large: GitHub metadata exceeded the limit".to_string(),
-        );
-    }
-    serde_json::from_slice(&bytes).map_err(|_| {
-        "remote_release_response_invalid: GitHub returned invalid metadata".to_string()
-    })
 }
 
 #[cfg(test)]
@@ -1674,9 +1540,11 @@ mod tests {
             "https://forge.example.net",
             "owner/repo",
             "file",
-            false,
-            Some("^bundle\\.tar$"),
-            false,
+            RemoteReleaseOptions {
+                include_prereleases: false,
+                asset_pattern: Some("^bundle\\.tar$"),
+                invert_asset_pattern: false,
+            },
             &assets,
         )
         .unwrap();
@@ -1690,9 +1558,11 @@ mod tests {
             "https://forge.example.net",
             "owner/repo",
             "apk",
-            false,
-            Some("^app-.*\\.apk$"),
-            true,
+            RemoteReleaseOptions {
+                include_prereleases: false,
+                asset_pattern: Some("^app-.*\\.apk$"),
+                invert_asset_pattern: true,
+            },
             &assets,
         )
         .unwrap_err();
@@ -1707,9 +1577,11 @@ mod tests {
             "https://gitlab.example.net",
             "group/project",
             "apk",
-            false,
-            None,
-            false,
+            RemoteReleaseOptions {
+                include_prereleases: false,
+                asset_pattern: None,
+                invert_asset_pattern: false,
+            },
             &gitlab_invalid_timestamp,
         )
         .unwrap_err()
@@ -1732,9 +1604,11 @@ mod tests {
                 "https://forge.example.net",
                 "owner/repo",
                 "apk",
-                false,
-                Some("^app-(good|bad|missing)\\.apk$"),
-                false,
+                RemoteReleaseOptions {
+                    include_prereleases: false,
+                    asset_pattern: Some("^app-(good|bad|missing)\\.apk$"),
+                    invert_asset_pattern: false,
+                },
                 &releases,
             )
         };
@@ -1780,9 +1654,11 @@ mod tests {
                 "https://forge.example.net",
                 "owner/repo",
                 "file",
-                false,
-                None,
-                false,
+                RemoteReleaseOptions {
+                    include_prereleases: false,
+                    asset_pattern: None,
+                    invert_asset_pattern: false,
+                },
                 &releases,
             )
         };
@@ -1848,9 +1724,11 @@ mod tests {
             "https://forge.example.net",
             "owner/repo",
             "file",
-            false,
-            None,
-            false,
+            RemoteReleaseOptions {
+                include_prereleases: false,
+                asset_pattern: None,
+                invert_asset_pattern: false,
+            },
             &releases,
         )
         .unwrap_err();
@@ -1874,202 +1752,5 @@ mod tests {
             assert!(likely_prerelease(&format!("v1-{marker}"), ""), "{marker}");
         }
         assert!(!likely_prerelease("v1-candidate", "Release Candidate"));
-    }
-
-    #[test]
-    fn github_release_selection_rejects_zero_matching_apks() {
-        let releases = json!([
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v1",
-                "published_at": "2026-01-01T00:00:00Z",
-                "assets": [{
-                    "name": "wanted-1.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-1.apk"
-                }]
-            },
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v2",
-                "published_at": "2026-01-02T00:00:00Z",
-                "assets": [{
-                    "name": "other.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v2/other.apk"
-                }]
-            }
-        ]);
-        let matcher = Regex::new("^wanted-[0-9]+\\.apk$").unwrap();
-
-        let error = select_github_release_asset(&releases, false, &matcher).unwrap_err();
-
-        assert_eq!(
-            error,
-            "remote_asset_no_match: Latest release contains no APK matching the saved pattern"
-        );
-    }
-
-    #[test]
-    fn github_release_selection_rejects_multiple_matching_apks() {
-        let releases = json!([{
-            "draft": false,
-            "prerelease": false,
-            "tag_name": "v1",
-            "published_at": "2026-01-01T00:00:00Z",
-            "assets": [
-                {
-                    "name": "wanted-1.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-1.apk"
-                },
-                {
-                    "name": "wanted-2.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-2.apk"
-                }
-            ]
-        }]);
-        let matcher = Regex::new("^wanted-[0-9]+\\.apk$").unwrap();
-
-        let error = select_github_release_asset(&releases, false, &matcher).unwrap_err();
-
-        assert_eq!(
-            error,
-            "remote_asset_ambiguous: Latest release contains multiple APKs matching the saved pattern"
-        );
-    }
-
-    #[test]
-    fn github_release_selection_chooses_one_matching_asset_from_latest_stable_release() {
-        let releases = json!([
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v1",
-                "published_at": "2025-12-31T00:00:00Z",
-                "assets": [{
-                    "name": "wanted-1.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted-1.apk",
-                    "size": 12
-                }]
-            },
-            {
-                "draft": false,
-                "prerelease": true,
-                "tag_name": "v2-rc1",
-                "published_at": "2026-02-01T00:00:00Z",
-                "assets": [{
-                    "name": "wanted-2.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v2/wanted-2.apk"
-                }]
-            },
-            {
-                "draft": true,
-                "prerelease": false,
-                "tag_name": "v3",
-                "published_at": "2026-03-01T00:00:00Z",
-                "assets": [{
-                    "name": "wanted-3.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v3/wanted-3.apk"
-                }]
-            },
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v4",
-                "published_at": "2026-01-31T00:00:00Z",
-                "assets": [{
-                    "name": "wanted-4.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v4/wanted-4.apk",
-                    "size": 34
-                }]
-            }
-        ]);
-        let matcher = Regex::new("^wanted-[0-9]+\\.apk$").unwrap();
-
-        let selected = select_github_release_asset(&releases, false, &matcher).unwrap();
-
-        assert_eq!(selected.asset_name, "wanted-4.apk");
-        assert_eq!(selected.release_tag, "v4");
-        assert_eq!(selected.size, Some(34));
-        assert_eq!(
-            selected.download_url,
-            "https://github.com/example/app/releases/download/v4/wanted-4.apk"
-        );
-    }
-
-    #[test]
-    fn github_release_selection_ignores_malformed_published_dates() {
-        let releases = json!([
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v1",
-                "published_at": "2025-12-31T00:00:00Z",
-                "assets": [{
-                    "name": "wanted.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v1/wanted.apk"
-                }]
-            },
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v2",
-                "published_at": "2026-02-01T00:00:00Z",
-                "assets": [{
-                    "name": "wanted.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/v2/wanted.apk"
-                }]
-            },
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v-invalid-date",
-                "published_at": "9999-99-99T99:99:99Z",
-                "assets": [{
-                    "name": "wanted.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/invalid/wanted.apk"
-                }]
-            },
-            {
-                "draft": false,
-                "prerelease": false,
-                "tag_name": "v-missing-date",
-                "published_at": null,
-                "assets": [{
-                    "name": "wanted.apk",
-                    "browser_download_url": "https://github.com/example/app/releases/download/missing/wanted.apk"
-                }]
-            }
-        ]);
-        let matcher = Regex::new("^wanted\\.apk$").unwrap();
-
-        let selected = select_github_release_asset(&releases, false, &matcher).unwrap();
-
-        assert_eq!(selected.release_tag, "v2");
-        assert_eq!(
-            selected.published_at.as_deref(),
-            Some("2026-02-01T00:00:00Z")
-        );
-    }
-
-    #[test]
-    fn github_release_selection_rejects_releases_without_a_valid_published_date() {
-        let releases = json!([{
-            "draft": false,
-            "prerelease": false,
-            "tag_name": "v-undated",
-            "assets": [{
-                "name": "wanted.apk",
-                "browser_download_url": "https://github.com/example/app/releases/download/undated/wanted.apk"
-            }]
-        }]);
-        let matcher = Regex::new("^wanted\\.apk$").unwrap();
-
-        let error = select_github_release_asset(&releases, false, &matcher).unwrap_err();
-
-        assert_eq!(
-            error,
-            "remote_release_not_found: No eligible GitHub release was found"
-        );
     }
 }

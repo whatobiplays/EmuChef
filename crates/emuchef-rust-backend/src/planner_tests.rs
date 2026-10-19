@@ -16,9 +16,8 @@ use crate::model::{
     StepConstraints,
 };
 use crate::planner::{
-    build_permission_intent, normalized_plan_step_note, plan_execution_with_app_definitions,
-    resolve_runtime_bindings, BindingSource, DeviceContext, PlannerInput, PlanningStatus,
-    RuntimeCapabilities,
+    normalized_plan_step_note, plan_execution_with_app_definitions, resolve_runtime_bindings,
+    BindingSource, DeviceContext, PlannerInput, PlanningStatus, RuntimeCapabilities,
 };
 use crate::runtime_configuration::input_reuse_diagnostics;
 
@@ -512,16 +511,18 @@ fn repo_plan_e2e_no_app_data_write_cases() -> Vec<RepoPlanE2eCase> {
 }
 
 fn planning_result_value(input: PlannerInput) -> Value {
-    let apps = if input.recipes.iter().any(|recipe| {
-        recipe
-            .steps
-            .iter()
-            .any(|step| step.app_ref.as_deref() == Some("retroarch"))
-    }) {
-        vec![
-            load_app_definition(repo_authored_root().join("apps/retroarch.yaml"))
-                .expect("RetroArch App Definition should load"),
-        ]
+    let has_app_context = input
+        .recipes
+        .iter()
+        .any(|recipe| recipe.steps.iter().any(|step| step.app_ref.is_some()));
+    let apps = if has_app_context {
+        let catalog = crate::catalog::load_app_definition_catalog(&repo_authored_root());
+        assert!(
+            catalog.diagnostics.is_empty(),
+            "repo App Definition catalog should be valid: {:?}",
+            catalog.diagnostics
+        );
+        catalog.entries.into_iter().map(|(_, app)| app).collect()
     } else {
         Vec::new()
     };
@@ -529,20 +530,44 @@ fn planning_result_value(input: PlannerInput) -> Value {
         .expect("planning result should serialize")
 }
 
-fn obtainium_planning_result_value(input: PlannerInput) -> Value {
-    let obtainium = load_app_definition(repo_authored_root().join("apps/obtainium.yaml"))
-        .expect("Obtainium App Definition should load");
-    let retroarch = load_app_definition(repo_authored_root().join("apps/retroarch.yaml"))
-        .expect("RetroArch App Definition should load");
-    serde_json::to_value(plan_execution_with_app_definitions(
-        input,
-        &[obtainium, retroarch],
-    ))
-    .expect("Obtainium planning result should serialize")
+fn authored_corpus_planning_result_value(input: PlannerInput) -> Value {
+    let catalog = crate::catalog::load_app_definition_catalog(&repo_authored_root());
+    assert!(
+        catalog.diagnostics.is_empty(),
+        "repo App Definition catalog should be valid: {:?}",
+        catalog.diagnostics
+    );
+    let apps = catalog
+        .entries
+        .into_iter()
+        .map(|(_, app)| app)
+        .collect::<Vec<_>>();
+    serde_json::to_value(plan_execution_with_app_definitions(input, &apps))
+        .expect("authored corpus planning result should serialize")
 }
 
 fn normalized_planning_result_value(input: PlannerInput) -> Value {
     normalize_paths(planning_result_value(input))
+}
+
+fn normalized_planning_result_for_fixture(fixture: &str, selected_recipe_refs: &[&str]) -> Value {
+    let root = authored_root(fixture);
+    let app_catalog = crate::catalog::load_app_definition_catalog(&root);
+    assert!(
+        app_catalog.diagnostics.is_empty(),
+        "planner fixture App Definitions should be valid: {:?}",
+        app_catalog.diagnostics
+    );
+    let app_definitions = app_catalog
+        .entries
+        .into_iter()
+        .map(|(_, app)| app)
+        .collect::<Vec<_>>();
+    let result = plan_execution_with_app_definitions(
+        planner_input(fixture, selected_recipe_refs),
+        &app_definitions,
+    );
+    normalize_paths(serde_json::to_value(result).expect("fixture planning result should serialize"))
 }
 
 fn normalize_paths(value: Value) -> Value {
@@ -703,32 +728,171 @@ fn required_input_bindings_match_compatibility_success_and_missing_error() {
 }
 
 #[test]
-fn grant_permissions_stays_step_local_without_permission_plan() {
-    let actual = planning_result_value(planner_input(
-        "planner_grant_permissions",
-        &["planner.grant_permissions"],
-    ));
-    let expected = read_golden("phase6m_planner_grant_permissions.json");
+fn grant_permissions_uses_the_canonical_app_definition_plan() {
+    let actual = normalized_planning_result_for_fixture(
+        "planner_phase6n_builtins_all",
+        &["planner.phase6n.builtins_all"],
+    );
 
-    assert_eq!(actual, expected);
-    let plan = actual["execution_plan"].as_object().unwrap();
-    assert!(!plan.contains_key("permission_plan"));
-    let grant = &actual["execution_plan"]["steps"][0];
-    assert_eq!(grant["id"], "planner.grant_permissions/grant");
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    let grant = planner_step(&actual, "planner.phase6n.builtins_all/grant");
+    assert_eq!(grant["app_id"], "planner_app");
+    assert_eq!(grant["params"], json!({}));
+    assert_eq!(grant["permission_plan"]["permission_set"], "baseline");
+    assert_eq!(grant["permission_plan"]["on_failure"], "fail");
     assert_eq!(
-        grant["params"]["runtime"]["value"][0]["package_name"],
-        "com.example.app"
+        grant["permission_plan"]["actions"][0]["permission"],
+        "android.permission.POST_NOTIFICATIONS"
     );
     assert_eq!(
-        grant["params"]["policy"]["value"],
-        json!({"on_failure": "warn", "require_all": false})
+        grant["permission_plan"]["actions"][1]["op"],
+        "MANAGE_EXTERNAL_STORAGE"
     );
 }
 
 #[test]
-fn permission_intent_builds_structured_runtime_and_appop_actions_from_selected_grant_steps() {
-    let steps = permission_intent_steps(vec![param_contract_step(
-        "grant",
+fn permission_plan_defaults_failure_policy_and_serializes_step_local_actions() {
+    let default_policy = grant_permission_set_step("grant_defaults");
+    let explicit_policy = param_contract_step(
+        "grant_explicit",
+        "grant_permissions",
+        vec![],
+        ref_params(vec![
+            ("permission_set", ParamValue::Literal(json!("baseline"))),
+            ("policy", ParamValue::Literal(json!({"on_failure": "fail"}))),
+        ]),
+    );
+    let actual =
+        param_contract_result_value(param_contract_input(vec![default_policy, explicit_policy]));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    let steps = actual["execution_plan"]["steps"].as_array().unwrap();
+    let default = steps
+        .iter()
+        .find(|step| step["id"] == "planner.param_contract/grant_defaults")
+        .unwrap();
+    let explicit = steps
+        .iter()
+        .find(|step| step["id"] == "planner.param_contract/grant_explicit")
+        .unwrap();
+
+    assert_eq!(default["app_id"], "planner_app");
+    assert_eq!(default["params"], json!({}));
+    assert_eq!(default["permission_plan"]["permission_set"], "baseline");
+    assert_eq!(default["permission_plan"]["on_failure"], "warn");
+    assert_eq!(
+        default["permission_plan"]["actions"][0]["kind"],
+        "runtime_permission"
+    );
+    assert_eq!(
+        default["permission_plan"]["actions"][0]["package_name"],
+        "com.example.app"
+    );
+    assert_eq!(
+        default["permission_plan"]["actions"][0]["permission"],
+        "android.permission.CAMERA"
+    );
+    assert_eq!(explicit["permission_plan"]["on_failure"], "fail");
+}
+
+#[test]
+fn permission_intent_validation_rejects_obvious_malformed_step_local_inputs() {
+    let cases = vec![
+        (
+            {
+                let mut step = grant_permission_set_step("manual");
+                step.params
+                    .insert("manual".to_string(), ParamValue::Literal(json!([])));
+                step
+            },
+            "manual",
+            "manual",
+            "unknown_param",
+            json!(["permission_set", "policy"]),
+            json!([]),
+        ),
+        (
+            {
+                let mut step = grant_permission_set_step("bad_policy");
+                step.params.insert(
+                    "policy".to_string(),
+                    ParamValue::Literal(json!({"on_failure": "explode"})),
+                );
+                step
+            },
+            "bad_policy",
+            "policy.on_failure",
+            "invalid_enum_value",
+            json!(["warn", "fail"]),
+            json!("explode"),
+        ),
+        (
+            param_contract_step(
+                "missing_policy",
+                "grant_permissions",
+                vec![],
+                ref_params(vec![(
+                    "permission_set",
+                    ParamValue::Literal(json!("baseline")),
+                )]),
+            ),
+            "missing_policy",
+            "policy",
+            "missing_required_param",
+            json!({"on_failure": ["warn", "fail"]}),
+            Value::Null,
+        ),
+        (
+            {
+                let mut step = grant_permission_set_step("retired_runtime");
+                step.params.insert(
+                    "runtime".to_string(),
+                    ParamValue::Literal(json!([
+                        {"package_name": "com.example.app", "required": "yes"}
+                    ])),
+                );
+                step
+            },
+            "retired_runtime",
+            "runtime",
+            "unknown_param",
+            json!(["permission_set", "policy"]),
+            json!([{"package_name": "com.example.app", "required": "yes"}]),
+        ),
+        (
+            {
+                let mut step = grant_permission_set_step("retired_appops");
+                step.params.insert(
+                    "appops".to_string(),
+                    ParamValue::Literal(json!([
+                        {
+                            "package_name": "com.example.app",
+                            "op": "MANAGE_EXTERNAL_STORAGE",
+                            "mode": "allow",
+                            "when": {"android_api_min": 35, "android_api_max": 34}
+                        }
+                    ])),
+                );
+                step
+            },
+            "retired_appops",
+            "appops",
+            "unknown_param",
+            json!(["permission_set", "policy"]),
+            json!([{"package_name": "com.example.app", "op": "MANAGE_EXTERNAL_STORAGE", "mode": "allow", "when": {"android_api_min": 35, "android_api_max": 34}}]),
+        ),
+    ];
+
+    for (step, step_id, param, code, expected, actual_value) in cases {
+        let actual = param_contract_result_value(param_contract_input(vec![step]));
+        assert_param_contract_error(&actual, code, step_id, param, expected, actual_value);
+    }
+}
+
+#[test]
+fn legacy_recipe_owned_permission_parameters_never_resolve_permission_actions() {
+    let mut step = param_contract_step(
+        "legacy",
         "grant_permissions",
         vec![],
         ref_params(vec![
@@ -737,9 +901,7 @@ fn permission_intent_builds_structured_runtime_and_appop_actions_from_selected_g
                 ParamValue::Literal(json!([
                     {
                         "package_name": "com.example.app",
-                        "name": "android.permission.POST_NOTIFICATIONS",
-                        "required": false,
-                        "when": {"android_api_min": 33}
+                        "name": "android.permission.CAMERA"
                     }
                 ])),
             ),
@@ -749,9 +911,7 @@ fn permission_intent_builds_structured_runtime_and_appop_actions_from_selected_g
                     {
                         "package_name": "com.example.app",
                         "op": "MANAGE_EXTERNAL_STORAGE",
-                        "mode": "allow",
-                        "required": true,
-                        "when": {"rooted": false}
+                        "mode": "allow"
                     }
                 ])),
             ),
@@ -760,250 +920,161 @@ fn permission_intent_builds_structured_runtime_and_appop_actions_from_selected_g
                 ParamValue::Literal(json!({"on_failure": "fail", "require_all": true})),
             ),
         ]),
-    )]);
-
-    let intent = serde_json::to_value(build_permission_intent(&steps))
-        .expect("internal permission intent should serialize for tests");
-
-    assert_eq!(
-        intent,
-        json!({
-            "grants": [
-                {
-                    "recipe_ref": "planner.permission_intent",
-                    "step_id": "grant",
-                    "execution_step_id": "planner.permission_intent/grant",
-                    "policy": {"on_failure": "fail", "require_all": true},
-                    "actions": [
-                        {
-                            "kind": "runtime_permission",
-                            "package_name": "com.example.app",
-                            "permission": "android.permission.POST_NOTIFICATIONS",
-                            "required": false,
-                            "when": {"android_api_min": 33},
-                            "source_section": "params.runtime[0]"
-                        },
-                        {
-                            "kind": "appop",
-                            "package_name": "com.example.app",
-                            "op": "MANAGE_EXTERNAL_STORAGE",
-                            "desired_mode": "allow",
-                            "required": true,
-                            "when": {"rooted": false},
-                            "source_section": "params.appops[0]"
-                        }
-                    ]
-                }
-            ]
-        })
     );
+    step.app_ref = Some("planner_app".to_string());
+    let actual = serde_json::to_value(plan_execution_with_app_definitions(
+        param_contract_input(vec![step]),
+        &[param_contract_app_definition()],
+    ))
+    .expect("planner result should serialize");
+
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"].as_array().expect("planner errors");
+    for param in ["runtime", "appops"] {
+        assert!(
+            errors.iter().any(|error| {
+                error["code"] == "unknown_param" && error["details"]["param"] == param
+            }),
+            "legacy {param} arrays must be rejected: {errors:#?}"
+        );
+    }
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == "missing_required_param"
+                && error["details"]["param"] == "permission_set"
+        }),
+        "legacy permission steps must require the canonical permission set: {errors:#?}"
+    );
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == "invalid_param_value"
+                && error["details"]["param"] == "policy.require_all"
+        }),
+        "legacy require_all must be rejected: {errors:#?}"
+    );
+    assert!(!actual.to_string().contains("permission_plan"));
 }
 
 #[test]
-fn permission_intent_defaults_policy_required_and_empty_grants_without_serialized_plan_field() {
-    let grant_with_defaults = param_contract_step(
-        "grant_defaults",
-        "grant_permissions",
-        vec![],
-        ref_params(vec![(
-            "runtime",
-            ParamValue::Literal(json!([
-                {
-                    "package_name": "com.example.defaults",
-                    "name": "android.permission.CAMERA"
-                }
-            ])),
-        )]),
-    );
-    let empty_grant = param_contract_step(
-        "grant_empty",
-        "grant_permissions",
-        vec![],
-        OrderedMap::new(),
-    );
-    let steps = permission_intent_steps(vec![grant_with_defaults.clone(), empty_grant]);
-
-    let first = serde_json::to_value(build_permission_intent(&steps))
-        .expect("internal permission intent should serialize for tests");
-    let second = serde_json::to_value(build_permission_intent(&steps))
-        .expect("internal permission intent should serialize for tests");
-
-    assert_eq!(first, second);
-    assert_eq!(first["grants"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        first["grants"][0]["policy"],
-        json!({"on_failure": "warn", "require_all": false})
-    );
-    assert_eq!(first["grants"][0]["actions"][0]["required"], true);
-
-    let no_actions = serde_json::to_value(build_permission_intent(&permission_intent_steps(vec![
-        grant_empty_permission_step("grant_empty"),
-    ])))
-    .expect("internal permission intent should serialize for tests");
-    assert_eq!(no_actions, json!({"grants": []}));
-
-    let plan = planning_result_value(PlannerInput {
-        device_plan_presentation: None,
-        recipes: vec![Recipe {
-            schema_version: 1,
-            kind: "recipe".to_string(),
-            id: "planner.permission_intent".to_string(),
-            name: "Planner Permission Intent".to_string(),
-            description: None,
-            recipe_dependencies: Vec::new(),
-            provides: RecipeProvides {
-                features: Vec::new(),
-            },
-            inputs: OrderedMap::new(),
-            artifacts: OrderedMap::new(),
-            artifact_groups: OrderedMap::new(),
-            steps: vec![grant_with_defaults],
-        }],
-        selected_recipe_refs: vec!["planner.permission_intent".to_string()],
-        explicit_input_bindings: OrderedMap::new(),
-        user_configuration_bindings: OrderedMap::new(),
-        device_plan_input_bindings: OrderedMap::new(),
-        plan_id: "plan.permission_intent.001".to_string(),
-        device_plan_ref: "example.device_plan".to_string(),
-        device_profile_ref: "example.device_profile".to_string(),
-        device_context: fixture_device_context(),
-        runtime_capabilities: fixture_runtime_capabilities(),
-        catalog_identity: None,
-        target_device: None,
-    });
-    assert!(!plan["execution_plan"]
-        .as_object()
-        .unwrap()
-        .contains_key("permission_plan"));
-}
-
-#[test]
-fn permission_intent_serialized_for_tests_contains_no_shell_or_adb_command_strings() {
-    let steps = permission_intent_steps(vec![param_contract_step(
-        "grant",
+fn canonical_permission_steps_reject_require_all_before_action_resolution() {
+    let step = param_contract_step(
+        "require_all",
         "grant_permissions",
         vec![],
         ref_params(vec![
+            ("permission_set", ParamValue::Literal(json!("baseline"))),
             (
-                "runtime",
-                ParamValue::Literal(json!([
-                    {"package_name": "com.example.app", "name": "android.permission.CAMERA"}
-                ])),
-            ),
-            (
-                "appops",
-                ParamValue::Literal(json!([
-                    {"package_name": "com.example.app", "op": "MANAGE_EXTERNAL_STORAGE", "mode": "allow"}
-                ])),
+                "policy",
+                ParamValue::Literal(json!({"on_failure": "warn", "require_all": true})),
             ),
         ]),
-    )]);
+    );
+    let actual = param_contract_result_value(param_contract_input(vec![step]));
 
-    let serialized = serde_json::to_string(&build_permission_intent(&steps))
-        .expect("internal permission intent should serialize for tests");
-
-    for forbidden in ["adb", "shell", "pm grant", "appops set", "run_plan_command"] {
-        assert!(
-            !serialized.contains(forbidden),
-            "internal planner intent must not contain executable command text {forbidden:?}: {serialized}"
-        );
-    }
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"].as_array().expect("planner errors");
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == "invalid_param_value"
+                && error["details"]["param"] == "policy.require_all"
+        }),
+        "canonical permission steps must reject legacy require_all: {errors:#?}"
+    );
+    assert!(!actual.to_string().contains("permission_plan"));
 }
 
 #[test]
-fn permission_intent_validation_rejects_obvious_malformed_step_local_inputs() {
-    let cases = vec![
-        (
-            param_contract_step(
-                "manual",
-                "grant_permissions",
-                vec![],
-                ref_params(vec![
-                    ("manual", ParamValue::Literal(json!([]))),
-                    ("runtime", ParamValue::Literal(json!([]))),
-                ]),
-            ),
-            "manual",
-            "manual",
-            "unknown_param",
-            json!(["appops", "policy", "runtime"]),
-            json!([]),
-        ),
-        (
-            param_contract_step(
-                "bad_policy",
-                "grant_permissions",
-                vec![],
-                ref_params(vec![(
-                    "policy",
-                    ParamValue::Literal(json!({"on_failure": "explode"})),
-                )]),
-            ),
-            "bad_policy",
-            "policy.on_failure",
-            "invalid_enum_value",
-            json!(["warn", "fail"]),
-            json!("explode"),
-        ),
-        (
-            param_contract_step(
-                "bad_runtime",
-                "grant_permissions",
-                vec![],
-                ref_params(vec![(
-                    "runtime",
-                    ParamValue::Literal(json!([
-                        {"package_name": "com.example.app", "required": "yes"}
-                    ])),
-                )]),
-            ),
-            "bad_runtime",
-            "runtime[0].name",
-            "missing_required_param",
-            json!("non-empty string"),
-            Value::Null,
-        ),
-        (
-            param_contract_step(
-                "bad_appop",
-                "grant_permissions",
-                vec![],
-                ref_params(vec![(
-                    "appops",
-                    ParamValue::Literal(json!([
-                        {
-                            "package_name": "com.example.app",
-                            "op": "MANAGE_EXTERNAL_STORAGE",
-                            "mode": "allow",
-                            "when": {"android_api_min": 35, "android_api_max": 34}
-                        }
-                    ])),
-                )]),
-            ),
-            "bad_appop",
-            "appops[0].when",
-            "invalid_param_value",
-            json!("android_api_min <= android_api_max"),
-            json!({"android_api_max": 34, "android_api_min": 35}),
-        ),
-    ];
-
-    for (step, step_id, param, code, expected, actual_value) in cases {
-        let actual = planning_result_value(param_contract_input(vec![step]));
-        assert_param_contract_error(&actual, code, step_id, param, expected, actual_value);
-    }
-}
-
-#[test]
-fn builtin_planner_mappings_match_compatibility_goldens_v1() {
-    let actual = normalized_planning_result_value(planner_input(
+fn builtin_planner_mappings_preserve_frozen_compatibility_surface_v1() {
+    let actual = normalized_planning_result_for_fixture(
         "planner_phase6n_builtins_all",
         &["planner.phase6n.builtins_all"],
-    ));
+    );
     let expected = read_golden("phase6n_planner_builtins_all.json");
 
-    assert_eq!(actual, expected);
+    assert_eq!(actual["status"], expected["status"]);
+    assert_eq!(actual["warnings"], expected["warnings"]);
+    assert_eq!(actual["errors"], expected["errors"]);
+    for field in [
+        "id",
+        "source",
+        "device_context",
+        "runtime_capabilities",
+        "inputs",
+    ] {
+        assert_eq!(
+            actual["execution_plan"][field], expected["execution_plan"][field],
+            "canonical plan should preserve frozen execution-plan field {field}"
+        );
+    }
+    let actual_artifacts = actual["execution_plan"]["artifacts"].as_array().unwrap();
+    let expected_artifacts = expected["execution_plan"]["artifacts"].as_array().unwrap();
+    let actual_apk = actual_artifacts
+        .iter()
+        .find(|artifact| artifact["id"] == "planner.phase6n.builtins_all/app_apk")
+        .unwrap();
+    let expected_apk = expected_artifacts
+        .iter()
+        .find(|artifact| artifact["id"] == "planner.phase6n.builtins_all/app_apk")
+        .unwrap();
+    assert_eq!(actual_apk["id"], expected_apk["id"]);
+    assert_eq!(actual_apk["type"], expected_apk["type"]);
+    assert_eq!(
+        actual_apk["source"],
+        json!({
+            "kind": "direct_url",
+            "url": expected_apk["url"]
+        })
+    );
+    assert_eq!(actual_apk["cache"], expected_apk["cache"]);
+    assert_eq!(
+        actual_apk["app_provenance"],
+        json!({"app_id": "planner_app", "artifact_id": "apk", "kind": "apk"})
+    );
+    let actual_archive = actual_artifacts
+        .iter()
+        .find(|artifact| artifact["id"] == "planner.phase6n.builtins_all/archive_zip")
+        .unwrap();
+    let expected_archive = expected_artifacts
+        .iter()
+        .find(|artifact| artifact["id"] == "planner.phase6n.builtins_all/archive_zip")
+        .unwrap();
+    assert_eq!(actual_archive, expected_archive);
     let steps = actual["execution_plan"]["steps"].as_array().unwrap();
+    let expected_steps = expected["execution_plan"]["steps"].as_array().unwrap();
+    for step_id in [
+        "planner.phase6n.builtins_all/resolve",
+        "planner.phase6n.builtins_all/extract_artifacts",
+        "planner.phase6n.builtins_all/extract_archive",
+        "planner.phase6n.builtins_all/copy",
+        "planner.phase6n.builtins_all/wait",
+    ] {
+        let step = steps
+            .iter()
+            .find(|step| step["id"] == step_id)
+            .expect("canonical plan should retain the frozen generic step");
+        let expected_step = expected_steps
+            .iter()
+            .find(|step| step["id"] == step_id)
+            .expect("frozen golden should include the generic step");
+        for field in [
+            "id",
+            "recipe_ref",
+            "type",
+            "name",
+            "dependencies",
+            "constraints",
+            "params",
+            "skip_if",
+            "verify",
+        ] {
+            assert_eq!(
+                step[field], expected_step[field],
+                "canonical step {step_id} should preserve frozen field {field}"
+            );
+        }
+    }
     let step_ids = steps
         .iter()
         .map(|step| step["id"].as_str().unwrap())
@@ -1321,14 +1392,15 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
         "app.xaniteog.install",
         "feature.copy_bios",
     ];
-    let first = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
+    let first = authored_corpus_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
         &corpus_recipe_expansion_bindings(),
     ));
-    let second = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
-        &selected_recipe_refs,
-        &corpus_recipe_expansion_bindings(),
-    ));
+    let second =
+        authored_corpus_planning_result_value(authored_corpus_planner_input_with_bindings(
+            &selected_recipe_refs,
+            &corpus_recipe_expansion_bindings(),
+        ));
 
     assert_eq!(first, second);
     assert_eq!(first["status"], "success", "{first:#}");
@@ -1416,14 +1488,14 @@ fn step_data_refs_conditions_and_constraints_match_compatibility() {
 
 #[test]
 fn dto_success_result_shape_is_stable_for_supported_fixture_surface() {
-    let first = normalized_planning_result_value(planner_input(
+    let first = normalized_planning_result_for_fixture(
         "planner_phase6n_builtins_all",
         &["planner.phase6n.builtins_all"],
-    ));
-    let second = normalized_planning_result_value(planner_input(
+    );
+    let second = normalized_planning_result_for_fixture(
         "planner_phase6n_builtins_all",
         &["planner.phase6n.builtins_all"],
-    ));
+    );
 
     assert_eq!(first, second);
     assert_planning_result_shape("dto success result", &first);
@@ -1440,6 +1512,7 @@ fn dto_success_result_shape_is_stable_for_supported_fixture_surface() {
         &[
             "id",
             "source",
+            "apps",
             "device_context",
             "runtime_capabilities",
             "inputs",
@@ -1453,6 +1526,14 @@ fn dto_success_result_shape_is_stable_for_supported_fixture_surface() {
     assert_eq!(plan["id"], "plan.example.device_plan.001");
     assert_eq!(plan["schema_version"], 1);
     assert_eq!(plan["kind"], "execution_plan");
+    assert_eq!(
+        plan["apps"],
+        json!([{
+            "id": "planner_app",
+            "name": "Planner Test App",
+            "package_id": "com.example.app"
+        }])
+    );
 
     assert_eq!(
         plan["source"],
@@ -1488,20 +1569,27 @@ fn dto_success_result_shape_is_stable_for_supported_fixture_surface() {
         let step = step
             .as_object()
             .expect("dto execution plan step should be an object");
+        let mut expected_step_fields = vec![
+            "id",
+            "recipe_ref",
+            "type",
+            "name",
+            "dependencies",
+            "constraints",
+            "params",
+            "skip_if",
+            "verify",
+        ];
+        if step.contains_key("app_id") {
+            expected_step_fields.push("app_id");
+        }
+        if step.contains_key("permission_plan") {
+            expected_step_fields.push("permission_plan");
+        }
         assert_object_keys(
             &format!("dto success steps[{index}]"),
             step,
-            &[
-                "id",
-                "recipe_ref",
-                "type",
-                "name",
-                "dependencies",
-                "constraints",
-                "params",
-                "skip_if",
-                "verify",
-            ],
+            &expected_step_fields,
         );
         assert_object_keys(
             &format!("dto success steps[{index}].constraints"),
@@ -1519,10 +1607,10 @@ fn dto_success_result_shape_is_stable_for_supported_fixture_surface() {
 
 #[test]
 fn dto_normalized_params_ref_defaults_and_permission_surface_are_stable() {
-    let actual = normalized_planning_result_value(planner_input(
+    let actual = normalized_planning_result_for_fixture(
         "planner_phase6n_builtins_all",
         &["planner.phase6n.builtins_all"],
-    ));
+    );
     let plan = actual["execution_plan"].as_object().unwrap();
     assert!(!plan.contains_key("permission_plan"));
 
@@ -1575,19 +1663,32 @@ fn dto_normalized_params_ref_defaults_and_permission_surface_are_stable() {
     assert_object_keys(
         "dto grant params",
         grant["params"].as_object().unwrap(),
-        &["runtime", "appops", "policy"],
+        &[],
     );
-    assert_eq!(
-        grant["params"]["runtime"]["value"][0]["package_name"],
-        "com.example.app"
+    assert_object_keys(
+        "dto grant permission_plan",
+        grant["permission_plan"].as_object().unwrap(),
+        &["permission_set", "on_failure", "actions"],
     );
+    assert_eq!(grant["permission_plan"]["permission_set"], "baseline");
+    assert_eq!(grant["permission_plan"]["on_failure"], "fail");
     assert_eq!(
-        grant["params"]["appops"]["value"][0]["op"],
-        "MANAGE_EXTERNAL_STORAGE"
-    );
-    assert_eq!(
-        grant["params"]["policy"],
-        json!({"value": {"on_failure": "fail", "require_all": true}})
+        grant["permission_plan"]["actions"],
+        json!([
+            {
+                "kind": "runtime_permission",
+                "package_name": "com.example.app",
+                "permission": "android.permission.POST_NOTIFICATIONS",
+                "applicability": {"status": "applicable"}
+            },
+            {
+                "kind": "app_op",
+                "package_name": "com.example.app",
+                "op": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow",
+                "applicability": {"status": "applicable"}
+            }
+        ])
     );
 }
 
@@ -1900,15 +2001,16 @@ fn step_ref_validation_preserves_explicit_refs_and_rewrites_shorthand_refs() {
 
 #[test]
 fn step_ref_validation_reports_invalid_targets_outputs_and_formats() {
-    let unknown_step = planning_result_value(ref_validation_input(vec![ref_validation_step(
-        "copy",
-        "copy_files",
-        vec![],
-        ref_params(vec![(
-            "source",
-            ParamValue::Ref("steps.missing".to_string()),
-        )]),
-    )]));
+    let unknown_step =
+        param_contract_result_value(ref_validation_input(vec![ref_validation_step(
+            "copy",
+            "copy_files",
+            vec![],
+            ref_params(vec![(
+                "source",
+                ParamValue::Ref("steps.missing".to_string()),
+            )]),
+        )]));
     assert_step_ref_error(
         &unknown_step,
         "unknown_step_ref",
@@ -1917,7 +2019,7 @@ fn step_ref_validation_reports_invalid_targets_outputs_and_formats() {
         "steps.missing",
     );
 
-    let unknown_output = planning_result_value(ref_validation_input(vec![
+    let unknown_output = param_contract_result_value(ref_validation_input(vec![
         ref_validation_step("extract", "extract_artifacts", vec![], OrderedMap::new()),
         ref_validation_step(
             "copy",
@@ -1937,24 +2039,21 @@ fn step_ref_validation_reports_invalid_targets_outputs_and_formats() {
         "steps.extract.outputs.missing",
     );
 
-    let no_primary_output = planning_result_value(ref_validation_input(vec![
+    let no_primary_output = param_contract_result_value(ref_validation_input(vec![
         ref_validation_step(
-            "install",
-            "install_apk",
+            "wait",
+            "wait",
             vec![],
-            ref_params(vec![(
-                "app",
-                ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-            )]),
+            ref_params(vec![("duration_ms", ParamValue::Literal(json!(1)))]),
         ),
         ref_validation_step(
             "copy",
             "copy_files",
             vec![],
-            ref_params(vec![(
-                "source",
-                ParamValue::Ref("steps.install".to_string()),
-            )]),
+            ref_params(vec![
+                ("source", ParamValue::Ref("steps.wait".to_string())),
+                ("dest", ParamValue::Literal(json!("/sdcard/Out"))),
+            ]),
         ),
     ]));
     assert_step_ref_error(
@@ -1962,10 +2061,10 @@ fn step_ref_validation_reports_invalid_targets_outputs_and_formats() {
         "step_ref_has_no_primary_output",
         "copy",
         "source",
-        "steps.install",
+        "steps.wait",
     );
 
-    let malformed = planning_result_value(ref_validation_input(vec![ref_validation_step(
+    let malformed = param_contract_result_value(ref_validation_input(vec![ref_validation_step(
         "copy",
         "copy_files",
         vec![],
@@ -2106,7 +2205,7 @@ fn dependency_validation_reports_cycles_deterministically_without_cascading_unkn
 
 #[test]
 fn param_contract_defaults_preserve_group_only_selection_order_and_shorthand_refs() {
-    let actual = planning_result_value(param_contract_input(vec![
+    let actual = param_contract_result_value(param_contract_input(vec![
         param_contract_step(
             "extract",
             "extract_artifacts",
@@ -2159,10 +2258,11 @@ fn param_contract_defaults_preserve_group_only_selection_order_and_shorthand_ref
     assert_eq!(
         param_contract_step_ids(&actual),
         vec![
+            "planner.param_contract/resolve_install",
             "planner.param_contract/extract",
             "planner.param_contract/archive",
-            "planner.param_contract/install",
             "planner.param_contract/wait",
+            "planner.param_contract/install",
             "planner.param_contract/copy",
         ]
     );
@@ -2194,7 +2294,7 @@ fn param_contract_defaults_preserve_group_only_selection_order_and_shorthand_ref
 
 #[test]
 fn param_contract_accepts_valid_enum_and_bool_values() {
-    let actual = planning_result_value(param_contract_input(vec![
+    let actual = param_contract_result_value(param_contract_input(vec![
         param_contract_step(
             "extract",
             "extract_artifacts",
@@ -2244,16 +2344,6 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
                     "app",
                     ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
                 ),
-                (
-                    "expected_package_name",
-                    ParamValue::Literal(json!("com.example.app")),
-                ),
-                (
-                    "expected_sha256",
-                    ParamValue::Literal(json!(
-                        " \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n"
-                    )),
-                ),
                 ("replace_existing", ParamValue::Literal(json!(true))),
             ]),
         ),
@@ -2273,77 +2363,39 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
         json!({"value": "sync"})
     );
     assert_eq!(
-        *param_contract_step_param(&actual, "install", "expected_package_name"),
-        json!({"value": "com.example.app"})
-    );
-    assert_eq!(
-        *param_contract_step_param(&actual, "install", "expected_sha256"),
-        json!({"value": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"})
-    );
-    assert_eq!(
         *param_contract_step_param(&actual, "install", "replace_existing"),
         json!({"value": true})
     );
 }
 
 #[test]
-fn install_apk_expected_sha256_rejects_invalid_authored_values() {
-    let invalid_values = [
-        json!(false),
-        json!(""),
-        json!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"),
-        json!("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-        json!("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-        json!("0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef"),
-        json!("0123456789abcdef0123456789abcdef-0123456789abcdef0123456789abcdef"),
-    ];
+fn install_apk_rejects_retired_inline_package_and_checksum_inputs() {
+    for (name, value) in [
+        ("expected_package_name", json!("com.example.app")),
+        ("expected_sha256", json!("0".repeat(64))),
+    ] {
+        let mut input = armsx1_recipe_planner_input();
+        let install = input
+            .recipes
+            .iter_mut()
+            .find(|recipe| recipe.id == "app.armsx1.install")
+            .expect("ARMSX1 Recipe should be selected")
+            .steps
+            .iter_mut()
+            .find(|step| step.type_name == "install_apk")
+            .expect("ARMSX1 Recipe should include an APK install");
+        install
+            .params
+            .insert(name.to_string(), ParamValue::Literal(value));
 
-    for invalid in invalid_values {
-        let actual = planning_result_value(param_contract_input(vec![param_contract_step(
-            "install",
-            "install_apk",
-            vec![],
-            ref_params(vec![
-                (
-                    "app",
-                    ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-                ),
-                ("expected_sha256", ParamValue::Literal(invalid.clone())),
-            ]),
-        )]));
-        assert_param_contract_error(
-            &actual,
-            "invalid_param_value",
-            "install",
-            "expected_sha256",
-            json!("literal 64-character hexadecimal string"),
-            invalid,
-        );
+        let result = plan_execution_with_app_definitions(input, &[armsx1_app_definition()]);
+        let error = result
+            .errors
+            .iter()
+            .find(|error| error.code == "app_install_authority_override")
+            .expect("retired inline App authority should be rejected");
+        assert_eq!(error.details["fields"], json!([name]));
     }
-
-    let ref_value = planning_result_value(param_contract_input(vec![param_contract_step(
-        "install",
-        "install_apk",
-        vec![],
-        ref_params(vec![
-            (
-                "app",
-                ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-            ),
-            (
-                "expected_sha256",
-                ParamValue::Ref("inputs.expected_sha256".to_string()),
-            ),
-        ]),
-    )]));
-    assert_param_contract_error(
-        &ref_value,
-        "invalid_param_source",
-        "install",
-        "expected_sha256",
-        json!(["literal"]),
-        json!({"ref": "inputs.expected_sha256"}),
-    );
 }
 
 #[test]
@@ -2523,93 +2575,6 @@ fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
             json!("false"),
         ),
         (
-            param_contract_step(
-                "install",
-                "install_apk",
-                vec![],
-                ref_params(vec![
-                    (
-                        "app",
-                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-                    ),
-                    ("expected_package_name", ParamValue::Literal(json!(false))),
-                ]),
-            ),
-            "install",
-            "expected_package_name",
-            "invalid_param_value",
-            json!("literal non-empty string"),
-            json!(false),
-        ),
-        (
-            param_contract_step(
-                "install",
-                "install_apk",
-                vec![],
-                ref_params(vec![
-                    (
-                        "app",
-                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-                    ),
-                    (
-                        "expected_package_name",
-                        ParamValue::Ref("inputs.package_name".to_string()),
-                    ),
-                ]),
-            ),
-            "install",
-            "expected_package_name",
-            "invalid_param_source",
-            json!(["literal"]),
-            json!({"ref": "inputs.package_name"}),
-        ),
-        (
-            param_contract_step(
-                "install",
-                "install_apk",
-                vec![],
-                ref_params(vec![
-                    (
-                        "app",
-                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-                    ),
-                    ("expected_package_name", ParamValue::Literal(json!(""))),
-                ]),
-            ),
-            "install",
-            "expected_package_name",
-            "invalid_param_value",
-            json!("literal non-empty string"),
-            json!(""),
-        ),
-        (
-            param_contract_step(
-                "install",
-                "install_apk",
-                vec![],
-                ref_params(vec![
-                    (
-                        "app",
-                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
-                    ),
-                    ("expected_package_name", ParamValue::Literal(json!("   "))),
-                ]),
-            ),
-            "install",
-            "expected_package_name",
-            "invalid_param_value",
-            json!("literal non-empty string"),
-            json!("   "),
-        ),
-        (
-            param_contract_step("install", "install_apk", vec![], OrderedMap::new()),
-            "install",
-            "app",
-            "missing_required_param",
-            json!("ref"),
-            Value::Null,
-        ),
-        (
             param_contract_step("wait", "wait", vec![], OrderedMap::new()),
             "wait",
             "duration_ms",
@@ -2633,13 +2598,29 @@ fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
     ];
 
     for (step, step_id, param, code, expected, actual_value) in cases {
-        let actual = planning_result_value(param_contract_input(vec![step]));
+        let actual = param_contract_result_value(param_contract_input(vec![step]));
         assert_param_contract_error(&actual, code, step_id, param, expected, actual_value);
     }
+
+    let missing_app = param_contract_result_value(param_contract_input(vec![param_contract_step(
+        "install",
+        "install_apk",
+        vec![],
+        OrderedMap::new(),
+    )]));
+    assert_eq!(missing_app["status"], "error", "{missing_app:#}");
+    assert!(
+        missing_app["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "app_install_artifact_provenance_invalid"),
+        "app install without its declared artifact path must fail closed: {missing_app:#}"
+    );
 }
 
 #[test]
-fn param_contract_rejects_unknown_params_and_preserves_valid_legacy_lifecycle() {
+fn param_contract_rejects_unknown_params_and_retired_lifecycle_forms() {
     let focused = planning_result_value(param_contract_input(vec![param_contract_step(
         "copy",
         "copy_files",
@@ -2668,7 +2649,14 @@ fn param_contract_rejects_unknown_params_and_preserves_valid_legacy_lifecycle() 
             ParamValue::Literal(json!("com.example.app")),
         )]),
     )]));
-    assert_eq!(non_focused["status"], "success", "{non_focused:#}");
+    assert!(
+        non_focused["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "app_context_required"),
+        "lifecycle identity must come from App Definition context: {non_focused:#}"
+    );
 
     let malformed_legacy = planning_result_value(param_contract_input(vec![param_contract_step(
         "launch",
@@ -2682,10 +2670,11 @@ fn param_contract_rejects_unknown_params_and_preserves_valid_legacy_lifecycle() 
             ("extra", ParamValue::Literal(json!(true))),
         ]),
     )]));
-    assert_eq!(
-        malformed_legacy["errors"][0]["code"],
-        "app_context_required"
-    );
+    assert!(malformed_legacy["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| error["code"] == "app_context_required"));
 }
 
 #[test]
@@ -2917,14 +2906,13 @@ fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
         ),
     ];
 
-    let first = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
+    let first = authored_corpus_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
         &input_bindings,
     ));
-    let second = obtainium_planning_result_value(authored_corpus_planner_input_with_bindings(
-        &selected_recipe_refs,
-        &input_bindings,
-    ));
+    let second = authored_corpus_planning_result_value(
+        authored_corpus_planner_input_with_bindings(&selected_recipe_refs, &input_bindings),
+    );
 
     assert_eq!(first, second);
     assert_planning_result_shape("authored corpus supported synthetic context", &first);
@@ -2982,7 +2970,7 @@ fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() 
     );
     assert_eq!(input.selected_recipe_refs, vec!["app.obtainium.install"]);
 
-    let actual = obtainium_planning_result_value(input);
+    let actual = authored_corpus_planning_result_value(input);
 
     assert_eq!(actual["status"], "success", "{actual:#}");
     assert_eq!(snapshot_files(&repo_authored_recipes_dir()), recipes_before);
@@ -5562,6 +5550,104 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
     }
 }
 
+fn param_contract_app_definition() -> crate::authored_models::AppDefinitionV1 {
+    crate::authored_models::AppDefinitionV1 {
+        schema_version: 1,
+        kind: "app_definition".to_string(),
+        id: "planner_app".to_string(),
+        name: "Planner Test App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.app".to_string(),
+        artifacts: vec![(
+            "apk".to_string(),
+            AppArtifactV1 {
+                kind: AppArtifactKind::Apk,
+                name: Some("Planner Test APK".to_string()),
+                description: None,
+                source: AppArtifactSource::DirectUrl {
+                    url: "https://example.com/app.apk".to_string(),
+                    sha256: None,
+                },
+            },
+        )]
+        .into_iter()
+        .collect(),
+        permission_sets: Some(crate::authored_models::AppPermissionSets {
+            baseline: Some(crate::authored_models::AppPermissionSet {
+                runtime: vec![crate::authored_models::AppRuntimePermissionAction {
+                    permission: "android.permission.CAMERA".to_string(),
+                    android_api_min: None,
+                    android_api_max: None,
+                }],
+                app_ops: Vec::new(),
+            }),
+            elevated: None,
+        }),
+        targets: Default::default(),
+        launcher_activity: None,
+        metadata: Default::default(),
+    }
+}
+
+fn param_contract_result_value(mut input: PlannerInput) -> Value {
+    let app = param_contract_app_definition();
+    let app_ref = app.id.clone();
+
+    for recipe in &mut input.recipes {
+        let has_install = recipe
+            .steps
+            .iter()
+            .any(|step| step.type_name == "install_apk");
+        let mut resolver_steps = Vec::new();
+        if has_install {
+            recipe.artifacts.insert(
+                "app_apk".to_string(),
+                RecipeArtifact::AppArtifact(AppArtifactReference {
+                    app_ref: app_ref.clone(),
+                    artifact: "apk".to_string(),
+                    input: None,
+                    cache: "default".to_string(),
+                }),
+            );
+        }
+
+        for step in &mut recipe.steps {
+            if step.type_name == "install_apk" {
+                step.app_ref = Some(app_ref.clone());
+                let resolver_id = format!("resolve_{}", step.id);
+                step.dependencies.push(resolver_id.clone());
+                resolver_steps.push(param_contract_step(
+                    &resolver_id,
+                    "resolve_artifacts",
+                    vec![],
+                    ref_params(vec![("artifacts", ParamValue::Literal(json!(["app_apk"])))]),
+                ));
+            } else if step.type_name == "grant_permissions" {
+                step.app_ref = Some(app_ref.clone());
+            }
+        }
+        if !resolver_steps.is_empty() {
+            recipe.steps.splice(0..0, resolver_steps);
+        }
+    }
+
+    serde_json::to_value(plan_execution_with_app_definitions(input, &[app]))
+        .expect("planner result should serialize")
+}
+
+fn grant_permission_set_step(id: &str) -> Step {
+    param_contract_step(
+        id,
+        "grant_permissions",
+        vec![],
+        ref_params(vec![
+            ("permission_set", ParamValue::Literal(json!("baseline"))),
+            ("policy", ParamValue::Literal(json!({"on_failure": "warn"}))),
+        ]),
+    )
+}
+
 fn param_contract_step(
     id: &str,
     step_type: &str,
@@ -5585,23 +5671,6 @@ fn param_contract_step(
         params,
         verify: Vec::<StepCondition>::new(),
     }
-}
-
-fn permission_intent_steps(steps: Vec<Step>) -> Vec<(String, String, Step)> {
-    steps
-        .into_iter()
-        .map(|step| {
-            (
-                format!("planner.permission_intent/{}", step.id),
-                "planner.permission_intent".to_string(),
-                step,
-            )
-        })
-        .collect()
-}
-
-fn grant_empty_permission_step(id: &str) -> Step {
-    param_contract_step(id, "grant_permissions", vec![], OrderedMap::new())
 }
 
 fn param_contract_step_ids(actual: &Value) -> Vec<&str> {
@@ -6857,7 +6926,7 @@ fn lifecycle_form_diagnostics_reject_missing_context_without_catalog() {
 }
 
 #[test]
-fn app_lifecycle_rejects_overrides_and_malformed_legacy_forms() {
+fn app_lifecycle_rejects_overrides_and_retired_literal_forms() {
     let mut app = armsx1_app_definition();
     app.launcher_activity = Some("com.nanodata.armsx.MainActivity".to_string());
     for step_type in ["launch_app", "force_stop_app"] {
@@ -6910,28 +6979,10 @@ fn app_lifecycle_rejects_overrides_and_malformed_legacy_forms() {
             ParamValue::Literal(json!("com.example.legacy")),
         );
         legacy.insert("activity".to_string(), ParamValue::Literal(json!(activity)));
-        let result = plan_execution_with_app_definitions(
+        assert_app_planning_error(
             lifecycle_planner_input("launch_app", None, legacy),
             &[app.clone()],
-        );
-        assert_eq!(
-            result.status,
-            PlanningStatus::Success,
-            "{activity}: {:?}",
-            result.errors
-        );
-        let plan = result.execution_plan.unwrap();
-        let launch = plan
-            .steps
-            .iter()
-            .find(|step| step.id.ends_with("/lifecycle"))
-            .unwrap();
-        assert_eq!(launch.app_id, None);
-        assert_eq!(
-            launch.params["activity"],
-            crate::planner::ExecutionParamValue::Literal {
-                value: json!(activity),
-            }
+            "app_context_required",
         );
     }
 }
@@ -7194,7 +7245,7 @@ fn issue19_all_inapplicable_elevated_step_stays_selected_without_shell_or_root()
         input.runtime_capabilities.root_shell = root_shell;
         input.runtime_capabilities.shell_command = shell_command;
 
-        let result = plan_execution_with_app_definitions(input.clone(), &[app.clone()]);
+        let result = plan_execution_with_app_definitions(input.clone(), std::slice::from_ref(&app));
 
         assert_eq!(
             result.status,
@@ -7248,7 +7299,7 @@ fn issue19_mixed_permission_actions_keep_existing_shell_and_root_gates() {
     input.runtime_capabilities.root_shell = false;
     input.runtime_capabilities.shell_command = true;
 
-    let result = plan_execution_with_app_definitions(input.clone(), &[app.clone()]);
+    let result = plan_execution_with_app_definitions(input.clone(), std::slice::from_ref(&app));
     assert_eq!(result.status, PlanningStatus::Error);
     assert!(result
         .errors
@@ -7257,7 +7308,7 @@ fn issue19_mixed_permission_actions_keep_existing_shell_and_root_gates() {
 
     input.runtime_capabilities.root_shell = true;
     input.runtime_capabilities.shell_command = false;
-    let result = plan_execution_with_app_definitions(input.clone(), &[app.clone()]);
+    let result = plan_execution_with_app_definitions(input.clone(), std::slice::from_ref(&app));
     assert_eq!(result.status, PlanningStatus::Error);
     assert!(result
         .errors
@@ -7773,7 +7824,7 @@ fn app_authority_accepts_transitive_resolver_ancestor_selected_by_artifact_group
 }
 
 #[test]
-fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
+fn retroarch_package_condition_uses_app_context_without_duplicate_identity() {
     let app = load_app_definition(repo_authored_root().join("apps/retroarch.yaml"))
         .expect("RetroArch App Definition should load");
     let result = plan_execution_with_app_definitions(
@@ -7793,12 +7844,9 @@ fn legacy_recipe_package_conditions_keep_authored_package_parameters() {
         .iter()
         .find(|step| step.type_name == "install_apk")
         .unwrap();
-    assert!(install.app_id.is_none());
-    assert_eq!(install.skip_if[0].app_id, None);
-    assert_eq!(
-        install.skip_if[0].params.get("package_name"),
-        Some(&json!("com.retroarch.aarch64"))
-    );
+    assert_eq!(install.app_id.as_deref(), Some("retroarch"));
+    assert_eq!(install.skip_if[0].app_id.as_deref(), Some("retroarch"));
+    assert!(install.skip_if[0].params.is_empty());
 }
 
 fn review_snapshot_recipe() -> Recipe {

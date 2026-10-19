@@ -24,8 +24,9 @@ inputs:
     default: null
 artifacts:
   retroarch_apk:
-    type: remote_file
-    url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
+    type: app_artifact
+    app_ref: retroarch
+    artifact: apk
     cache: default
   asset_assets_zip:
     type: app_artifact
@@ -189,6 +190,7 @@ steps:
   verify: []
 - id: install_retroarch
   type: install_apk
+  app_ref: retroarch
   name: Install RetroArch
   description: Install the RetroArch APK.
   user_toggleable: false
@@ -200,8 +202,7 @@ steps:
     conflicts_with: []
   skip_if:
   - type: package_installed
-    params:
-      package_name: com.retroarch.aarch64
+    params: {}
   params:
     app:
       ref: artifacts.retroarch_apk.local_path

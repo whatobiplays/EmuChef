@@ -7,7 +7,7 @@
       "sourceKind": "recipe",
       "id": "app.retroarch.provision",
       "path": "authored/recipes/app.retroarch.provision.yaml",
-      "sha256": "bf10874d72be73dc8a5255101403bbe025f6e073f1891a7146a9aa812ed173a2"
+      "sha256": "41c53ffca788d0c56c71e6db7e819f5a73209a2efe7469a59d4190bf9823a83b"
     },
     {
       "sourceKind": "appDefinition",

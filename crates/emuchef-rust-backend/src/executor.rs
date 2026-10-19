@@ -11,19 +11,17 @@ pub(crate) mod root_authority;
 pub(crate) mod root_requirements;
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
+use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tempfile::TempPath;
 
 use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
-use crate::artifact_transport::{HttpArtifactTransport, HttpClientConfig};
 use crate::model::OrderedMap;
 use crate::owned_process::ProcessCleanup;
 use crate::planner::{
@@ -32,11 +30,8 @@ use crate::planner::{
     PermissionPlan, PermissionPlanAction, PermissionSetKind, RuntimeValue, TargetDeviceBinding,
 };
 use crate::remote_release_resolver::{
-    resolve_github_latest, resolve_remote_latest, ResolvedRemoteRelease,
+    resolve_remote_latest, RemoteReleaseOptions, ResolvedRemoteRelease,
 };
-use crate::validation::normalize_expected_sha256;
-
-const APK_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Materialization details resolved from one planned artifact source.
 enum MaterializedArtifactSource {
@@ -240,9 +235,11 @@ mod resolved_release_result_tests {
             "https://forge.example.net",
             "owner/repo",
             "file",
-            false,
-            None,
-            false,
+            crate::remote_release_resolver::RemoteReleaseOptions {
+                include_prereleases: false,
+                asset_pattern: None,
+                invert_asset_pattern: false,
+            },
             &release_metadata,
         )
         .expect("the valid file asset should be selected for the terminal report");
@@ -597,7 +594,6 @@ pub trait ExecutorDevice: std::fmt::Debug {
     fn package_installed(&mut self, package_name: &str) -> Result<bool, DeviceOperationError>;
     fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError>;
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError>;
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError>;
     /// Apply one planned permission action through the adapter's fixed command
     /// mapping. The operation contains no caller-supplied shell command.
     /// Baseline actions use ordinary ADB shell execution. Elevated actions use
@@ -1371,17 +1367,15 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let resolved_params = resolve_step_params(state, &step.params)?;
         match step.type_name.as_str() {
             "wait" => self.execute_wait(&resolved_params),
-            "grant_permissions" => self.execute_grant_permissions(plan, step, &resolved_params),
-            "resolve_remote_release" => self.execute_resolve_remote_release(&resolved_params),
-            "resolve_github_release" => self.execute_resolve_github_release(&resolved_params),
+            "grant_permissions" => self.execute_grant_permissions(plan, step),
             "download_remote_file" => self.execute_download_remote_file(step, &resolved_params),
             "resolve_artifacts" => self.execute_resolve_artifacts(plan, state, &resolved_params),
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
             "copy_files" => self.execute_copy_files(plan, step, &resolved_params),
             "install_apk" => self.execute_install_apk(plan, state, step, &resolved_params),
-            "launch_app" => self.execute_launch_app(plan, step, &resolved_params),
-            "force_stop_app" => self.execute_force_stop_app(plan, step, &resolved_params),
+            "launch_app" => self.execute_launch_app(plan, step),
+            "force_stop_app" => self.execute_force_stop_app(plan, step),
             other => Err(StepFailure::new(format!(
                 "Unsupported executor step type: {other}"
             ))),
@@ -1408,78 +1402,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         &mut self,
         plan: &ExecutionPlan,
         step: &ExecutionStep,
-        resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        if step.permission_plan.is_some() || step.app_id.is_some() {
-            let (_, permission_plan) = crate::planner::validated_plan_permission_plan(plan, step)
-                .map_err(|reason| {
-                DeviceOperationError::other(format!(
+        let (_, permission_plan) = crate::planner::validated_plan_permission_plan(plan, step)
+            .map_err(|reason| {
+                StepFailure::new(format!(
                     "The reviewed permission plan is invalid: {reason}."
                 ))
             })?;
-            return self.execute_planned_permission_actions(step, permission_plan);
-        }
-
-        let policy = permission_policy(resolved_params.get("policy"));
-        let mut action_results = Vec::new();
-        let mut failure = None;
-
-        for action in permission_actions(resolved_params) {
-            if let Some(reason) = permission_not_applicable_reason(
-                action.when.as_ref(),
-                plan.runtime_capabilities.root_shell,
-                plan.device_context.android_api_level,
-            ) {
-                let mut result = permission_result_base(step, &action);
-                insert_object_entries(&mut result, reason);
-                result.insert("status".to_string(), json!("not_applicable"));
-                action_results.push(Value::Object(result));
-                continue;
-            }
-
-            match self
-                .adapters
-                .device
-                .run_plan_command(permission_command(&action))
-            {
-                Ok(()) => {
-                    let mut result = permission_result_base(step, &action);
-                    result.insert("status".to_string(), json!("executed"));
-                    action_results.push(Value::Object(result));
-                }
-                Err(error) => {
-                    let message = error.message.clone();
-                    let mut result = permission_result_base(step, &action);
-                    result.insert("status".to_string(), json!("failed"));
-                    result.insert("message".to_string(), json!(message));
-                    action_results.push(Value::Object(result));
-                    if action.required
-                        || policy.require_all
-                        || policy.on_failure == "fail"
-                        || error.kind.requires_device_fail_stop()
-                    {
-                        failure = Some((error,));
-                        break;
-                    }
-                }
-            }
-        }
-
-        let mut outputs = OrderedMap::new();
-        outputs.insert(
-            "permission_results".to_string(),
-            RuntimeValue {
-                type_name: "object".to_string(),
-                value: json!({ "actions": action_results }),
-                location: None,
-            },
-        );
-        if let Some((error,)) = failure {
-            let mut failure: StepFailure = error.into();
-            failure.outputs = outputs;
-            return Err(failure);
-        }
-        Ok(outputs)
+        self.execute_planned_permission_actions(step, permission_plan)
     }
 
     fn execute_planned_permission_actions(
@@ -1542,127 +1472,6 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             if let Some(error) = ordinary_failure {
                 return Err(step_failure_with_outputs(error, outputs));
             }
-        }
-        Ok(outputs)
-    }
-
-    fn execute_resolve_remote_release(
-        &mut self,
-        resolved_params: &OrderedMap<Value>,
-    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        let provider = resolved_params
-            .get("provider")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StepFailure::new("resolve_remote_release requires provider".to_string())
-            })?;
-        let base_url = resolved_params
-            .get("base_url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StepFailure::new("resolve_remote_release requires base_url".to_string())
-            })?;
-        let repository = resolved_params
-            .get("repository")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StepFailure::new("resolve_remote_release requires repository".to_string())
-            })?;
-        let asset_pattern = resolved_params
-            .get("asset_pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StepFailure::new("resolve_remote_release requires asset_pattern".to_string())
-            })?;
-        let include_prereleases = resolved_params
-            .get("include_prereleases")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let transport = HttpArtifactTransport::new(HttpClientConfig::default()).map_err(|_| {
-            StepFailure::new(
-                "remote_release_client_failed: Network access could not be initialized".to_string(),
-            )
-        })?;
-        let resolved = resolve_remote_latest(
-            &transport,
-            provider,
-            base_url,
-            repository,
-            "apk",
-            include_prereleases,
-            Some(asset_pattern),
-            false,
-        )
-        .map_err(StepFailure::new)?;
-        Ok(remote_release_outputs(resolved))
-    }
-
-    fn execute_resolve_github_release(
-        &mut self,
-        resolved_params: &OrderedMap<Value>,
-    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        let repository = resolved_params
-            .get("repository")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StepFailure::new("resolve_github_release requires repository".to_string())
-            })?;
-        let asset_pattern = resolved_params
-            .get("asset_pattern")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StepFailure::new("resolve_github_release requires asset_pattern".to_string())
-            })?;
-        let include_prereleases = resolved_params
-            .get("include_prereleases")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let resolved = resolve_github_latest(repository, include_prereleases, asset_pattern)
-            .map_err(StepFailure::new)?;
-        let mut outputs = OrderedMap::new();
-        outputs.insert(
-            "download_url".to_string(),
-            RuntimeValue {
-                type_name: "string".to_string(),
-                value: Value::String(resolved.download_url),
-                location: None,
-            },
-        );
-        outputs.insert(
-            "asset_name".to_string(),
-            RuntimeValue {
-                type_name: "string".to_string(),
-                value: Value::String(resolved.asset_name),
-                location: None,
-            },
-        );
-        outputs.insert(
-            "release_tag".to_string(),
-            RuntimeValue {
-                type_name: "string".to_string(),
-                value: Value::String(resolved.release_tag),
-                location: None,
-            },
-        );
-        if let Some(published_at) = resolved.published_at {
-            outputs.insert(
-                "published_at".to_string(),
-                RuntimeValue {
-                    type_name: "string".to_string(),
-                    value: Value::String(published_at),
-                    location: None,
-                },
-            );
-        }
-        if let Some(size) = resolved.size {
-            outputs.insert(
-                "size".to_string(),
-                RuntimeValue {
-                    type_name: "integer".to_string(),
-                    value: Value::from(size),
-                    location: None,
-                },
-            );
         }
         Ok(outputs)
     }
@@ -1800,9 +1609,11 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                                     service_origin,
                                     repository,
                                     &provenance.kind,
-                                    *include_prereleases,
-                                    asset_pattern.as_deref(),
-                                    *invert_asset_pattern,
+                                    crate::remote_release_resolver::RemoteReleaseOptions {
+                                        include_prereleases: *include_prereleases,
+                                        asset_pattern: asset_pattern.as_deref(),
+                                        invert_asset_pattern: *invert_asset_pattern,
+                                    },
                                     fixture,
                                 )
                             }
@@ -1824,9 +1635,11 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                                     service_origin,
                                     repository,
                                     &provenance.kind,
-                                    *include_prereleases,
-                                    asset_pattern.as_deref(),
-                                    *invert_asset_pattern,
+                                    RemoteReleaseOptions {
+                                        include_prereleases: *include_prereleases,
+                                        asset_pattern: asset_pattern.as_deref(),
+                                        invert_asset_pattern: *invert_asset_pattern,
+                                    },
                                 )
                                 .map_err(StepFailure::new)?
                             }
@@ -1844,9 +1657,11 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                                 service_origin,
                                 repository,
                                 &provenance.kind,
-                                *include_prereleases,
-                                asset_pattern.as_deref(),
-                                *invert_asset_pattern,
+                                RemoteReleaseOptions {
+                                    include_prereleases: *include_prereleases,
+                                    asset_pattern: asset_pattern.as_deref(),
+                                    invert_asset_pattern: *invert_asset_pattern,
+                                },
                             )
                             .map_err(StepFailure::new)?
                         };
@@ -2262,38 +2077,6 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Ok(outputs)
     }
 
-    /// Infer one unambiguous package identity for synthetic dry-run state.
-    /// Ambiguous, empty, or inconsistent declarations intentionally return
-    /// `None` so bookkeeping can never turn a successful install into a
-    /// failed operation.
-    fn inferred_installed_package(
-        step: &ExecutionStep,
-        resolved_params: &OrderedMap<Value>,
-    ) -> Option<String> {
-        let identities = step
-            .skip_if
-            .iter()
-            .chain(step.verify.iter())
-            .filter(|condition| condition.type_name == "package_installed")
-            .filter_map(|condition| condition.params.get("package_name"))
-            .filter_map(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<HashSet<_>>();
-        if identities.len() != 1 {
-            return None;
-        }
-        let package_name = identities.into_iter().next()?;
-        if resolved_params
-            .get("expected_package_name")
-            .and_then(Value::as_str)
-            .is_some_and(|expected| expected != package_name)
-        {
-            return None;
-        }
-        Some(package_name)
-    }
-
     fn execute_install_apk(
         &mut self,
         plan: &ExecutionPlan,
@@ -2325,19 +2108,24 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 apk_path.display()
             )));
         }
-        let app_context_package = if let Some(app_id) = step.app_id.as_deref() {
-            let app = plan
-                .apps
-                .iter()
-                .find(|app| app.id == app_id)
-                .ok_or_else(|| {
-                    StepFailure::new(
-                        "app_context_invalid: Reviewed App Definition data is unavailable."
-                            .to_string(),
-                    )
-                })?;
-            let path = apk_path.to_string_lossy();
-            let provenance = plan.artifacts.iter().find(|artifact| {
+        let app_id = step.app_id.as_deref().ok_or_else(|| {
+            StepFailure::new(
+                "app_context_invalid: APK installation requires reviewed App Definition context."
+                    .to_string(),
+            )
+        })?;
+        let app = plan
+            .apps
+            .iter()
+            .find(|app| app.id == app_id)
+            .ok_or_else(|| {
+                StepFailure::new(
+                    "app_context_invalid: Reviewed App Definition data is unavailable.".to_string(),
+                )
+            })?;
+        let path = apk_path.to_string_lossy();
+        let provenance =
+            plan.artifacts.iter().find(|artifact| {
                 artifact.app_provenance.as_ref().is_some_and(|provenance| {
                     provenance.app_id == app_id && provenance.kind == "apk"
                 }) && artifact.type_name == "remote_file"
@@ -2347,80 +2135,23 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         .and_then(|artifact| artifact.local_path.as_deref())
                         == Some(path.as_ref())
             });
-            let Some(provenance) = provenance else {
-                return Err(StepFailure::new(
-                    "app_install_artifact_provenance_invalid: Reviewed APK artifact provenance is unavailable.".to_string(),
-                ));
-            };
-            let _ = provenance;
-            if resolved_params.contains_key("expected_package_name") {
-                return Err(StepFailure::new(
-                    "app_context_invalid: App-context APK installs derive package identity from the reviewed App Definition.".to_string(),
-                ));
-            }
-            Some(app.package_id.clone())
-        } else {
-            None
-        };
-        let legacy_expected_package = if step.app_id.is_none() {
-            resolved_params
-                .get("expected_package_name")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .filter(|value| !value.trim().is_empty())
-                        .ok_or_else(|| {
-                            StepFailure::new(
-                                "install_apk expected_package_name must be a non-empty string literal."
-                                    .to_string(),
-                            )
-                        })
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        let expected_package_name = app_context_package.as_deref().or(legacy_expected_package);
-        if let Some(expected_package_name) = expected_package_name {
-            if expected_package_name.trim().is_empty() {
-                return Err(StepFailure::new(
-                    "install_apk expected package name must be a non-empty string literal."
-                        .to_string(),
-                ));
-            }
-            let manifest = inspect_apk_manifest(&apk_path).map_err(|error| {
-                StepFailure::new(format!(
-                    "apk_package_inspection_failed: manifest inspection failed with reason '{}'.",
-                    error.code()
-                ))
-            })?;
-            if manifest.package_name != expected_package_name {
-                return Err(StepFailure::new(format!(
-                    "apk_package_mismatch: expected package '{}', actual package '{}'.",
-                    expected_package_name, manifest.package_name
-                )));
-            }
+        if provenance.is_none() {
+            return Err(StepFailure::new(
+                "app_install_artifact_provenance_invalid: Reviewed APK artifact provenance is unavailable.".to_string(),
+            ));
         }
-        if let Some(expected_sha256) = resolved_params.get("expected_sha256") {
-            let expected_sha256 = expected_sha256
-                .as_str()
-                .and_then(normalize_expected_sha256)
-                .ok_or_else(|| {
-                    StepFailure::new(
-                        "install_apk expected_sha256 must be a 64-character hexadecimal string literal."
-                            .to_string(),
-                    )
-                })?;
-            let actual_sha256 = calculate_apk_sha256(&apk_path).map_err(|_| {
-                StepFailure::new(
-                    "apk_checksum_read_failed: APK checksum could not be calculated.".to_string(),
-                )
-            })?;
-            if actual_sha256 != expected_sha256 {
-                return Err(StepFailure::new(format!(
-                    "apk_checksum_mismatch: expected SHA-256 '{expected_sha256}', actual SHA-256 '{actual_sha256}'."
-                )));
-            }
+        let expected_package_name = &app.package_id;
+        let manifest = inspect_apk_manifest(&apk_path).map_err(|error| {
+            StepFailure::new(format!(
+                "apk_package_inspection_failed: manifest inspection failed with reason '{}'.",
+                error.code()
+            ))
+        })?;
+        if manifest.package_name != *expected_package_name {
+            return Err(StepFailure::new(format!(
+                "apk_package_mismatch: expected package '{}', actual package '{}'.",
+                expected_package_name, manifest.package_name
+            )));
         }
         let replace_existing = resolved_params
             .get("replace_existing")
@@ -2429,11 +2160,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         self.adapters
             .device
             .install_apk(&apk_path, replace_existing)?;
-        if let Some(package_name) =
-            app_context_package.or_else(|| Self::inferred_installed_package(step, resolved_params))
-        {
-            self.adapters.device.record_installed_package(&package_name);
-        }
+        self.adapters
+            .device
+            .record_installed_package(expected_package_name);
         Ok(OrderedMap::new())
     }
 
@@ -2441,29 +2170,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         &mut self,
         plan: &ExecutionPlan,
         step: &ExecutionStep,
-        resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        if step.app_id.is_some() {
-            let (package, activity) = crate::planner::validated_plan_lifecycle_target(plan, step)
-                .map_err(|reason| {
+        let (package, activity) = crate::planner::validated_plan_lifecycle_target(plan, step)
+            .map_err(|reason| {
                 StepFailure::new(format!("App launch identity is invalid: {reason}."))
             })?;
-            self.adapters
-                .device
-                .launch_app(&package, activity.as_deref())?;
-            return Ok(OrderedMap::new());
-        }
-        let package_name = resolved_params
-            .get("package_name")
-            .map(value_to_string)
-            .unwrap_or_else(|| "None".to_string());
-        let activity = resolved_params
-            .get("activity")
-            .filter(|value| !value.is_null())
-            .map(value_to_string);
         self.adapters
             .device
-            .launch_app(&package_name, activity.as_deref())?;
+            .launch_app(&package, activity.as_deref())?;
         Ok(OrderedMap::new())
     }
 
@@ -2471,26 +2185,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         &mut self,
         plan: &ExecutionPlan,
         step: &ExecutionStep,
-        resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        if step.app_id.is_some() {
-            let (package, _) = crate::planner::validated_plan_lifecycle_target(plan, step)
-                .map_err(|reason| {
-                    StepFailure::new(format!("App force-stop identity is invalid: {reason}."))
-                })?;
-            self.adapters.device.force_stop_app(&package)?;
-            return Ok(OrderedMap::new());
-        }
-        let package_name = resolved_params
-            .get("package_name")
-            .map(value_to_string)
-            .unwrap_or_else(|| "None".to_string());
-        if package_name.trim().is_empty() {
-            return Err(StepFailure::new(
-                "force_stop_app step requires a non-empty package_name.".to_string(),
-            ));
-        }
-        self.adapters.device.force_stop_app(&package_name)?;
+        let (package, _) =
+            crate::planner::validated_plan_lifecycle_target(plan, step).map_err(|reason| {
+                StepFailure::new(format!("App force-stop identity is invalid: {reason}."))
+            })?;
+        self.adapters.device.force_stop_app(&package)?;
         Ok(OrderedMap::new())
     }
 
@@ -2501,25 +2201,27 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     ) -> Result<bool, StepFailure> {
         match condition.type_name.as_str() {
             "package_installed" => {
-                let package_name = if let Some(app_id) = condition.app_id.as_deref() {
-                    if condition.params.contains_key("package_name") {
-                        return Err(StepFailure::new(
-                            "app_condition_package_parameter_forbidden: App-context package_installed conditions inherit the reviewed package.".to_string(),
-                        ));
-                    }
-                    plan.apps
-                        .iter()
-                        .find(|app| app.id == app_id)
-                        .map(|app| app.package_id.clone())
-                        .ok_or_else(|| {
-                            StepFailure::new(
-                                "app_context_invalid: Reviewed App Definition data is unavailable."
-                                    .to_string(),
-                            )
-                        })?
-                } else {
-                    required_string_param(condition, "package_name").map_err(StepFailure::new)?
-                };
+                let app_id = condition.app_id.as_deref().ok_or_else(|| {
+                    StepFailure::new(
+                        "app_condition_context_required: package_installed requires App Definition context.".to_string(),
+                    )
+                })?;
+                if !condition.params.is_empty() {
+                    return Err(StepFailure::new(
+                        "app_condition_package_parameter_forbidden: App-context package_installed conditions are parameterless.".to_string(),
+                    ));
+                }
+                let package_name = plan
+                    .apps
+                    .iter()
+                    .find(|app| app.id == app_id)
+                    .map(|app| app.package_id.clone())
+                    .ok_or_else(|| {
+                        StepFailure::new(
+                            "app_context_invalid: Reviewed App Definition data is unavailable."
+                                .to_string(),
+                        )
+                    })?;
                 self.adapters
                     .device
                     .package_installed(&package_name)
@@ -2577,25 +2279,6 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             ))),
         }
     }
-}
-
-fn calculate_apk_sha256(path: &Path) -> io::Result<String> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; APK_HASH_BUFFER_BYTES];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect())
 }
 
 pub(crate) fn reviewed_plan_requires_root(plan: &ExecutionPlan) -> bool {
@@ -2761,57 +2444,6 @@ fn condition_requires_root(condition: &ExecutionStepCondition) -> bool {
         &condition.type_name,
         condition.params.get("path").and_then(Value::as_str),
     )
-}
-
-fn remote_release_outputs(
-    resolved: crate::remote_release_resolver::ResolvedRemoteRelease,
-) -> OrderedMap<RuntimeValue> {
-    let mut outputs = OrderedMap::new();
-    outputs.insert(
-        "download_url".to_string(),
-        RuntimeValue {
-            type_name: "string".to_string(),
-            value: Value::String(resolved.download_url),
-            location: None,
-        },
-    );
-    outputs.insert(
-        "asset_name".to_string(),
-        RuntimeValue {
-            type_name: "string".to_string(),
-            value: Value::String(resolved.asset_name),
-            location: None,
-        },
-    );
-    outputs.insert(
-        "release_tag".to_string(),
-        RuntimeValue {
-            type_name: "string".to_string(),
-            value: Value::String(resolved.release_tag),
-            location: None,
-        },
-    );
-    if let Some(published_at) = resolved.published_at {
-        outputs.insert(
-            "published_at".to_string(),
-            RuntimeValue {
-                type_name: "string".to_string(),
-                value: Value::String(published_at),
-                location: None,
-            },
-        );
-    }
-    if let Some(size) = resolved.size {
-        outputs.insert(
-            "size".to_string(),
-            RuntimeValue {
-                type_name: "integer".to_string(),
-                value: Value::from(size),
-                location: None,
-            },
-        );
-    }
-    outputs
 }
 
 fn copy_host_source<D: ExecutorDevice>(
@@ -3193,7 +2825,6 @@ pub struct FakeDryRunDevice {
     remote_paths: HashSet<String>,
     remote_dirs: HashSet<String>,
     commands: Vec<Vec<String>>,
-    run_plan_failures: HashMap<Vec<String>, String>,
     permission_failures: HashMap<PermissionOperation, String>,
     #[cfg(test)]
     permission_operation_errors: HashMap<PermissionOperation, DeviceOperationError>,
@@ -3233,11 +2864,6 @@ impl FakeDryRunDevice {
     #[cfg(test)]
     pub fn root_preflight_calls(&self) -> usize {
         self.root_preflight_calls
-    }
-
-    #[cfg(test)]
-    pub fn fail_run_plan_command(&mut self, command: Vec<String>, message: &str) {
-        self.run_plan_failures.insert(command, message.to_string());
     }
 
     #[cfg(test)]
@@ -3302,16 +2928,6 @@ impl FakeDryRunDevice {
             privileged.to_string(),
         ]);
         self.remote_dirs.contains(path)
-    }
-
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
-        let mut recorded = vec!["run_plan_command".to_string()];
-        recorded.extend(command.iter().cloned());
-        self.commands.push(recorded);
-        if let Some(message) = self.run_plan_failures.get(&command) {
-            return Err(message.clone());
-        }
-        Ok(())
     }
 
     fn apply_permission_operation(&mut self, operation: PermissionOperation) -> Result<(), String> {
@@ -3457,10 +3073,6 @@ impl ExecutorDevice for FakeDryRunDevice {
         Ok(FakeDryRunDevice::path_is_dir(self, path))
     }
 
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
-        FakeDryRunDevice::run_plan_command(self, command).map_err(DeviceOperationError::from)
-    }
-
     fn apply_permission_operation(
         &mut self,
         operation: PermissionOperation,
@@ -3547,11 +3159,11 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
             message: "Continued root authority could not be confirmed safely.".to_string(),
             cleanup: None,
         },
-        adb::AdbCommandError::Resolution(_)
-        | adb::AdbCommandError::RootCheckFailed
-        | adb::AdbCommandError::InvalidPlanCommand(_) => DeviceOperationError::other(
-            "The device operation could not be started or completed safely.",
-        ),
+        adb::AdbCommandError::Resolution(_) | adb::AdbCommandError::RootCheckFailed => {
+            DeviceOperationError::other(
+                "The device operation could not be started or completed safely.",
+            )
+        }
     }
 }
 
@@ -3644,11 +3256,6 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
 
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
         adb::RealAdbDevice::path_is_dir(self, path).map_err(|message| real_adb_error(self, message))
-    }
-
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
-        adb::RealAdbDevice::run_plan_command(self, command)
-            .map_err(|message| real_adb_error(self, message))
     }
 
     fn apply_permission_operation(
@@ -4259,30 +3866,6 @@ impl From<String> for StepFailure {
     }
 }
 
-#[derive(Clone, Debug)]
-struct PermissionPolicy {
-    on_failure: String,
-    require_all: bool,
-}
-
-#[derive(Clone, Debug)]
-struct PermissionAction {
-    kind: PermissionActionKind,
-    package_name: String,
-    permission: Option<String>,
-    op: Option<String>,
-    desired_mode: Option<String>,
-    required: bool,
-    when: Option<Value>,
-    source_section: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PermissionActionKind {
-    RuntimePermission,
-    Appop,
-}
-
 fn record(
     step: &ExecutionStep,
     status: StepRunStatus,
@@ -4749,84 +4332,6 @@ fn required_string_param(condition: &ExecutionStepCondition, name: &str) -> Resu
         .ok_or_else(|| format!("Unsupported condition params for {}", condition.type_name))
 }
 
-fn permission_policy(value: Option<&Value>) -> PermissionPolicy {
-    let Some(Value::Object(policy)) = value else {
-        return PermissionPolicy {
-            on_failure: "warn".to_string(),
-            require_all: false,
-        };
-    };
-    PermissionPolicy {
-        on_failure: policy
-            .get("on_failure")
-            .and_then(Value::as_str)
-            .unwrap_or("warn")
-            .to_string(),
-        require_all: policy
-            .get("require_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    }
-}
-
-fn permission_actions(resolved_params: &OrderedMap<Value>) -> Vec<PermissionAction> {
-    let mut actions = Vec::new();
-    for (index, item) in value_array(resolved_params.get("runtime"))
-        .iter()
-        .enumerate()
-    {
-        let Some(item) = item.as_object() else {
-            continue;
-        };
-        actions.push(PermissionAction {
-            kind: PermissionActionKind::RuntimePermission,
-            package_name: string_field(item, "package_name"),
-            permission: Some(string_field(item, "name")),
-            op: None,
-            desired_mode: None,
-            required: item
-                .get("required")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            when: item.get("when").cloned(),
-            source_section: format!("params.runtime[{index}]"),
-        });
-    }
-    for (index, item) in value_array(resolved_params.get("appops"))
-        .iter()
-        .enumerate()
-    {
-        let Some(item) = item.as_object() else {
-            continue;
-        };
-        actions.push(PermissionAction {
-            kind: PermissionActionKind::Appop,
-            package_name: string_field(item, "package_name"),
-            permission: None,
-            op: Some(string_field(item, "op")),
-            desired_mode: Some(string_field(item, "mode")),
-            required: item
-                .get("required")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            when: item.get("when").cloned(),
-            source_section: format!("params.appops[{index}]"),
-        });
-    }
-    actions
-}
-
-fn value_array(value: Option<&Value>) -> Vec<Value> {
-    value.and_then(Value::as_array).cloned().unwrap_or_default()
-}
-
-fn string_field(item: &serde_json::Map<String, Value>, field: &str) -> String {
-    item.get(field)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .unwrap_or_else(|| item.get(field).map_or_else(String::new, Value::to_string))
-}
-
 fn permission_operation(
     permission_set: PermissionSetKind,
     action: &PermissionPlanAction,
@@ -4966,119 +4471,6 @@ fn step_failure_with_outputs(
     failure
 }
 
-fn permission_command(action: &PermissionAction) -> Vec<String> {
-    match action.kind {
-        PermissionActionKind::RuntimePermission => vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            action.package_name.clone(),
-            action.permission.clone().unwrap_or_default(),
-        ],
-        PermissionActionKind::Appop => vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "appops".to_string(),
-            "set".to_string(),
-            action.package_name.clone(),
-            action.op.clone().unwrap_or_default(),
-            action.desired_mode.clone().unwrap_or_default(),
-        ],
-    }
-}
-
-fn permission_result_base(
-    step: &ExecutionStep,
-    action: &PermissionAction,
-) -> serde_json::Map<String, Value> {
-    let mut result = serde_json::Map::new();
-    result.insert("step_id".to_string(), json!(step.id));
-    result.insert(
-        "kind".to_string(),
-        json!(match action.kind {
-            PermissionActionKind::RuntimePermission => "runtime_permission",
-            PermissionActionKind::Appop => "appop",
-        }),
-    );
-    result.insert("package_name".to_string(), json!(action.package_name));
-    result.insert("source_recipe_id".to_string(), json!(step.recipe_ref));
-    result.insert("source_section".to_string(), json!(action.source_section));
-    if let Some(permission) = &action.permission {
-        result.insert("permission".to_string(), json!(permission));
-    }
-    if let Some(op) = &action.op {
-        result.insert("op".to_string(), json!(op));
-    }
-    if let Some(desired_mode) = &action.desired_mode {
-        result.insert("desired_mode".to_string(), json!(desired_mode));
-    }
-    result
-}
-
-fn permission_not_applicable_reason(
-    when: Option<&Value>,
-    rooted: bool,
-    android_api_level: Option<i64>,
-) -> Option<serde_json::Map<String, Value>> {
-    let Some(Value::Object(when)) = when else {
-        return None;
-    };
-    if when.get("rooted").and_then(Value::as_bool) == Some(true) && !rooted {
-        return Some(object_entries(json!({
-            "reason_code": "requires_root",
-            "message": "Device is not rooted."
-        })));
-    }
-    if when.get("rooted").and_then(Value::as_bool) == Some(false) && rooted {
-        return Some(object_entries(json!({
-            "reason_code": "requires_unrooted",
-            "message": "Device is rooted."
-        })));
-    }
-    let api_min = when.get("android_api_min").and_then(Value::as_i64);
-    let api_max = when.get("android_api_max").and_then(Value::as_i64);
-    if (api_min.is_some() || api_max.is_some()) && android_api_level.is_none() {
-        return Some(object_entries(json!({
-            "reason_code": "missing_android_api_level",
-            "message": "Device Android API level is unknown."
-        })));
-    }
-    if let (Some(api_min), Some(android_api_level)) = (api_min, android_api_level) {
-        if android_api_level < api_min {
-            return Some(object_entries(json!({
-                "reason_code": "android_api_out_of_range",
-                "message": format!("Device Android API {android_api_level} is below minimum {api_min}.")
-            })));
-        }
-    }
-    if let (Some(api_max), Some(android_api_level)) = (api_max, android_api_level) {
-        if android_api_level > api_max {
-            return Some(object_entries(json!({
-                "reason_code": "android_api_out_of_range",
-                "message": format!("Device Android API {android_api_level} is above maximum {api_max}.")
-            })));
-        }
-    }
-    None
-}
-
-fn object_entries(value: Value) -> serde_json::Map<String, Value> {
-    match value {
-        Value::Object(entries) => entries,
-        _ => serde_json::Map::new(),
-    }
-}
-
-fn insert_object_entries(
-    target: &mut serde_json::Map<String, Value>,
-    source: serde_json::Map<String, Value>,
-) {
-    for (key, value) in source {
-        target.insert(key, value);
-    }
-}
-
 fn py_bool(value: bool) -> &'static str {
     if value {
         "True"
@@ -5118,188 +4510,6 @@ fn stable_repr(value: &Value) -> String {
     }
 }
 
-#[cfg(test)]
-mod phase_5b10_tests {
-    use super::*;
-    use crate::planner::{
-        DeviceContext, ExecutionPlanSource, ExecutionStepConstraints, RuntimeCapabilities,
-    };
-
-    #[test]
-    fn permission_fail_policy_stops_after_deterministic_mixed_outcomes() {
-        let mut params = OrderedMap::new();
-        params.insert(
-            "runtime".to_string(),
-            ExecutionParamValue::Literal {
-                value: json!([
-                    {
-                        "package_name": "com.example.root",
-                        "name": "android.permission.CAMERA",
-                        "required": false,
-                        "when": { "rooted": true }
-                    },
-                    {
-                        "package_name": "com.example.success",
-                        "name": "android.permission.POST_NOTIFICATIONS",
-                        "required": false
-                    }
-                ]),
-            },
-        );
-        params.insert(
-            "appops".to_string(),
-            ExecutionParamValue::Literal {
-                value: json!([
-                    {
-                        "package_name": "com.example.fail",
-                        "op": "RUN_IN_BACKGROUND",
-                        "mode": "ignore",
-                        "required": false
-                    },
-                    {
-                        "package_name": "com.example.after",
-                        "op": "MANAGE_EXTERNAL_STORAGE",
-                        "mode": "allow",
-                        "required": false
-                    }
-                ]),
-            },
-        );
-        params.insert(
-            "policy".to_string(),
-            ExecutionParamValue::Literal {
-                value: json!({ "on_failure": "fail", "require_all": false }),
-            },
-        );
-        let step = ExecutionStep {
-            id: "phase5b10.permissions/mixed".to_string(),
-            recipe_ref: "phase5b10.permissions".to_string(),
-            app_id: None,
-            type_name: "grant_permissions".to_string(),
-            name: "Grant mixed permissions".to_string(),
-            note: "Grant mixed permissions".to_string(),
-            dependencies: Vec::new(),
-            constraints: ExecutionStepConstraints {
-                capabilities: vec!["shell_command".to_string()],
-                conflicts_with: Vec::new(),
-            },
-            permission_plan: None,
-            params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        };
-        let plan = ExecutionPlan {
-            device_plan: None,
-            resolved_inputs: Vec::new(),
-            id: "plan.phase5b10.permissions".to_string(),
-            source: ExecutionPlanSource {
-                device_profile_ref: "example.device_profile".to_string(),
-                device_plan_ref: "example.device_plan".to_string(),
-                selected_recipe_refs: vec!["phase5b10.permissions".to_string()],
-                expanded_recipe_refs: vec!["phase5b10.permissions".to_string()],
-                catalog: None,
-            },
-            recipes: Vec::new(),
-            apps: Vec::new(),
-            target_device: None,
-            device_context: DeviceContext {
-                manufacturer: "Example".to_string(),
-                model: "Example".to_string(),
-                android_version: 14,
-                android_api_level: Some(34),
-                device_tags: Vec::new(),
-            },
-            runtime_capabilities: RuntimeCapabilities {
-                adb_available: true,
-                apk_install: true,
-                shared_storage_write: true,
-                app_launch: true,
-                shell_command: true,
-                package_remove_for_user: false,
-                root_shell: false,
-                app_data_write: false,
-            },
-            inputs: Vec::new(),
-            artifacts: Vec::new(),
-            steps: vec![step],
-            schema_version: 1,
-            kind: "execution_plan",
-        };
-        let successful_command = vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.success".to_string(),
-            "android.permission.POST_NOTIFICATIONS".to_string(),
-        ];
-        let failing_command = vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "appops".to_string(),
-            "set".to_string(),
-            "com.example.fail".to_string(),
-            "RUN_IN_BACKGROUND".to_string(),
-            "ignore".to_string(),
-        ];
-        let mut adapters = DryRunExecutorAdapters::default();
-        adapters
-            .device_mut()
-            .fail_run_plan_command(failing_command.clone(), "app-op denied");
-        let mut runner = ExecutorRunner::new(adapters);
-
-        let actual = serde_json::to_value(runner.run(&plan))
-            .expect("execution result should serialize deterministically");
-
-        assert_eq!(actual["success"], false);
-        assert_eq!(actual["steps"][0]["status"], "failed");
-        assert_eq!(actual["steps"][0]["message"], "app-op denied");
-        assert_eq!(
-            actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"],
-            json!([
-                {
-                    "step_id": "phase5b10.permissions/mixed",
-                    "kind": "runtime_permission",
-                    "package_name": "com.example.root",
-                    "source_recipe_id": "phase5b10.permissions",
-                    "source_section": "params.runtime[0]",
-                    "permission": "android.permission.CAMERA",
-                    "reason_code": "requires_root",
-                    "message": "Device is not rooted.",
-                    "status": "not_applicable"
-                },
-                {
-                    "step_id": "phase5b10.permissions/mixed",
-                    "kind": "runtime_permission",
-                    "package_name": "com.example.success",
-                    "source_recipe_id": "phase5b10.permissions",
-                    "source_section": "params.runtime[1]",
-                    "permission": "android.permission.POST_NOTIFICATIONS",
-                    "status": "executed"
-                },
-                {
-                    "step_id": "phase5b10.permissions/mixed",
-                    "kind": "appop",
-                    "package_name": "com.example.fail",
-                    "source_recipe_id": "phase5b10.permissions",
-                    "source_section": "params.appops[0]",
-                    "op": "RUN_IN_BACKGROUND",
-                    "desired_mode": "ignore",
-                    "status": "failed",
-                    "message": "app-op denied"
-                }
-            ])
-        );
-        assert_eq!(
-            runner.adapters().device().commands(),
-            &[
-                [vec!["run_plan_command".to_string()], successful_command].concat(),
-                [vec!["run_plan_command".to_string()], failing_command].concat(),
-            ]
-        );
-        assert!(!actual.to_string().contains("com.example.after"));
-    }
-}
 #[cfg(test)]
 mod runtime_ref_projection_tests {
     use super::*;

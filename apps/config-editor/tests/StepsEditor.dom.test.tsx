@@ -740,7 +740,7 @@ describe("StepsEditor catalog-backed App-aware controls", () => {
     expect(screen.getByText(/until catalog diagnostics are resolved/)).toBeTruthy();
   });
 
-  it("hides the legacy package_name verify add-option on app-context steps", () => {
+  it("keeps legacy package_name rows inspectable as JSON and hides that authoring option", () => {
     render(
       <StepsHarness
         initialDocument={recipeDocument([
@@ -766,12 +766,14 @@ describe("StepsEditor catalog-backed App-aware controls", () => {
     ]);
     expect(within(verifySection).queryByRole("option", { name: "Package installed" })).toBeNull();
     expect(within(verifySection).getByRole("option", { name: "Package installed (App Definition)" })).toBeTruthy();
-    expect((within(verifySection).getByRole("textbox", { name: "Package name" }) as HTMLInputElement).value).toBe(
-      "com.example.legacy",
+    expect(within(verifySection).getByText("JSON check")).toBeTruthy();
+    expect(within(verifySection).queryByRole("textbox", { name: "Package name" })).toBeNull();
+    expect((verifySection.querySelector("textarea") as HTMLTextAreaElement).value).toContain(
+      '"package_name": "com.example.legacy"',
     );
   });
 
-  it("offers the legacy package_name verify option only without app context", () => {
+  it("does not offer a package_name condition for authoring without app context", () => {
     render(
       <StepsHarness
         initialDocument={recipeDocument([buildStep({ id: "wait", type: "wait" })])}
@@ -780,10 +782,10 @@ describe("StepsEditor catalog-backed App-aware controls", () => {
     );
 
     const addTypeSelect = within(verifySectionElement()).getByRole("combobox", { name: "Type" }) as HTMLSelectElement;
-    expect(selectValues(addTypeSelect)).toEqual(["path_exists", "file_exists", "package_installed"]);
+    expect(selectValues(addTypeSelect)).toEqual(["path_exists", "file_exists"]);
   });
 
-  it("resets a chosen legacy verify type when the step gains App Definition context", async () => {
+  it("offers only the parameterless package condition after the step gains App Definition context", async () => {
     const user = userEvent.setup();
     render(
       <StepsHarness
@@ -794,8 +796,7 @@ describe("StepsEditor catalog-backed App-aware controls", () => {
 
     const verifySection = verifySectionElement();
     const addTypeSelect = within(verifySection).getByRole("combobox", { name: "Type" }) as HTMLSelectElement;
-    await user.selectOptions(addTypeSelect, "package_installed");
-    expect(addTypeSelect.value).toBe("package_installed");
+    expect(selectValues(addTypeSelect)).toEqual(["path_exists", "file_exists"]);
 
     await user.selectOptions(appDefinitionSelect(), "demo_app");
     expect(selectValues(addTypeSelect)).toEqual([
@@ -805,7 +806,7 @@ describe("StepsEditor catalog-backed App-aware controls", () => {
       "app_target_file_exists",
       "app_package_installed",
     ]);
-    expect(addTypeSelect.value).toBe("app_package_installed");
+    expect(within(verifySection).getByRole("option", { name: "Package installed (App Definition)" })).toBeTruthy();
   });
 
   it("edits an App Target path check through the step App Definition", async () => {

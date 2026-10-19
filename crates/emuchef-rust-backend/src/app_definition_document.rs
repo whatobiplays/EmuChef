@@ -701,7 +701,7 @@ fn incompatible_header_diagnostics(raw: &serde_yaml::Value, path: &Path) -> Vec<
     let Some(mapping) = raw.as_mapping() else {
         return Vec::new();
     };
-    let header_value = |field: &str| mapping.get(&serde_yaml::Value::String(field.to_string()));
+    let header_value = |field: &str| mapping.get(serde_yaml::Value::String(field.to_string()));
     let kind = header_value("kind").and_then(serde_yaml::Value::as_str);
     let schema_version = header_value("schema_version").and_then(serde_yaml::Value::as_i64);
     let object_id = header_value("id").and_then(serde_yaml::Value::as_str);

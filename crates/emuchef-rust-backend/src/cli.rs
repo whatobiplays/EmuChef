@@ -397,11 +397,18 @@ fn run_validate(args: &[String]) -> ProcessOutput {
     }
 
     let Some(target) = path else {
+        let Some(authored_root) = authored_root else {
+            return usage_error(
+                validate_usage(),
+                "emuchef validate: error: requires an explicit recipe path or --authored-root for catalog validation",
+            );
+        };
+        let result = validate_authored_root(&PathBuf::from(authored_root));
+        let exit_code = if result.has_errors() { 1 } else { 0 };
         return ProcessOutput {
-            exit_code: 2,
-            stdout: String::new(),
-            stderr: "Error: Rust validate requires an explicit recipe path; default catalog validation is not supported.\n"
-                .to_string(),
+            exit_code,
+            stdout: format_validation_summary(&result),
+            stderr: String::new(),
         };
     };
     let target_path = PathBuf::from(&target);
@@ -696,6 +703,14 @@ fn validate_single_path(path: &Path, authored_root: Option<&Path>) -> Validation
     }
 }
 
+fn validate_authored_root(authored_root: &Path) -> ValidationCliResult {
+    let (validated_paths, diagnostics) = crate::catalog::validate_authored_root(authored_root);
+    ValidationCliResult {
+        validated_paths,
+        diagnostics,
+    }
+}
+
 fn format_validation_summary(result: &ValidationCliResult) -> String {
     let status = if result.has_errors() {
         "error"
@@ -727,6 +742,14 @@ fn format_validation_summary(result: &ValidationCliResult) -> String {
             }
         }
     }
+    lines.push(format!(
+        "Errors: {}",
+        result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["severity"] == "error")
+            .count()
+    ));
     lines.join("\n") + "\n"
 }
 
@@ -1513,6 +1536,319 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use serde_json::{json, Value};
+
+    #[test]
+    fn validate_authored_root_checks_the_complete_catalog() {
+        let output = run_validate(&["--authored-root".to_string(), repo_authored_root()]);
+
+        assert_eq!(output.exit_code, 0, "{}", output.stderr);
+        assert!(
+            output.stdout.contains("Errors: 0"),
+            "catalog validation must report an explicit zero-error count: {}",
+            output.stdout
+        );
+        let authored_root = PathBuf::from(repo_authored_root());
+        for directory in ["apps", "device_profiles", "device_plans", "recipes"] {
+            for entry in fs::read_dir(authored_root.join(directory))
+                .expect("authored model directory should be readable")
+            {
+                let path = entry
+                    .expect("authored model entry should be readable")
+                    .path();
+                if !path.is_file()
+                    || !matches!(
+                        path.extension().and_then(|extension| extension.to_str()),
+                        Some("yaml" | "yml")
+                    )
+                {
+                    continue;
+                }
+                let resolved = yaml::resolved_path_string(&path);
+                assert!(
+                    output.stdout.contains(&resolved),
+                    "validated path summary should include {resolved}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_authored_root_rejects_unknown_device_profile_and_omits_plan() {
+        let root = copy_authored_catalog();
+        let plan_path = rewrite_copied_device_plan(
+            &root,
+            "device_profile_ref: ayaneo.pocket_s2",
+            "device_profile_ref: missing.profile",
+        );
+
+        let output = run_authored_root(&root);
+
+        assert_eq!(output.exit_code, 1, "{}", output.stdout);
+        assert!(output.stdout.contains("device_profile_not_found"));
+        assert!(
+            !output
+                .stdout
+                .contains(&plan_path.to_string_lossy().to_string()),
+            "an invalid Device Plan must not appear in the validated-path summary: {}",
+            output.stdout
+        );
+    }
+
+    #[test]
+    fn validate_authored_root_rejects_plans_when_profile_catalog_cannot_be_loaded() {
+        for profile_failure in ["malformed", "duplicate"] {
+            let root = copy_authored_catalog();
+            let plan_path = rewrite_copied_device_plan(
+                &root,
+                "device_profile_ref: ayaneo.pocket_s2",
+                "device_profile_ref: missing.profile",
+            );
+            let profile_path = root.path().join("device_profiles/ayaneo.pocket_s2.yaml");
+
+            match profile_failure {
+                "malformed" => fs::write(&profile_path, "schema_version: [\n")
+                    .expect("malformed profile should be written"),
+                "duplicate" => {
+                    let profile = fs::read_to_string(&profile_path)
+                        .expect("profile fixture should be readable");
+                    fs::write(
+                        root.path().join("device_profiles/zz-duplicate.yaml"),
+                        profile,
+                    )
+                    .expect("duplicate profile should be written");
+                }
+                _ => unreachable!(),
+            }
+
+            let (validated_paths, diagnostics) =
+                crate::catalog::validate_authored_root(root.path());
+            let plan_file = "device_plans/ayaneo.pocket_s2.base.yaml";
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic["code"] == "device_profile_catalog_unavailable"
+                        && diagnostic["file"] == plan_file
+                }),
+                "{profile_failure} profile catalog failure must be attached to the affected Device Plan: {diagnostics:#?}"
+            );
+            for entry in fs::read_dir(root.path().join("device_plans"))
+                .expect("Device Plan directory should be readable")
+            {
+                let plan = entry.expect("Device Plan entry should be readable").path();
+                if !matches!(
+                    plan.extension().and_then(|extension| extension.to_str()),
+                    Some("yaml" | "yml")
+                ) {
+                    continue;
+                }
+
+                let plan_file = plan
+                    .strip_prefix(root.path())
+                    .expect("Device Plan should be under the authored root")
+                    .to_string_lossy();
+                assert!(
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["code"] == "device_profile_catalog_unavailable"
+                            && diagnostic["file"] == plan_file.as_ref()
+                    }),
+                    "every uncheckable Device Plan needs a diagnostic: {diagnostics:#?}"
+                );
+                assert!(
+                    !validated_paths.contains(&yaml::resolved_path_string(&plan)),
+                    "uncheckable Device Plan {plan_file} must not appear in validated paths"
+                );
+            }
+            assert!(
+                !validated_paths.contains(&yaml::resolved_path_string(&plan_path)),
+                "the affected Device Plan must not appear in validated paths"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_authored_root_rejects_unknown_selected_recipe() {
+        let root = copy_authored_catalog();
+        let plan_path = rewrite_copied_device_plan(
+            &root,
+            "recipe_ref: app.xaniteog.install",
+            "recipe_ref: missing.recipe",
+        );
+
+        let output = run_authored_root(&root);
+
+        assert_eq!(output.exit_code, 1, "{}", output.stdout);
+        assert!(output.stdout.contains("recipe_not_found"));
+        assert!(!output
+            .stdout
+            .contains(&plan_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn validate_authored_root_rejects_unknown_recipe_in_override_binding() {
+        let root = copy_authored_catalog();
+        let plan_path = rewrite_copied_device_plan(
+            &root,
+            "metadata:",
+            "  missing.recipe/xaniteog_apk: fixture.apk\nmetadata:",
+        );
+
+        let output = run_authored_root(&root);
+
+        assert_eq!(output.exit_code, 1, "{}", output.stdout);
+        assert!(output
+            .stdout
+            .contains("device_plan_override_unknown_binding"));
+        assert!(!output
+            .stdout
+            .contains(&plan_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn validate_authored_root_rejects_unknown_input_in_override_binding() {
+        let root = copy_authored_catalog();
+        let plan_path = rewrite_copied_device_plan(
+            &root,
+            "metadata:",
+            "  app.xaniteog.install/missing_input: fixture.apk\nmetadata:",
+        );
+
+        let output = run_authored_root(&root);
+
+        assert_eq!(output.exit_code, 1, "{}", output.stdout);
+        assert!(output
+            .stdout
+            .contains("device_plan_override_unknown_binding"));
+        assert!(!output
+            .stdout
+            .contains(&plan_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn validate_authored_root_reports_semantic_device_plan_errors_by_file() {
+        let root = copy_authored_catalog();
+        let sample_plan =
+            fs::read_to_string(root.path().join("device_plans/ayaneo.pocket_s2.base.yaml"))
+                .expect("copied Device Plan should be readable");
+        let first_plan = sample_plan
+            .replace("ayaneo.pocket_s2.base", "invalid.first")
+            .replace(
+                "device_profile_ref: ayaneo.pocket_s2",
+                "device_profile_ref: missing.profile",
+            );
+        let second_plan = sample_plan
+            .replace("ayaneo.pocket_s2.base", "invalid.second")
+            .replace(
+                "recipe_ref: app.xaniteog.install",
+                "recipe_ref: missing.recipe",
+            );
+        let first_path = root.path().join("device_plans/a-invalid.yaml");
+        let second_path = root.path().join("device_plans/z-invalid.yaml");
+        fs::write(&first_path, first_plan).expect("first invalid plan should be written");
+        fs::write(&second_path, second_plan).expect("second invalid plan should be written");
+
+        let output = run_authored_root(&root);
+
+        assert_eq!(output.exit_code, 1, "{}", output.stdout);
+        let first_diagnostic = output
+            .stdout
+            .find("device_plans/a-invalid.yaml")
+            .expect("first plan diagnostic should identify its file");
+        let second_diagnostic = output
+            .stdout
+            .find("device_plans/z-invalid.yaml")
+            .expect("second plan diagnostic should identify its file");
+        assert!(first_diagnostic < second_diagnostic);
+        assert!(!output
+            .stdout
+            .contains(&first_path.to_string_lossy().to_string()));
+        assert!(!output
+            .stdout
+            .contains(&second_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn validate_authored_root_rejects_malformed_and_duplicate_device_plans() {
+        let malformed_root = TempDir::new().expect("temporary authored root should be created");
+        let malformed_plans = malformed_root.path().join("device_plans");
+        fs::create_dir(&malformed_plans).expect("Device Plan directory should be created");
+        fs::write(malformed_plans.join("broken.yaml"), "schema_version: [\n")
+            .expect("malformed Device Plan should be written");
+
+        let malformed_output = run_authored_root(&malformed_root);
+        assert_eq!(malformed_output.exit_code, 1, "{}", malformed_output.stdout);
+        assert!(malformed_output.stdout.contains("authored_data_invalid"));
+
+        let duplicate_root = TempDir::new().expect("temporary authored root should be created");
+        let duplicate_plans = duplicate_root.path().join("device_plans");
+        fs::create_dir(&duplicate_plans).expect("Device Plan directory should be created");
+        let sample_plan = fs::read_to_string(
+            Path::new(&repo_authored_root()).join("device_plans/ayaneo.generic.base.yaml"),
+        )
+        .expect("checked-in Device Plan should be readable");
+        fs::write(duplicate_plans.join("first.yaml"), &sample_plan)
+            .expect("first duplicate Device Plan should be written");
+        fs::write(duplicate_plans.join("second.yaml"), &sample_plan)
+            .expect("second duplicate Device Plan should be written");
+        fs::write(duplicate_plans.join("third.yaml"), &sample_plan)
+            .expect("third duplicate Device Plan should be written");
+
+        let duplicate_output = run_authored_root(&duplicate_root);
+        assert_eq!(duplicate_output.exit_code, 1, "{}", duplicate_output.stdout);
+        assert!(duplicate_output.stdout.contains("device_plan_id_conflict"));
+
+        let duplicate_result = validate_authored_root(duplicate_root.path());
+        let mut conflict_files = duplicate_result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "device_plan_id_conflict")
+            .filter_map(|diagnostic| diagnostic["file"].as_str())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        conflict_files.sort();
+        assert_eq!(
+            conflict_files,
+            vec![
+                "device_plans/first.yaml",
+                "device_plans/second.yaml",
+                "device_plans/third.yaml",
+            ]
+        );
+        for file_name in ["first.yaml", "second.yaml", "third.yaml"] {
+            let path = crate::yaml::resolved_path_string(&duplicate_plans.join(file_name));
+            assert!(
+                !duplicate_result.validated_paths.contains(&path),
+                "conflicting Device Plan should not be validated: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_authored_root_reports_unreadable_model_directories() {
+        for (directory, code) in [
+            ("device_profiles", "device_profile_catalog_unreadable"),
+            ("device_plans", "device_plan_catalog_unreadable"),
+        ] {
+            let root = TempDir::new().expect("temporary authored root should be created");
+            fs::write(root.path().join(directory), "not a directory")
+                .expect("unreadable model directory fixture should be written");
+
+            let output = run_authored_root(&root);
+            assert_eq!(output.exit_code, 1, "{}", output.stdout);
+            assert!(
+                output.stdout.contains(code),
+                "expected {code} diagnostic, got: {}",
+                output.stdout
+            );
+        }
+    }
+
+    #[test]
+    fn validate_authored_root_accepts_missing_optional_model_directories() {
+        let root = TempDir::new().expect("temporary authored root should be created");
+        let output = run_authored_root(&root);
+
+        assert_eq!(output.exit_code, 0, "{}", output.stdout);
+        assert!(output.stdout.contains("Errors: 0"));
+    }
     use tempfile::TempDir;
 
     use super::*;
@@ -1543,6 +1879,49 @@ mod tests {
             .expect("repo authored root should resolve")
             .to_string_lossy()
             .into_owned()
+    }
+
+    fn copy_authored_catalog() -> TempDir {
+        let root = TempDir::new().expect("temporary authored root should be created");
+        let source_root = PathBuf::from(repo_authored_root());
+        for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+            let source_directory = source_root.join(directory);
+            let destination_directory = root.path().join(directory);
+            fs::create_dir_all(&destination_directory)
+                .expect("authored catalog directory should be created");
+            for entry in fs::read_dir(&source_directory)
+                .expect("checked-in authored catalog directory should be readable")
+            {
+                let source = entry
+                    .expect("checked-in authored catalog entry should be readable")
+                    .path();
+                if source.is_file() {
+                    let destination = destination_directory.join(
+                        source
+                            .file_name()
+                            .expect("authored catalog file should have a name"),
+                    );
+                    fs::copy(source, destination).expect("authored catalog file should be copied");
+                }
+            }
+        }
+        root
+    }
+
+    fn rewrite_copied_device_plan(root: &TempDir, before: &str, after: &str) -> PathBuf {
+        let path = root.path().join("device_plans/ayaneo.pocket_s2.base.yaml");
+        let plan = fs::read_to_string(&path).expect("copied Device Plan should be readable");
+        let rewritten = plan.replace(before, after);
+        assert_ne!(rewritten, plan, "the Device Plan fixture should be updated");
+        fs::write(&path, rewritten).expect("mutated Device Plan should be written");
+        path
+    }
+
+    fn run_authored_root(root: &TempDir) -> ProcessOutput {
+        run_validate(&[
+            "--authored-root".to_string(),
+            root.path().to_string_lossy().into_owned(),
+        ])
     }
 
     fn input_value(id: &str, path: &Path) -> Value {
@@ -1914,6 +2293,10 @@ source:
   device_plan_ref: example.plan
   selected_recipe_refs: [example.recipe]
   expanded_recipe_refs: [example.recipe]
+apps:
+- id: example.app
+  name: Example App
+  package_id: com.example.app
 device_context:
   manufacturer: Example
   model: Example
@@ -1934,6 +2317,7 @@ artifacts: []
 steps:
 - id: example.recipe/stop
   recipe_ref: example.recipe
+  app_id: example.app
   type: force_stop_app
   name: Stop
   dependencies: []

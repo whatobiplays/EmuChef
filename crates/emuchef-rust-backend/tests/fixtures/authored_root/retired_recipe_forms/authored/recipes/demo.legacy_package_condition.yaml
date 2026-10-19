@@ -1,0 +1,26 @@
+schema_version: 1
+kind: recipe
+id: demo.legacy_package_condition
+name: Retired package condition
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: wait_for_legacy
+    type: wait
+    name: Wait for legacy package
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 250
+    verify:
+      - type: package_installed
+        params:
+          package_name: com.example.demo

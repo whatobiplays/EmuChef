@@ -1,7 +1,7 @@
 schema_version: 1
 kind: recipe
-id: demo.legacy_package_condition
-name: Legacy package condition
+id: demo.app_condition
+name: App-aware package condition
 recipe_dependencies: []
 provides:
   features: []
@@ -9,18 +9,17 @@ inputs: {}
 artifacts: {}
 artifact_groups: {}
 steps:
-  - id: wait_for_legacy
-    type: wait
-    name: Wait for legacy package
+  - id: launch_demo_app
+    type: launch_app
+    app_ref: demo_app
+    name: Launch Demo App
     user_toggleable: false
     dependencies: []
     constraints:
       capabilities: []
       conflicts_with: []
     skip_if: []
-    params:
-      duration_ms: 250
+    params: {}
     verify:
       - type: package_installed
-        params:
-          package_name: com.example.demo
+        params: {}

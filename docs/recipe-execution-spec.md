@@ -17,7 +17,7 @@ The current design goal is to keep authored recipes declarative and predictable,
 
 ### Implemented baseline
 
-The following is now the intended baseline design and has been implemented at a structural level:
+The behavior below defines the implemented canonical schema-v1 baseline:
 
 - map-based recipe schema for `inputs`, `artifacts`, and `artifact_groups`
 - flattened literal params with `{ ref: ... }` only for references
@@ -33,12 +33,12 @@ The following is now the intended baseline design and has been implemented at a 
 - single-threaded executor
 - grouped artifact support for flows like RetroArch core seeding
 
+### Implemented dependency and lifecycle behavior
+
+Execution marks a step `BLOCKED` when a dependency failed or was blocked. App-backed lifecycle steps require `app_ref`; planning resolves and seals the package identity from the referenced App Definition and, for `launch_app`, its launcher activity as a concrete target in the reviewed plan. Execution validates the retained target before contacting the device.
+
 ### Approved next hardening
 
-The following is approved next work, based on the first real device run, but should be treated as executor hardening rather than already completed unless separately verified:
-
-- distinct `BLOCKED` status for downstream steps after upstream failure
-- better `launch_app` behavior using explicit activity or resolved launcher component before `monkey`
 - typed artifact download failures, including clearer TLS trust-store errors
 
 ## 3. Design Principles
@@ -213,10 +213,7 @@ Purpose:
 
 ### 5.5 Permissions
 
-Legacy package-based permission declarations remain declarative in the
-`grant_permissions` step parameters until their compatibility cutover. New
-App Definition permission steps select one app-owned set directly on the
-step:
+Permission actions are owned by App Definition permission sets. A Recipe `grant_permissions` step selects one set on its app-aware step:
 
 ```yaml
 - id: grant_retroarch_baseline
@@ -228,20 +225,12 @@ step:
       on_failure: warn
 ```
 
-The app-aware form does not author package names or duplicate runtime/app-op
-action arrays. The selected App Definition supplies those actions.
-
-Supported categories include:
-
-- `runtime`
-- `appops`
-- existing `manual` compatibility path if already present in authored schema
-- `policy`
-
-Policy fields include:
-
-- `on_failure`
-- `require_all`
+The Recipe step does not author package names or permission action arrays. The
+selected App Definition supplies `runtime` and `app_ops` actions for its
+`baseline` or `elevated` permission set. The step selects one set with
+`permission_set` and may define `policy.on_failure` as `warn` or `fail`.
+Legacy inline action forms, manual-action compatibility paths, per-action
+`required` flags, and `require_all` are not part of schema v1.
 
 ### 5.6 Steps
 
@@ -267,7 +256,6 @@ Authors should write:
 
 ```yaml
 dest: /sdcard/RetroArch/assets
-package_name: com.retroarch.aarch64
 duration_ms: 1000
 replace_existing: false
 ```
@@ -451,9 +439,8 @@ This keeps planner and executor logic from fragmenting into step-specific condit
 - `force_stop_app`
 - `wait`
 
-### Legacy steps
-
-Older copy/push steps may still exist for compatibility, but they are not the forward path and should not be extended.
+### Retired app-authority forms
+Package-based install identity fields, package/activity lifecycle parameters, inline permission action arrays, and Recipe-derived APK security fingerprints are not valid schema-v1 authority. Validation reports these fields without rewriting them; editor saves reject invalid documents until an author repairs them. Generic remote downloads remain supported for non-app resources.
 
 ## 13. Step Specifications
 
@@ -575,31 +562,28 @@ V1 scope:
 
 Params:
 
-- `app`: required ref
+- `app`: required reference to `artifacts.<id>.local_path` for a Recipe `app_artifact` that resolves to an APK App Artifact owned by the same step `app_ref`
 - `replace_existing`: optional, default `false`
+
+The step requires `app_ref`. App ID and package identity are inherited from the App Definition. Recipe parameters named `expected_package_name` or `expected_sha256`, and input or generic-file references used as the APK, are invalid.
 
 Runtime validation:
 
 - resolved file must end in `.apk`
+- before any device mutation, the APK manifest package ID must match the package identity inherited from the bound App Definition
+- when the App Artifact declares a trusted SHA-256 digest, the APK digest must match it before any device mutation
 
 ### 13.6 `launch_app`
 
-Params:
-
-- `package_name`: required literal
-- `activity`: optional literal
+Params: none. The step requires `app_ref`; package and launcher identity come from the App Definition.
 
 Behavior:
 
-- if `activity` is present, launch explicit component
-- otherwise use default launch path
-- improved launcher resolution before `monkey` is approved next hardening
+- planner resolves package ID and canonical launcher activity
 
 ### 13.7 `force_stop_app`
 
-Params:
-
-- `package_name`: required literal
+Params: none. The step requires `app_ref`; package identity comes from the App Definition.
 
 ### 13.8 `wait`
 
@@ -609,46 +593,9 @@ Params:
 
 ### 13.9 `grant_permissions`
 
-Legacy package-based steps retain their existing `runtime`, `appops`, and
-legacy policy parameters. App-aware steps require `app_ref`, a literal
-`permission_set` of `baseline` or `elevated`, and `policy.on_failure` of
-`warn` or `fail`.
+The step requires `app_ref` and a literal `permission_set` of `baseline` or `elevated`. `policy.on_failure` may be `warn` or `fail`. Inline `runtime` and `appops` arrays are invalid.
 
-The app-aware permission step is planned into the step-local typed
-`ExecutionStep.permission_plan`. This plan is the sole executable source for
-new-form permission actions. `ExecutionStep.params` contains no duplicate
-action arrays. The plan retains the App Definition package, action identity,
-API bounds, resolved applicability, permission set, and failure policy. The
-canonical plan digest covers the complete step-local plan. Review, execution,
-and reporting consume the same retained plan and app snapshot.
-
-Behavior:
-
-- planning resolves every selected App Definition action before capability
-  pruning and validates the action package against the selected app snapshot
-- bounded actions require a known Android API level; unknown API applicability
-  is a planning error with the action identity and bounds, while unbounded
-  actions remain applicable with an unknown API level
-- when a selected target supplies an API level, planning uses it ahead of
-  profile context and retains it in the plan's device context for review
-- a known API outside an inclusive action bound retains a `not_applicable`
-  result with its confirmed reason
-- `baseline` requires `shell_command` and uses ordinary ADB shell execution
-- `elevated` requires both `shell_command` and `root_shell` and is omitted
-  when either capability is unavailable
-- elevated execution requires reviewed root authorization and a fresh
-  per-command root revalidation; the actual operation uses only typed runtime
-  grants and app-op `allow` updates
-- a retained step with no applicable actions is skipped before shell execution
-  or root preflight and preserves every action's applicability reason;
-  capability-pruned steps do not appear in the plan
-- ordinary action failures do not stop other independent applicable actions;
-  `warn` records failed actions as warnings and yields
-  `succeeded_with_warnings`, while `fail` fails the step and adds a report error
-- root-authority, identity, transport, and interruption failures remain
-  immediate safety fail-stops
-- legacy package-based steps preserve their existing behavior until the
-  compatibility cutover
+The App Definition actions are planned into the step-local typed `ExecutionStep.permission_plan`. This plan is the only executable source for permission actions. `ExecutionStep.params` contains no duplicate action arrays. The plan retains App Definition package, action identity, API bounds, resolved applicability, permission set, and failure policy. The canonical plan digest covers the complete step-local plan. Review, execution, and reporting consume the same retained plan and App snapshot.
 
 ## 14. Planner Responsibilities
 
@@ -702,7 +649,7 @@ Current defaults:
 
 ### 15.1 App Definition execution plan
 
-For a new-form permission step, the planner emits one typed permission plan on
+For a schema-v1 permission step, the planner emits one typed permission plan on
 that `ExecutionStep`. No top-level permission plan or alternate executable
 action collection exists. The retained app snapshot binds the action package to
 the selected App Definition. The plan digest covers the action sequence and
@@ -740,9 +687,9 @@ The action sequence carries:
 - `baseline` requires `shell_command` and executes without `su`.
 - `elevated` requires both `shell_command` and `root_shell` and is pruned when
   either capability is unavailable.
-- The shared Rust/Tauri root-work contract classifies a new-form elevated
-  permission step as root-dependent. Legacy permission steps remain outside
-  this new root classification.
+- The shared Rust/Tauri root-work contract classifies an elevated
+  App Definition permission set as root-dependent. Legacy permission steps
+  are rejected by the schema and do not have a separate execution path.
 - Capability eligibility, reviewed root authorization, root preflight,
   per-command root revalidation, and actual command privilege are separate
   checks. An elevated command uses the existing guarded `su -c` adapter only
@@ -754,11 +701,8 @@ unrooted devices. The launch step depends on baseline; with both permission
 steps selected, stable topological ordering keeps baseline, elevated, then
 launch in that order.
 
-### 15.4 Legacy compatibility
-
-Package-based permission steps retain the legacy parameter contract and
-execution behavior until the designated compatibility cutover. Their action
-arrays are not copied into the new-form `permission_plan`.
+### 15.4 Schema-v1 authority boundary
+Only App Definition-backed permission plans are executable. Recipe validation rejects package-based permission arrays rather than adapting or normalizing them into an App Definition permission set.
 
 ## 16. Executor Responsibilities
 
@@ -831,15 +775,9 @@ V1 verify types:
 
 Verify failure turns the step into failed.
 
-### Approved next hardening
+### Dependency handling
 
-A distinct `BLOCKED` status is approved next to replace the current ambiguity between true skips and downstream dependency fallout:
-
-- if a dependency failed or is blocked, current step becomes `BLOCKED`
-- blocked steps do not execute, resolve params, or verify
-- skipped dependencies still do not automatically block downstream steps
-
-This hardening is specifically intended to prevent noisy cascades after early failures.
+If a dependency failed or was blocked, execution marks the current step `BLOCKED`. Blocked steps do not execute, resolve parameters, or verify. A skipped dependency does not automatically block downstream steps.
 
 ## 18. Artifact Resolution and Caching
 
@@ -917,7 +855,7 @@ This keeps the schema clean while still allowing app-private core seeding, such 
 The RetroArch provisioning flow uses App Definition ownership for its reusable
 file sources while keeping installation and procedural setup in the Recipe:
 
-1. keep the Recipe's legacy `remote_file` artifact for the RetroArch APK
+1. resolve RetroArch APK through its Recipe `app_artifact` reference to the App Definition `apk` artifact
 2. declare seven frontend archives, thirteen selected core archives, and
    three system-resource archives as named `kind: file` App Definition
    artifacts with HTTPS direct-URL sources
@@ -939,9 +877,10 @@ file sources while keeping installation and procedural setup in the Recipe:
    - optional config copy via `copy_files`
    - final launch
 
-The APK installation behavior remains the legacy Recipe artifact flow. All
-other RetroArch archive sources are app-owned, and they use the ordinary
-artifact resolution, cache, extraction, and local-path workflow.
+The RetroArch APK is installed from the App Definition's `apk` App Artifact
+with reviewed package provenance. Other RetroArch archive sources are also
+App Definition-owned and use the ordinary artifact resolution, cache,
+extraction, and local-path workflow.
 
 ## 22. Known Current Gaps / Intentional V1 Limits
 
@@ -951,8 +890,6 @@ These are intentionally left narrow in v1:
 - ZIP-only extraction
 - host extraction is the primary grouped path
 - device extraction is basic
-- legacy copy/push step types may still exist for compatibility
-- `manual_requirement` may remain only as compatibility for existing `permissions.manual`
 - planner does not emit execution commands
 - no heuristic path inference in `copy_files`
 
@@ -977,8 +914,6 @@ In plain terms:
 The next practical milestones are:
 
 1. executor hardening:
-   - `BLOCKED` status
-   - better `launch_app`
    - typed TLS/download errors
 2. device E2E validation:
    - full RetroArch artifact-based apply
@@ -986,5 +921,3 @@ The next practical milestones are:
    - grouped core batch flow
    - frontend/system asset flow
    - app-private copy verification
-3. cleanup:
-   - deprecate/remove legacy copy/push steps once migration is stable

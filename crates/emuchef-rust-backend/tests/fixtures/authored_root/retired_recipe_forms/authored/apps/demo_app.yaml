@@ -1,0 +1,5 @@
+schema_version: 1
+kind: app_definition
+id: demo_app
+name: Demo App
+package_id: com.example.demo

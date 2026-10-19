@@ -4,7 +4,7 @@
   "planningDevicePlan": "ayaneo.pocket_s2.base",
   "authoredSource": {
     "path": "authored/recipes/app.xaniteog.install.yaml",
-    "sha256": "c55f9547f7aa8de60f951386243992fa9b8c66329eeb6e1fd2f20bea21dda1f2"
+    "sha256": "6d9d27fb4f4e9329bc277d236fcf47f76f8a71147d98e69b2a0eaf69fab29726"
   },
   "selectedRecipes": ["app.xaniteog.install"],
   "expandedRecipes": ["app.xaniteog.install"],
@@ -12,7 +12,7 @@
   "qualificationContextCapabilities": ["apk_install"],
   "requiredInputs": ["app.xaniteog.install/xaniteog_apk"],
   "optionalInputs": [],
-  "requiredOperationFamilies": ["install_apk"],
+  "requiredOperationFamilies": ["resolve_artifacts", "install_apk"],
   "input": {
     "key": "app.xaniteog.install/xaniteog_apk",
     "required": true,
@@ -24,10 +24,12 @@
   },
   "install": {
     "stepIdSuffix": "install_xaniteog",
+    "appId": "xaniteog",
     "packageName": "Ali.Xanite",
-    "inputRef": "inputs.xaniteog_apk",
+    "artifactLocalPathRef": "artifacts.app.xaniteog.install/xaniteog_apk.local_path",
     "replaceExisting": false,
-    "skipConditionType": "package_installed"
+    "skipConditionType": "package_installed",
+    "skipConditionParams": {}
   },
   "liveNetworkRequiredForAutomatedQualification": false,
   "automatedStatus": "qualified",

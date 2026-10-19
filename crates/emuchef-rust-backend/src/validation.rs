@@ -31,7 +31,22 @@ pub(crate) fn normalize_expected_sha256(value: &str) -> Option<String> {
 }
 
 pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root: Option<&Path>) -> Value {
-    let path = path.as_ref();
+    validate_recipe_path_result_inner(path.as_ref(), authored_root, None)
+}
+
+pub(crate) fn validate_recipe_path_result_with_catalog(
+    path: impl AsRef<Path>,
+    authored_root: &Path,
+    catalog: &catalog::ValidationCatalog,
+) -> Value {
+    validate_recipe_path_result_inner(path.as_ref(), Some(authored_root), Some(catalog))
+}
+
+fn validate_recipe_path_result_inner(
+    path: &Path,
+    authored_root: Option<&Path>,
+    collected_catalog: Option<&catalog::ValidationCatalog>,
+) -> Value {
     let file = yaml::resolved_path_string(path);
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -40,7 +55,13 @@ pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root: Option
         Ok(raw) => match yaml::parse_recipe_mapping(&raw, path) {
             Ok(recipe) => {
                 return json!({
-                    "diagnostics": diagnostics_for_loaded_recipe(&file, &recipe, path, authored_root)
+                    "diagnostics": diagnostics_for_loaded_recipe(
+                        &file,
+                        &recipe,
+                        path,
+                        authored_root,
+                        collected_catalog,
+                    )
                 });
             }
             Err(error) => {
@@ -69,7 +90,9 @@ pub fn validate_loaded_recipe_result(
 ) -> Value {
     let path = path.as_ref();
     let file = yaml::resolved_path_string(path);
-    json!({ "diagnostics": diagnostics_for_loaded_recipe(&file, recipe, path, authored_root) })
+    json!({
+        "diagnostics": diagnostics_for_loaded_recipe(&file, recipe, path, authored_root, None)
+    })
 }
 
 fn diagnostics_for_loaded_recipe(
@@ -77,6 +100,7 @@ fn diagnostics_for_loaded_recipe(
     recipe: &Recipe,
     path: &Path,
     authored_root: Option<&Path>,
+    collected_catalog: Option<&catalog::ValidationCatalog>,
 ) -> Vec<Value> {
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
@@ -88,19 +112,46 @@ fn diagnostics_for_loaded_recipe(
             Some(recipe.id.as_str()),
         ));
     }
-    errors.extend(validate_step_dependencies(file, recipe));
-    errors.extend(validate_step_contracts(file, recipe));
-    errors.extend(validate_step_references(file, recipe));
+    errors.extend(validate_recipe_local_content(
+        file,
+        recipe,
+        authored_root.is_none(),
+    ));
     if let Some(authored_root) = authored_root {
-        errors.extend(catalog::validate_recipe_with_catalog(
-            file,
-            recipe,
-            path,
-            authored_root,
-        ));
+        if let Some(collected_catalog) = collected_catalog {
+            errors.extend(collected_catalog.validate_recipe(file, recipe, path, authored_root));
+        } else {
+            errors.extend(catalog::validate_recipe_with_catalog(
+                file,
+                recipe,
+                path,
+                authored_root,
+            ));
+        }
     }
 
     warnings.into_iter().chain(errors).collect()
+}
+
+/// Validate the parts of a Recipe that do not require a catalog scan.
+///
+/// Catalog admission reuses this for each Recipe in the selected Recipe's
+/// reachable dependency closure. The context flag preserves the standalone
+/// validator's existing App-context diagnostics without recursively invoking
+/// catalog validation.
+pub(crate) fn validate_recipe_local_content(
+    file: &str,
+    recipe: &Recipe,
+    require_catalog_independent_app_context: bool,
+) -> Vec<Value> {
+    let mut errors = validate_step_dependencies(file, recipe);
+    errors.extend(validate_step_contracts(
+        file,
+        recipe,
+        require_catalog_independent_app_context,
+    ));
+    errors.extend(validate_step_references(file, recipe));
+    errors
 }
 
 fn validate_step_dependencies(file: &str, recipe: &Recipe) -> Vec<Value> {
@@ -219,7 +270,11 @@ fn dependency_field(recipe: &Recipe, step_id: &str, dependency_id: &str) -> Opti
     ))
 }
 
-fn validate_step_contracts(file: &str, recipe: &Recipe) -> Vec<Value> {
+fn validate_step_contracts(
+    file: &str,
+    recipe: &Recipe,
+    require_catalog_independent_app_context: bool,
+) -> Vec<Value> {
     let mut errors = Vec::new();
     for (step_index, step) in recipe.steps.iter().enumerate() {
         let Some(spec) = step_specs::authored_step_spec_for(step) else {
@@ -234,19 +289,56 @@ fn validate_step_contracts(file: &str, recipe: &Recipe) -> Vec<Value> {
             ));
             continue;
         };
-        if matches!(step.type_name.as_str(), "launch_app" | "force_stop_app")
-            && step.app_ref.is_none()
-            && !step_specs::is_valid_legacy_lifecycle_form(step)
-        {
-            errors.push(diagnostic(
-                "error",
-                "app_context_required",
-                "A lifecycle step requires an App Definition ID or a valid legacy literal package and optional activity.",
-                file,
-                Some("recipe"),
-                Some(&recipe.id),
-                Some(&format!("steps[{step_index}].app_ref")),
-            ));
+        if require_catalog_independent_app_context && step.app_ref.is_none() {
+            if spec.app_context == step_specs::AppContextRequirement::Required {
+                errors.push(diagnostic(
+                    "error",
+                    "app_context_required",
+                    "This step requires an App Definition ID in app_ref.",
+                    file,
+                    Some("recipe"),
+                    Some(&recipe.id),
+                    Some(&format!("steps[{step_index}].app_ref")),
+                ));
+            }
+            if step
+                .skip_if
+                .iter()
+                .chain(&step.verify)
+                .any(|condition| condition.type_name == "package_installed")
+            {
+                errors.push(diagnostic(
+                    "error",
+                    "app_condition_context_required",
+                    "A package_installed condition requires an app context on its step.",
+                    file,
+                    Some("recipe"),
+                    Some(&recipe.id),
+                    Some(&format!("steps[{step_index}].app_ref")),
+                ));
+            }
+        }
+        if require_catalog_independent_app_context {
+            for (condition_field, conditions) in
+                [("skip_if", &step.skip_if), ("verify", &step.verify)]
+            {
+                for (condition_index, condition) in conditions.iter().enumerate() {
+                    if condition.type_name != "package_installed" || condition.params.is_empty() {
+                        continue;
+                    }
+                    let field =
+                        format!("steps[{step_index}].{condition_field}[{condition_index}].params");
+                    errors.push(diagnostic(
+                        "error",
+                        "app_condition_package_parameter_forbidden",
+                        "A package_installed condition inherits package identity from app_ref and must not specify params.",
+                        file,
+                        Some("recipe"),
+                        Some(&recipe.id),
+                        Some(&field),
+                    ));
+                }
+            }
         }
         if step
             .app_ref
@@ -343,33 +435,6 @@ fn validate_step_params(
                 ))
             }
             _ => {}
-        }
-        if step.type_name == "install_apk" && param_name == "expected_package_name" {
-            if let ParamValue::Literal(value) = value {
-                if !matches!(value, Value::String(value) if !value.trim().is_empty()) {
-                    errors.push(param_contract_error(
-                        file,
-                        recipe,
-                        step_index,
-                        param_name,
-                        "Param 'expected_package_name' must be a non-empty string literal for step type 'install_apk'.",
-                    ));
-                }
-            }
-        }
-        if step.type_name == "install_apk" && param_name == "expected_sha256" {
-            if let ParamValue::Literal(value) = value {
-                if !matches!(value, Value::String(value) if normalize_expected_sha256(value).is_some())
-                {
-                    errors.push(param_contract_error(
-                        file,
-                        recipe,
-                        step_index,
-                        param_name,
-                        "Param 'expected_sha256' must be a 64-character hexadecimal string literal for step type 'install_apk'.",
-                    ));
-                }
-            }
         }
     }
     errors

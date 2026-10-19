@@ -27,6 +27,27 @@ use crate::planner::{
     PlannerInput, RuntimeCapabilities, RuntimeValue, TargetDeviceBinding,
 };
 
+fn local_input_app_install_plan(
+    apk_path: &Path,
+    package_id: &str,
+    provenance: Option<crate::planner::ExecutionArtifactAppProvenance>,
+) -> ExecutionPlan {
+    let input_id = "example.recipe/user_apk";
+    let mut execution_plan = app_context_install_plan(String::new(), package_id, provenance);
+    execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::LocalInput {
+        input_id: input_id.to_string(),
+    };
+    execution_plan.inputs = vec![ExecutionInputValue {
+        id: input_id.to_string(),
+        value: RuntimeValue {
+            type_name: "file_path".to_string(),
+            value: json!(apk_path),
+            location: Some("host".to_string()),
+        },
+    }];
+    execution_plan
+}
+
 fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -100,8 +121,16 @@ fn app_permission_action(
     permission: &str,
     applicability: PermissionActionApplicability,
 ) -> PermissionPlanAction {
+    app_permission_action_for_package("com.example.permission", permission, applicability)
+}
+
+fn app_permission_action_for_package(
+    package_name: &str,
+    permission: &str,
+    applicability: PermissionActionApplicability,
+) -> PermissionPlanAction {
     PermissionPlanAction::RuntimePermission {
-        package_name: "com.example.permission".to_string(),
+        package_name: package_name.to_string(),
         permission: permission.to_string(),
         android_api_min: None,
         android_api_max: None,
@@ -109,15 +138,17 @@ fn app_permission_action(
     }
 }
 
-fn app_permission_plan(
+fn app_permission_step(
+    id: &str,
+    app_id: &str,
     permission_set: PermissionSetKind,
     on_failure: PermissionFailurePolicy,
     actions: Vec<PermissionPlanAction>,
-) -> ExecutionPlan {
-    let mut execution_plan = plan(vec![ExecutionStep {
-        id: "example.recipe/permission-plan".to_string(),
+) -> ExecutionStep {
+    ExecutionStep {
+        id: id.to_string(),
         recipe_ref: "example.recipe".to_string(),
-        app_id: Some("permission-app".to_string()),
+        app_id: Some(app_id.to_string()),
         type_name: "grant_permissions".to_string(),
         name: "Permission plan".to_string(),
         note: "Permission plan".to_string(),
@@ -131,15 +162,51 @@ fn app_permission_plan(
         params: OrderedMap::new(),
         skip_if: Vec::new(),
         verify: Vec::new(),
-    }]);
-    execution_plan.apps.push(ExecutionAppSnapshot {
-        id: "permission-app".to_string(),
+    }
+}
+
+fn app_permission_app_snapshot(app_id: &str, package_id: &str) -> ExecutionAppSnapshot {
+    ExecutionAppSnapshot {
+        id: app_id.to_string(),
         name: "Permission App".to_string(),
         description: None,
         category: None,
-        package_id: "com.example.permission".to_string(),
-    });
+        package_id: package_id.to_string(),
+    }
+}
+
+fn app_permission_plan_for_app(
+    app_id: &str,
+    package_id: &str,
+    permission_set: PermissionSetKind,
+    on_failure: PermissionFailurePolicy,
+    actions: Vec<PermissionPlanAction>,
+) -> ExecutionPlan {
+    let mut execution_plan = plan(vec![app_permission_step(
+        "example.recipe/permission-plan",
+        app_id,
+        permission_set,
+        on_failure,
+        actions,
+    )]);
     execution_plan
+        .apps
+        .push(app_permission_app_snapshot(app_id, package_id));
+    execution_plan
+}
+
+fn app_permission_plan(
+    permission_set: PermissionSetKind,
+    on_failure: PermissionFailurePolicy,
+    actions: Vec<PermissionPlanAction>,
+) -> ExecutionPlan {
+    app_permission_plan_for_app(
+        "permission-app",
+        "com.example.permission",
+        permission_set,
+        on_failure,
+        actions,
+    )
 }
 
 fn app_context_install_plan(
@@ -279,7 +346,7 @@ fn direct_url_file_artifact_resolves_and_reports_hash_cache_and_provenance() {
         ),
     );
 
-    assert_eq!(actual["success"], true, "{actual:#}");
+    assert_eq!(actual["success"], true);
     let reported = &actual["resolved_artifacts"][0];
     assert_eq!(reported["appId"], "example-app");
     assert_eq!(reported["appArtifactId"], "configuration");
@@ -386,7 +453,67 @@ fn direct_executor_rejects_cross_recipe_binding_before_device_or_artifact_work()
 }
 
 #[test]
-fn local_input_apk_app_artifact_is_admitted_and_package_verified() {
+fn install_apk_rejects_noncanonical_app_artifact_provenance_before_device_calls() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &workspace,
+        "com.example.expected",
+    );
+    let valid_provenance = crate::planner::ExecutionArtifactAppProvenance {
+        app_id: "example-app".to_string(),
+        artifact_id: "apk".to_string(),
+        kind: "apk".to_string(),
+    };
+    let mut invalid_plans = vec![
+        local_input_app_install_plan(&apk, "com.example.expected", None),
+        local_input_app_install_plan(
+            &apk,
+            "com.example.expected",
+            Some(crate::planner::ExecutionArtifactAppProvenance {
+                app_id: "another-app".to_string(),
+                ..valid_provenance.clone()
+            }),
+        ),
+        local_input_app_install_plan(
+            &apk,
+            "com.example.expected",
+            Some(crate::planner::ExecutionArtifactAppProvenance {
+                kind: "archive".to_string(),
+                ..valid_provenance.clone()
+            }),
+        ),
+    ];
+    let mut missing_app_context =
+        local_input_app_install_plan(&apk, "com.example.expected", Some(valid_provenance));
+    missing_app_context.steps[1].app_id = None;
+    invalid_plans.push(missing_app_context);
+
+    for execution_plan in invalid_plans {
+        let (actual, runner) = run_value(
+            &execution_plan,
+            sandbox_adapters(
+                &workspace.path().join("runtime"),
+                &workspace.path().join("cache"),
+                &workspace.path().join("device"),
+                vec![workspace.path().to_path_buf()],
+            ),
+        );
+
+        assert_eq!(actual["success"], false, "{actual:#}");
+        assert!(
+            runner
+                .adapters()
+                .device()
+                .commands()
+                .iter()
+                .all(|command| command.first().is_none_or(|value| value != "install_apk")),
+            "invalid App Artifact provenance must fail before APK installation"
+        );
+    }
+}
+
+#[test]
+fn install_apk_local_input_app_artifact_is_admitted_and_package_verified() {
     let workspace = tempfile::tempdir().expect("executor temp root should be created");
     let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
         &workspace,
@@ -441,7 +568,7 @@ fn local_input_apk_app_artifact_is_admitted_and_package_verified() {
 }
 
 #[test]
-fn local_input_apk_package_mismatch_blocks_install_after_resolution() {
+fn install_apk_local_input_package_mismatch_blocks_install_after_resolution() {
     let workspace = tempfile::tempdir().expect("executor temp root should be created");
     let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
         &workspace,
@@ -1622,16 +1749,13 @@ fn permission_commands_are_nonprivileged_but_record_mutation_evidence() {
     let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
     device.configure_root_authority(true);
 
-    let permission_failure = crate::executor::ExecutorDevice::run_plan_command(
+    let permission_failure = crate::executor::ExecutorDevice::apply_permission_operation(
         &mut device,
-        vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.app".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ],
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.app".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
     )
     .expect_err("permission failure should remain an ordinary command failure");
     assert_eq!(permission_failure.kind, DeviceOperationKind::CommandFailed);
@@ -1651,9 +1775,9 @@ fn permission_commands_are_nonprivileged_but_record_mutation_evidence() {
     );
     let calls = device.command_executor().calls();
     assert_eq!(calls.len(), 2);
-    assert!(calls[0]
-        .windows(2)
-        .any(|pair| pair == ["shell".to_string(), "pm".to_string()]));
+    assert!(calls[0].windows(2).any(|pair| {
+        pair[0] == "shell" && pair[1].contains("pm grant com.example.app android.permission.CAMERA")
+    }));
     assert!(calls[0].iter().all(|argument| argument != "su"));
     assert!(calls[1].ends_with(&[
         "shell".to_string(),
@@ -1680,16 +1804,15 @@ fn mutation_evidence_precedes_post_identity_override() {
         android_api_level: Some(33),
     }));
     device.configure_root_authority(true);
-    let command = vec![
-        "adb".to_string(),
-        "shell".to_string(),
-        "pm".to_string(),
-        "grant".to_string(),
-        "com.example.app".to_string(),
-        "android.permission.CAMERA".to_string(),
-    ];
-    let identity_failure = crate::executor::ExecutorDevice::run_plan_command(&mut device, command)
-        .expect_err("post-operation identity change should override ordinary failure");
+    let identity_failure = crate::executor::ExecutorDevice::apply_permission_operation(
+        &mut device,
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.app".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
+    )
+    .expect_err("post-operation identity change should override ordinary failure");
     assert_eq!(
         identity_failure.kind,
         DeviceOperationKind::DeviceIdentityChanged(IdentityCheckPhase::PostOperation)
@@ -2017,60 +2140,6 @@ fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
     }
 }
 
-fn install_apk_step(id: &str, apk_path: &Path, replace_existing: bool) -> ExecutionStep {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "app".to_string(),
-        literal(runtime_value(
-            "file_path",
-            json!(apk_path.to_string_lossy().to_string()),
-            Some("host"),
-        )),
-    );
-    if replace_existing {
-        params.insert("replace_existing".to_string(), literal(json!(true)));
-    }
-    ExecutionStep {
-        id: id.to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "install_apk".to_string(),
-        name: "Install APK".to_string(),
-        note: "Install APK".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }
-}
-
-fn install_apk_step_with_expected_package(
-    id: &str,
-    apk_path: &Path,
-    replace_existing: bool,
-    expected_package_name: &str,
-) -> ExecutionStep {
-    let mut step = install_apk_step(id, apk_path, replace_existing);
-    step.params.insert(
-        "expected_package_name".to_string(),
-        literal(json!(expected_package_name)),
-    );
-    step
-}
-
-fn install_apk_step_with_expected_sha256(
-    id: &str,
-    apk_path: &Path,
-    expected_sha256: Value,
-) -> ExecutionStep {
-    let mut step = install_apk_step(id, apk_path, false);
-    step.params
-        .insert("expected_sha256".to_string(), literal(expected_sha256));
-    step
-}
-
 fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -2212,15 +2281,21 @@ fn failures_block_dependents_but_not_unrelated_steps_like_compatibility() {
 }
 
 #[test]
-fn skip_if_uses_compatibility_dry_run_device_state_and_does_not_block_dependents() {
+fn app_context_package_installed_skip_does_not_block_dependents() {
     let mut skipped = wait_step("example.recipe/skipped", "Skipped", 1);
-    skipped.skip_if = vec![condition(
-        "package_installed",
-        json!({"package_name": "com.example.skip"}),
-    )];
+    let mut package_condition = condition("package_installed", json!({}));
+    package_condition.app_id = Some("example-app".to_string());
+    skipped.skip_if = vec![package_condition];
     let mut downstream = wait_step("example.recipe/downstream", "Downstream", 1);
     downstream.dependencies = vec!["example.recipe/skipped".to_string()];
-    let execution_plan = plan(vec![skipped, downstream]);
+    let mut execution_plan = plan(vec![skipped, downstream]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.skip".to_string(),
+    });
     let mut adapters = DryRunExecutorAdapters::default();
     adapters
         .device_mut()
@@ -2230,6 +2305,62 @@ fn skip_if_uses_compatibility_dry_run_device_state_and_does_not_block_dependents
     let (actual, _) = run_value(&execution_plan, adapters);
 
     assert_eq!(actual, read_golden("phase6o_executor_skip_if.json"));
+}
+
+#[test]
+fn package_installed_condition_rejects_arbitrary_parameters_before_device_read() {
+    let mut step = wait_step("example.recipe/condition", "Condition", 1);
+    step.app_id = Some("example-app".to_string());
+    let mut package_condition = condition(
+        "package_installed",
+        json!({"unexpected_parameter": "ignored-value"}),
+    );
+    package_condition.app_id = Some("example-app".to_string());
+    step.skip_if = vec![package_condition];
+    let mut execution_plan = plan(vec![step]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.qualified".to_string(),
+    });
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(
+        actual["steps"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("parameterless")),
+        "{actual:#}"
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn app_less_package_installed_condition_fails_without_reading_device_state() {
+    let mut step = wait_step("example.recipe/legacy-condition", "Legacy condition", 1);
+    step.skip_if = vec![condition(
+        "package_installed",
+        json!({"package_name": "com.example.legacy"}),
+    )];
+    let execution_plan = plan(vec![step]);
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters
+        .device_mut()
+        .installed_packages_mut()
+        .insert("com.example.legacy".to_string());
+
+    let (actual, runner) = run_value(&execution_plan, adapters);
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("App Definition context")));
+    assert!(runner.adapters().device().commands().is_empty());
 }
 
 #[test]
@@ -2254,7 +2385,7 @@ fn verify_uses_only_compatibility_backed_condition_types_and_fails_after_executi
 }
 
 #[test]
-fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recorded_commands() {
+fn grant_permissions_legacy_inline_actions_fail_before_device_calls() {
     let mut params = OrderedMap::new();
     params.insert(
         "runtime".to_string(),
@@ -2294,18 +2425,17 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
 
     let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
 
-    assert_eq!(
-        actual,
-        read_golden("phase6o_executor_grant_permissions.json")
-    );
-    assert_eq!(runner.adapters().device().commands().len(), 1);
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("reviewed permission plan is invalid")));
+    assert!(runner.adapters().device().commands().is_empty());
     assert_eq!(runner.adapters().device().root_preflight_calls(), 0);
-    assert!(actual.to_string().contains("permission_results"));
-    assert!(!actual.to_string().contains("run_plan_command"));
 }
 
 #[test]
-fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_blocks_dependents() {
+fn grant_permissions_legacy_actions_fail_closed_and_block_dependents() {
     let mut params = OrderedMap::new();
     params.insert(
         "runtime".to_string(),
@@ -2339,56 +2469,36 @@ fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_bl
         dependent,
         wait_step("example.recipe/unrelated", "Unrelated", 1),
     ]);
-    let mut adapters = DryRunExecutorAdapters::default();
-    adapters.device_mut().fail_run_plan_command(
-        vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.fail".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ],
-        "permission denied",
-    );
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
 
-    let (actual, _) = run_value(&execution_plan, adapters);
-
-    assert_eq!(
-        actual,
-        read_golden("phase6o_executor_grant_permissions_failure.json")
-    );
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert_eq!(actual["steps"][2]["status"], "executed");
+    assert!(runner.adapters().device().commands().is_empty());
 }
 
 #[test]
 fn real_device_timeout_fails_current_step_and_leaves_later_steps_unscheduled() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.timeout",
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
-    );
-    let execution_plan = plan(vec![
-        ExecutionStep {
-            id: "example.recipe/timeout".to_string(),
-            recipe_ref: "example.recipe".to_string(),
-            app_id: None,
-            type_name: "grant_permissions".to_string(),
-            name: "Timeout".to_string(),
-            note: "Timeout".to_string(),
-            dependencies: Vec::new(),
-            constraints: constraints(),
-            permission_plan: None,
-            params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        },
+    let mut execution_plan = plan(vec![
+        app_permission_step(
+            "example.recipe/timeout",
+            "timeout-app",
+            PermissionSetKind::Baseline,
+            PermissionFailurePolicy::Fail,
+            vec![app_permission_action_for_package(
+                "com.example.timeout",
+                "android.permission.CAMERA",
+                PermissionActionApplicability::Applicable,
+            )],
+        ),
         wait_step("example.recipe/dependent", "Dependent", 1),
         wait_step("example.recipe/unrelated", "Unrelated", 1),
     ]);
+    execution_plan.apps.push(app_permission_app_snapshot(
+        "timeout-app",
+        "com.example.timeout",
+    ));
     let mut command_executor = FakeAdbCommandExecutor::default();
     command_executor.push_timed_out();
     let device = RealAdbDevice::with_executor("adb", Some("serial"), command_executor);
@@ -2407,55 +2517,35 @@ fn real_device_timeout_fails_current_step_and_leaves_later_steps_unscheduled() {
 
 #[test]
 fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_steps_unstarted() {
-    let mut first_params = OrderedMap::new();
-    first_params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.first",
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
-    );
-    let mut second_params = OrderedMap::new();
-    second_params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.second",
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
-    );
-    let execution_plan = plan(vec![
-        ExecutionStep {
-            id: "example.recipe/first".to_string(),
-            recipe_ref: "example.recipe".to_string(),
-            app_id: None,
-            type_name: "grant_permissions".to_string(),
-            name: "First".to_string(),
-            note: "First".to_string(),
-            dependencies: Vec::new(),
-            constraints: constraints(),
-            permission_plan: None,
-            params: first_params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        },
-        ExecutionStep {
-            id: "example.recipe/transport".to_string(),
-            recipe_ref: "example.recipe".to_string(),
-            app_id: None,
-            type_name: "grant_permissions".to_string(),
-            name: "Transport".to_string(),
-            note: "Transport".to_string(),
-            dependencies: Vec::new(),
-            constraints: constraints(),
-            permission_plan: None,
-            params: second_params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        },
+    let mut execution_plan = plan(vec![
+        app_permission_step(
+            "example.recipe/first",
+            "first-app",
+            PermissionSetKind::Baseline,
+            PermissionFailurePolicy::Fail,
+            vec![app_permission_action_for_package(
+                "com.example.first",
+                "android.permission.CAMERA",
+                PermissionActionApplicability::Applicable,
+            )],
+        ),
+        app_permission_step(
+            "example.recipe/transport",
+            "second-app",
+            PermissionSetKind::Baseline,
+            PermissionFailurePolicy::Fail,
+            vec![app_permission_action_for_package(
+                "com.example.second",
+                "android.permission.CAMERA",
+                PermissionActionApplicability::Applicable,
+            )],
+        ),
         wait_step("example.recipe/unrelated", "Unrelated", 1),
     ]);
+    execution_plan.apps = vec![
+        app_permission_app_snapshot("first-app", "com.example.first"),
+        app_permission_app_snapshot("second-app", "com.example.second"),
+    ];
     let mut command_executor = FakeAdbCommandExecutor::default();
     command_executor.push_completed(0, "", "");
     command_executor.push_completed(1, "", "error: device offline");
@@ -2494,55 +2584,35 @@ fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_step
 
 #[test]
 fn real_device_storage_failure_stops_after_prior_evidence_and_keeps_later_steps_unstarted() {
-    let mut first_params = OrderedMap::new();
-    first_params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.first",
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
-    );
-    let mut second_params = OrderedMap::new();
-    second_params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.second",
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
-    );
-    let execution_plan = plan(vec![
-        ExecutionStep {
-            id: "example.recipe/first-storage".to_string(),
-            recipe_ref: "example.recipe".to_string(),
-            app_id: None,
-            type_name: "grant_permissions".to_string(),
-            name: "First".to_string(),
-            note: "First".to_string(),
-            dependencies: Vec::new(),
-            constraints: constraints(),
-            permission_plan: None,
-            params: first_params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        },
-        ExecutionStep {
-            id: "example.recipe/storage".to_string(),
-            recipe_ref: "example.recipe".to_string(),
-            app_id: None,
-            type_name: "grant_permissions".to_string(),
-            name: "Storage".to_string(),
-            note: "Storage".to_string(),
-            dependencies: Vec::new(),
-            constraints: constraints(),
-            permission_plan: None,
-            params: second_params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        },
+    let mut execution_plan = plan(vec![
+        app_permission_step(
+            "example.recipe/first-storage",
+            "first-app",
+            PermissionSetKind::Baseline,
+            PermissionFailurePolicy::Fail,
+            vec![app_permission_action_for_package(
+                "com.example.first",
+                "android.permission.CAMERA",
+                PermissionActionApplicability::Applicable,
+            )],
+        ),
+        app_permission_step(
+            "example.recipe/storage",
+            "second-app",
+            PermissionSetKind::Baseline,
+            PermissionFailurePolicy::Fail,
+            vec![app_permission_action_for_package(
+                "com.example.second",
+                "android.permission.CAMERA",
+                PermissionActionApplicability::Applicable,
+            )],
+        ),
         wait_step("example.recipe/storage-unrelated", "Unrelated", 1),
     ]);
+    execution_plan.apps = vec![
+        app_permission_app_snapshot("first-app", "com.example.first"),
+        app_permission_app_snapshot("second-app", "com.example.second"),
+    ];
     let mut command_executor = FakeAdbCommandExecutor::default();
     command_executor.push_completed(0, "", "");
     command_executor.push_completed(1, "", "mkdir: '/owned/fixture': No space left on device");
@@ -2619,29 +2689,17 @@ fn transport_failure_in_root_preflight_fails_current_step_and_stops_later_work()
 
 #[test]
 fn transport_failure_during_verification_preserves_completed_operation_outputs() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.verify",
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
+    let mut step = app_permission_step(
+        "example.recipe/verify_transport",
+        "verify-app",
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Fail,
+        vec![app_permission_action_for_package(
+            "com.example.verify",
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        )],
     );
-    let mut step = ExecutionStep {
-        id: "example.recipe/verify_transport".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Verify transport".to_string(),
-        note: "Verify transport".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    };
     step.verify = vec![condition("path_exists", json!({"path": "/sdcard/verify"}))];
     let mut command_executor = FakeAdbCommandExecutor::default();
     command_executor.push_completed(0, "", "");
@@ -2649,10 +2707,12 @@ fn transport_failure_during_verification_preserves_completed_operation_outputs()
     let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
     let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
 
-    let result = runner.run(&plan(vec![
-        step,
-        wait_step("example.recipe/later", "Later", 1),
-    ]));
+    let mut execution_plan = plan(vec![step, wait_step("example.recipe/later", "Later", 1)]);
+    execution_plan.apps.push(app_permission_app_snapshot(
+        "verify-app",
+        "com.example.verify",
+    ));
+    let result = runner.run(&execution_plan);
 
     assert_eq!(result.steps.len(), 1);
     assert_eq!(
@@ -2667,14 +2727,24 @@ fn transport_failure_during_verification_preserves_completed_operation_outputs()
 }
 
 #[test]
-fn optional_permission_transport_failure_cannot_be_downgraded_or_followed() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([
-            {"package_name": "com.example.optional", "name": "android.permission.CAMERA", "required": false},
-            {"package_name": "com.example.optional", "name": "android.permission.RECORD_AUDIO", "required": false}
-        ])),
+fn warn_policy_does_not_downgrade_permission_transport_failure_or_followup() {
+    let execution_plan = app_permission_plan_for_app(
+        "optional-app",
+        "com.example.optional",
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![
+            app_permission_action_for_package(
+                "com.example.optional",
+                "android.permission.CAMERA",
+                PermissionActionApplicability::Applicable,
+            ),
+            app_permission_action_for_package(
+                "com.example.optional",
+                "android.permission.RECORD_AUDIO",
+                PermissionActionApplicability::Applicable,
+            ),
+        ],
     );
     let mut command_executor = FakeAdbCommandExecutor::default();
     command_executor.push_completed(1, "", "error: device unauthorized");
@@ -2682,20 +2752,7 @@ fn optional_permission_transport_failure_cannot_be_downgraded_or_followed() {
     let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
     let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
 
-    let result = runner.run(&plan(vec![ExecutionStep {
-        id: "example.recipe/optional".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Optional".to_string(),
-        note: "Optional".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }]));
+    let result = runner.run(&execution_plan);
 
     assert_eq!(
         result.steps[0].failure_kind,
@@ -2816,53 +2873,33 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
 
 #[test]
 fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_evidence() {
-    let mut first_params = OrderedMap::new();
-    first_params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.first",
-            "name": "android.permission.CAMERA",
-            "required": false
-        }])),
+    let first = app_permission_step(
+        "example.recipe/first",
+        "first-app",
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action_for_package(
+            "com.example.first",
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        )],
     );
-    let first = ExecutionStep {
-        id: "example.recipe/first".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "First".to_string(),
-        note: "First".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params: first_params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    };
-    let mut second_params = OrderedMap::new();
-    second_params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.second",
-            "name": "android.permission.CAMERA",
-            "required": false
-        }])),
+    let second = app_permission_step(
+        "example.recipe/second",
+        "second-app",
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action_for_package(
+            "com.example.second",
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        )],
     );
-    let second = ExecutionStep {
-        id: "example.recipe/second".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Second".to_string(),
-        note: "Second".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params: second_params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    };
-    let execution_plan = plan_for_reviewed_target(plan(vec![first, second]));
+    let mut execution_plan = plan_for_reviewed_target(plan(vec![first, second]));
+    execution_plan.apps = vec![
+        app_permission_app_snapshot("first-app", "com.example.first"),
+        app_permission_app_snapshot("second-app", "com.example.second"),
+    ];
 
     let mut executor = FakeAdbCommandExecutor::default();
     push_identity_sample(&mut executor, "a1b2");
@@ -2892,7 +2929,7 @@ fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_e
             ProcessOperation::Probe,
             ProcessOperation::Probe,
             ProcessOperation::Probe,
-            ProcessOperation::GenericFallback,
+            ProcessOperation::ShellMutation,
             ProcessOperation::Probe,
             ProcessOperation::Probe,
             ProcessOperation::Probe,
@@ -2938,45 +2975,26 @@ fn file_exists_condition_uses_compatibility_dry_run_path_and_directory_state() {
 }
 
 #[test]
-fn optional_permission_command_failure_is_reported_without_failing_the_step() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.optional",
-            "name": "android.permission.CAMERA",
-            "required": false
-        }])),
+fn app_permission_warn_policy_reports_command_failure_without_failing_the_step() {
+    let permission = "android.permission.CAMERA";
+    let execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        vec![app_permission_action(
+            permission,
+            PermissionActionApplicability::Applicable,
+        )],
     );
-    let execution_plan = plan(vec![ExecutionStep {
-        id: "example.recipe/grant_optional".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Grant Optional".to_string(),
-        note: "Grant Optional".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }]);
     let mut adapters = DryRunExecutorAdapters::default();
-    adapters.device_mut().fail_run_plan_command(
-        vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.optional".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ],
+    adapters.device_mut().fail_permission_operation(
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: permission.to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
         "permission denied",
     );
-
     let (actual, _) = run_value(&execution_plan, adapters);
-
     assert_eq!(actual["success"], true);
     assert_eq!(actual["steps"][0]["status"], "executed");
     assert_eq!(
@@ -2990,505 +3008,99 @@ fn optional_permission_command_failure_is_reported_without_failing_the_step() {
 }
 
 #[test]
-fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": "com.example.require_all",
-            "name": "android.permission.CAMERA",
-            "required": false
-        }])),
+fn app_permission_fail_policy_promotes_command_failure_to_step_failure() {
+    let permission = "android.permission.CAMERA";
+    let execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Fail,
+        vec![app_permission_action(
+            permission,
+            PermissionActionApplicability::Applicable,
+        )],
     );
-    params.insert(
-        "policy".to_string(),
-        literal(json!({"on_failure": "warn", "require_all": true})),
-    );
-    let execution_plan = plan(vec![ExecutionStep {
-        id: "example.recipe/grant_require_all".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Grant Require All".to_string(),
-        note: "Grant Require All".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }]);
     let mut adapters = DryRunExecutorAdapters::default();
-    adapters.device_mut().fail_run_plan_command(
-        vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.require_all".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ],
+    adapters.device_mut().fail_permission_operation(
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: permission.to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
         "permission denied",
     );
-
     let (actual, _) = run_value(&execution_plan, adapters);
-
     assert_eq!(actual["success"], false);
     assert_eq!(actual["steps"][0]["status"], "failed");
     assert_eq!(actual["steps"][0]["message"], "permission denied");
 }
 
 #[test]
-fn install_apk_dry_run_matches_compatibility_outputs_and_keeps_replace_existing_internal() {
-    let tmp = tempfile::tempdir().expect("temp root should be created");
-    let apk = tmp.path().join("example.apk");
-    fs::write(&apk, "apk").expect("apk fixture should be writable");
-    let execution_plan = plan(vec![install_apk_step("example.recipe/install", &apk, true)]);
-
-    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
-
-    assert_eq!(
-        normalize_tmp_paths(actual.clone(), tmp.path()),
-        read_golden("phase6q_executor_install_apk_replace_existing.json")
-    );
-    assert_eq!(actual["success"], true);
-    assert_eq!(actual["steps"][0]["status"], "executed");
-    assert_eq!(actual["steps"][0]["outputs"], json!({}));
-    assert_eq!(
-        runner.adapters().device().commands(),
-        &[vec![
-            "install_apk".to_string(),
-            apk.to_string_lossy().to_string(),
-            "True".to_string(),
-        ]]
-    );
-    assert!(!actual.to_string().contains("install_apk"));
-    assert!(!actual.to_string().contains("replace_existing"));
-}
-
-#[test]
-fn install_apk_with_matching_expected_package_installs_once() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
-    let execution_plan = plan(vec![install_apk_step_with_expected_package(
-        "example.recipe/install",
-        &apk,
-        true,
-        "com.example.qualified",
-    )]);
-
-    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
-
-    assert_eq!(actual["success"], true);
-    assert_eq!(actual["steps"][0]["status"], "executed");
-    assert_eq!(
-        runner.adapters().device().commands(),
-        &[vec![
-            "install_apk".to_string(),
-            apk.to_string_lossy().to_string(),
-            "True".to_string(),
-        ]]
-    );
-}
-
-#[test]
-fn install_apk_with_mismatched_expected_package_fails_before_install() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
-    let execution_plan = plan(vec![install_apk_step_with_expected_package(
-        "example.recipe/install",
-        &apk,
-        false,
-        "Com.example.qualified",
-    )]);
-
-    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
-    let message = actual["steps"][0]["message"]
-        .as_str()
-        .expect("failure should include a message");
-
-    assert_eq!(actual["success"], false);
-    assert_eq!(actual["steps"][0]["status"], "failed");
-    assert_eq!(
-        message,
-        "apk_package_mismatch: expected package 'Com.example.qualified', actual package 'com.example.qualified'."
-    );
-    assert!(!message.contains(&apk.to_string_lossy().to_string()));
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn install_apk_with_expected_package_redacts_inspection_failure_and_does_not_install() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = workspace.path().join("malformed.apk");
-    fs::write(&apk, "not a zip").expect("malformed APK fixture should be writable");
-    let execution_plan = plan(vec![install_apk_step_with_expected_package(
-        "example.recipe/install",
-        &apk,
-        false,
-        "com.example.expected",
-    )]);
-
-    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
-    let message = actual["steps"][0]["message"]
-        .as_str()
-        .expect("failure should include a message");
-
-    assert_eq!(actual["success"], false);
-    assert_eq!(actual["steps"][0]["status"], "failed");
-    assert_eq!(
-        message,
-        "apk_package_inspection_failed: manifest inspection failed with reason 'apk_zip_invalid'."
-    );
-    assert!(!message.contains(&apk.to_string_lossy().to_string()));
-    for internal in ["ZIP", "AXML", "rusty_axml", "not a zip"] {
-        assert!(!message.contains(internal));
-    }
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn install_apk_rejects_invalid_expected_package_value_before_inspection_or_install() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = workspace.path().join("malformed.apk");
-    fs::write(&apk, "not a zip").expect("malformed APK fixture should be writable");
-    let mut step = install_apk_step("example.recipe/install", &apk, false);
-    step.params
-        .insert("expected_package_name".to_string(), literal(json!(false)));
-
-    let (actual, runner) = run_value(&plan(vec![step]), DryRunExecutorAdapters::default());
-
-    assert_eq!(actual["success"], false);
-    assert_eq!(
-        actual["steps"][0]["message"],
-        "install_apk expected_package_name must be a non-empty string literal."
-    );
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn install_apk_with_matching_expected_sha256_installs_once() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = workspace.path().join("matching.apk");
-    let bytes = b"trusted APK bytes";
-    fs::write(&apk, bytes).expect("APK fixture should be writable");
-    let expected = format!(" \t{}\r\n", sha256(bytes).to_ascii_lowercase());
-
-    let (actual, runner) = run_value(
-        &plan(vec![install_apk_step_with_expected_sha256(
-            "example.recipe/install",
-            &apk,
-            json!(expected),
-        )]),
-        DryRunExecutorAdapters::default(),
-    );
-
-    assert_eq!(actual["success"], true);
-    assert_eq!(runner.adapters().device().commands().len(), 1);
-    assert_eq!(runner.adapters().device().commands()[0][0], "install_apk");
-}
-
-#[test]
-fn install_apk_checksum_mismatch_is_redacted_and_does_not_install() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = workspace.path().join("mismatch.apk");
-    fs::write(&apk, b"actual APK bytes").expect("APK fixture should be writable");
-    let expected = "0".repeat(64);
-
-    let (actual, runner) = run_value(
-        &plan(vec![install_apk_step_with_expected_sha256(
-            "example.recipe/install",
-            &apk,
-            json!(expected.clone()),
-        )]),
-        DryRunExecutorAdapters::default(),
-    );
-    let message = actual["steps"][0]["message"].as_str().unwrap();
-
-    assert_eq!(actual["success"], false);
-    assert!(message.starts_with(&format!(
-        "apk_checksum_mismatch: expected SHA-256 '{expected}', actual SHA-256 '"
-    )));
-    assert!(!message.contains(&apk.to_string_lossy().to_string()));
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn phase_6c_fixture_bad_checksum_blocks_dependents_without_installing() {
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("backend crate should live beneath the repository root");
-    let fixture_root = repository_root.join("tests/fixtures/phase-6c/non-root/android-fixture");
-    let host_staging = tempfile::tempdir().expect("host staging should be created");
-    let staged_apk = host_staging.path().join("fixture.apk");
-    fs::copy(fixture_root.join("fixture.apk"), &staged_apk)
-        .expect("fixture APK should stage for the host-only test");
-    let mut dependent = wait_step("fixture.recipe/downstream", "Downstream", 1);
-    dependent.dependencies = vec!["fixture.recipe/install".to_string()];
-    let execution_plan = plan(vec![
-        install_apk_step_with_expected_sha256(
-            "fixture.recipe/install",
-            &staged_apk,
-            json!("0".repeat(64)),
-        ),
-        dependent,
-    ]);
-    let mut runner = ExecutorRunner::new(DryRunExecutorAdapters::default());
-    let mut events = Vec::new();
-    let result = runner.run_with_progress(&execution_plan, |event| events.push(event));
-    let projected = serde_json::to_string(&result).expect("result should serialize");
-    let staged_path = staged_apk.to_string_lossy().to_string();
-    let device_commands = runner.adapters().device().commands().to_vec();
-    drop(runner);
-    host_staging
-        .close()
-        .expect("host test staging should be removed");
-
-    assert!(!result.success);
-    assert_eq!(result.total_steps, 2);
-    assert_eq!(
-        result.steps[0].status,
-        crate::executor::StepRunStatus::Failed
-    );
-    assert_eq!(
-        result.steps[1].status,
-        crate::executor::StepRunStatus::Blocked
-    );
-    assert!(device_commands.is_empty());
-    assert!(!projected.contains(&staged_path));
-    assert!(!projected.contains("device-"));
-    assert!(!Path::new(&staged_path).exists());
-    assert!(events.iter().any(|event| {
-        event.step_id == "fixture.recipe/install"
-            && event.status == Some(crate::executor::ProgressStatus::Failed)
-    }));
-    assert!(events.iter().any(|event| {
-        event.step_id == "fixture.recipe/downstream"
-            && event.status == Some(crate::executor::ProgressStatus::Blocked)
-    }));
-    assert_eq!(
-        events.last().and_then(|event| event.status.clone()),
-        Some(crate::executor::ProgressStatus::Blocked)
-    );
-}
-
-#[test]
-fn install_apk_checksum_read_failure_is_redacted_and_does_not_install() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = workspace.path().join("unreadable.apk");
-    fs::create_dir(&apk).expect("directory fixture should be created");
-
-    let (actual, runner) = run_value(
-        &plan(vec![install_apk_step_with_expected_sha256(
-            "example.recipe/install",
-            &apk,
-            json!("0".repeat(64)),
-        )]),
-        DryRunExecutorAdapters::default(),
-    );
-    let message = actual["steps"][0]["message"].as_str().unwrap();
-
-    assert_eq!(
-        message,
-        "apk_checksum_read_failed: APK checksum could not be calculated."
-    );
-    assert!(!message.contains(&apk.to_string_lossy().to_string()));
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn install_apk_rejects_invalid_runtime_checksum_before_hashing_or_installation() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = workspace.path().join("invalid.apk");
-    fs::create_dir(&apk).expect("directory fixture should be created");
-
-    let (actual, runner) = run_value(
-        &plan(vec![install_apk_step_with_expected_sha256(
-            "example.recipe/install",
-            &apk,
-            json!("sha256:not-a-digest"),
-        )]),
-        DryRunExecutorAdapters::default(),
-    );
-
-    assert_eq!(
-        actual["steps"][0]["message"],
-        "install_apk expected_sha256 must be a 64-character hexadecimal string literal."
-    );
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn install_apk_package_enforcement_precedes_checksum_enforcement() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
-    let mut step = install_apk_step_with_expected_package(
-        "example.recipe/install",
-        &apk,
-        false,
-        "com.example.wrong",
-    );
-    step.params.insert(
-        "expected_sha256".to_string(),
-        literal(json!("0".repeat(64))),
-    );
-
-    let (actual, runner) = run_value(&plan(vec![step]), DryRunExecutorAdapters::default());
-
-    assert!(actual["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .starts_with("apk_package_mismatch:"));
-    assert!(runner.adapters().device().commands().is_empty());
-}
-
-#[test]
-fn install_apk_matching_package_proceeds_to_matching_checksum() {
-    let workspace = tempfile::tempdir().expect("temp root should be created");
-    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
-    let mut step = install_apk_step_with_expected_package(
-        "example.recipe/install",
-        &apk,
-        false,
-        "com.example.qualified",
-    );
-    step.params.insert(
-        "expected_sha256".to_string(),
-        literal(json!(sha256(&fs::read(&apk).unwrap()))),
-    );
-
-    let (actual, runner) = run_value(&plan(vec![step]), DryRunExecutorAdapters::default());
-
-    assert_eq!(actual["success"], true);
-    assert_eq!(runner.adapters().device().commands().len(), 1);
-    assert_eq!(runner.adapters().device().commands()[0][0], "install_apk");
-}
-
-#[test]
-fn install_apk_validation_stays_at_compatibility_executor_layer_with_compatibility_messages() {
+fn install_apk_rejects_invalid_local_inputs_before_device_calls() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let non_apk = tmp.path().join("example.txt");
     fs::write(&non_apk, "not an apk").expect("non-apk fixture should be writable");
     let missing_apk = tmp.path().join("missing.apk");
+    let provenance = crate::planner::ExecutionArtifactAppProvenance {
+        app_id: "example-app".to_string(),
+        artifact_id: "apk".to_string(),
+        kind: "apk".to_string(),
+    };
 
     let (non_apk_result, non_apk_runner) = run_value(
-        &plan(vec![install_apk_step(
-            "example.recipe/non_apk",
-            &non_apk,
-            false,
-        )]),
-        DryRunExecutorAdapters::default(),
+        &local_input_app_install_plan(&non_apk, "com.example.app", Some(provenance.clone())),
+        sandbox_adapters(
+            &tmp.path().join("runtime-non-apk"),
+            &tmp.path().join("cache-non-apk"),
+            &tmp.path().join("device-non-apk"),
+            vec![tmp.path().to_path_buf()],
+        ),
     );
     assert_eq!(non_apk_result["success"], false);
-    assert_eq!(
-        non_apk_result["steps"][0]["message"],
-        format!(
-            "install_apk requires an .apk file, got: {}",
-            non_apk.display()
-        )
-    );
+    let non_apk_message = non_apk_result["steps"][1]["message"]
+        .as_str()
+        .expect("invalid APK extension should report a message");
+    assert!(non_apk_message.starts_with("install_apk requires an .apk file, got:"));
+    assert!(non_apk_message.ends_with(".txt"));
     assert!(non_apk_runner.adapters().device().commands().is_empty());
 
     let (missing_result, missing_runner) = run_value(
-        &plan(vec![install_apk_step(
-            "example.recipe/missing",
-            &missing_apk,
-            false,
-        )]),
-        DryRunExecutorAdapters::default(),
+        &local_input_app_install_plan(&missing_apk, "com.example.app", Some(provenance)),
+        sandbox_adapters(
+            &tmp.path().join("runtime-missing"),
+            &tmp.path().join("cache-missing"),
+            &tmp.path().join("device-missing"),
+            vec![tmp.path().to_path_buf()],
+        ),
     );
     assert_eq!(missing_result["success"], false);
+    let missing_message = missing_result["steps"][0]["message"]
+        .as_str()
+        .expect("missing APK should report a message");
     assert_eq!(
-        missing_result["steps"][0]["message"],
-        format!("APK file not found: {}", missing_apk.display())
+        missing_message,
+        "artifact_source_not_found: Local input admission failed."
     );
+    assert_eq!(missing_result["steps"][1]["status"], "blocked");
     assert!(missing_runner.adapters().device().commands().is_empty());
-
-    let mut params = OrderedMap::new();
-    params.insert(
-        "app".to_string(),
-        literal(runtime_value(
-            "directory_path",
-            json!("/sdcard/app.apk"),
-            Some("device"),
-        )),
-    );
-    let invalid_runtime_plan = plan(vec![ExecutionStep {
-        id: "example.recipe/invalid_runtime".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "install_apk".to_string(),
-        name: "Invalid Runtime".to_string(),
-        note: "Invalid Runtime".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }]);
-    let (invalid_runtime_result, invalid_runtime_runner) =
-        run_value(&invalid_runtime_plan, DryRunExecutorAdapters::default());
-    assert_eq!(invalid_runtime_result["success"], false);
-    assert_eq!(
-        invalid_runtime_result["steps"][0]["message"],
-        "install_apk requires a host-side file_path runtime value."
-    );
-    assert!(invalid_runtime_runner
-        .adapters()
-        .device()
-        .commands()
-        .is_empty());
-}
-
-#[test]
-fn install_apk_does_not_mutate_package_state_for_later_package_installed_checks() {
-    let tmp = tempfile::tempdir().expect("temp root should be created");
-    let apk = tmp.path().join("example.apk");
-    fs::write(&apk, "apk").expect("apk fixture should be writable");
-    let mut downstream = wait_step("example.recipe/downstream", "Downstream", 1);
-    downstream.dependencies = vec!["example.recipe/install".to_string()];
-    downstream.skip_if = vec![condition(
-        "package_installed",
-        json!({"package_name": "com.example.app"}),
-    )];
-    let execution_plan = plan(vec![
-        install_apk_step("example.recipe/install", &apk, false),
-        downstream,
-    ]);
-
-    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
-
-    assert_eq!(actual["success"], true);
-    assert_eq!(actual["steps"][0]["status"], "executed");
-    assert_eq!(actual["steps"][1]["status"], "executed");
-    assert_eq!(
-        runner.adapters().device().commands(),
-        &[
-            vec![
-                "install_apk".to_string(),
-                apk.to_string_lossy().to_string(),
-                "False".to_string(),
-            ],
-            vec![
-                "package_installed".to_string(),
-                "com.example.app".to_string(),
-            ],
-        ]
-    );
 }
 
 #[test]
 fn launch_and_force_stop_dry_run_match_compatibility_empty_outputs_and_internal_logs() {
-    let execution_plan = plan(vec![
-        launch_app_step(
-            "example.recipe/launch",
-            "com.example.missing",
-            Some(".MainActivity"),
-        ),
-        force_stop_app_step("example.recipe/force_stop", "com.example.missing"),
-    ]);
+    let mut launch = launch_app_step(
+        "example.recipe/launch",
+        "com.example.missing",
+        Some("com.example.missing.MainActivity"),
+    );
+    launch.app_id = Some("example-app".to_string());
+    let mut force_stop = force_stop_app_step("example.recipe/force_stop", "com.example.missing");
+    force_stop.app_id = Some("example-app".to_string());
+    let mut execution_plan = plan(vec![launch, force_stop]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.missing".to_string(),
+    });
 
     let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
 
@@ -3496,7 +3108,7 @@ fn launch_and_force_stop_dry_run_match_compatibility_empty_outputs_and_internal_
         actual,
         read_golden("phase6q_executor_launch_force_stop.json")
     );
-    assert_eq!(actual["success"], true);
+    assert_eq!(actual["success"], true, "{actual:#}");
     assert_eq!(
         actual["steps"]
             .as_array()
@@ -3512,7 +3124,7 @@ fn launch_and_force_stop_dry_run_match_compatibility_empty_outputs_and_internal_
             vec![
                 "launch_app".to_string(),
                 "com.example.missing".to_string(),
-                ".MainActivity".to_string(),
+                "com.example.missing.MainActivity".to_string(),
             ],
             vec![
                 "force_stop_app".to_string(),
@@ -3548,6 +3160,12 @@ fn app_aware_lifecycle_requires_the_reviewed_snapshot_and_concrete_target_before
     assert_eq!(runner.adapters().device().commands().len(), 2);
 
     let mut invalid_plans = Vec::new();
+    let mut app_less_launch = valid.clone();
+    app_less_launch.steps[0].app_id = None;
+    invalid_plans.push(app_less_launch);
+    let mut app_less_stop = valid.clone();
+    app_less_stop.steps[1].app_id = None;
+    invalid_plans.push(app_less_stop);
     let mut missing = valid.clone();
     missing.apps.clear();
     invalid_plans.push(missing);
@@ -3613,15 +3231,30 @@ fn app_aware_lifecycle_requires_the_reviewed_snapshot_and_concrete_target_before
 fn device_app_failures_block_dependents_but_unrelated_steps_continue() {
     let mut dependent = wait_step("example.recipe/dependent", "Dependent", 1);
     dependent.dependencies = vec!["example.recipe/launch".to_string()];
-    let execution_plan = plan(vec![
-        launch_app_step("example.recipe/launch", "com.example.fail", None),
+    let mut launch = launch_app_step(
+        "example.recipe/launch",
+        "com.example.fail",
+        Some("com.example.fail.MainActivity"),
+    );
+    launch.app_id = Some("example-app".to_string());
+    let mut execution_plan = plan(vec![
+        launch,
         dependent,
         wait_step("example.recipe/unrelated", "Unrelated", 1),
     ]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.fail".to_string(),
+    });
     let mut adapters = DryRunExecutorAdapters::default();
-    adapters
-        .device_mut()
-        .fail_launch_app("com.example.fail", None, "launch denied");
+    adapters.device_mut().fail_launch_app(
+        "com.example.fail",
+        Some("com.example.fail.MainActivity"),
+        "launch denied",
+    );
 
     let (actual, runner) = run_value(&execution_plan, adapters);
 
@@ -3639,7 +3272,7 @@ fn device_app_failures_block_dependents_but_unrelated_steps_continue() {
         &[vec![
             "launch_app".to_string(),
             "com.example.fail".to_string(),
-            "".to_string(),
+            "com.example.fail.MainActivity".to_string(),
         ]]
     );
 }
@@ -3655,167 +3288,100 @@ fn force_stop_rejects_blank_package_name_with_compatibility_executor_message() {
 
     assert_eq!(actual["success"], false);
     assert_eq!(actual["steps"][0]["status"], "failed");
-    assert_eq!(
-        actual["steps"][0]["message"],
-        "force_stop_app step requires a non-empty package_name."
-    );
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("App force-stop identity is invalid")));
     assert!(runner.adapters().device().commands().is_empty());
 }
 
 #[test]
-fn permission_required_failure_preserves_partial_permission_results_like_compatibility() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([
-            {
-                "package_name": "com.example.first",
-                "name": "android.permission.POST_NOTIFICATIONS",
-                "required": false
-            },
-            {
-                "package_name": "com.example.fail",
-                "name": "android.permission.CAMERA",
-                "required": true
-            },
-            {
-                "package_name": "com.example.after",
-                "name": "android.permission.RECORD_AUDIO",
-                "required": false
-            }
-        ])),
+fn permission_fail_policy_preserves_partial_app_permission_results() {
+    let permissions = [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+    ];
+    let execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Fail,
+        permissions
+            .iter()
+            .map(|permission| {
+                app_permission_action(permission, PermissionActionApplicability::Applicable)
+            })
+            .collect(),
     );
-    let execution_plan = plan(vec![ExecutionStep {
-        id: "example.recipe/grant_partial".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Grant Partial".to_string(),
-        note: "Grant Partial".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }]);
     let mut adapters = DryRunExecutorAdapters::default();
-    adapters.device_mut().fail_run_plan_command(
-        vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.fail".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ],
+    adapters.device_mut().fail_permission_operation(
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
         "permission denied",
     );
-
     let (actual, _) = run_value(&execution_plan, adapters);
-
-    assert_eq!(
-        actual,
-        read_golden("phase6q_executor_permission_partial_failure.json")
-    );
     assert_eq!(actual["success"], false);
     assert_eq!(actual["steps"][0]["status"], "failed");
     assert_eq!(actual["steps"][0]["message"], "permission denied");
     let actions = actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"]
         .as_array()
         .unwrap();
-    assert_eq!(actions.len(), 2);
+    assert_eq!(actions.len(), 3);
     assert_eq!(actions[0]["status"], "executed");
     assert_eq!(actions[1]["status"], "failed");
     assert_eq!(actions[1]["message"], "permission denied");
+    assert_eq!(actions[2]["status"], "executed");
 }
 
 #[test]
-fn permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([
-            {
-                "package_name": "com.example.optional",
-                "name": "android.permission.CAMERA",
-                "required": false
+fn permission_plan_matrix_covers_api_gating_and_failure_policy() {
+    let actions = vec![
+        app_permission_action(
+            "android.permission.CAMERA",
+            PermissionActionApplicability::Applicable,
+        ),
+        PermissionPlanAction::RuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: "android.permission.POST_NOTIFICATIONS".to_string(),
+            android_api_min: Some(34),
+            android_api_max: None,
+            applicability: PermissionActionApplicability::NotApplicable {
+                reason: crate::planner::PermissionNotApplicableReason::AndroidApiBelowMinimum {
+                    actual: 33,
+                    minimum: 34,
+                },
             },
-            {
-                "package_name": "com.example.api",
-                "name": "android.permission.POST_NOTIFICATIONS",
-                "required": false,
-                "when": {"android_api_min": 34}
-            }
-        ])),
+        },
+    ];
+    let mut execution_plan = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Warn,
+        actions,
     );
-    params.insert(
-        "appops".to_string(),
-        literal(json!([
-            {
-                "package_name": "com.example.app",
-                "op": "RUN_IN_BACKGROUND",
-                "mode": "ignore",
-                "required": false
-            },
-            {
-                "package_name": "com.example.root",
-                "op": "MANAGE_EXTERNAL_STORAGE",
-                "mode": "allow",
-                "required": false,
-                "when": {"rooted": false}
-            }
-        ])),
-    );
-    params.insert(
-        "policy".to_string(),
-        literal(json!({"on_failure": "warn", "require_all": false})),
-    );
-    let execution_plan = plan(vec![ExecutionStep {
-        id: "example.recipe/grant_matrix".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Grant Matrix".to_string(),
-        note: "Grant Matrix".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    }]);
+    execution_plan.device_context.android_api_level = Some(33);
     let mut adapters = DryRunExecutorAdapters::default();
-    adapters.device_mut().fail_run_plan_command(
-        vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.optional".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ],
+    adapters.device_mut().fail_permission_operation(
+        PermissionOperation::GrantRuntimePermission {
+            package_name: "com.example.permission".to_string(),
+            permission: "android.permission.CAMERA".to_string(),
+            permission_set: PermissionSetKind::Baseline,
+        },
         "permission denied",
     );
-
     let (actual, _) = run_value(&execution_plan, adapters);
-
     assert_eq!(actual["success"], true);
     let actions = actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"]
         .as_array()
         .unwrap();
-    assert_eq!(
-        actions
-            .iter()
-            .map(|action| action["status"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["failed", "not_applicable", "executed", "not_applicable"]
-    );
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0]["status"], "failed");
     assert_eq!(actions[0]["message"], "permission denied");
-    assert_eq!(actions[1]["reason_code"], "android_api_out_of_range");
-    assert_eq!(actions[2]["kind"], "appop");
-    assert_eq!(actions[2]["desired_mode"], "ignore");
-    assert_eq!(actions[3]["reason_code"], "requires_unrooted");
+    assert_eq!(actions[1]["status"], "not_applicable");
+    assert_eq!(
+        actions[1]["reason"],
+        "Android API level 33 is below the action minimum of 34."
+    );
 }
 
 #[test]
@@ -4120,73 +3686,6 @@ fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and
 }
 
 #[test]
-fn run_plan_command_serial_injection_matches_compatibility() {
-    let mut executor = FakeAdbCommandExecutor::default();
-    executor.push_completed(0, "", "");
-    executor.push_completed(0, "", "");
-    let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
-
-    device
-        .run_plan_command(vec![
-            "adb".to_string(),
-            "shell".to_string(),
-            "pm".to_string(),
-            "grant".to_string(),
-            "com.example.app".to_string(),
-            "android.permission.CAMERA".to_string(),
-        ])
-        .unwrap();
-    device
-        .run_plan_command(vec![
-            "adb".to_string(),
-            "-s".to_string(),
-            "already-selected".to_string(),
-            "shell".to_string(),
-            "appops".to_string(),
-            "set".to_string(),
-            "com.example.app".to_string(),
-            "RUN_IN_BACKGROUND".to_string(),
-            "ignore".to_string(),
-        ])
-        .unwrap();
-
-    assert_eq!(
-        device.command_executor().calls(),
-        &[
-            vec![
-                "adb".to_string(),
-                "-s".to_string(),
-                "emulator-5554".to_string(),
-                "shell".to_string(),
-                "pm".to_string(),
-                "grant".to_string(),
-                "com.example.app".to_string(),
-                "android.permission.CAMERA".to_string(),
-            ],
-            vec![
-                "adb".to_string(),
-                "-s".to_string(),
-                "already-selected".to_string(),
-                "shell".to_string(),
-                "appops".to_string(),
-                "set".to_string(),
-                "com.example.app".to_string(),
-                "RUN_IN_BACKGROUND".to_string(),
-                "ignore".to_string(),
-            ],
-        ]
-    );
-
-    let err = device
-        .run_plan_command(vec!["pm".to_string(), "path".to_string()])
-        .unwrap_err();
-    assert_eq!(err, "Plan command must start with 'adb': ['pm', 'path']");
-
-    let err = device.run_plan_command(Vec::new()).unwrap_err();
-    assert_eq!(err, "Plan command must not be empty.");
-}
-
-#[test]
 fn adb_result_mapping_uses_fake_executor_without_launching_processes() {
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(1, "", "Failure [INSTALL_FAILED_ALREADY_EXISTS]\n");
@@ -4361,52 +3860,78 @@ fn launch_app_command_shapes_match_compatibility_explicit_resolved_and_fallback_
 }
 
 #[test]
-fn executor_can_use_explicit_real_adb_device_for_selected_handlers() {
+fn install_apk_and_permission_plan_forward_exact_real_adb_commands() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
-    let apk = tmp.path().join("example app.apk");
-    fs::write(&apk, "apk").expect("apk fixture should be writable");
-
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        literal(json!([
-            {
-                "package_name": "com.example.app",
-                "name": "android.permission.POST_NOTIFICATIONS"
-            }
-        ])),
-    );
-    let grant_step = ExecutionStep {
-        id: "example.recipe/grant".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "grant_permissions".to_string(),
-        name: "Grant".to_string(),
-        note: "Grant".to_string(),
-        dependencies: Vec::new(),
-        constraints: constraints(),
-        permission_plan: None,
-        params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
+    let apk =
+        crate::apk_manifest::tests::write_valid_test_apk_with_package(&tmp, "com.example.app");
+    let provenance = crate::planner::ExecutionArtifactAppProvenance {
+        app_id: "example-app".to_string(),
+        artifact_id: "apk".to_string(),
+        kind: "apk".to_string(),
     };
-    let execution_plan = plan(vec![
-        install_apk_step("example.recipe/install", &apk, true),
-        grant_step,
-    ]);
+    let mut execution_plan =
+        local_input_app_install_plan(&apk, "com.example.app", Some(provenance));
+    execution_plan.steps[1].verify.clear();
+    execution_plan.steps[1]
+        .params
+        .insert("replace_existing".to_string(), literal(json!(true)));
+
+    let mut permission_execution = app_permission_plan(
+        PermissionSetKind::Baseline,
+        PermissionFailurePolicy::Fail,
+        vec![app_permission_action(
+            "android.permission.POST_NOTIFICATIONS",
+            PermissionActionApplicability::Applicable,
+        )],
+    );
+    let mut grant_step = permission_execution.steps.remove(0);
+    grant_step.app_id = Some("example-app".to_string());
+    grant_step.dependencies = vec!["example.recipe/install".to_string()];
+    let permission_plan = grant_step
+        .permission_plan
+        .as_mut()
+        .expect("grant step should carry a permission plan");
+    let Some(PermissionPlanAction::RuntimePermission { package_name, .. }) =
+        permission_plan.actions.first_mut()
+    else {
+        panic!("permission plan should include a runtime permission action");
+    };
+    *package_name = "com.example.app".to_string();
+    execution_plan.steps.push(grant_step);
 
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(0, "", "");
     executor.push_completed(0, "", "");
     let device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
 
-    let (actual, runner) = run_real_adb_value(&execution_plan, device);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        tmp.path().join("runtime"),
+        tmp.path().join("cache"),
+        tmp.path().join("device"),
+        vec![tmp.path().to_path_buf()],
+        false,
+    ));
+    let actual = serde_json::to_value(runner.run(&execution_plan))
+        .expect("execution result should serialize");
 
-    assert_eq!(actual["success"], true);
+    assert_eq!(actual["success"], true, "{actual:#}");
     assert_eq!(actual["steps"][0]["status"], "executed");
     assert_eq!(actual["steps"][1]["status"], "executed");
+    assert_eq!(actual["steps"][2]["status"], "executed");
+    let calls = runner.adapters().device().command_executor().calls();
+    let installed_path = calls[0]
+        .last()
+        .expect("APK install command should include its materialized path")
+        .clone();
     assert_eq!(
-        runner.adapters().device().command_executor().calls(),
+        Path::new(&installed_path)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("apk")
+    );
+    assert_eq!(
+        calls,
         &[
             vec![
                 "adb".to_string(),
@@ -4414,17 +3939,14 @@ fn executor_can_use_explicit_real_adb_device_for_selected_handlers() {
                 "emulator-5554".to_string(),
                 "install".to_string(),
                 "-r".to_string(),
-                apk.to_string_lossy().to_string(),
+                installed_path,
             ],
             vec![
                 "adb".to_string(),
                 "-s".to_string(),
                 "emulator-5554".to_string(),
                 "shell".to_string(),
-                "pm".to_string(),
-                "grant".to_string(),
-                "com.example.app".to_string(),
-                "android.permission.POST_NOTIFICATIONS".to_string(),
+                "pm grant com.example.app android.permission.POST_NOTIFICATIONS".to_string(),
             ],
         ]
     );
@@ -5827,38 +5349,18 @@ fn download_remote_file_filename_output_reaches_the_next_url_parser() {
 }
 
 #[test]
-fn downloaded_local_path_ref_installs_the_host_apk() {
+fn download_remote_file_materializes_a_generic_host_path() {
     let workspace = tempfile::tempdir().expect("executor temp root should be created");
-    let (base_url, requests, server) = spawn_executor_http_server(vec![b"fixture apk bytes"]);
+    let bytes = b"fixture apk bytes";
+    let (base_url, requests, server) = spawn_executor_http_server(vec![bytes]);
     let download = download_remote_file_step(
         "download",
         literal(json!(format!("{base_url}/app.apk"))),
         Vec::new(),
     );
-    let mut install_params = OrderedMap::new();
-    install_params.insert(
-        "app".to_string(),
-        ExecutionParamValue::Ref {
-            ref_value: "steps.download.outputs.local_path".to_string(),
-        },
-    );
-    let install = ExecutionStep {
-        id: "install".to_string(),
-        recipe_ref: "example.recipe".to_string(),
-        app_id: None,
-        type_name: "install_apk".to_string(),
-        name: "Install Downloaded APK".to_string(),
-        note: "Install Downloaded APK".to_string(),
-        dependencies: vec!["download".to_string()],
-        constraints: constraints(),
-        permission_plan: None,
-        params: install_params,
-        skip_if: Vec::new(),
-        verify: Vec::new(),
-    };
 
     let (actual, runner) = run_value(
-        &plan(vec![download, install]),
+        &plan(vec![download]),
         sandbox_adapters(
             &workspace.path().join("runtime"),
             &workspace.path().join("cache"),
@@ -5870,19 +5372,20 @@ fn downloaded_local_path_ref_installs_the_host_apk() {
 
     assert_eq!(requests.load(Ordering::Relaxed), 1);
     assert_eq!(actual["success"], true, "{actual:#}");
-    let install_command = runner
-        .adapters()
-        .device()
-        .commands()
-        .iter()
-        .find(|command| command.first().is_some_and(|value| value == "install_apk"))
-        .expect("install_apk should receive the downloaded host file");
-    let installed_path = PathBuf::from(&install_command[1]);
-    assert!(installed_path.is_file(), "{installed_path:?}");
+    let downloaded_path = actual["steps"][0]["outputs"]["local_path"]["value"]
+        .as_str()
+        .expect("generic download should report its local path");
+    let downloaded_path = PathBuf::from(downloaded_path);
+    assert!(downloaded_path.is_file(), "{downloaded_path:?}");
     assert_eq!(
-        installed_path.extension().and_then(|value| value.to_str()),
+        downloaded_path.extension().and_then(|value| value.to_str()),
         Some("apk")
     );
+    assert_eq!(
+        fs::read(&downloaded_path).expect("downloaded bytes should be readable"),
+        bytes
+    );
+    assert!(runner.adapters().device().commands().is_empty());
 }
 
 #[test]

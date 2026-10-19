@@ -946,7 +946,10 @@ fn normalize_remote_source(mode: &str, input: &str) -> Result<NormalizedRemoteSo
     let mut url = Url::parse(input.trim())
         .map_err(|_| remote_source_error("remote_url_invalid", "Enter a valid HTTPS address."))?;
     let durable_query = mode == "direct_apk";
-    if !safe_remote_url(&url) || url.fragment().is_some() || (!durable_query && url.query().is_some()) {
+    if !safe_remote_url(&url)
+        || url.fragment().is_some()
+        || (!durable_query && url.query().is_some())
+    {
         return Err(remote_source_error(
             "remote_url_invalid",
             if durable_query {
@@ -2476,11 +2479,12 @@ fn resolve_draft_inputs(
             Some(root) => Some((handle.to_string(), root.clone())),
             None => return Ok(Err(invalid_handle_error())),
         },
-        None => match session
-            .active_root
-            .as_deref()
-            .and_then(|handle| session.roots.get(handle).map(|root| (handle.to_string(), root.clone())))
-        {
+        None => match session.active_root.as_deref().and_then(|handle| {
+            session
+                .roots
+                .get(handle)
+                .map(|root| (handle.to_string(), root.clone()))
+        }) {
             Some(resolved) => Some(resolved),
             None if require_root => return Ok(Err(invalid_root_error())),
             None => None,
@@ -2508,15 +2512,12 @@ fn resolve_draft_inputs(
         return Ok(Err(inspection_required_error()));
     };
     let existing_app = match existing_app_handle {
-        Some(handle) => match trusted_existing_app(
-            session,
-            apk,
-            handle,
-            root.as_ref().map(|(_, root)| root),
-        ) {
-            Ok(bound) => Some(bound),
-            Err(error) => return Ok(Err(error)),
-        },
+        Some(handle) => {
+            match trusted_existing_app(session, apk, handle, root.as_ref().map(|(_, root)| root)) {
+                Ok(bound) => Some(bound),
+                Err(error) => return Ok(Err(error)),
+            }
+        }
         None => None,
     };
     if current_file_identity(&apk.path).as_ref() != Some(&apk.identity) {
@@ -2885,8 +2886,15 @@ enum SaveGate {
 /// Reviews are invalidated, never silently refreshed: a changed APK file, a
 /// replaced inspection, a re-analyzed remote source, a dropped root, or a
 /// replaced existing-App selection all mean the author must review again.
-fn review_dependencies_current(session: &GeneratorSession, record: &ReviewRecord) -> Result<(), ()> {
-    if !session.roots.values().any(|root| root.root == record.root_path) {
+fn review_dependencies_current(
+    session: &GeneratorSession,
+    record: &ReviewRecord,
+) -> Result<(), ()> {
+    if !session
+        .roots
+        .values()
+        .any(|root| root.root == record.root_path)
+    {
         return Err(());
     }
     let Some(apk) = session.apks.get(record.binding.apk_handle()) else {
@@ -3166,7 +3174,12 @@ fn publish_review_via_transport(
                 .and_then(Value::as_str)
                 .unwrap_or(UNCONFIRMED_PUBLICATION_MESSAGE);
             let payload = unknown_publication_value(&operation_id, message);
-            update_publication(state, &operation_id, PublicationState::Submitted, Some(payload.clone()))?;
+            update_publication(
+                state,
+                &operation_id,
+                PublicationState::Submitted,
+                Some(payload.clone()),
+            )?;
             Ok(success(payload))
         }
     }
@@ -3247,7 +3260,10 @@ fn publication_status_via_transport(
             json!({ "reason": "no_record" }),
         )));
     };
-    if matches!(record.state, PublicationState::Saved | PublicationState::Failed) {
+    if matches!(
+        record.state,
+        PublicationState::Saved | PublicationState::Failed
+    ) {
         return Ok(success(publication_status_value(
             operation_id,
             publication_state_name(record.state),
@@ -3317,8 +3333,15 @@ fn publication_status_via_transport(
 }
 
 /// Map one confirmed backend record onto the frozen status detail shape.
-fn confirmed_status_detail(operation_id: &str, record: &PublicationRecord, result: &Value) -> Value {
-    let outcome = result.get("outcome").and_then(Value::as_str).unwrap_or("unknown");
+fn confirmed_status_detail(
+    operation_id: &str,
+    record: &PublicationRecord,
+    result: &Value,
+) -> Value {
+    let outcome = result
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     if outcome == "failed" {
         // A status lookup nests the recorded save payload under `detail`, while a
         // direct save response carries the failure fields at its top level. Both
@@ -3694,9 +3717,7 @@ fn validate_authored_root(path: &Path) -> Result<TrustedRoot, Value> {
     {
         return Err(invalid_root_error());
     }
-    Ok(TrustedRoot {
-        root,
-    })
+    Ok(TrustedRoot { root })
 }
 
 fn current_file_identity(path: &Path) -> Option<FileIdentity> {
@@ -4353,7 +4374,11 @@ fn iso8601_from_epoch_seconds(seconds: u64) -> String {
 /// every timestamp a system clock can produce and needs no date library.
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let shifted = days_since_epoch + 719_468;
-    let era = if shifted >= 0 { shifted } else { shifted - 146_096 } / 146_097;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
     let day_of_era = (shifted - era * 146_097) as u64;
     let year_of_era =
         (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
@@ -4833,10 +4858,9 @@ mod tests {
     fn pinned_and_user_provided_payloads_do_not_require_release_analysis() {
         for strategy in ["pinned_remote_asset", "user_provided_apk"] {
             let (state, session, asset) = trusted_remote_test_state(None);
-            let trusted = remote_context_from_state(
-                &state, &session, &asset, strategy, None, false, None,
-            )
-            .unwrap();
+            let trusted =
+                remote_context_from_state(&state, &session, &asset, strategy, None, false, None)
+                    .unwrap();
             assert!(trusted.release_analysis.is_none());
             assert_eq!(trusted.source["strategy"], strategy);
         }
@@ -4845,14 +4869,10 @@ mod tests {
     #[test]
     fn permission_selection_is_canonicalized_from_stored_inspection_only() {
         let apk = permission_test_apk("permission-canonical");
-        let canonical = canonical_permission_automation(
-            &apk,
-            Some(permission_selection()),
-            true,
-            true,
-        )
-            .unwrap()
-            .unwrap();
+        let canonical =
+            canonical_permission_automation(&apk, Some(permission_selection()), true, true)
+                .unwrap()
+                .unwrap();
         assert_eq!(canonical["packageName"], "com.example.inspected");
         assert_eq!(
             canonical["runtimePermissions"],
@@ -4901,8 +4921,8 @@ mod tests {
                 "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
                 "appOps": []
             });
-            let error = canonical_permission_automation(&apk, Some(selection), true, true)
-                .unwrap_err();
+            let error =
+                canonical_permission_automation(&apk, Some(selection), true, true).unwrap_err();
             assert_eq!(error["error"]["details"]["reason"], "altered");
             fs::remove_file(apk.path).unwrap();
         }
@@ -4945,8 +4965,8 @@ mod tests {
             ),
         ];
         for (selection, reason) in cases {
-            let error = canonical_permission_automation(&apk, Some(selection), true, true)
-                .unwrap_err();
+            let error =
+                canonical_permission_automation(&apk, Some(selection), true, true).unwrap_err();
             assert_eq!(
                 api_error_code(&error),
                 Some("app_generator_permission_selection_invalid")
@@ -4990,8 +5010,8 @@ mod tests {
         let apk = permission_test_apk("permission-stale");
         let mut stale = permission_selection();
         stale["inspectionHandle"] = json!("apk-inspection-previous");
-        let stale_error = canonical_permission_automation(&apk, Some(stale), true, true)
-            .unwrap_err();
+        let stale_error =
+            canonical_permission_automation(&apk, Some(stale), true, true).unwrap_err();
         assert_eq!(
             api_error_code(&stale_error),
             Some("app_generator_permission_selection_invalid")
@@ -5669,8 +5689,9 @@ mod tests {
         let source = normalize_remote_source("direct_apk", "https://example.com/download").unwrap();
         assert_eq!(source.url.as_str(), "https://example.com/download");
         // A durable query string is part of the author's original address.
-        let query = normalize_remote_source("direct_apk", "https://example.com/download?variant=stable")
-            .unwrap();
+        let query =
+            normalize_remote_source("direct_apk", "https://example.com/download?variant=stable")
+                .unwrap();
         assert_eq!(
             query.url.as_str(),
             "https://example.com/download?variant=stable"
@@ -5737,7 +5758,10 @@ mod tests {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
             443,
         )]));
-        assert_eq!(resolve_public_host("localhost"), Err("remote_host_not_public"));
+        assert_eq!(
+            resolve_public_host("localhost"),
+            Err("remote_host_not_public")
+        );
         // Redirect hops keep the original address policy and the bounded budget.
         let public_hop = Url::parse("https://mirror.example.com/app.apk?signature=abc").unwrap();
         assert!(redirect_target_allowed(0, &public_hop));
@@ -5788,8 +5812,10 @@ mod tests {
     /// Every request is recorded verbatim so the tests can assert what the
     /// native boundary actually sent, while the handler decides the response or
     /// a transport failure per operation.
+    type ScriptedTransportHandler = dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync;
+
     struct ScriptedTransport {
-        handler: Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>,
+        handler: Box<ScriptedTransportHandler>,
         requests: Mutex<Vec<(String, Value)>>,
     }
 
@@ -5860,7 +5886,9 @@ mod tests {
             let mut registry = lock_registry(&state).unwrap();
             let session_handle = registry.begin();
             let session = registry.session_mut(&session_handle).unwrap();
-            session.roots.insert("root-handle".to_string(), root.clone());
+            session
+                .roots
+                .insert("root-handle".to_string(), root.clone());
             session.active_root = Some("root-handle".to_string());
             session.apks.insert("apk-handle".to_string(), apk.clone());
             session.reviews.insert(
@@ -5975,7 +6003,9 @@ mod tests {
         let fixture = ReviewFixture::create("publication-identity");
         let transport = ScriptedTransport::new(|operation, _| match operation {
             "saveAppGeneratorReview" => Ok(success(json!({ "outcome": "saved" }))),
-            "openRecipe" => Ok(success(json!({ "document": { "documentId": "document-1" } }))),
+            "openRecipe" => Ok(success(
+                json!({ "document": { "documentId": "document-1" } }),
+            )),
             other => panic!("unexpected operation {other}"),
         });
         let response = publish_review_via_transport(
@@ -6149,7 +6179,10 @@ mod tests {
         let result = success_result(&response).unwrap();
         assert_eq!(result["outcome"], "saved");
         assert_eq!(result["recipe"]["documentId"], Value::Null);
-        assert_eq!(result["recipe"]["openError"]["code"], "app_recipe_open_failed");
+        assert_eq!(
+            result["recipe"]["openError"]["code"],
+            "app_recipe_open_failed"
+        );
         assert_eq!(
             result["recipe"]["openError"]["details"]["reason"],
             "missing_catalog"
@@ -6801,7 +6834,10 @@ mod tests {
                 "appOps": [],
             }))
         );
-        assert!(matches!(baseline.binding, Some(ReviewBinding::Local { .. })));
+        assert!(matches!(
+            baseline.binding,
+            Some(ReviewBinding::Local { .. })
+        ));
 
         // Elevated selections keep the trusted root requirement and API bounds.
         let elevated = resolve_draft_inputs(
@@ -6996,8 +7032,7 @@ mod tests {
                 "{label} selection carries the permission-selection error code"
             );
             assert_eq!(
-                refused["error"]["details"]["reason"],
-                reason,
+                refused["error"]["details"]["reason"], reason,
                 "{label} selection reports its refusal reason"
             );
         }
@@ -7137,7 +7172,9 @@ mod tests {
         {
             let mut registry = lock_registry(&state).unwrap();
             let session = registry.session_mut(&session_handle).unwrap();
-            session.roots.insert("root-handle".to_string(), root.clone());
+            session
+                .roots
+                .insert("root-handle".to_string(), root.clone());
             session.existing_apps.insert(
                 "existing-app-handle".to_string(),
                 TrustedExistingApp {
@@ -7357,7 +7394,10 @@ mod tests {
         .unwrap();
         assert!(enabled.permission_automation_enabled);
         assert!(enabled.permission_automation.is_none());
-        assert!(matches!(enabled.binding, Some(ReviewBinding::Remote { .. })));
+        assert!(matches!(
+            enabled.binding,
+            Some(ReviewBinding::Remote { .. })
+        ));
         let _ = fs::remove_file(&apk.path);
         let _ = fs::remove_dir_all(&root_path);
     }
@@ -7414,10 +7454,7 @@ mod tests {
         )
         .unwrap()
         .unwrap_err();
-        assert_eq!(
-            api_error_code(&mismatch),
-            Some("existing_app_outside_root")
-        );
+        assert_eq!(api_error_code(&mismatch), Some("existing_app_outside_root"));
 
         // A package that differs from the inspected APK can never install.
         {
@@ -7810,7 +7847,10 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(matches!(accepted.binding, Some(ReviewBinding::Remote { .. })));
+        assert!(matches!(
+            accepted.binding,
+            Some(ReviewBinding::Remote { .. })
+        ));
 
         let _ = fs::remove_file(&apk.path);
         let _ = fs::remove_dir_all(&root_path);
@@ -7845,7 +7885,9 @@ mod tests {
         {
             let mut registry = lock_registry(&state).unwrap();
             let session = registry.session_mut(&session_handle).unwrap();
-            session.roots.insert("root-handle".to_string(), root.clone());
+            session
+                .roots
+                .insert("root-handle".to_string(), root.clone());
             session.existing_apps.insert(
                 "existing-app-handle".to_string(),
                 TrustedExistingApp {
@@ -7906,7 +7948,10 @@ mod tests {
                 .snapshot_id,
             "backend-snapshot-1"
         );
-        assert!(matches!(accepted.binding, Some(ReviewBinding::Remote { .. })));
+        assert!(matches!(
+            accepted.binding,
+            Some(ReviewBinding::Remote { .. })
+        ));
 
         let _ = fs::remove_file(&apk.path);
         let _ = fs::remove_dir_all(&root_path);
@@ -7987,7 +8032,9 @@ mod tests {
             payload["source"]["downloadUrl"],
             "https://github.com/example/project/releases/download/v2/app.apk"
         );
-        assert!(!payload.to_string().contains("objects.githubusercontent.com"));
+        assert!(!payload
+            .to_string()
+            .contains("objects.githubusercontent.com"));
         assert!(durable.contains("https://github.com/example/project/releases/download/v2/app.apk"));
         assert!(!durable.contains("objects.githubusercontent.com"));
         let _ = fs::remove_dir_all(&provider_root_path);

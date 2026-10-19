@@ -113,7 +113,7 @@ fn config_editor_validation_rejects_app_artifact_authority_overrides() {
 }
 
 #[test]
-fn config_editor_validation_keeps_legacy_form_recipes_valid() {
+fn config_editor_validation_accepts_canonical_app_artifact_recipes() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../authored/recipes/app.obtainium.install.yaml")
         .to_string_lossy()

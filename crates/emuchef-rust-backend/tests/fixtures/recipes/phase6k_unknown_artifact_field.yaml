@@ -8,13 +8,14 @@ provides:
 inputs: {}
 artifacts:
   app_apk:
-    type: remote_file
-    url: https://example.com/app.apk
-    cache: default
+    type: app_artifact
+    app_ref: test.app
+    artifact: apk
 artifact_groups: {}
 steps:
   - id: install
     type: install_apk
+    app_ref: test.app
     name: Install
     user_toggleable: false
     dependencies: []

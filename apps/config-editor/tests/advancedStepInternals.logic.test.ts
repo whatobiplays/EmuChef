@@ -272,10 +272,7 @@ test("classifyVerifyEntry renders only exact supported shapes with string known 
     fieldValue: "/sdcard/retroarch.cfg",
   });
   assert.deepEqual(classifyVerifyEntry({ type: "package_installed", params: { package_name: "org.retroarch" } }), {
-    kind: "structured",
-    type: "package_installed",
-    fieldName: "package_name",
-    fieldValue: "org.retroarch",
+    kind: "json",
   });
 
   assert.deepEqual(classifyVerifyEntry({ type: "path_exists", params: {} }), { kind: "json" });
@@ -368,10 +365,6 @@ test("verify add helper creates supported condition entries with the known field
     ok: true,
     value: [{ type: "file_exists", params: { path: "/sdcard/retroarch.cfg" } }],
   });
-  assert.deepEqual(buildAddVerifyEntry([], "package_installed", "org.retroarch"), {
-    ok: true,
-    value: [{ type: "package_installed", params: { package_name: "org.retroarch" } }],
-  });
   assert.deepEqual(buildAddVerifyEntry([], "path_exists", ""), {
     ok: false,
     error: "path is required.",
@@ -381,7 +374,7 @@ test("verify add helper creates supported condition entries with the known field
 test("verifyFieldForType exposes the structured parameter key for supported types only", () => {
   assert.equal(verifyFieldForType("path_exists"), "path");
   assert.equal(verifyFieldForType("file_exists"), "path");
-  assert.equal(verifyFieldForType("package_installed"), "package_name");
+  assert.equal(verifyFieldForType("package_installed"), null);
   assert.equal(verifyFieldForType("custom"), null);
 });
 

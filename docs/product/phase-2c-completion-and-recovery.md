@@ -66,10 +66,13 @@ high-friction confirmation again after the new plan is reviewed.
 
 Launch is available only for a retained terminal real execution whose status is
 `succeeded` or `succeeded_with_warnings` and whose reviewed plan plus report
-establish exactly one distinct successful `launch_app` candidate. Candidate
-package and optional activity values must be trusted literals. Simulation,
-failure, cancellation, unknown outcomes, zero candidates, dynamic candidates,
-and multiple distinct candidates are ineligible.
+establish exactly one distinct successful `launch_app` candidate under App
+Definition authority. The concrete package must match the App snapshot, and the
+activity must be the valid fully qualified launcher activity resolved from that
+definition. Post-execution action eligibility must use that same canonical
+package/activity target; optional or raw activity overrides are ineligible.
+Simulation, failure, cancellation, unknown outcomes, zero candidates, dynamic
+candidates, and multiple distinct candidates are ineligible.
 
 Tauri exclusively owns one-shot authority:
 
@@ -89,8 +92,9 @@ Tauri exclusively owns one-shot authority:
 
 The consumed opaque handle is never reusable, including after failure. If
 revalidation or launch fails while the execution remains retained and eligible,
-a later authoritative snapshot refresh may mint a new opaque action. A
-successful launch suppresses further actions for that execution. Restart,
+the current authoritative terminal report may immediately carry a fresh
+one-shot action for retry. A successful launch suppresses further actions for
+that execution. Restart,
 review invalidation, catalog/device/Platform-Tools change, mapping eviction, or
 execution-session loss makes existing actions unusable.
 

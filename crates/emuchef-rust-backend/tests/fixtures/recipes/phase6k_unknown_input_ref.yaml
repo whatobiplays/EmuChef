@@ -10,7 +10,7 @@ artifacts: {}
 artifact_groups: {}
 steps:
   - id: install
-    type: install_apk
+    type: copy_files
     name: Install
     user_toggleable: false
     dependencies: []
@@ -19,6 +19,7 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      app:
+      source:
         ref: inputs.missing_apk
+      dest: /sdcard/out
     verify: []

@@ -7,12 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{condition, executor_step, fixture_install_step, fixture_root, literal, runtime_value};
+use super::{
+    condition, executor_step, fixture_install_step, fixture_root, literal, phase6c_plan_step,
+    runtime_value,
+};
 use crate::executor::adb::{AdbCommandExecutor, RealAdbDevice};
 use crate::executor::{ExecutorAdapters, ExecutorRunner};
-use crate::planner::{
-    DeviceContext, ExecutionPlan, ExecutionPlanSource, ExecutionStep, RuntimeCapabilities,
-};
+use crate::planner::ExecutionStep;
 
 const FIXTURE_PACKAGE: &str = "com.emuchef.fixture";
 const DATA_DATA_PREFIX: &str = "/data/data/com.emuchef.fixture/emuchef-qualification-data/";
@@ -524,8 +525,7 @@ fn root_copy_group_plan(contract: &RootQualificationContract) -> RootCopyGroupPl
     let copied_directory = format!("{data_data_root}/copied-directory");
 
     let preflight = root_preflight_step();
-    let mut install = fixture_install_step();
-    install.dependencies = vec![preflight.id.clone()];
+    let (resolve, install) = root_install_steps(&preflight);
     let mut stage_file = root_host_copy_step(
         "fixture.root/copy-stage-file",
         "file_path",
@@ -568,6 +568,7 @@ fn root_copy_group_plan(contract: &RootQualificationContract) -> RootCopyGroupPl
     RootCopyGroupPlan {
         steps: vec![
             preflight,
+            resolve,
             install,
             stage_file,
             stage_directory,
@@ -578,48 +579,25 @@ fn root_copy_group_plan(contract: &RootQualificationContract) -> RootCopyGroupPl
     }
 }
 
+fn root_install_steps(preflight: &ExecutionStep) -> (ExecutionStep, ExecutionStep) {
+    let mut resolve = phase6c_plan_step("resolve_fixture_artifacts");
+    resolve.dependencies = vec![preflight.id.clone()];
+    let mut install = fixture_install_step();
+    install.dependencies = vec![preflight.id.clone(), resolve.id.clone()];
+    (resolve, install)
+}
+
 fn run_root_executor_plan<E: AdbCommandExecutor>(
     device: RealAdbDevice<E>,
     steps: Vec<ExecutionStep>,
 ) -> crate::executor::ExecutionRunResult {
     let sandbox = tempfile::tempdir().expect("root qualification sandbox should be created");
-    let plan = ExecutionPlan {
-        device_plan: None,
-        resolved_inputs: Vec::new(),
-        id: "plan.phase6c2.root.001".to_string(),
-        source: ExecutionPlanSource {
-            device_profile_ref: "fixture.root".to_string(),
-            device_plan_ref: "fixture.root".to_string(),
-            selected_recipe_refs: vec!["fixture.root".to_string()],
-            expanded_recipe_refs: vec!["fixture.root".to_string()],
-            catalog: None,
-        },
-        recipes: Vec::new(),
-        apps: Vec::new(),
-        target_device: None,
-        device_context: DeviceContext {
-            manufacturer: "Qualification fixture".to_string(),
-            model: "Rooted Android device".to_string(),
-            android_version: 11,
-            android_api_level: Some(30),
-            device_tags: Vec::new(),
-        },
-        runtime_capabilities: RuntimeCapabilities {
-            adb_available: true,
-            apk_install: true,
-            shared_storage_write: true,
-            app_launch: true,
-            shell_command: true,
-            package_remove_for_user: false,
-            root_shell: true,
-            app_data_write: true,
-        },
-        inputs: Vec::new(),
-        artifacts: Vec::new(),
-        steps,
-        schema_version: 1,
-        kind: "execution_plan",
-    };
+    let mut plan = super::phase6c_qualification_plan();
+    plan.id = "plan.phase6c2.root.001".to_string();
+    plan.device_context.model = "Rooted Android device".to_string();
+    plan.runtime_capabilities.root_shell = true;
+    plan.runtime_capabilities.app_data_write = true;
+    plan.steps = steps;
     let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
         device,
         sandbox.path().join("runtime"),
@@ -685,9 +663,8 @@ fn manual_real_adb_root_filesystem_group() {
     let owned_paths = vec![data_data_root.clone(), data_user_root.clone()];
     qualification.validate_paths(&owned_paths);
 
-    let mut install = fixture_install_step();
     let preflight = root_preflight_step();
-    install.dependencies = vec![preflight.id.clone()];
+    let (resolve, install) = root_install_steps(&preflight);
     let mut copy = root_host_copy_step(
         "fixture.root/filesystem-copy",
         "file_path",
@@ -696,8 +673,10 @@ fn manual_real_adb_root_filesystem_group() {
     );
     copy.dependencies = vec![install.id.clone()];
     copy.verify = vec![condition("path_exists", json!({ "path": copied_file }))];
-    let plan_result =
-        run_root_executor_plan(qualification.device(), vec![preflight, install, copy]);
+    let plan_result = run_root_executor_plan(
+        qualification.device(),
+        vec![preflight, resolve, install, copy],
+    );
 
     if let Some(report) = preflight_failure_report(&plan_result) {
         emit_report(&report);
@@ -774,8 +753,7 @@ fn manual_real_adb_root_combined_group() {
     qualification.validate_paths(&owned_paths);
 
     let preflight = root_preflight_step();
-    let mut install = fixture_install_step();
-    install.dependencies = vec![preflight.id.clone()];
+    let (resolve, install) = root_install_steps(&preflight);
     let mut stage_file = root_host_copy_step(
         "fixture.root/combined-stage-file",
         "file_path",
@@ -813,6 +791,7 @@ fn manual_real_adb_root_combined_group() {
         qualification.device(),
         vec![
             preflight,
+            resolve,
             install,
             stage_file,
             stage_directory,
@@ -852,9 +831,9 @@ fn manual_real_adb_root_cleanup_failure_group() {
         .expect("generated cleanup-failure path should be bounded");
     qualification.validate_paths(std::slice::from_ref(&residual));
     let preflight = root_preflight_step();
-    let mut install = fixture_install_step();
-    install.dependencies = vec![preflight.id.clone()];
-    let preparation = run_root_executor_plan(qualification.device(), vec![preflight, install]);
+    let (resolve, install) = root_install_steps(&preflight);
+    let preparation =
+        run_root_executor_plan(qualification.device(), vec![preflight, resolve, install]);
     if let Some(report) = preflight_failure_report(&preparation) {
         emit_report(&report);
         panic!("root cleanup-failure qualification preflight failed");
@@ -1102,7 +1081,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "fixture.root/preflight",
-                "fixture/install",
+                "phase6c.qualification.non_root/resolve_fixture_artifacts",
+                "phase6c.qualification.non_root/install_fixture",
                 "fixture.root/copy-stage-file",
                 "fixture.root/copy-stage-directory",
                 "fixture.root/copy-device-file",
@@ -1110,20 +1090,30 @@ mod tests {
             ]
         );
         assert_eq!(steps[1]["dependencies"], json!(["fixture.root/preflight"]));
-        assert_eq!(steps[2]["dependencies"], json!(["fixture/install"]));
+        assert_eq!(
+            steps[2]["dependencies"],
+            json!([
+                "fixture.root/preflight",
+                "phase6c.qualification.non_root/resolve_fixture_artifacts"
+            ])
+        );
         assert_eq!(
             steps[3]["dependencies"],
-            json!(["fixture.root/copy-stage-file"])
+            json!(["phase6c.qualification.non_root/install_fixture"])
         );
         assert_eq!(
             steps[4]["dependencies"],
-            json!(["fixture.root/copy-stage-directory"])
+            json!(["fixture.root/copy-stage-file"])
         );
         assert_eq!(
             steps[5]["dependencies"],
+            json!(["fixture.root/copy-stage-directory"])
+        );
+        assert_eq!(
+            steps[6]["dependencies"],
             json!(["fixture.root/copy-device-file"])
         );
-        for step in &steps[2..=5] {
+        for step in &steps[3..=6] {
             assert_eq!(step["type"], "copy_files");
             assert_eq!(step["recipe_ref"], "fixture.root");
         }
@@ -1132,54 +1122,54 @@ mod tests {
         let source_directory = format!("{DATA_USER_PREFIX}copy/source-directory");
         let copied_file = format!("{DATA_USER_PREFIX}copy/copied-file.txt");
         let copied_directory = format!("{DATA_DATA_PREFIX}copy/copied-directory");
-        assert_eq!(steps[2]["params"]["source"]["value"]["location"], "host");
-        assert_eq!(steps[2]["params"]["source"]["value"]["type"], "file_path");
-        assert_eq!(
-            steps[2]["params"]["source"]["value"]["value"],
-            json!(fixture_root().join("corpus/source/single-file.txt"))
-        );
-        assert_eq!(steps[2]["params"]["dest"]["value"], source_file);
         assert_eq!(steps[3]["params"]["source"]["value"]["location"], "host");
-        assert_eq!(
-            steps[3]["params"]["source"]["value"]["type"],
-            "directory_path"
-        );
+        assert_eq!(steps[3]["params"]["source"]["value"]["type"], "file_path");
         assert_eq!(
             steps[3]["params"]["source"]["value"]["value"],
-            json!(fixture_root().join("corpus/source/nested"))
+            json!(fixture_root().join("corpus/source/single-file.txt"))
         );
-        assert_eq!(steps[3]["params"]["dest"]["value"], source_directory);
-        assert_eq!(steps[4]["params"]["source"]["value"]["location"], "device");
-        assert_eq!(steps[4]["params"]["source"]["value"]["type"], "file_path");
-        assert_eq!(steps[4]["params"]["source"]["value"]["value"], source_file);
-        assert_eq!(steps[4]["params"]["dest"]["value"], copied_file);
-        assert_eq!(steps[5]["params"]["source"]["value"]["location"], "device");
+        assert_eq!(steps[3]["params"]["dest"]["value"], source_file);
+        assert_eq!(steps[4]["params"]["source"]["value"]["location"], "host");
         assert_eq!(
-            steps[5]["params"]["source"]["value"]["type"],
+            steps[4]["params"]["source"]["value"]["type"],
             "directory_path"
         );
         assert_eq!(
-            steps[5]["params"]["source"]["value"]["value"],
+            steps[4]["params"]["source"]["value"]["value"],
+            json!(fixture_root().join("corpus/source/nested"))
+        );
+        assert_eq!(steps[4]["params"]["dest"]["value"], source_directory);
+        assert_eq!(steps[5]["params"]["source"]["value"]["location"], "device");
+        assert_eq!(steps[5]["params"]["source"]["value"]["type"], "file_path");
+        assert_eq!(steps[5]["params"]["source"]["value"]["value"], source_file);
+        assert_eq!(steps[5]["params"]["dest"]["value"], copied_file);
+        assert_eq!(steps[6]["params"]["source"]["value"]["location"], "device");
+        assert_eq!(
+            steps[6]["params"]["source"]["value"]["type"],
+            "directory_path"
+        );
+        assert_eq!(
+            steps[6]["params"]["source"]["value"]["value"],
             source_directory
         );
-        assert_eq!(steps[5]["params"]["dest"]["value"], copied_directory);
+        assert_eq!(steps[6]["params"]["dest"]["value"], copied_directory);
         assert_ne!(source_file, copied_file);
         assert_ne!(source_directory, copied_directory);
 
         assert_eq!(
-            steps[2]["verify"][0]["params"]["path"],
+            steps[3]["verify"][0]["params"]["path"],
             format!("{DATA_DATA_PREFIX}copy/source-file.txt")
         );
         assert_eq!(
-            steps[3]["verify"][0]["params"]["path"],
+            steps[4]["verify"][0]["params"]["path"],
             format!("{DATA_USER_PREFIX}copy/source-directory/alpha/beta/two.txt")
         );
         assert_eq!(
-            steps[4]["verify"][0]["params"]["path"],
+            steps[5]["verify"][0]["params"]["path"],
             format!("{DATA_USER_PREFIX}copy/copied-file.txt")
         );
         assert_eq!(
-            steps[5]["verify"][0]["params"]["path"],
+            steps[6]["verify"][0]["params"]["path"],
             format!("{DATA_DATA_PREFIX}copy/copied-directory/alpha/one.txt")
         );
 

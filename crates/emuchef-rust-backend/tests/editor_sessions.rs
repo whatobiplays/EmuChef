@@ -170,12 +170,10 @@ fn save_recipe_as_writes_target_updates_path_and_preserves_history() {
     );
     assert_eq!(
         saved_as["authoredRoot"],
-        Path::new(&fixture_root())
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
+        Value::Null,
+        "a standalone Save As destination must not retain the source catalog"
     );
+    assert_eq!(saved_as["appCatalog"]["status"], "unbound");
     assert_eq!(saved_as["dirty"], false);
     assert_eq!(saved_as["canUndo"], true);
     assert_eq!(saved_as["canRedo"], false);

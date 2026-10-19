@@ -364,7 +364,7 @@ pub(crate) fn check_device_root_observation(
         ));
     }
     let key = RootQualificationKey::from_context(context);
-    let adb_path = current_adb_path(&state)?;
+    let adb_path = current_adb_path(state)?;
     let previous = state
         .root_qualification
         .lock()
@@ -403,7 +403,7 @@ pub(crate) fn check_device_root_observation(
         },
     };
     let changed = previous.as_ref() != Some(&qualification);
-    let transition = crate::commands::qualification_transition_lock(&state);
+    let transition = crate::commands::qualification_transition_lock(state);
     {
         let handles = state.handles.lock().map_err(|_| {
             safe_error("session_state_unavailable", "Session state is unavailable.")

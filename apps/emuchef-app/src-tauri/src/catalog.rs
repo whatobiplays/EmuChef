@@ -537,6 +537,7 @@ mod tests {
         assert_eq!(
             types,
             [
+                "resolve_artifacts",
                 "install_apk",
                 "copy_files",
                 "copy_files",

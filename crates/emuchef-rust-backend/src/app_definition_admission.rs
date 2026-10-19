@@ -179,10 +179,7 @@ fn admit_app_definition_save_inner(
         .collect::<Vec<_>>();
 
     let mut snapshot =
-        match prepare_save_snapshot(value, context, &mut diagnostics, expect_new_destination) {
-            Some(snapshot) => Some(snapshot),
-            None => None,
-        };
+        prepare_save_snapshot(value, context, &mut diagnostics, expect_new_destination);
 
     if let Some(current) = snapshot.as_ref() {
         if let Err(error) = verify_admission_snapshot(current) {
@@ -912,7 +909,7 @@ fn validate_recipe_inventory(
         let affected = match recipe_references_app(&recipe, &app.id, &file.path) {
             Ok(affected) => affected,
             Err(diagnostic) => {
-                diagnostics.push(diagnostic);
+                diagnostics.push(*diagnostic);
                 complete = false;
                 continue;
             }
@@ -971,7 +968,7 @@ fn recipe_references_app(
     recipe: &Recipe,
     app_id: &str,
     path: &Path,
-) -> Result<bool, AppDefinitionSaveDiagnostic> {
+) -> Result<bool, Box<AppDefinitionSaveDiagnostic>> {
     let mut affected = recipe.artifacts.values().any(|artifact| match artifact {
         RecipeArtifact::AppArtifact(reference) => reference.app_ref == app_id,
         RecipeArtifact::RemoteFile(_) => false,
@@ -993,27 +990,27 @@ fn recipe_references_app(
             .any(contains_app_target_key);
 
         if has_app_target && step.app_ref.is_none() {
-            return Err(diagnostic(
+            return Err(Box::new(diagnostic(
                 "app_dependency_classification_incomplete",
                 "This Recipe contains an App Target reference without an App Definition context, so its owner cannot be identified safely.",
                 Some(path),
                 Some("step"),
                 Some(&step.id),
                 Some("app_ref"),
-            ));
+            )));
         }
         if step.type_name == "grant_permissions"
             && step.params.contains_key("permission_set")
             && step.app_ref.is_none()
         {
-            return Err(diagnostic(
+            return Err(Box::new(diagnostic(
                 "app_dependency_classification_incomplete",
                 "This Recipe selects an App Definition permission set without naming its app_ref, so its owner cannot be identified safely.",
                 Some(path),
                 Some("step"),
                 Some(&step.id),
                 Some("app_ref"),
-            ));
+            )));
         }
 
         if step.app_ref.as_deref() == Some(app_id) {
@@ -1023,7 +1020,8 @@ fn recipe_references_app(
     Ok(affected)
 }
 
-fn contains_app_target_key(value: &Value) -> bool {
+/// Return whether a JSON value contains an App Target key at any depth.
+pub(crate) fn contains_app_target_key(value: &Value) -> bool {
     match value {
         Value::Object(object) => {
             object.contains_key("app_target") || object.values().any(contains_app_target_key)
@@ -1413,7 +1411,7 @@ pub(crate) fn verify_admission_snapshot(
     for directory in &snapshot.directories {
         let current = capture_catalog_directory(
             &directory.path,
-            &directory.path.parent().unwrap_or(&directory.path),
+            directory.path.parent().unwrap_or(&directory.path),
         )?;
         if current.path != directory.path
             || current.identity != directory.identity

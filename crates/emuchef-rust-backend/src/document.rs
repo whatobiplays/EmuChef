@@ -139,6 +139,35 @@ fn published_snapshot(
     Ok(snapshot)
 }
 
+/// Validate a Recipe before publication and return its diagnostics.
+///
+/// App-bearing Recipes cannot be published without a destination catalog because
+/// their App Definitions provide required context.
+fn recipe_publication_diagnostics(
+    recipe: &crate::model::Recipe,
+    destination: &Path,
+    authored_root: Option<&Path>,
+) -> Result<Vec<Value>, String> {
+    if authored_root.is_none() && catalog::recipe_references_any_app(recipe) {
+        return Err(
+            "Recipe publication is blocked; an App-aware Recipe requires a destination catalog with App Definitions."
+                .to_string(),
+        );
+    }
+    let validation_path = PathBuf::from(yaml::resolved_path_string(destination));
+    let diagnostics = validation_diagnostics_for_recipe(recipe, &validation_path, authored_root);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic["severity"] == "error")
+    {
+        return Err(
+            "Recipe publication is blocked; review the Recipe and destination catalog diagnostics."
+                .to_string(),
+        );
+    }
+    Ok(diagnostics)
+}
+
 impl RecipeDocument {
     /// Open the exact Recipe file revision that the document will later protect
     /// from overwriting if another process changes it first.
@@ -212,8 +241,7 @@ impl RecipeDocument {
                     template_path,
                     destination_path,
                     recipe_id,
-                    authored_root,
-                    &coordinator,
+                    coordinator,
                     guard,
                 )
                 .map_err(CatalogChangeError::InvalidOperation)
@@ -226,13 +254,18 @@ impl RecipeDocument {
         template_path: &Path,
         destination_path: &Path,
         recipe_id: &str,
-        authored_root: Option<&str>,
         coordinator: &CatalogChangeCoordinator,
         guard: &PublicationGuard,
     ) -> Result<Self, String> {
         let mut recipe =
             yaml::load_recipe_from_path(template_path).map_err(|error| error.to_string())?;
         recipe.id = recipe_id.to_string();
+        let destination_authored_root = coordinator.authored_catalog_root().map(Path::to_path_buf);
+        let diagnostics = recipe_publication_diagnostics(
+            &recipe,
+            destination_path,
+            destination_authored_root.as_deref(),
+        )?;
         let current_yaml = yaml::emit_recipe_yaml(&recipe).map_err(|error| error.to_string())?;
         Self::publish_recipe_bytes(
             coordinator,
@@ -246,14 +279,11 @@ impl RecipeDocument {
             published_snapshot(coordinator, destination_path, current_yaml.as_bytes())
                 .map_err(|error| error.to_string())?;
         let path = PathBuf::from(yaml::resolved_path_string(destination_path));
-        let authored_root = catalog::normalize_authored_root(authored_root, &path);
-        let diagnostics =
-            validation_diagnostics_for_recipe(&recipe, &path, authored_root.as_deref());
-        let app_catalog = catalog::project_app_catalog(authored_root.as_deref());
+        let app_catalog = catalog::project_app_catalog(destination_authored_root.as_deref());
 
         Ok(Self {
             path,
-            authored_root,
+            authored_root: destination_authored_root,
             persisted_snapshot,
             recipe,
             saved_yaml: current_yaml.clone(),
@@ -306,6 +336,11 @@ impl RecipeDocument {
         coordinator: &CatalogChangeCoordinator,
         guard: &PublicationGuard,
     ) -> Result<(), String> {
+        recipe_publication_diagnostics(
+            &self.recipe,
+            &self.path,
+            coordinator.authored_catalog_root(),
+        )?;
         let current_yaml =
             yaml::emit_recipe_yaml(&self.recipe).map_err(|error| error.to_string())?;
         Self::publish_recipe_bytes(
@@ -374,13 +409,16 @@ impl RecipeDocument {
         guard: &PublicationGuard,
         path: &Path,
     ) -> Result<(), String> {
+        recipe_publication_diagnostics(&self.recipe, path, coordinator.authored_catalog_root())?;
+        let destination_authored_root = coordinator.authored_catalog_root().map(Path::to_path_buf);
         let current_yaml =
             yaml::emit_recipe_yaml(&self.recipe).map_err(|error| error.to_string())?;
         Self::publish_recipe_bytes(coordinator, guard, path, current_yaml.as_bytes(), None)
             .map_err(|error| error.to_string())?;
         let persisted_snapshot = published_snapshot(coordinator, path, current_yaml.as_bytes())
             .map_err(|error| error.to_string())?;
-        self.path = PathBuf::from(yaml::resolved_path_string(path.as_ref()));
+        self.path = PathBuf::from(yaml::resolved_path_string(path));
+        self.authored_root = destination_authored_root;
         self.persisted_snapshot = persisted_snapshot;
         self.current_yaml = current_yaml;
         self.saved_yaml = self.current_yaml.clone();
@@ -1894,14 +1932,53 @@ mod catalog_coordination_tests {
     use tempfile::TempDir;
 
     #[test]
-    fn save_as_can_publish_to_another_catalog() {
-        let source = authored_root();
-        let other = authored_root();
-        let destination = other.path().join("escaped.yaml");
-        let mut document =
-            RecipeDocument::open(source.path().join("recipe.yaml"), source.path().to_str())
-                .unwrap();
+    fn save_as_rebinds_a_destination_catalog_and_uses_it_for_later_saves() {
+        let source_app = include_str!(
+            "../tests/fixtures/authored_root/editor_app_catalog/authored/apps/demo_app.yaml"
+        );
+        let source = app_aware_catalog_root(source_app, false);
+        let source_path = source.path().join("recipes/source.yaml");
+        let source_yaml = include_str!("../../../templates/authored/recipe.blank.template.yaml");
+        fs::write(&source_path, source_yaml).expect("write source Recipe");
+        let destination_app = source_app
+            .replace("demo_app", "second_app")
+            .replace("Demo App", "Second App")
+            .replace("com.example.demo", "com.example.second");
+        let destination_root = app_aware_catalog_root(&destination_app, false);
+        let destination = destination_root.path().join("recipes/destination.yaml");
+        let mut document = RecipeDocument::open(&source_path, source.path().to_str())
+            .expect("open catalog-backed Recipe");
+
         document.save_as(&destination).unwrap();
+
+        let expected_root = fs::canonicalize(destination_root.path()).unwrap();
+        assert_eq!(document.authored_root(), Some(expected_root.as_path()));
+        assert_eq!(
+            fs::canonicalize(document.path()).unwrap(),
+            fs::canonicalize(&destination).unwrap()
+        );
+        let app_catalog = document.app_catalog().to_dto();
+        assert_eq!(app_catalog["status"], "ready", "{app_catalog:#}");
+        assert_eq!(
+            app_catalog["apps"]
+                .as_array()
+                .expect("app projection")
+                .iter()
+                .map(|app| app["id"].as_str().expect("App id"))
+                .collect::<Vec<_>>(),
+            vec!["second_app"]
+        );
+        assert_eq!(
+            fs::read_to_string(&source_path).expect("source Recipe bytes"),
+            source_yaml
+        );
+
+        document.recipe.name = "Destination save".to_string();
+        document
+            .save()
+            .expect("a later ordinary Save uses the destination catalog");
+        let saved = yaml::load_recipe_from_path(&destination).expect("load destination Recipe");
+        assert_eq!(saved.name, "Destination save");
         assert!(destination.is_file());
     }
 
@@ -1933,6 +2010,32 @@ mod catalog_coordination_tests {
         assert!(!target.exists());
     }
 
+    fn app_aware_catalog_root(app_definition: &str, include_recipe: bool) -> TempDir {
+        let temp = TempDir::new().expect("app-aware catalog root");
+        let apps = temp.path().join("apps");
+        let recipes = temp.path().join("recipes");
+        fs::create_dir_all(&apps).expect("create App Definition directory");
+        fs::create_dir_all(&recipes).expect("create Recipe directory");
+        fs::write(apps.join("retroarch.yaml"), app_definition)
+            .expect("write App Definition fixture");
+        if include_recipe {
+            fs::write(
+                recipes.join("app.retroarch.provision.yaml"),
+                include_str!("../../../authored/recipes/app.retroarch.provision.yaml"),
+            )
+            .expect("write App-aware Recipe fixture");
+        }
+        temp
+    }
+
+    fn catalog_root_without_app_definitions() -> TempDir {
+        let temp = TempDir::new().expect("catalog root without App Definitions");
+        fs::create_dir_all(temp.path().join("apps"))
+            .expect("create empty App Definition directory");
+        fs::create_dir_all(temp.path().join("recipes")).expect("create Recipe directory");
+        temp
+    }
+
     fn authored_root() -> TempDir {
         let temp = TempDir::new().expect("authored root");
         fs::write(
@@ -1941,6 +2044,20 @@ mod catalog_coordination_tests {
         )
         .expect("write recipe fixture");
         temp
+    }
+
+    fn condition_only_app_target_recipe_yaml() -> String {
+        include_str!("../tests/fixtures/recipes/phase6k_nested_ref_literal.yaml")
+            .replace("ref: inputs.missing", "app_target: system")
+    }
+
+    fn literal_condition_recipe_yaml() -> String {
+        include_str!("../tests/fixtures/recipes/phase6k_nested_ref_literal.yaml")
+            .replace(
+                "          path:\n            ref: inputs.missing",
+                "          path: /sdcard/EmuChef/condition",
+            )
+            .replacen("- type: path_exists", "- type: file_exists", 1)
     }
 
     fn leave_unresolved(root: &Path) -> CatalogChangeCoordinator {
@@ -2097,5 +2214,479 @@ mod catalog_coordination_tests {
         assert!(error.to_lowercase().contains("recovery"), "{error}");
         assert!(!destination.exists());
         clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn template_creation_rejects_an_invalid_but_parseable_recipe() {
+        let destination_root =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), false);
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("invalid.yaml");
+        let source = include_str!("../../../authored/recipes/app.retroarch.provision.yaml");
+        let invalid = source.replacen(
+            "  dependencies: []",
+            "  dependencies:\n    - missing-step",
+            1,
+        );
+        assert_ne!(
+            source, invalid,
+            "template fixture must exercise a dependency"
+        );
+        fs::write(&template, invalid).expect("write invalid template");
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+
+        let error =
+            RecipeDocument::create_from_template(&template, &destination, "new.invalid", None)
+                .expect_err("semantic template errors must block publication");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_a_missing_destination_app_definition() {
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("template.yaml");
+        fs::write(
+            &template,
+            include_str!("../../../authored/recipes/app.retroarch.provision.yaml"),
+        )
+        .expect("write App-aware template");
+        let destination_root = catalog_root_without_app_definitions();
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+
+        let error =
+            RecipeDocument::create_from_template(&template, &destination, "new.missing_app", None)
+                .expect_err("a missing destination App Definition must block publication");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_an_app_aware_template_without_destination_apps() {
+        let source =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), true);
+        let destination_root = TempDir::new().expect("destination catalog without apps");
+        fs::create_dir(destination_root.path().join("recipes"))
+            .expect("create destination Recipe directory");
+        let template = source.path().join("recipes/app.retroarch.provision.yaml");
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+        let recipe = yaml::load_recipe_from_path(&template).expect("load template Recipe");
+        let diagnostics =
+            validation_diagnostics_for_recipe(&recipe, &destination, Some(destination_root.path()));
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic["severity"] == "error" && diagnostic["code"] == "app_definition_unknown"
+            }),
+            "a catalog without an apps directory must have no App Definitions: {diagnostics:#?}"
+        );
+
+        let error =
+            RecipeDocument::create_from_template(&template, &destination, "new.missing_apps", None)
+                .expect_err("an app-aware template must not bypass destination catalog validation");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_creation_rejects_a_dangling_destination_apps_directory() {
+        let source =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), true);
+        let destination_root = TempDir::new().expect("destination catalog with dangling apps");
+        fs::create_dir(destination_root.path().join("recipes"))
+            .expect("create destination Recipe directory");
+        std::os::unix::fs::symlink("missing-apps", destination_root.path().join("apps"))
+            .expect("create dangling App Definition directory");
+        let template = source.path().join("recipes/app.retroarch.provision.yaml");
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+        let recipe = yaml::load_recipe_from_path(&template).expect("load template Recipe");
+        let diagnostics =
+            validation_diagnostics_for_recipe(&recipe, &destination, Some(destination_root.path()));
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic["severity"] == "error"
+                    && diagnostic["code"] == "app_definition_catalog_unreadable"
+            }),
+            "a dangling apps directory must fail closed: {diagnostics:#?}"
+        );
+
+        let error = RecipeDocument::create_from_template(
+            &template,
+            &destination,
+            "new.dangling_apps",
+            None,
+        )
+        .expect_err("a dangling destination apps directory must block publication");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_a_standalone_app_aware_recipe() {
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("app-aware.yaml");
+        fs::write(
+            &template,
+            include_str!("../../../authored/recipes/app.retroarch.provision.yaml"),
+        )
+        .expect("write App-aware template");
+        let destination_root = TempDir::new().expect("standalone destination directory");
+        let destination = destination_root.path().join("standalone.yaml");
+
+        let error =
+            RecipeDocument::create_from_template(&template, &destination, "standalone.app", None)
+                .expect_err("an App-aware Recipe requires destination App Definitions");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_a_standalone_condition_only_app_target() {
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("condition-only.yaml");
+        fs::write(&template, condition_only_app_target_recipe_yaml())
+            .expect("write condition-only template");
+        let destination_root = TempDir::new().expect("standalone destination directory");
+        let destination = destination_root.path().join("condition-only.yaml");
+
+        let error = RecipeDocument::create_from_template(
+            &template,
+            &destination,
+            "standalone.condition_only",
+            None,
+        )
+        .expect_err("a condition-only App Target requires destination App Definitions");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn standalone_save_rejects_a_condition_only_app_target_without_modifying_the_file() {
+        let root = TempDir::new().expect("standalone Recipe directory");
+        let path = root.path().join("recipe.yaml");
+        fs::write(&path, condition_only_app_target_recipe_yaml())
+            .expect("write condition-only Recipe");
+        let before = fs::read(&path).expect("read original Recipe");
+        let mut document =
+            RecipeDocument::open(&path, None).expect("open standalone condition-only Recipe");
+        document.recipe.name = "changed without publication".to_string();
+
+        let error = document
+            .save()
+            .expect_err("standalone Save must reject a condition-only App Target");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert_eq!(
+            fs::read(&path).expect("unchanged Recipe bytes"),
+            before,
+            "a rejected Save must not modify the existing Recipe"
+        );
+    }
+
+    #[test]
+    fn standalone_save_as_rejects_a_condition_only_app_target_without_publishing() {
+        let source = TempDir::new().expect("source directory");
+        let source_path = source.path().join("recipe.yaml");
+        fs::write(&source_path, condition_only_app_target_recipe_yaml())
+            .expect("write source condition-only Recipe");
+        let before = fs::read(&source_path).expect("read source Recipe");
+        let destination_root = TempDir::new().expect("destination directory");
+        let destination = destination_root.path().join("saved.yaml");
+        let mut document = RecipeDocument::open(&source_path, None)
+            .expect("open standalone condition-only Recipe");
+
+        let error = document
+            .save_as(&destination)
+            .expect_err("standalone Save As must reject a condition-only App Target");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read(&source_path).expect("unchanged source bytes"),
+            before,
+            "a rejected Save As must not modify the source Recipe"
+        );
+    }
+
+    #[test]
+    fn template_creation_allows_standalone_literal_condition_paths() {
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("literal-conditions.yaml");
+        fs::write(&template, literal_condition_recipe_yaml())
+            .expect("write literal-condition template");
+        let destination_root = TempDir::new().expect("standalone destination directory");
+        let destination = destination_root.path().join("literal-conditions.yaml");
+
+        let document = RecipeDocument::create_from_template(
+            &template,
+            &destination,
+            "standalone.literal_conditions",
+            None,
+        )
+        .expect("literal device paths do not require App Definitions");
+
+        assert!(destination.is_file());
+        assert_eq!(document.authored_root(), None);
+        assert_eq!(document.recipe.steps[0].skip_if[0].type_name, "file_exists");
+        assert_eq!(
+            document.recipe.steps[0].skip_if[0].params["path"],
+            "/sdcard/EmuChef/condition"
+        );
+        assert_eq!(document.recipe.steps[0].verify[0].type_name, "path_exists");
+        assert_eq!(
+            document.recipe.steps[0].verify[0].params["path"],
+            "/sdcard/EmuChef/condition"
+        );
+    }
+
+    #[test]
+    fn template_creation_keeps_a_sibling_of_recipes_standalone() {
+        let root = TempDir::new().expect("project root");
+        fs::create_dir(root.path().join("recipes")).expect("create sibling Recipe directory");
+        let standalone = root.path().join("standalone");
+        fs::create_dir(&standalone).expect("create standalone directory");
+        let template = root.path().join("generic.yaml");
+        fs::write(
+            &template,
+            include_str!("../../../templates/authored/recipe.blank.template.yaml"),
+        )
+        .expect("write generic template");
+        let destination = standalone.join("generic.yaml");
+
+        let document = RecipeDocument::create_from_template(
+            &template,
+            &destination,
+            "standalone.generic",
+            None,
+        )
+        .expect("a sibling of recipes is a standalone destination");
+
+        assert!(destination.is_file());
+        assert_eq!(document.authored_root(), None);
+        assert_eq!(
+            fs::canonicalize(document.path()).unwrap(),
+            fs::canonicalize(&destination).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_creation_rejects_a_symlinked_destination_recipes_directory() {
+        let catalog = TempDir::new().expect("catalog root");
+        let outside = TempDir::new().expect("outside root");
+        let real_recipes = outside.path().join("real");
+        fs::create_dir_all(real_recipes.join("sub")).expect("create outside Recipe directory");
+        std::os::unix::fs::symlink(&real_recipes, catalog.path().join("recipes"))
+            .expect("create symlinked Recipe directory");
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("generic.yaml");
+        fs::write(
+            &template,
+            include_str!("../../../templates/authored/recipe.blank.template.yaml"),
+        )
+        .expect("write generic template");
+        let destination = catalog.path().join("recipes/sub/generic.yaml");
+        let published_outside = real_recipes.join("sub/generic.yaml");
+
+        let error =
+            RecipeDocument::create_from_template(&template, &destination, "symlink.recipe", None)
+                .expect_err("a symlinked recipes directory must fail closed");
+
+        assert!(error.to_lowercase().contains("symlink"), "{error}");
+        assert!(!destination.exists());
+        assert!(!published_outside.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_an_invalid_destination_app_definition() {
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("template.yaml");
+        fs::write(
+            &template,
+            include_str!("../../../authored/recipes/app.retroarch.provision.yaml"),
+        )
+        .expect("write App-aware template");
+        let invalid_app = include_str!("../../../authored/apps/retroarch.yaml").replacen(
+            "package_id: com.retroarch.aarch64",
+            "package_id: invalid package",
+            1,
+        );
+        let destination_root = app_aware_catalog_root(&invalid_app, false);
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+
+        let error =
+            RecipeDocument::create_from_template(&template, &destination, "new.invalid_app", None)
+                .expect_err("an invalid destination App Definition must block publication");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_a_missing_destination_app_artifact() {
+        let source =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), true);
+        let incompatible_app = include_str!("../../../authored/apps/retroarch.yaml").replacen(
+            "  apk:\n",
+            "  unavailable_apk:\n",
+            1,
+        );
+        assert!(incompatible_app.contains("  unavailable_apk:\n"));
+        let destination_root = app_aware_catalog_root(&incompatible_app, false);
+        let template = source.path().join("recipes/app.retroarch.provision.yaml");
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+        let recipe = yaml::load_recipe_from_path(&template).expect("load template Recipe");
+        let diagnostics =
+            validation_diagnostics_for_recipe(&recipe, &destination, Some(destination_root.path()));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "app_artifact_unknown"),
+            "the destination must reject the missing App Artifact: {diagnostics:#?}"
+        );
+
+        let error = RecipeDocument::create_from_template(
+            &template,
+            &destination,
+            "new.missing_artifact",
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect_err("a missing destination App Artifact must block publication");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_rejects_cross_app_artifact_provenance() {
+        let source =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), true);
+        let destination_root =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), false);
+        let other_app = include_str!("../../../authored/apps/retroarch.yaml")
+            .replacen("id: retroarch\n", "id: other_app\n", 1)
+            .replacen(
+                "package_id: com.retroarch.aarch64",
+                "package_id: com.example.other",
+                1,
+            );
+        fs::write(
+            destination_root.path().join("apps/other_app.yaml"),
+            other_app,
+        )
+        .expect("write second destination App Definition");
+        let template_root = TempDir::new().expect("template directory");
+        let template = template_root.path().join("cross-app.yaml");
+        let source_recipe = include_str!("../../../authored/recipes/app.retroarch.provision.yaml");
+        let recipe = source_recipe.replacen(
+            "  type: install_apk\n  app_ref: retroarch",
+            "  type: install_apk\n  app_ref: other_app",
+            1,
+        );
+        assert_ne!(source_recipe, recipe);
+        fs::write(&template, recipe).expect("write cross-App template");
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+
+        let error = RecipeDocument::create_from_template(
+            &template,
+            &destination,
+            "new.cross_app",
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect_err("cross-App artifact provenance must block publication");
+
+        assert!(error.contains("blocked"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn template_creation_into_another_catalog_is_blocked_by_destination_recovery() {
+        let source =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), true);
+        let destination_root =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), false);
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+        let recovery = leave_unresolved(destination_root.path());
+
+        let error = RecipeDocument::create_from_template(
+            source.path().join("recipes/app.retroarch.provision.yaml"),
+            &destination,
+            "new.retroarch",
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect_err("destination recovery must block template publication");
+
+        assert!(error.to_lowercase().contains("recovery"), "{error}");
+        assert!(!destination.exists());
+        clear_test_recovery(&recovery);
+    }
+
+    #[test]
+    fn template_creation_binds_the_destination_catalog_and_publishes_canonical_yaml() {
+        let source =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), true);
+        let destination_root =
+            app_aware_catalog_root(include_str!("../../../authored/apps/retroarch.yaml"), false);
+        let destination = destination_root.path().join("recipes/from-template.yaml");
+
+        let document = RecipeDocument::create_from_template(
+            source.path().join("recipes/app.retroarch.provision.yaml"),
+            &destination,
+            "new.retroarch",
+            Some(source.path().to_str().expect("utf8 source root")),
+        )
+        .expect("a valid canonical template should publish");
+
+        let expected_root = fs::canonicalize(destination_root.path()).unwrap();
+        assert!(destination.is_file());
+        assert_eq!(document.recipe.id, "new.retroarch");
+        assert_eq!(document.authored_root(), Some(expected_root.as_path()));
+        assert_eq!(
+            fs::canonicalize(document.path()).unwrap(),
+            fs::canonicalize(&destination).unwrap()
+        );
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic["severity"] != "error"),
+            "published document must remain valid: {:#?}",
+            document.diagnostics
+        );
+        let published = yaml::load_recipe_from_path(&destination).expect("published Recipe");
+        assert_eq!(published.id, "new.retroarch");
+        assert_eq!(published.steps.len(), document.recipe.steps.len());
+        assert!(
+            document.recipe.steps.iter().any(|step| {
+                step.app_ref.is_some()
+                    && step.verify.iter().any(|condition| {
+                        condition
+                            .params
+                            .values()
+                            .any(crate::app_definition_admission::contains_app_target_key)
+                    })
+            }),
+            "the canonical fixture must exercise an app_ref with an App Target condition"
+        );
+        assert_eq!(
+            published
+                .steps
+                .iter()
+                .map(|step| (&step.skip_if, &step.verify))
+                .collect::<Vec<_>>(),
+            document
+                .recipe
+                .steps
+                .iter()
+                .map(|step| (&step.skip_if, &step.verify))
+                .collect::<Vec<_>>(),
+            "canonical App Target conditions must keep their shape after publication"
+        );
     }
 }

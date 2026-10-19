@@ -379,16 +379,16 @@ pub(crate) fn generate_remote_app_recipe_draft(
         verified_selection,
         permission_automation_enabled,
     ) {
-            Ok(metadata) => Some(metadata),
-            Err(issues) => {
-                diagnostics.extend(
-                    issues
-                        .into_iter()
-                        .map(|issue| error(issue.code, issue.message, &issue.field)),
-                );
-                None
-            }
-        };
+        Ok(metadata) => Some(metadata),
+        Err(issues) => {
+            diagnostics.extend(
+                issues
+                    .into_iter()
+                    .map(|issue| error(issue.code, issue.message, &issue.field)),
+            );
+            None
+        }
+    };
 
     if let Some(selection) = verified_selection {
         if existing_mode {
@@ -1226,7 +1226,12 @@ fn build_recipe(
     }
 
     if permission_automation_enabled {
-        append_permission_steps(&mut steps, app, &ids.permission_step_id, &ids.install_step_id);
+        append_permission_steps(
+            &mut steps,
+            app,
+            &ids.permission_step_id,
+            &ids.install_step_id,
+        );
     }
 
     Recipe {
@@ -1397,8 +1402,8 @@ fn present(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::authored_models::{
-    AppOpMode, AppPermissionSet, AppPermissionSets, AppRuntimePermissionAction, AppTargetKind,
-    AppTargetLocation, AppTargetV1,
+        AppOpMode, AppPermissionSet, AppPermissionSets, AppRuntimePermissionAction, AppTargetKind,
+        AppTargetLocation, AppTargetV1,
     };
     use crate::generation::app_recipe::{AppOpPermissionSelection, RuntimePermissionSelection};
 
@@ -1571,10 +1576,22 @@ mod tests {
         println!("{}", permission_document_block(&generated));
         println!("=== END CASE remote:new-app ===");
         let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(&generated);
-        assert_eq!(permission_sha256_hex(app_yaml.as_bytes()), "24ac7346098eb4edae5b86d99604ecd7f923c3714379737d6f75bd4d0defd632");
-        assert_eq!(permission_sha256_hex(recipe_yaml.as_bytes()), "963ce5ca92bf07b0574fab036b0a3549fd5068ea50e0c96101df66c14b573fd0");
-        assert_eq!(permission_sha256_hex(diagnostics.as_bytes()), "7cb7f244325c8fd86175ba28c9a645b3b47ac8f689a1a1039c7e4c77f0ef7d04");
-        assert_eq!(permission_sha256_hex(steps.as_bytes()), "3e25ea4bd4531cc5cf0b25f05374ab474e99242da53a24fdb6601a52b693de40");
+        assert_eq!(
+            permission_sha256_hex(app_yaml.as_bytes()),
+            "24ac7346098eb4edae5b86d99604ecd7f923c3714379737d6f75bd4d0defd632"
+        );
+        assert_eq!(
+            permission_sha256_hex(recipe_yaml.as_bytes()),
+            "963ce5ca92bf07b0574fab036b0a3549fd5068ea50e0c96101df66c14b573fd0"
+        );
+        assert_eq!(
+            permission_sha256_hex(diagnostics.as_bytes()),
+            "7cb7f244325c8fd86175ba28c9a645b3b47ac8f689a1a1039c7e4c77f0ef7d04"
+        );
+        assert_eq!(
+            permission_sha256_hex(steps.as_bytes()),
+            "3e25ea4bd4531cc5cf0b25f05374ab474e99242da53a24fdb6601a52b693de40"
+        );
         println!(
             "HASH remote:new-app app={} recipe={} diagnostics={} steps={}",
             permission_sha256_hex(app_yaml.as_bytes()),
@@ -1611,10 +1628,22 @@ mod tests {
         println!("{}", permission_document_block(&merged));
         println!("=== END CASE remote:existing-app-merge ===");
         let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(&merged);
-        assert_eq!(permission_sha256_hex(app_yaml.as_bytes()), "a9f14ed9fedeca7e675456eda91bf4e57995acc258d284789e0a19074d5a0f16");
-        assert_eq!(permission_sha256_hex(recipe_yaml.as_bytes()), "6e9c960fd025b2e5b1cbceebc7e7b31d041c4c352987f3b56b07f14ad43abca7");
-        assert_eq!(permission_sha256_hex(diagnostics.as_bytes()), "ea0089e46b7e4d0449e5dbb0abd86c8554961caf4a93b7ac1948fdce2ab4021c");
-        assert_eq!(permission_sha256_hex(steps.as_bytes()), "b08bc926edfaded77e36818f85d727cb5fee39695dc1381b1f36d77520a87bc9");
+        assert_eq!(
+            permission_sha256_hex(app_yaml.as_bytes()),
+            "a9f14ed9fedeca7e675456eda91bf4e57995acc258d284789e0a19074d5a0f16"
+        );
+        assert_eq!(
+            permission_sha256_hex(recipe_yaml.as_bytes()),
+            "6e9c960fd025b2e5b1cbceebc7e7b31d041c4c352987f3b56b07f14ad43abca7"
+        );
+        assert_eq!(
+            permission_sha256_hex(diagnostics.as_bytes()),
+            "ea0089e46b7e4d0449e5dbb0abd86c8554961caf4a93b7ac1948fdce2ab4021c"
+        );
+        assert_eq!(
+            permission_sha256_hex(steps.as_bytes()),
+            "b08bc926edfaded77e36818f85d727cb5fee39695dc1381b1f36d77520a87bc9"
+        );
         println!(
             "HASH remote:existing-app-merge app={} recipe={} diagnostics={} steps={}",
             permission_sha256_hex(app_yaml.as_bytes()),
@@ -1791,8 +1820,10 @@ mod tests {
         let recipe =
             crate::yaml::parse_recipe_mapping(&mapping, std::path::Path::new("recipe.yaml"))
                 .expect("generated recipe parses");
-        let messages =
-            crate::planner::validate_recipe_app_authority(&recipe, std::slice::from_ref(&draft.app));
+        let messages = crate::planner::validate_recipe_app_authority(
+            &recipe,
+            std::slice::from_ref(&draft.app),
+        );
         assert!(
             messages.is_empty(),
             "app authority diagnostics: {messages:?}"
@@ -1830,7 +1861,8 @@ mod tests {
         assert_eq!(draft.recipe["artifacts"]["apk"]["artifact"], "apk");
         let app_yaml = draft.app_canonical_yaml.as_deref().unwrap();
         assert!(app_yaml.contains("strategy: direct_url"));
-        assert!(app_yaml.contains("url: https://github.com/example/project/releases/download/v1/app.apk"));
+        assert!(app_yaml
+            .contains("url: https://github.com/example/project/releases/download/v1/app.apk"));
         let recipe_yaml = draft.recipe_canonical_yaml.as_deref().unwrap();
         assert!(!recipe_yaml.contains("remote_file"));
         assert!(!recipe_yaml.contains("github.com"));
@@ -1894,10 +1926,7 @@ mod tests {
         assert_eq!(added.app.launcher_activity, original.launcher_activity);
         assert_eq!(added.app.permission_sets, original.permission_sets);
         assert_eq!(added.recipe["id"], "app.remote_example.direct_apk.install");
-        assert_eq!(
-            step_types(&added),
-            vec!["resolve_artifacts", "install_apk"]
-        );
+        assert_eq!(step_types(&added), vec!["resolve_artifacts", "install_apk"]);
         assert_eq!(
             added.recipe["steps"][0]["id"],
             "resolve_remote_example_direct_apk"
@@ -1915,8 +1944,9 @@ mod tests {
     #[test]
     fn selected_release_asset_checksum_is_recorded_in_the_direct_url_artifact() {
         let mut selection = source();
-        selection.trusted_sha256 =
-            Some(" \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n".to_string());
+        selection.trusted_sha256 = Some(
+            " \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n".to_string(),
+        );
 
         let draft = generate_remote_app_recipe_draft(request(selection));
 
@@ -1984,12 +2014,18 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(request(user_provided_source()));
 
         assert!(!draft.blocking, "{:#?}", draft.diagnostics);
-        assert_eq!(draft.app.artifacts["apk"].source, AppArtifactSource::UserProvided);
+        assert_eq!(
+            draft.app.artifacts["apk"].source,
+            AppArtifactSource::UserProvided
+        );
         let input = &draft.recipe["inputs"]["remote_example_apk"];
         assert_eq!(input["type"], "file");
         assert_eq!(input["role"], "apk");
         assert_eq!(input["validation"]["mustExist"], true);
-        assert_eq!(input["validation"]["allowedExtensions"], serde_json::json!(["apk"]));
+        assert_eq!(
+            input["validation"]["allowedExtensions"],
+            serde_json::json!(["apk"])
+        );
         let recipe_yaml = draft.recipe_canonical_yaml.as_deref().unwrap();
         assert!(recipe_yaml.contains("ref: inputs.remote_example_apk"));
         assert!(recipe_yaml.contains("cache: none"));
@@ -2027,7 +2063,10 @@ mod tests {
         assert!(!draft.blocking, "{:#?}", draft.diagnostics);
         assert!(draft.app.artifacts.contains_key("release_apk"));
         assert_eq!(draft.recipe["id"], "remote_example.install.release");
-        assert_eq!(draft.recipe["artifacts"]["release_apk"]["artifact"], "release_apk");
+        assert_eq!(
+            draft.recipe["artifacts"]["release_apk"]["artifact"],
+            "release_apk"
+        );
         assert_eq!(
             draft.recipe_destination.relative_path.as_deref(),
             Some("recipes/remote_example.install.release.yaml")
@@ -2110,11 +2149,11 @@ mod tests {
         assert_eq!(added.kind, AppArtifactKind::Apk);
         assert_eq!(added.name.as_deref(), Some("Remote Example APK"));
         assert!(matches!(added.source, AppArtifactSource::DirectUrl { .. }));
-        assert_eq!(draft.recipe["artifacts"]["added_apk"]["artifact"], "added_apk");
         assert_eq!(
-            step_types(&draft),
-            vec!["resolve_artifacts", "install_apk"]
+            draft.recipe["artifacts"]["added_apk"]["artifact"],
+            "added_apk"
         );
+        assert_eq!(step_types(&draft), vec!["resolve_artifacts", "install_apk"]);
         assert!(!draft
             .recipe_canonical_yaml
             .as_deref()
@@ -2158,7 +2197,10 @@ mod tests {
             AppArtifactSource::DirectUrl { url, .. }
                 if url == "https://github.com/example/project/releases/download/v0/author.apk"
         ));
-        assert_eq!(draft.app.artifacts["added_apk"].name.as_deref(), Some("Author APK"));
+        assert_eq!(
+            draft.app.artifacts["added_apk"].name.as_deref(),
+            Some("Author APK")
+        );
     }
 
     #[test]
@@ -2225,10 +2267,7 @@ mod tests {
             draft.recipe["artifacts"]["release_apk"]["artifact"],
             "release_apk"
         );
-        assert_eq!(
-            step_types(&draft),
-            vec!["resolve_artifacts", "install_apk"]
-        );
+        assert_eq!(step_types(&draft), vec!["resolve_artifacts", "install_apk"]);
         assert_eq!(
             draft.recipe["steps"][0]["id"],
             "resolve_remote_example_release_apk"
@@ -2287,10 +2326,7 @@ mod tests {
             draft.recipe["inputs"]["remote_example_user_apk_apk"]["role"],
             "apk"
         );
-        assert_eq!(
-            step_types(&draft),
-            vec!["resolve_artifacts", "install_apk"]
-        );
+        assert_eq!(step_types(&draft), vec!["resolve_artifacts", "install_apk"]);
         assert_eq!(
             draft.recipe["steps"][0]["id"],
             "resolve_remote_example_user_apk"
@@ -2355,7 +2391,10 @@ mod tests {
         let explicit = generate_remote_app_recipe_draft(explicit_request);
         assert!(!explicit.blocking, "{:#?}", explicit.diagnostics);
         assert!(explicit.app.artifacts.contains_key("renamed_apk"));
-        assert_eq!(explicit.recipe["artifacts"]["renamed_apk"]["artifact"], "renamed_apk");
+        assert_eq!(
+            explicit.recipe["artifacts"]["renamed_apk"]["artifact"],
+            "renamed_apk"
+        );
         assert_eq!(
             explicit.recipe["id"],
             "app.remote_example.renamed_apk.install"
@@ -2392,7 +2431,10 @@ mod tests {
     #[test]
     fn ambiguous_reviewed_artifact_selection_blocks_generation() {
         let mut app = proposed_draft_app(&source());
-        let renamed = app.artifacts.shift_remove("apk").expect("proposed artifact");
+        let renamed = app
+            .artifacts
+            .shift_remove("apk")
+            .expect("proposed artifact");
         app.artifacts.insert("renamed_apk".to_string(), renamed);
         app.artifacts.insert(
             "extra_apk".to_string(),
@@ -2455,7 +2497,10 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(draft_request);
 
         assert!(!draft.blocking, "{:#?}", draft.diagnostics);
-        assert_eq!(draft.app.artifacts["apk"].name.as_deref(), Some("Mapped APK"));
+        assert_eq!(
+            draft.app.artifacts["apk"].name.as_deref(),
+            Some("Mapped APK")
+        );
         assert!(draft.app.targets.is_empty());
         assert_eq!(draft.app.metadata["author"], serde_json::json!("EmuChef"));
         assert_eq!(draft.recipe["artifacts"]["apk"]["type"], "app_artifact");
@@ -2548,7 +2593,10 @@ mod tests {
             baseline_step["dependencies"],
             serde_json::json!(["install_remote_example"])
         );
-        assert_eq!(baseline_step["constraints"]["capabilities"], serde_json::json!([]));
+        assert_eq!(
+            baseline_step["constraints"]["capabilities"],
+            serde_json::json!([])
+        );
         let elevated_step = &draft.recipe["steps"][3];
         assert_eq!(
             elevated_step["id"],
@@ -2708,14 +2756,16 @@ mod tests {
     fn permission_automation_without_selected_actions_produces_no_sets_or_steps() {
         let mut enabled_request = request(source());
         enabled_request.permission_automation_enabled = true;
-        enabled_request.permission_automation =
-            Some(permission_automation(Vec::new(), Vec::new()));
+        enabled_request.permission_automation = Some(permission_automation(Vec::new(), Vec::new()));
 
         let enabled = generate_remote_app_recipe_draft(enabled_request);
 
         assert!(!enabled.blocking, "{:#?}", enabled.diagnostics);
         assert!(enabled.app.permission_sets.is_none());
-        assert_eq!(step_types(&enabled), vec!["resolve_artifacts", "install_apk"]);
+        assert_eq!(
+            step_types(&enabled),
+            vec!["resolve_artifacts", "install_apk"]
+        );
         assert!(!enabled
             .app_canonical_yaml
             .as_deref()
@@ -2731,7 +2781,10 @@ mod tests {
 
         assert!(!absent.blocking, "{:#?}", absent.diagnostics);
         assert!(absent.app.permission_sets.is_none());
-        assert_eq!(step_types(&absent), vec!["resolve_artifacts", "install_apk"]);
+        assert_eq!(
+            step_types(&absent),
+            vec!["resolve_artifacts", "install_apk"]
+        );
     }
 
     /// A wire request that omits `permissionAutomationEnabled` parses with the
@@ -2885,11 +2938,7 @@ mod tests {
         assert_eq!(draft.app.permission_sets, original.permission_sets);
         assert_eq!(
             step_types(&draft),
-            vec![
-                "resolve_artifacts",
-                "install_apk",
-                "grant_permissions"
-            ]
+            vec!["resolve_artifacts", "install_apk", "grant_permissions"]
         );
         let grant = &draft.recipe["steps"][2];
         assert_eq!(grant["id"], "grant_permissions_remote_example_added_apk");
@@ -2937,8 +2986,9 @@ mod tests {
         let mismatched = generate_remote_app_recipe_draft(mismatched_request);
 
         assert!(mismatched.blocking);
-        assert!(diagnostic_codes(&mismatched)
-            .contains(&"apk_permission_automation_package_mismatch"));
+        assert!(
+            diagnostic_codes(&mismatched).contains(&"apk_permission_automation_package_mismatch")
+        );
         assert!(mismatched.app.permission_sets.is_none());
         assert!(mismatched.recipe_canonical_yaml.is_none());
     }
@@ -2976,7 +3026,9 @@ mod tests {
             launch["constraints"]["capabilities"],
             serde_json::json!(["app_launch"])
         );
-        assert!(!launch["dependencies"].to_string().contains("grant_permissions"));
+        assert!(!launch["dependencies"]
+            .to_string()
+            .contains("grant_permissions"));
         assert_eq!(
             draft.app.launcher_activity.as_deref(),
             Some("com.example.remote.MainActivity")
@@ -3397,8 +3449,11 @@ mod tests {
         }
         let mut excluded_request = request(latest_source());
         excluded_request.app = Some(no_remaining_asset_app);
-        excluded_request.release_analysis =
-            Some(release_analysis(vec![trusted_release("v1", false, &["app-v1-arm64.apk"])]));
+        excluded_request.release_analysis = Some(release_analysis(vec![trusted_release(
+            "v1",
+            false,
+            &["app-v1-arm64.apk"],
+        )]));
         let excluded = generate_remote_app_recipe_draft(excluded_request);
         assert!(excluded.blocking);
         assert!(diagnostic_codes(&excluded).contains(&"latest_release_current_no_match"));
@@ -3497,7 +3552,9 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(request(forgejo));
         assert!(!draft.blocking, "{:#?}", draft.diagnostics);
         match &draft.app.artifacts["apk"].source {
-            AppArtifactSource::LatestRelease { provider, base_url, .. } => {
+            AppArtifactSource::LatestRelease {
+                provider, base_url, ..
+            } => {
                 assert_eq!(*provider, ReleaseProvider::Forgejo);
                 assert_eq!(base_url, "https://codeberg.org");
             }
@@ -3603,8 +3660,8 @@ mod tests {
             };
             selected.trusted_sha256 = Some("A".repeat(64));
             let mut draft_request = request(selected);
-            draft_request.release_analysis = (strategy == "latest_compatible_release")
-                .then(unique_release_analysis);
+            draft_request.release_analysis =
+                (strategy == "latest_compatible_release").then(unique_release_analysis);
             let draft = generate_remote_app_recipe_draft(draft_request);
             assert!(draft.blocking, "{strategy}");
             assert!(draft.diagnostics.iter().any(|diagnostic| {
@@ -3625,8 +3682,8 @@ mod tests {
             };
             selected.trusted_sha256 = Some(" \t\r\n".to_string());
             let mut draft_request = request(selected);
-            draft_request.release_analysis = (strategy == "latest_compatible_release")
-                .then(unique_release_analysis);
+            draft_request.release_analysis =
+                (strategy == "latest_compatible_release").then(unique_release_analysis);
             let draft = generate_remote_app_recipe_draft(draft_request);
             assert!(!draft.blocking, "{strategy}: {:#?}", draft.diagnostics);
         }

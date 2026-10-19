@@ -25,9 +25,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
 use crate::adb::{AdbRevalidationError, PlatformToolsReadiness};
-use crate::commands::{
-    current_adb_path, redact_absolute_paths, redact_exact_serial, safe_error, AppState,
-};
+use crate::commands::{redact_absolute_paths, redact_exact_serial, safe_error, AppState};
 use crate::device_observation::{
     qualify_reconciled_current_with_runtime, CurrentQualification, DeviceQualificationState,
 };
@@ -98,7 +96,6 @@ fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
             "version": "1",
             "contentDigest": { "algorithm": "sha256", "value": "catalog" }
         }),
-        catalog_digest: "catalog".to_string(),
         plan_digest: canonical_json_digest(&plan).unwrap_or_default(),
         device_handle: "device-test".to_string(),
         qualification_context: None,
@@ -324,6 +321,7 @@ impl ExecutionHandleStore {
         false
     }
 
+    #[cfg(test)]
     fn set_terminal_report_runtime(
         &mut self,
         public_handle: &str,
@@ -1358,6 +1356,9 @@ struct PlatformToolsSnapshot<'a> {
 /// qualification, root evidence, and the one start request all share one
 /// runtime requester so request-count tests exercise the actual authority
 /// boundary instead of testing the validator in isolation.
+#[cfg(test)]
+// The test seam exposes each independently injected authority source.
+#[allow(clippy::too_many_arguments)]
 fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     review_handle: &str,
     qualification_state: Option<&AppState>,
@@ -1385,6 +1386,8 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     )
 }
 
+// Keep runtime, product state, and qualification authority as separate inputs.
+#[allow(clippy::too_many_arguments)]
 fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     review_handle: &str,
     qualification_state: Option<&AppState>,
@@ -1648,16 +1651,15 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             "matchDevice",
             json!({ "catalog": catalog, "facts": facts }),
         )
-        .map_err(|error| {
+        .inspect_err(|error| {
             // The catalog match is qualification-only, so an ordinary failure
             // still only reports a device observation failure below. A proven
             // runtime-session loss is not an ordinary failure: it is resolved
             // through the ordered runtime-loss transition instead of being
             // presented as an observation of a dead device session.
-            if qualification_state.is_some_and(|state| runtime_session_lost(state, &error)) {
+            if qualification_state.is_some_and(|state| runtime_session_lost(state, error)) {
                 lost_runtime_session = true;
             }
-            error
         })
         .ok()?;
         let public = crate::commands::public_match(&match_result, Some(&serial));
@@ -2749,7 +2751,7 @@ where
         .clone();
     let platform_tools = resolve_platform_tools(state, &review)?;
 
-    let _devices = match list_and_reconcile_preflight_inventory(&state, runtime, &platform_tools) {
+    let _devices = match list_and_reconcile_preflight_inventory(state, runtime, &platform_tools) {
         Ok(devices) => devices,
         Err(PreflightInventoryFailure::ProductUnavailable) => {
             return Err(device_disconnected());
@@ -2814,7 +2816,7 @@ where
     let report = report_response
         .get("execution")
         .ok_or_else(launch_unavailable)?;
-    eligible_launch_label(&mapping, report).ok_or_else(launch_unavailable)?;
+    eligible_launch_label(mapping, report).ok_or_else(launch_unavailable)?;
 
     match runtime_request(
         runtime,
@@ -3503,7 +3505,6 @@ pub(crate) fn project_phase6d6_terminal(public_handle: &str, report: Value) -> V
             response: json!({ "plan": { "recipes": [], "steps": [] } }),
             target: json!({}),
             catalog_identity: Value::Null,
-            catalog_digest: String::new(),
             plan_digest: String::new(),
             device_handle: String::new(),
             qualification_context: None,
@@ -3668,6 +3669,12 @@ fn eligible_launch_label(mapping: &ExecutionMapping, report: &Value) -> Option<S
         .filter(|step| step.get("status").and_then(Value::as_str) == Some("succeeded"))
         .filter_map(|step| step.get("stepId").and_then(Value::as_str))
         .collect::<HashSet<_>>();
+    // A reviewed App Definition snapshot, reached through app_id, establishes launch authority.
+    let apps = mapping
+        .review
+        .response
+        .pointer("/plan/apps")
+        .and_then(Value::as_array)?;
     let mut candidates = HashMap::<(String, Option<String>), String>::new();
     for step in mapping
         .review
@@ -3683,22 +3690,49 @@ fn eligible_launch_label(mapping: &ExecutionMapping, report: &Value) -> Option<S
         {
             continue;
         }
-        let params = step.get("params")?;
-        let package_name = params
-            .pointer("/package_name/value")
+        let app_id = step
+            .get("app_id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())?;
-        let activity = match params.get("activity") {
-            None => None,
-            Some(value) if value.get("value").is_some_and(Value::is_null) => None,
-            Some(value) => Some(
-                value
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())?
-                    .to_string(),
-            ),
-        };
+        let mut matching_apps = apps
+            .iter()
+            .filter(|app| app.get("id").and_then(Value::as_str) == Some(app_id));
+        let app = matching_apps.next()?;
+        if matching_apps.next().is_some() {
+            return None;
+        }
+        app.get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())?;
+        let package_name = app
+            .get("package_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())?;
+        let step_package_name = step
+            .pointer("/params/package_name/value")
+            .and_then(Value::as_str)?;
+        if step_package_name != package_name {
+            return None;
+        }
+        let launcher_activity = app
+            .get("launcher_activity")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())?;
+        let step_activity = step
+            .pointer("/params/activity/value")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())?;
+        let mut activity_segments = launcher_activity.split('.');
+        let is_fully_qualified_activity = activity_segments
+            .next()
+            .is_some_and(|segment| !segment.is_empty())
+            && activity_segments
+                .next()
+                .is_some_and(|segment| !segment.is_empty())
+            && activity_segments.all(|segment| !segment.is_empty());
+        if !is_fully_qualified_activity || step_activity != launcher_activity {
+            return None;
+        }
         let label = step
             .get("note")
             .or_else(|| step.get("name"))
@@ -3707,7 +3741,10 @@ fn eligible_launch_label(mapping: &ExecutionMapping, report: &Value) -> Option<S
             .unwrap_or("Launch configured app")
             .to_string();
         candidates
-            .entry((package_name.to_string(), activity))
+            .entry((
+                package_name.to_string(),
+                Some(launcher_activity.to_string()),
+            ))
             .or_insert(label);
     }
     if candidates.len() != 1 {
@@ -4814,7 +4851,6 @@ pub(crate) mod tests {
                 "sourceKind": "bundled", "sourceId": "catalog", "version": "1",
                 "contentDigest": { "algorithm": "sha256", "value": "catalog" }
             }),
-            catalog_digest: "catalog".to_string(),
             plan_digest: canonical_json_digest(&plan).unwrap(),
             device_handle: "device_one".to_string(),
             qualification_context: None,
@@ -4931,7 +4967,7 @@ pub(crate) mod tests {
         store.reserve_start(ExecutionKind::Real).unwrap();
     }
 
-    fn launch_review() -> ReviewedPlanSnapshot {
+    fn app_less_launch_review() -> ReviewedPlanSnapshot {
         let mut reviewed = review();
         reviewed.response["plan"]["steps"] = json!([{
             "id": "recipe.one/launch",
@@ -4944,6 +4980,20 @@ pub(crate) mod tests {
                 "activity": { "value": ".MainActivity" }
             }
         }]);
+        reviewed
+    }
+
+    fn launch_review() -> ReviewedPlanSnapshot {
+        let mut reviewed = app_less_launch_review();
+        reviewed.response["plan"]["apps"] = json!([{
+            "id": "example-app",
+            "name": "Example App",
+            "package_id": "com.example.app",
+            "launcher_activity": "com.example.app.MainActivity"
+        }]);
+        reviewed.response["plan"]["steps"][0]["app_id"] = json!("example-app");
+        reviewed.response["plan"]["steps"][0]["params"]["activity"]["value"] =
+            json!("com.example.app.MainActivity");
         reviewed
     }
 
@@ -4961,6 +5011,97 @@ pub(crate) mod tests {
                 }]
             }]
         })
+    }
+
+    #[test]
+    fn app_less_reviewed_launch_does_not_create_or_retain_launch_action() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            app_less_launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        store.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report.clone(),
+            json!({ "status": "ready" }),
+        );
+
+        assert!(store.launch_action(&mapping, &report).is_none());
+        assert!(store
+            .retained_launch_action(&mapping.public_handle)
+            .is_none());
+        assert!(store.launch_actions.is_empty());
+    }
+
+    #[test]
+    fn launch_eligibility_accepts_fully_qualified_launcher_in_different_namespace() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mut mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        let launcher_activity = "org.vendor.launcher.MainActivity";
+        mapping.review.response["plan"]["apps"][0]["launcher_activity"] = json!(launcher_activity);
+        mapping.review.response["plan"]["steps"][0]["params"]["activity"]["value"] =
+            json!(launcher_activity);
+
+        assert_eq!(
+            eligible_launch_label(&mapping, &report).as_deref(),
+            Some("Launch configured app")
+        );
+
+        let relative_activity = ".MainActivity";
+        mapping.review.response["plan"]["apps"][0]["launcher_activity"] = json!(relative_activity);
+        mapping.review.response["plan"]["steps"][0]["params"]["activity"]["value"] =
+            json!(relative_activity);
+        assert!(eligible_launch_label(&mapping, &report).is_none());
+    }
+
+    #[test]
+    fn launch_eligibility_requires_the_snapshot_package_and_launcher_activity() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mut mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+
+        assert_eq!(
+            eligible_launch_label(&mapping, &report).as_deref(),
+            Some("Launch configured app")
+        );
+
+        mapping.review.response["plan"]["steps"][0]["params"]["package_name"]["value"] =
+            json!("com.other.app");
+        assert!(eligible_launch_label(&mapping, &report).is_none());
+
+        mapping.review.response["plan"]["steps"][0]["params"]["package_name"]["value"] =
+            json!("com.example.app");
+        mapping.review.response["plan"]["steps"][0]["params"]["activity"]["value"] =
+            json!(".MainActivity");
+        assert!(eligible_launch_label(&mapping, &report).is_none());
+
+        mapping.review.response["plan"]["steps"][0]["params"]["activity"]["value"] =
+            json!("com.example.app.OtherActivity");
+        assert!(eligible_launch_label(&mapping, &report).is_none());
+
+        mapping.review.response["plan"]["steps"][0]["params"]["activity"] = Value::Null;
+        assert!(eligible_launch_label(&mapping, &report).is_none());
+
+        mapping.review.response["plan"]["steps"][0]["params"]["activity"]["value"] = Value::Null;
+        assert!(eligible_launch_label(&mapping, &report).is_none());
     }
 
     #[test]
@@ -6021,7 +6162,6 @@ pub(crate) mod tests {
         let mut retained = review();
         let plan_before_catalog_change = retained.response["plan"].clone();
         retained.catalog_identity["contentDigest"]["value"] = json!("changed");
-        retained.catalog_digest = "sha256:changed-catalog".to_string();
 
         validate_review_executable(&retained).unwrap();
         validate_plan_digest(&retained).unwrap();
@@ -7535,10 +7675,6 @@ pub(crate) mod tests {
             firmware_build: Some("test/build".to_string()),
             root_state: Some(crate::device_qualification::RootQualificationState::Denied),
         }
-    }
-
-    fn qualification_admission_review() -> crate::qualification_session::ReviewObservation {
-        qualification_admission_review_for("device-one")
     }
 
     fn qualification_admission_review_for(
@@ -9300,7 +9436,6 @@ pub(crate) mod tests {
         let catalog = crate::catalog::CatalogDescriptor::for_test()
             .expect("the repository catalog should be available to execution tests");
         retained.catalog_identity = serde_json::to_value(catalog.public_identity()).unwrap();
-        retained.catalog_digest = catalog.digest().to_string();
         handles.insert_review(retained)
     }
 
@@ -9693,17 +9828,7 @@ pub(crate) mod tests {
         let review_handle = {
             let mut handles = state.handles.lock().unwrap();
             let mut retained = handles.review(&review_handle).unwrap().clone();
-            retained.response["plan"]["steps"] = json!([{
-                "id": "recipe.one/launch",
-                "recipe_ref": "recipe.one",
-                "type": "launch_app",
-                "name": "Launch app",
-                "note": "Launch configured app",
-                "params": {
-                    "package_name": { "value": "com.example.app" },
-                    "activity": { "value": ".MainActivity" }
-                }
-            }]);
+            retained.response["plan"] = launch_review().response["plan"].clone();
             retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
             retained.platform_tools_identity =
                 Some(state.adb.lock().unwrap().installation_identity().unwrap());

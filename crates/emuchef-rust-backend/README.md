@@ -50,11 +50,13 @@ and matching rules are documented in
 ## APK Inspection and Install Enforcement
 
 The backend inspects bounded `AndroidManifest.xml` input natively in Rust for
-Config Editor authoring and optional install-time package enforcement. It does
-not require Java, Android SDK Build Tools, `apkanalyzer`, `aapt2`, or an
-installed Android SDK. Optional trusted SHA-256 enforcement is separate from
-the locally calculated authoring digest, and APK signatures and signer
-certificates are not verified. See the
+Config Editor authoring and App-aware APK install admission. It does not require
+Java, Android SDK Build Tools, `apkanalyzer`, `aapt2`, or an installed Android
+SDK. Every APK install verifies package identity against its referenced App
+Definition. When that definition declares a trusted SHA-256, admission also
+requires a checksum match; the locally calculated authoring digest is not a
+trusted checksum. APK signatures and signer certificates are not verified. See
+the
 [Phase 5B product contract](../../docs/product/phase-5b-apk-verification-and-permission-automation.md)
 for the complete trust and permission-automation boundaries.
 
@@ -71,7 +73,9 @@ same-directory partial files. Files are flushed, synced, and published with
 `persist_noclobber` semantics; exact no-clobber mechanics remain
 platform-dependent. Complete default-cache files bypass network setup.
 `cache: none` always transfers and selects a unique runtime path on collision.
-There is no resume support or authored checksum field. Reqwest uses standard
+Generic Recipe `remote_file` artifacts have no authored checksum field. App
+Artifact `direct_url` sources may declare a trusted `source.sha256`; the backend
+enforces it when supplied. There is no resume support. Reqwest uses standard
 system proxy discovery without EmuChef-specific proxy settings.
 
 ## Verification
