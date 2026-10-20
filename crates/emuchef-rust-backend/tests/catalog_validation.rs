@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use emuchef_rust_backend::{
-    protocol, request, run_with_args_and_input, session::DocumentSessionManager,
-};
+use emuchef_rust_backend::{protocol, request, run_with_args_and_input};
 use serde_json::{json, Value};
 
 mod common;
@@ -247,6 +245,439 @@ fn capabilities_include_catalog_context_session_update() {
             "setDocumentAuthoredRoot",
             "ping",
         ]
+    );
+}
+
+#[test]
+fn recipe_admission_ignores_unrelated_malformed_catalog_entries_but_root_validation_reports_them() {
+    let workspace = TempWorkspace::copy_fixture("nested_ignored");
+    let authored_root = workspace.authored_root();
+    let recipe = workspace.recipe_path("main.yaml");
+    fs::copy(plain_recipe_path("minimal_recipe.yaml"), &recipe)
+        .expect("generic valid Recipe fixture should be copied");
+    let unrelated_app = authored_root.join("apps/unrelated.yaml");
+    let unrelated_profile = authored_root.join("device_profiles/unrelated.yaml");
+    fs::create_dir_all(unrelated_app.parent().unwrap()).unwrap();
+    fs::create_dir_all(unrelated_profile.parent().unwrap()).unwrap();
+    fs::write(&unrelated_app, "schema_version: [\n").unwrap();
+    fs::write(&unrelated_profile, "schema_version: [\n").unwrap();
+
+    let recipe_diagnostics = diagnostic_set(&validate_path(&recipe, Some(&authored_root)));
+    assert!(
+        !recipe_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["severity"] == "error"),
+        "unrelated App Definition and Device Profile errors must not block a generic Recipe: {recipe_diagnostics:?}"
+    );
+
+    let (_, root_diagnostics) =
+        emuchef_rust_backend::catalog::validate_authored_root(&authored_root);
+    let root_diagnostics = serde_json::to_string(&root_diagnostics).unwrap();
+    assert!(root_diagnostics.contains("apps/unrelated.yaml"));
+    assert!(root_diagnostics.contains("device_profiles/unrelated.yaml"));
+}
+
+#[test]
+fn recipe_admission_still_rejects_an_invalid_referenced_app_definition() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let authored_root = workspace.authored_root();
+    let app_definition = authored_root.join("apps/demo_app.yaml");
+    let contents = fs::read_to_string(&app_definition).unwrap();
+    fs::write(
+        app_definition,
+        contents.replace(
+            "package_id: com.example.demo",
+            "package_id: invalid package",
+        ),
+    )
+    .unwrap();
+
+    let diagnostics = diagnostic_set(&validate_path(
+        &workspace.recipe_path("demo.app.install.yaml"),
+        Some(&authored_root),
+    ));
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["severity"] == "error" && diagnostic["code"] == "app_definition_invalid"
+    }));
+}
+
+#[test]
+fn recipe_admission_rejects_duplicate_reachable_dependency_id() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let authored_root = workspace.authored_root();
+    let recipes_dir = authored_root.join("recipes");
+    let minimal = fs::read_to_string(plain_recipe_path("minimal_recipe.yaml"))
+        .expect("minimal Recipe fixture should be readable");
+
+    let parent = minimal
+        .replace("phase6e.minimal", "dependency.parent")
+        .replace(
+            "recipe_dependencies: []",
+            "recipe_dependencies:\n  - dependency.duplicate",
+        );
+    let parent_path = recipes_dir.join("dependency_parent.yaml");
+    fs::write(&parent_path, parent).expect("parent Recipe should be written");
+
+    let valid_dependency = minimal.replace("phase6e.minimal", "dependency.duplicate");
+    fs::write(
+        recipes_dir.join("a_dependency_duplicate.yaml"),
+        valid_dependency,
+    )
+    .expect("valid dependency Recipe should be written");
+
+    let invalid_dependency =
+        fs::read_to_string(plain_recipe_path("phase6k_unknown_input_ref.yaml"))
+            .expect("invalid Recipe fixture should be readable")
+            .replace("phase6k.unknown_input_ref", "dependency.duplicate");
+    fs::write(
+        recipes_dir.join("b_dependency_duplicate.yaml"),
+        invalid_dependency,
+    )
+    .expect("invalid duplicate dependency Recipe should be written");
+
+    let diagnostics = diagnostic_set(&validate_path(&parent_path, Some(&authored_root)));
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "recipe_id_conflict"
+                && diagnostic["objectId"] == "dependency.duplicate"
+        }),
+        "a duplicate reachable dependency id must fail admission: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn recipe_admission_rejects_duplicate_reachable_dependency_id_when_one_file_fails_schema_validation(
+) {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let authored_root = workspace.authored_root();
+    let recipes_dir = authored_root.join("recipes");
+    let minimal = fs::read_to_string(plain_recipe_path("minimal_recipe.yaml"))
+        .expect("minimal Recipe fixture should be readable");
+    let parent = minimal
+        .replace("phase6e.minimal", "dependency.parent")
+        .replace(
+            "recipe_dependencies: []",
+            "recipe_dependencies:\n  - dependency.duplicate",
+        );
+    let parent_path = recipes_dir.join("dependency_parent_invalid_schema.yaml");
+    fs::write(&parent_path, parent).expect("parent Recipe should be written");
+
+    let valid_dependency = minimal.replace("phase6e.minimal", "dependency.duplicate");
+    fs::write(
+        recipes_dir.join("a_dependency_duplicate_valid.yaml"),
+        valid_dependency,
+    )
+    .expect("valid dependency Recipe should be written");
+
+    let invalid_schema_dependency = minimal
+        .replace("phase6e.minimal", "dependency.duplicate")
+        .replacen("schema_version: 1", "schema_version: 2", 1);
+    fs::write(
+        recipes_dir.join("b_dependency_duplicate_invalid_schema.yaml"),
+        invalid_schema_dependency,
+    )
+    .expect("schema-invalid dependency Recipe should be written");
+
+    let diagnostics = diagnostic_set(&validate_path(&parent_path, Some(&authored_root)));
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "recipe_id_conflict"
+                && diagnostic["objectId"] == "dependency.duplicate"
+        }),
+        "duplicate reachable dependency id must fail admission even when one file fails schema validation: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn recipe_admission_deduplicates_relevant_app_definition_diagnostics() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let authored_root = workspace.authored_root();
+    let recipes_dir = authored_root.join("recipes");
+    let app_contents = fs::read_to_string(authored_root.join("apps/demo_app.yaml"))
+        .expect("App Definition fixture should be readable")
+        .replace(
+            "package_id: com.example.demo",
+            "package_id: com.example.demo.duplicate",
+        );
+    fs::write(
+        authored_root.join("apps/duplicate_demo_app.yaml"),
+        app_contents,
+    )
+    .expect("duplicate App Definition should be written");
+
+    let minimal = fs::read_to_string(plain_recipe_path("minimal_recipe.yaml"))
+        .expect("minimal Recipe fixture should be readable");
+    let parent = minimal
+        .replace("phase6e.minimal", "dependency.app_parent")
+        .replace(
+            "recipe_dependencies: []",
+            "recipe_dependencies:\n  - demo.app.install",
+        )
+        .replace(
+            "artifacts: {}",
+            "artifacts:\n  parent_apk:\n    type: app_artifact\n    app_ref: demo_app\n    artifact: apk",
+        );
+    let parent_path = recipes_dir.join("app_parent.yaml");
+    fs::write(&parent_path, parent).expect("parent Recipe should be written");
+
+    let diagnostics = diagnostic_set(&validate_path(&parent_path, Some(&authored_root)));
+    let app_definition_conflicts = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic["severity"] == "error" && diagnostic["code"] == "app_definition_id_conflict"
+        })
+        .count();
+    assert_eq!(
+        app_definition_conflicts, 1,
+        "the same relevant App Definition diagnostic must appear once: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn recipe_admission_reports_package_installed_parameter_violation_once() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let authored_root = workspace.authored_root();
+    let recipe_path = workspace.recipe_path("demo.app.install.yaml");
+    let contents = fs::read_to_string(&recipe_path)
+        .expect("App-aware Recipe fixture should be readable")
+        .replace(
+            "      - type: package_installed\n        params: {}\n",
+            "      - type: package_installed\n        params:\n          package: com.example.demo\n",
+        );
+    fs::write(&recipe_path, contents).expect("App-aware Recipe fixture should be written");
+
+    let diagnostics = diagnostic_set(&validate_path(&recipe_path, Some(&authored_root)));
+    let violations = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "app_condition_package_parameter_forbidden"
+        })
+        .count();
+    assert_eq!(
+        violations, 1,
+        "a retired package condition parameter must be reported once: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn standalone_validation_rejects_package_installed_params_on_app_context_step() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let recipe_path = workspace.recipe_path("demo.app.install.yaml");
+    let contents = fs::read_to_string(&recipe_path)
+        .expect("App-aware Recipe fixture should be readable")
+        .replace(
+            "      - type: package_installed\n        params: {}\n",
+            "      - type: package_installed\n        params:\n          package: com.example.demo\n",
+        );
+    fs::write(&recipe_path, contents).expect("App-aware Recipe fixture should be written");
+
+    let diagnostics = diagnostic_set(&validate_path_with_null_root(&recipe_path));
+    let violations = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "app_condition_package_parameter_forbidden"
+        })
+        .count();
+    assert_eq!(
+        violations, 1,
+        "standalone validation must still reject retired package condition params: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn unreadable_recipe_catalog_fails_admission_and_root_validation() {
+    let workspace = TempWorkspace::copy_fixture("nested_ignored");
+    let authored_root = workspace.authored_root();
+    let recipes_path = authored_root.join("recipes");
+    fs::remove_dir_all(&recipes_path).expect("Recipe fixture directory should be removable");
+    fs::write(&recipes_path, "not a directory")
+        .expect("Recipe catalog obstruction should be written");
+
+    let candidate = workspace.dir.join("candidate.yaml");
+    fs::copy(plain_recipe_path("minimal_recipe.yaml"), &candidate)
+        .expect("candidate Recipe should be copied");
+    let admission_diagnostics = diagnostic_set(&validate_path(&candidate, Some(&authored_root)));
+    assert!(
+        admission_diagnostics.iter().any(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "recipe_catalog_unreadable"
+        }),
+        "Recipe admission must fail closed when the Recipe catalog cannot be read: {admission_diagnostics:?}"
+    );
+
+    let (_, root_diagnostics) =
+        emuchef_rust_backend::catalog::validate_authored_root(&authored_root);
+    assert!(
+        root_diagnostics.iter().any(|diagnostic| {
+            diagnostic["severity"] == "error" && diagnostic["code"] == "recipe_catalog_unreadable"
+        }),
+        "authored-root validation must report an unreadable Recipe catalog: {root_diagnostics:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn authored_root_rejects_a_dangling_device_plan_yaml_symlink() {
+    let workspace = TempWorkspace::copy_fixture("nested_ignored");
+    let authored_root = workspace.authored_root();
+    let device_plans = authored_root.join("device_plans");
+    fs::create_dir_all(&device_plans).expect("create Device Plan directory");
+    std::os::unix::fs::symlink("missing-target.yaml", device_plans.join("dangling.yaml"))
+        .expect("create dangling Device Plan symlink");
+
+    let (validated_paths, diagnostics) =
+        emuchef_rust_backend::catalog::validate_authored_root(&authored_root);
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "device_plan_catalog_unreadable"
+        }),
+        "a dangling Device Plan symlink must fail authored-root validation: {diagnostics:?}"
+    );
+    assert!(
+        !validated_paths
+            .iter()
+            .any(|path| path.ends_with("dangling.yaml")),
+        "an unreadable Device Plan must not be reported as validated: {validated_paths:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_catalog_directory_symlinks_fail_both_catalog_validations() {
+    for directory_name in ["recipes", "apps", "device_profiles", "device_plans"] {
+        let workspace = TempWorkspace::copy_fixture("nested_ignored");
+        let authored_root = workspace.authored_root();
+        let directory = authored_root.join(directory_name);
+        if directory.exists() {
+            fs::remove_dir_all(&directory).expect("remove optional catalog directory");
+        }
+        std::os::unix::fs::symlink(
+            authored_root.join(format!("missing-{directory_name}")),
+            &directory,
+        )
+        .expect("create dangling catalog directory symlink");
+
+        let (_, root_diagnostics) =
+            emuchef_rust_backend::catalog::validate_authored_root(&authored_root);
+        assert!(
+            root_diagnostics.iter().any(|diagnostic| {
+                diagnostic["severity"] == "error"
+                    && diagnostic["code"]
+                        .as_str()
+                        .is_some_and(|code| code.ends_with("_catalog_unreadable"))
+            }),
+            "authored-root validation must reject a dangling {directory_name} symlink: {root_diagnostics:?}"
+        );
+
+        let model_diagnostics =
+            emuchef_rust_backend::catalog::validate_authored_catalog_models(&authored_root);
+        assert!(
+            model_diagnostics.iter().any(|diagnostic| {
+                diagnostic["severity"] == "error"
+                    && diagnostic["code"]
+                        .as_str()
+                        .is_some_and(|code| code.ends_with("_catalog_unreadable"))
+            }),
+            "catalog model validation must reject a dangling {directory_name} symlink: {model_diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn authored_catalog_models_rejects_an_unreadable_recipe_catalog_for_a_zero_recipe_plan() {
+    let workspace = TempWorkspace::copy_fixture("nested_ignored");
+    let authored_root = workspace.authored_root();
+    fs::create_dir_all(authored_root.join("device_profiles"))
+        .expect("create Device Profile directory");
+    fs::create_dir_all(authored_root.join("device_plans")).expect("create Device Plan directory");
+    fs::write(
+        authored_root.join("device_profiles/ayaneo.generic.yaml"),
+        include_str!("../../../authored/device_profiles/ayaneo.generic.yaml"),
+    )
+    .expect("write valid Device Profile");
+    fs::write(
+        authored_root.join("device_plans/no-recipes.yaml"),
+        r#"schema_version: 1
+kind: device_plan
+id: test.no_recipes
+name: No Recipes
+description: Zero-recipe plan used to validate catalog readability.
+device_profile_ref: ayaneo.generic
+recipes: []
+"#,
+    )
+    .expect("write valid zero-recipe Device Plan");
+
+    let recipes = authored_root.join("recipes");
+    fs::remove_dir_all(&recipes).expect("remove Recipe directory");
+    fs::write(&recipes, "not a directory").expect("obstruct Recipe directory");
+
+    let diagnostics =
+        emuchef_rust_backend::catalog::validate_authored_catalog_models(&authored_root);
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic["severity"] == "error"
+                && diagnostic["code"] == "recipe_catalog_unreadable"
+        }),
+        "public catalog model validation must not accept an unreadable Recipe catalog: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn recipe_admission_validates_sibling_dependencies_in_authored_order() {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let authored_root = workspace.authored_root();
+    let recipes_dir = authored_root.join("recipes");
+    let minimal = fs::read_to_string(plain_recipe_path("minimal_recipe.yaml"))
+        .expect("minimal Recipe fixture should be readable");
+
+    let parent = minimal
+        .replace("phase6e.minimal", "dependency.parent")
+        .replace(
+            "recipe_dependencies: []",
+            "recipe_dependencies:\n  - dependency.first\n  - dependency.second",
+        );
+    let parent_path = recipes_dir.join("dependency_order_parent.yaml");
+    fs::write(&parent_path, parent).expect("parent Recipe should be written");
+
+    for (file, id, missing_id) in [
+        (
+            "a_dependency_first.yaml",
+            "dependency.first",
+            "missing.first",
+        ),
+        (
+            "b_dependency_second.yaml",
+            "dependency.second",
+            "missing.second",
+        ),
+    ] {
+        let dependency = minimal.replace("phase6e.minimal", id).replace(
+            "recipe_dependencies: []",
+            &format!("recipe_dependencies:\n  - {missing_id}"),
+        );
+        fs::write(recipes_dir.join(file), dependency).expect("dependency Recipe should be written");
+    }
+
+    let diagnostics = diagnostic_set(&validate_path(&parent_path, Some(&authored_root)));
+    let observed = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "recipe_not_found")
+        .filter_map(|diagnostic| diagnostic["objectId"].as_str())
+        .filter(|object_id| object_id.starts_with("dependency."))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec!["dependency.first", "dependency.second"],
+        "siblings must validate in authored dependency order: {diagnostics:?}"
     );
 }
 
@@ -634,7 +1065,7 @@ fn duplicate_recipe_id_conflict_matches_compatibility_first_file_replacement_sem
 #[test]
 fn commands_undo_redo_save_and_session_validate_reuse_stored_authored_root() {
     let workspace = TempWorkspace::copy_fixture("missing_dependency");
-    let path = workspace.recipe_path("missing_dependency.yaml");
+    let path = workspace.recipe_path("main.yaml");
     let responses = sidecar_responses(vec![
         json!({
             "id": "open",
@@ -646,7 +1077,7 @@ fn commands_undo_redo_save_and_session_validate_reuse_stored_authored_root() {
             "type": "applyRecipeCommand",
             "payload": {
                 "documentId": "doc-1",
-                "command": {"type": "SetOverviewField", "field": "name", "value": "Renamed Missing Dependency"}
+                "command": {"type": "SetOverviewField", "field": "name", "value": "Renamed Main"}
             }
         }),
         json!({
@@ -672,6 +1103,15 @@ fn commands_undo_redo_save_and_session_validate_reuse_stored_authored_root() {
     ]);
 
     assert_eq!(responses.len(), 6);
+    let unrelated_recipe = validate_path(
+        &workspace.recipe_path("missing_dependency.yaml"),
+        Some(&workspace.authored_root()),
+    );
+    assert_eq!(unrelated_recipe["ok"], true);
+    assert_eq!(
+        diagnostic_set(&unrelated_recipe),
+        read_diagnostic_golden("phase6l_missing_dependency_open.diagnostics.json")
+    );
     for response in &responses {
         assert_eq!(response["ok"], true, "{response:#?}");
         let diagnostics = if response["result"].get("document").is_some() {
@@ -679,10 +1119,7 @@ fn commands_undo_redo_save_and_session_validate_reuse_stored_authored_root() {
         } else {
             diagnostic_set(response)
         };
-        assert_eq!(
-            diagnostics,
-            read_diagnostic_golden("phase6l_missing_dependency_open.diagnostics.json")
-        );
+        assert!(diagnostics.is_empty(), "{response:#?}");
     }
 
     let expected_root = workspace.authored_root().canonicalize().unwrap();

@@ -115,8 +115,16 @@ pub fn load_yaml_mapping(path: &Path) -> Result<Mapping, RecipeLoadError> {
     parse_yaml_mapping(&text, path)
 }
 
+/// Return a Recipe file's declared identifier before full schema validation.
+///
+/// Catalog admission uses this to preserve identifier ambiguity when another
+/// file with the same identifier fails Recipe schema parsing.
+pub(crate) fn declared_recipe_id(raw: &Mapping) -> Option<String> {
+    get_scalar_string(raw, "id")
+}
+
 fn parse_yaml_mapping(text: &str, path: &Path) -> Result<Mapping, RecipeLoadError> {
-    let value = serde_yaml::from_str::<YamlValue>(&text)
+    let value = serde_yaml::from_str::<YamlValue>(text)
         .map_err(|error| RecipeLoadError::yaml_parse(error.to_string()))?;
     match value {
         YamlValue::Null => Ok(Mapping::new()),

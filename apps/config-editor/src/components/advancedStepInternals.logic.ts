@@ -22,7 +22,7 @@ export type ConstraintsClassification =
         | "unsupported_field_shape"
         | "ambiguous_conflict_fields";
     };
-export type SupportedVerifyType = "path_exists" | "file_exists" | "package_installed";
+export type SupportedVerifyType = "path_exists" | "file_exists";
 /**
  * Classification of one authored `skip_if` or `verify` condition entry.
  *
@@ -33,16 +33,15 @@ export type SupportedVerifyType = "path_exists" | "file_exists" | "package_insta
  * raw JSON instead of being coerced into another representation.
  */
 export type VerifyClassification =
-  | { kind: "structured"; type: SupportedVerifyType; fieldName: "path" | "package_name"; fieldValue: string }
+  | { kind: "structured"; type: SupportedVerifyType; fieldName: "path"; fieldValue: string }
   | { kind: "app_target"; type: AppConditionType; targetId: string }
   | { kind: "app_package_installed"; type: "package_installed" }
   | { kind: "json" };
 export type VerifyUpdateResult = { ok: true; value: unknown[] } | { ok: false; error: string };
 
-const VERIFY_TYPE_FIELDS: Record<SupportedVerifyType, "path" | "package_name"> = {
+const VERIFY_TYPE_FIELDS: Record<SupportedVerifyType, "path"> = {
   path_exists: "path",
   file_exists: "path",
-  package_installed: "package_name",
 };
 
 export function formatJsonDraft(value: unknown): string {
@@ -125,7 +124,7 @@ export function jsonValuesEqual(left: unknown, right: unknown): boolean {
   return stableJsonString(left) === stableJsonString(right);
 }
 
-export function verifyFieldForType(type: string): "path" | "package_name" | null {
+export function verifyFieldForType(type: string): "path" | null {
   return Object.prototype.hasOwnProperty.call(VERIFY_TYPE_FIELDS, type)
     ? VERIFY_TYPE_FIELDS[type as SupportedVerifyType]
     : null;
@@ -138,7 +137,7 @@ export function verifyFieldForType(type: string): "path" | "package_name" | null
  * `path` parameter through the enclosing step's App Definition; every other
  * supported type keeps its literal parameter form.
  */
-export function appConditionType(type: SupportedVerifyType): AppConditionType | null {
+export function appConditionType(type: string): AppConditionType | null {
   return type === "path_exists" || type === "file_exists" ? type : null;
 }
 

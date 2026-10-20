@@ -11,6 +11,7 @@ artifact_groups: {}
 steps:
   - id: install
     type: install_apk
+    app_ref: test.app
     name: Install
     user_toggleable: false
     dependencies: []

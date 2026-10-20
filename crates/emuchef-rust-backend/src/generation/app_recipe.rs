@@ -206,111 +206,6 @@ fn validate_permission_api_bounds(
     }
 }
 
-/// Build the one generated permission step consumed by the existing executor.
-pub(crate) fn build_permission_step(
-    selection: &PermissionAutomationSelection,
-    step_id: String,
-    install_step_id: String,
-    app_name: &str,
-) -> Step {
-    let runtime = canonical_runtime_permissions(selection);
-    let app_ops = canonical_app_ops(selection);
-
-    let runtime = runtime
-        .into_iter()
-        .map(|action| {
-            let mut value = Map::new();
-            value.insert(
-                "package_name".to_string(),
-                Value::String(selection.package_name.clone()),
-            );
-            value.insert("name".to_string(), Value::String(action.permission_name));
-            value.insert("required".to_string(), Value::Bool(false));
-            value.insert(
-                "when".to_string(),
-                permission_action_condition(
-                    action.requires_root,
-                    action.android_api_min,
-                    action.android_api_max,
-                ),
-            );
-            Value::Object(value)
-        })
-        .collect();
-    let app_ops = app_ops
-        .into_iter()
-        .map(|action| {
-            let mut value = Map::new();
-            value.insert(
-                "package_name".to_string(),
-                Value::String(selection.package_name.clone()),
-            );
-            value.insert("op".to_string(), Value::String(action.operation_name));
-            value.insert("mode".to_string(), Value::String(action.mode));
-            value.insert("required".to_string(), Value::Bool(false));
-            value.insert(
-                "when".to_string(),
-                permission_action_condition(
-                    action.requires_root,
-                    action.android_api_min,
-                    action.android_api_max,
-                ),
-            );
-            Value::Object(value)
-        })
-        .collect();
-
-    let mut params = OrderedMap::new();
-    params.insert(
-        "runtime".to_string(),
-        ParamValue::Literal(Value::Array(runtime)),
-    );
-    params.insert(
-        "appops".to_string(),
-        ParamValue::Literal(Value::Array(app_ops)),
-    );
-    params.insert(
-        "policy".to_string(),
-        ParamValue::Literal(json!({ "on_failure": "warn", "require_all": false })),
-    );
-    Step {
-        id: step_id,
-        type_name: "grant_permissions".to_string(),
-        name: format!("Apply optional permissions for {app_name}"),
-        description: Some(
-            "Attempt selected runtime permission and app-op actions after installation."
-                .to_string(),
-        ),
-        progress_note: Some(format!("Applying selected permissions for {app_name}")),
-        user_toggleable: false,
-        app_ref: None,
-        dependencies: vec![install_step_id],
-        constraints: StepConstraints {
-            capabilities: vec!["shell_command".to_string()],
-            conflicts_with: Vec::new(),
-        },
-        skip_if: Vec::new(),
-        params,
-        verify: Vec::new(),
-    }
-}
-
-fn permission_action_condition(
-    requires_root: bool,
-    android_api_min: u32,
-    android_api_max: Option<u32>,
-) -> Value {
-    let mut condition = Map::new();
-    if requires_root {
-        condition.insert("rooted".to_string(), Value::Bool(true));
-    }
-    condition.insert("android_api_min".to_string(), Value::from(android_api_min));
-    if let Some(maximum) = android_api_max {
-        condition.insert("android_api_max".to_string(), Value::from(maximum));
-    }
-    Value::Object(condition)
-}
-
 fn canonical_runtime_permissions(
     selection: &PermissionAutomationSelection,
 ) -> Vec<RuntimePermissionSelection> {
@@ -926,11 +821,11 @@ pub(crate) fn pair_reviewed_artifact(
     proposed: &AppDefinitionV1,
     matches: impl Fn(&AppArtifactV1) -> bool,
 ) -> ReviewedArtifactPairing {
-    if let Some(id) = proposed.artifacts.keys().find(|id| {
-        app.artifacts
-            .get(*id)
-            .is_some_and(|artifact| matches(artifact))
-    }) {
+    if let Some(id) = proposed
+        .artifacts
+        .keys()
+        .find(|id| app.artifacts.get(*id).is_some_and(&matches))
+    {
         return ReviewedArtifactPairing::Paired(id.clone());
     }
     let mut candidates = app
@@ -1137,7 +1032,11 @@ fn merge_permission_set(
         target.runtime.push(action);
     }
     for action in source.app_ops {
-        if let Some(existing) = target.app_ops.iter().find(|existing| existing.op == action.op) {
+        if let Some(existing) = target
+            .app_ops
+            .iter()
+            .find(|existing| existing.op == action.op)
+        {
             if existing.mode == action.mode
                 && existing.android_api_min == action.android_api_min
                 && existing.android_api_max == action.android_api_max
@@ -1154,7 +1053,11 @@ fn merge_permission_set(
             ));
             continue;
         }
-        if other.app_ops.iter().any(|existing| existing.op == action.op) {
+        if other
+            .app_ops
+            .iter()
+            .any(|existing| existing.op == action.op)
+        {
             diagnostics.push(error(
                 "app_permission_action_conflict",
                 &format!(
@@ -1351,7 +1254,12 @@ fn build_recipe(
     // steps even when the App Definition declares permission sets, while an
     // enabled request executes the whole set each grant step references.
     if permission_automation_enabled {
-        append_permission_steps(&mut steps, app, &ids.permission_step_id, &ids.install_step_id);
+        append_permission_steps(
+            &mut steps,
+            app,
+            &ids.permission_step_id,
+            &ids.install_step_id,
+        );
     }
 
     Recipe {
@@ -1390,7 +1298,7 @@ pub(crate) fn collect_artifacts(
     let mut artifacts = IndexMap::new();
     for (index, edit) in edits.into_iter().enumerate() {
         let id = edit.id.trim().to_string();
-        if !claim_entry_id(&id, "artifacts", index, &mut artifacts, diagnostics) {
+        if !claim_entry_id(&id, "artifacts", index, &artifacts, diagnostics) {
             continue;
         }
         artifacts.insert(
@@ -1413,7 +1321,7 @@ pub(crate) fn collect_targets(
     let mut targets = IndexMap::new();
     for (index, edit) in edits.into_iter().enumerate() {
         let id = edit.id.trim().to_string();
-        if !claim_entry_id(&id, "targets", index, &mut targets, diagnostics) {
+        if !claim_entry_id(&id, "targets", index, &targets, diagnostics) {
             continue;
         }
         targets.insert(
@@ -1733,12 +1641,9 @@ impl<'de> Deserialize<'de> for StrictJsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::ExecutorRunner;
     use crate::generation::apk::{ApkPermissionApplicabilityFacts, ApkPermissionDeclarationFacts};
     use crate::planner::{
-        plan_execution_with_app_definitions, DeviceContext, ExecutionParamValue, ExecutionPlan,
-        ExecutionPlanSource, ExecutionStep, ExecutionStepConstraints, PlannerInput,
-        RuntimeCapabilities,
+        plan_execution_with_app_definitions, DeviceContext, PlannerInput, RuntimeCapabilities,
     };
 
     fn facts() -> ApkInspectionFacts {
@@ -2093,10 +1998,22 @@ mod tests {
         println!("{}", permission_document_block(&generated));
         println!("=== END CASE local:new-app ===");
         let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(&generated);
-        assert_eq!(permission_sha256_hex(app_yaml.as_bytes()), "21b39e57cd1d75353241e3e9bfea7c01be3cfa71a6ac322b8995f5fb4e137064");
-        assert_eq!(permission_sha256_hex(recipe_yaml.as_bytes()), "669ffb6c0231d3472e26b7caf7f8588e6ec4f2821f34b794a21c09649bb42660");
-        assert_eq!(permission_sha256_hex(diagnostics.as_bytes()), "7cb7f244325c8fd86175ba28c9a645b3b47ac8f689a1a1039c7e4c77f0ef7d04");
-        assert_eq!(permission_sha256_hex(steps.as_bytes()), "37e96274a12976cf68212b8d46ca220d4c19fc87f99c2d157f5031ff7b282096");
+        assert_eq!(
+            permission_sha256_hex(app_yaml.as_bytes()),
+            "21b39e57cd1d75353241e3e9bfea7c01be3cfa71a6ac322b8995f5fb4e137064"
+        );
+        assert_eq!(
+            permission_sha256_hex(recipe_yaml.as_bytes()),
+            "669ffb6c0231d3472e26b7caf7f8588e6ec4f2821f34b794a21c09649bb42660"
+        );
+        assert_eq!(
+            permission_sha256_hex(diagnostics.as_bytes()),
+            "7cb7f244325c8fd86175ba28c9a645b3b47ac8f689a1a1039c7e4c77f0ef7d04"
+        );
+        assert_eq!(
+            permission_sha256_hex(steps.as_bytes()),
+            "37e96274a12976cf68212b8d46ca220d4c19fc87f99c2d157f5031ff7b282096"
+        );
         println!(
             "HASH local:new-app app={} recipe={} diagnostics={} steps={}",
             permission_sha256_hex(app_yaml.as_bytes()),
@@ -2156,10 +2073,22 @@ mod tests {
         println!("{}", permission_document_block(&merged));
         println!("=== END CASE local:existing-app-merge ===");
         let [app_yaml, recipe_yaml, diagnostics, steps] = permission_artifact_sections(&merged);
-        assert_eq!(permission_sha256_hex(app_yaml.as_bytes()), "ceaadf3d8ace7df42f90254a75289e3d9c29992cf592bb929f819caa101c5812");
-        assert_eq!(permission_sha256_hex(recipe_yaml.as_bytes()), "6e9c960fd025b2e5b1cbceebc7e7b31d041c4c352987f3b56b07f14ad43abca7");
-        assert_eq!(permission_sha256_hex(diagnostics.as_bytes()), "15b177e49c63f04a12dedc9d197c34e3c31df52bc1ac89bccf68344255b3c689");
-        assert_eq!(permission_sha256_hex(steps.as_bytes()), "03e380f43ce50ebf6f1ef657333cc18fb2e85e9e894ae81ca046c76352870e9a");
+        assert_eq!(
+            permission_sha256_hex(app_yaml.as_bytes()),
+            "ceaadf3d8ace7df42f90254a75289e3d9c29992cf592bb929f819caa101c5812"
+        );
+        assert_eq!(
+            permission_sha256_hex(recipe_yaml.as_bytes()),
+            "6e9c960fd025b2e5b1cbceebc7e7b31d041c4c352987f3b56b07f14ad43abca7"
+        );
+        assert_eq!(
+            permission_sha256_hex(diagnostics.as_bytes()),
+            "15b177e49c63f04a12dedc9d197c34e3c31df52bc1ac89bccf68344255b3c689"
+        );
+        assert_eq!(
+            permission_sha256_hex(steps.as_bytes()),
+            "03e380f43ce50ebf6f1ef657333cc18fb2e85e9e894ae81ca046c76352870e9a"
+        );
         println!(
             "HASH local:existing-app-merge app={} recipe={} diagnostics={} steps={}",
             permission_sha256_hex(app_yaml.as_bytes()),
@@ -2744,127 +2673,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    fn generated_permission_execution_plan(
-        action: RuntimePermissionSelection,
-        android_api_level: i64,
-    ) -> ExecutionPlan {
-        let generated = build_permission_step(
-            &PermissionAutomationSelection {
-                package_name: "com.example.player".to_string(),
-                runtime_permissions: vec![action],
-                app_ops: Vec::new(),
-            },
-            "grant_permissions_example".to_string(),
-            "install_example".to_string(),
-            "Example Player",
-        );
-        let params = generated
-            .params
-            .into_iter()
-            .map(|(name, value)| match value {
-                ParamValue::Literal(value) => (name, ExecutionParamValue::Literal { value }),
-                ParamValue::Ref(_) | ParamValue::AppTarget(_) => {
-                    panic!("generated permission params must be literal")
-                }
-            })
-            .collect();
-        let step = ExecutionStep {
-            id: generated.id,
-            recipe_ref: "example.recipe".to_string(),
-            app_id: None,
-            type_name: generated.type_name,
-            name: generated.name,
-            note: generated.progress_note.unwrap_or_default(),
-            dependencies: Vec::new(),
-            constraints: ExecutionStepConstraints {
-                capabilities: generated.constraints.capabilities,
-                conflicts_with: generated.constraints.conflicts_with,
-            },
-            permission_plan: None,
-            params,
-            skip_if: Vec::new(),
-            verify: Vec::new(),
-        };
-        ExecutionPlan {
-            device_plan: None,
-            resolved_inputs: Vec::new(),
-            id: "plan.permission-bounds".to_string(),
-            source: ExecutionPlanSource {
-                device_profile_ref: "example.device".to_string(),
-                device_plan_ref: "example.plan".to_string(),
-                selected_recipe_refs: vec!["example.recipe".to_string()],
-                expanded_recipe_refs: vec!["example.recipe".to_string()],
-                catalog: None,
-            },
-            recipes: Vec::new(),
-            apps: Vec::new(),
-            target_device: None,
-            device_context: DeviceContext {
-                manufacturer: "Example".to_string(),
-                model: "Example".to_string(),
-                android_version: 11,
-                android_api_level: Some(android_api_level),
-                device_tags: Vec::new(),
-            },
-            runtime_capabilities: RuntimeCapabilities {
-                adb_available: true,
-                apk_install: true,
-                shared_storage_write: true,
-                app_launch: true,
-                shell_command: true,
-                package_remove_for_user: false,
-                root_shell: false,
-                app_data_write: false,
-            },
-            inputs: Vec::new(),
-            artifacts: Vec::new(),
-            steps: vec![step],
-            schema_version: 1,
-            kind: "execution_plan",
-        }
-    }
-
-    #[test]
-    fn generated_api_max_uses_the_real_executor_condition_path() {
-        let plan = generated_permission_execution_plan(
-            RuntimePermissionSelection {
-                permission_name: "android.permission.CAMERA".to_string(),
-                requires_root: false,
-                android_api_min: 23,
-                android_api_max: Some(29),
-            },
-            30,
-        );
-        let mut runner = ExecutorRunner::default();
-        let result = runner.run(&plan);
-        let serialized = serde_json::to_value(result).expect("execution result should serialize");
-        let action =
-            &serialized["steps"][0]["outputs"]["permission_results"]["value"]["actions"][0];
-        assert_eq!(action["status"], "not_applicable");
-        assert_eq!(action["reason_code"], "android_api_out_of_range");
-        assert!(runner.adapters().device().commands().is_empty());
-    }
-
-    #[test]
-    fn generated_target_29_write_storage_remains_applicable_on_api_30() {
-        let plan = generated_permission_execution_plan(
-            RuntimePermissionSelection {
-                permission_name: "android.permission.WRITE_EXTERNAL_STORAGE".to_string(),
-                requires_root: false,
-                android_api_min: 23,
-                android_api_max: None,
-            },
-            30,
-        );
-        let mut runner = ExecutorRunner::default();
-        let result = runner.run(&plan);
-        let serialized = serde_json::to_value(result).expect("execution result should serialize");
-        let action =
-            &serialized["steps"][0]["outputs"]["permission_results"]["value"]["actions"][0];
-        assert_ne!(action["status"], "not_applicable");
-        assert_eq!(runner.adapters().device().commands().len(), 1);
     }
 
     #[test]

@@ -18,7 +18,8 @@ default order is:
 
 The qualification uses production catalog loading, planning, review projection,
 and executor adapters. The source-bound contract below describes the current
-authored Recipes and App Definition after named target migration.
+schema-v1 Recipes and App Definition after App Artifact and named-target
+migration.
 
 ## 2. Source-bound contract
 
@@ -26,14 +27,15 @@ The strict contract is
 `tests/fixtures/recipe-qualification/retroarch-bios/qualification-contract.json`.
 It binds the raw authored sources as follows:
 
-The RetroArch App Definition supplies the seven frontend, thirteen core, and
-three system-resource archives as named `kind: file` artifacts. Its Recipe
-keeps the APK `remote_file`, cache selection, artifact groups, extraction, and
-copy behavior; the BIOS Recipe and its input-owned content remain unchanged.
+The RetroArch App Definition owns the `apk` artifact and the seven frontend,
+thirteen core, and three system-resource archives as named App Artifacts. The
+Recipe resolves these through App Artifact references and retains cache
+selection, artifact groups, extraction, and copy behavior. The BIOS Recipe and
+its input-owned content remain unchanged.
 
 | Source | SHA-256 |
 |---|---|
-| `authored/recipes/app.retroarch.provision.yaml` | `bf10874d72be73dc8a5255101403bbe025f6e073f1891a7146a9aa812ed173a2` |
+| `authored/recipes/app.retroarch.provision.yaml` | `41c53ffca788d0c56c71e6db7e819f5a73209a2efe7469a59d4190bf9823a83b` |
 | `authored/apps/retroarch.yaml` | `795e26f79d6f1eb2edccd76a0774a7ce5dbaa18fdcb13bad0572734640aac263` |
 | `authored/recipes/feature.copy_bios.yaml` | `4f4471aacb0cacebffcebb4785b12f0e7ef43d306526031540d0496957840fbc` |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `3da268bf1ce2dca8600baa47d7663a5d6542c0b5cd8c9a41510f2e9d71a3a969` |

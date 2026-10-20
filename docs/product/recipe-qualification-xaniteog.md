@@ -21,22 +21,27 @@ membership and default selection are not treated as product provenance.
 The strict contract at
 `tests/fixtures/recipe-qualification/xaniteog/qualification-contract.json`
 binds the raw `authored/recipes/app.xaniteog.install.yaml` bytes to SHA-256
-`c55f9547f7aa8de60f951386243992fa9b8c66329eeb6e1fd2f20bea21dda1f2`.
+`6d9d27fb4f4e9329bc277d236fcf47f76f8a71147d98e69b2a0eaf69fab29726`.
 The active qualification module is
 `crates/emuchef-rust-backend/src/recipe_qualification_xaniteog_tests.rs`.
 
 Qualification uses the real authored catalog through
 `CatalogSnapshot::legacy_local` and production
 `runtime_configuration::plan_configuration`. A valid local `.apk` file is
-bound explicitly to the authored required input. The generated plan is
-executed unchanged through deterministic sandbox-root adapters.
+bound through the required Recipe input to XaniteOG's `apk` App Artifact.
+Planning emits `resolve_artifacts`, and `install_apk` consumes the artifact's
+`local_path` with package identity supplied by the App Definition. The generated
+plan is executed unchanged through deterministic sandbox-root adapters.
 
 ## 3. What the tests prove
 
-- The strict contract matches recipe identity, source hash, required APK input
-  validation, `apk_install`, the `install_apk` operation, `Ali.Xanite`, the
-  authored input reference, `replace_existing: false`, and the
-  `package_installed` skip predicate.
+- The strict contract matches recipe identity and source hash, required APK
+  input validation, `apk_install`, App Artifact provenance, the
+  `resolve_artifacts` and `install_apk` operations, and the `Ali.Xanite`
+  App-owned package identity. The install consumes
+  `artifacts.app.xaniteog.install/xaniteog_apk.local_path`, uses
+  `replace_existing: false`, and has a parameterless `package_installed`
+  condition whose package identity comes from App context.
 - Production planning explicitly selects only `app.xaniteog.install`, emits a
   blocker-free executable review, and presents the configured APK as its
   filename without exposing its host parent directory or runtime authority

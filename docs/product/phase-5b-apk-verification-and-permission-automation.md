@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: complete
+Status: complete as a historical phase record. The optional `expected_package_name` and `expected_sha256` Recipe parameters and Recipe-derived APK security fingerprints described below are retired by the schema-v1 App Definition authority cutover. Current Recipes must resolve an APK App Artifact owned by their `app_ref`; package identity and trusted checksum policy belong to that App Definition. Invalid legacy content is inspectable for repair but is not normalized or accepted on save. Permission automation uses App Definition permission sets and is generated only when explicitly enabled.
 
 ## Purpose
 

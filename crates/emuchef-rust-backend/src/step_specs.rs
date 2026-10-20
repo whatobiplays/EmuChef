@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::model::{ParamValue, Step};
+use crate::model::Step;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StepSpecsResult {
@@ -73,82 +73,6 @@ pub fn list_step_specs_result() -> Value {
 pub fn step_specs_result() -> StepSpecsResult {
     StepSpecsResult {
         step_specs: vec![
-            spec(
-                "resolve_remote_release",
-                "Resolve Remote Release",
-                Some("download_url"),
-                vec![
-                    output("download_url", "string", true),
-                    output("asset_name", "string", false),
-                    output("release_tag", "string", false),
-                    output("published_at", "string", false),
-                    output("size", "integer", false),
-                ],
-                vec![
-                    "provider",
-                    "base_url",
-                    "repository",
-                    "include_prereleases",
-                    "asset_pattern",
-                ],
-                map(vec![
-                    (
-                        "provider",
-                        param(
-                            &["literal"],
-                            &["string"],
-                            true,
-                            vec!["github", "gitlab", "forgejo"],
-                            None,
-                        ),
-                    ),
-                    (
-                        "base_url",
-                        param(&["literal"], &["string"], true, vec![], None),
-                    ),
-                    (
-                        "repository",
-                        param(&["literal"], &["string"], true, vec![], None),
-                    ),
-                    (
-                        "include_prereleases",
-                        param(&["literal"], &["boolean"], false, vec![], None),
-                    ),
-                    (
-                        "asset_pattern",
-                        param(&["literal"], &["string"], true, vec![], None),
-                    ),
-                ]),
-                map(vec![("include_prereleases", json!(false))]),
-            ),
-            spec(
-                "resolve_github_release",
-                "Resolve GitHub Release",
-                Some("download_url"),
-                vec![
-                    output("download_url", "string", true),
-                    output("asset_name", "string", false),
-                    output("release_tag", "string", false),
-                    output("published_at", "string", false),
-                    output("size", "integer", false),
-                ],
-                vec!["repository", "include_prereleases", "asset_pattern"],
-                map(vec![
-                    (
-                        "repository",
-                        param(&["literal"], &["string"], true, vec![], None),
-                    ),
-                    (
-                        "include_prereleases",
-                        param(&["literal"], &["boolean"], false, vec![], None),
-                    ),
-                    (
-                        "asset_pattern",
-                        param(&["literal"], &["string"], true, vec![], None),
-                    ),
-                ]),
-                map(vec![("include_prereleases", json!(false))]),
-            ),
             spec(
                 "download_remote_file",
                 "Download Remote File",
@@ -348,30 +272,11 @@ pub fn step_specs_result() -> StepSpecsResult {
                 "Install APK",
                 None,
                 vec![],
-                vec![
-                    "app",
-                    "expected_package_name",
-                    "expected_sha256",
-                    "replace_existing",
-                ],
+                vec!["app", "replace_existing"],
                 map(vec![
                     (
                         "app",
-                        param(
-                            &["input_ref", "artifact_ref", "step_output_ref"],
-                            &["file_path"],
-                            true,
-                            vec![],
-                            None,
-                        ),
-                    ),
-                    (
-                        "expected_package_name",
-                        param(&["literal"], &["string"], false, vec![], None),
-                    ),
-                    (
-                        "expected_sha256",
-                        param(&["literal"], &["string"], false, vec![], None),
+                        param(&["artifact_ref"], &["file_path"], true, vec![], None),
                     ),
                     (
                         "replace_existing",
@@ -451,135 +356,9 @@ pub fn step_spec_for(type_name: &str) -> Option<StepSpecDto> {
         .find(|spec| spec.type_name == type_name)
 }
 
-/// Return the internal parameter contract for an authored step. The public
-/// StepSpec always describes the App Definition form; existing package-based
-/// steps retain a separate contract until their Recipes are migrated.
+/// Return the canonical authoring contract for an authored step.
 pub(crate) fn authored_step_spec_for(step: &Step) -> Option<StepSpecDto> {
-    let mut spec = step_spec_for(&step.type_name)?;
-    if step.app_ref.is_some() || step.params.contains_key("permission_set") {
-        return Some(spec);
-    }
-    match step.type_name.as_str() {
-        "grant_permissions" => {
-            spec.param_order = vec![
-                "runtime".to_string(),
-                "appops".to_string(),
-                "policy".to_string(),
-            ];
-            spec.params = map(vec![
-                (
-                    "appops",
-                    param(
-                        &["literal"],
-                        &["object"],
-                        false,
-                        vec![],
-                        Some(appops_shape()),
-                    ),
-                ),
-                (
-                    "policy",
-                    param(
-                        &["literal"],
-                        &["object"],
-                        false,
-                        vec![],
-                        Some(legacy_policy_shape()),
-                    ),
-                ),
-                (
-                    "runtime",
-                    param(
-                        &["literal"],
-                        &["object"],
-                        false,
-                        vec![],
-                        Some(runtime_permissions_shape()),
-                    ),
-                ),
-            ]);
-        }
-        "launch_app" => {
-            spec.param_order = vec!["package_name".to_string(), "activity".to_string()];
-            spec.params = map(vec![
-                (
-                    "activity",
-                    param(&["literal"], &["string"], false, vec![], None),
-                ),
-                (
-                    "package_name",
-                    param(&["literal"], &["string"], true, vec![], None),
-                ),
-            ]);
-        }
-        "force_stop_app" => {
-            spec.param_order = vec!["package_name".to_string()];
-            spec.params = map(vec![(
-                "package_name",
-                param(&["literal"], &["string"], true, vec![], None),
-            )]);
-        }
-        _ => {}
-    }
-    Some(spec)
-}
-
-/// Admit only complete literal legacy lifecycle forms with a valid package and
-/// optional valid activity. A missing or malformed
-/// App Definition context cannot become a legacy step by carrying one key.
-pub(crate) fn is_valid_legacy_lifecycle_form(step: &Step) -> bool {
-    if step.app_ref.is_some() {
-        return false;
-    }
-    let allowed = match step.type_name.as_str() {
-        "launch_app" => &["package_name", "activity"][..],
-        "force_stop_app" => &["package_name"][..],
-        _ => return false,
-    };
-    if step
-        .params
-        .keys()
-        .any(|name| !allowed.contains(&name.as_str()))
-    {
-        return false;
-    }
-    if !matches!(step.params.get("package_name"), Some(ParamValue::Literal(Value::String(package))) if crate::authored_models::is_valid_package_id(package))
-    {
-        return false;
-    }
-    match step.params.get("activity") {
-        None => true,
-        Some(ParamValue::Literal(Value::String(activity))) => is_valid_legacy_activity(activity),
-        _ => false,
-    }
-}
-
-fn is_valid_legacy_activity(activity: &str) -> bool {
-    let class = if let Some((package, class)) = activity.split_once('/') {
-        if !crate::authored_models::is_valid_package_id(package) {
-            return false;
-        }
-        class
-    } else {
-        activity
-    };
-    if crate::authored_models::is_valid_concrete_launcher_activity(class) {
-        return true;
-    }
-    let Some(relative) = class.strip_prefix('.') else {
-        return false;
-    };
-    !relative.is_empty()
-        && relative.split('.').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                && segment
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-        })
+    step_spec_for(&step.type_name)
 }
 
 pub fn is_supported_step_type(type_name: &str) -> bool {
@@ -673,53 +452,6 @@ fn artifact_group_list_shape() -> Value {
     })
 }
 
-fn runtime_permissions_shape() -> Value {
-    json!({
-        "fields": {
-            "name": {
-                "enumValues": [],
-                "kind": "string",
-                "required": true,
-            },
-            "package_name": {
-                "enumValues": [],
-                "kind": "string",
-                "required": true,
-            },
-        },
-        "itemKind": "object",
-        "kind": "list",
-        "ordered": true,
-        "unique": false,
-    })
-}
-
-fn appops_shape() -> Value {
-    json!({
-        "fields": {
-            "mode": {
-                "enumValues": [],
-                "kind": "string",
-                "required": true,
-            },
-            "op": {
-                "enumValues": [],
-                "kind": "string",
-                "required": true,
-            },
-            "package_name": {
-                "enumValues": [],
-                "kind": "string",
-                "required": true,
-            },
-        },
-        "itemKind": "object",
-        "kind": "list",
-        "ordered": true,
-        "unique": false,
-    })
-}
-
 fn permission_policy_shape() -> Value {
     json!({
         "fields": {
@@ -735,31 +467,10 @@ fn permission_policy_shape() -> Value {
     })
 }
 
-fn legacy_policy_shape() -> Value {
-    json!({
-        "fields": {
-            "on_failure": {
-                "default": "warn",
-                "enumValues": ["warn", "fail"],
-                "kind": "string",
-                "required": false,
-            },
-            "require_all": {
-                "default": false,
-                "enumValues": [],
-                "kind": "boolean",
-                "required": false,
-            },
-        },
-        "kind": "object",
-        "ordered": false,
-        "unique": false,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ParamValue;
 
     fn permission_step(app_ref: Option<&str>, permission_set: Option<&str>) -> Step {
         let mut params = crate::model::OrderedMap::new();
@@ -860,17 +571,17 @@ mod tests {
     }
 
     #[test]
-    fn existing_permission_steps_keep_their_legacy_editor_contract() {
-        let spec = authored_step_spec_for(&permission_step(None, None))
-            .expect("legacy permission step contract");
+    fn permission_steps_use_only_the_app_definition_contract() {
+        let spec =
+            authored_step_spec_for(&permission_step(None, None)).expect("permission step contract");
 
-        assert_eq!(spec.param_order, ["runtime", "appops", "policy"]);
-        assert!(spec.params.contains_key("runtime"));
-        assert!(spec.params.contains_key("appops"));
-        assert!(!spec.params.contains_key("permission_set"));
+        assert_eq!(spec.param_order, ["permission_set", "policy"]);
+        assert!(spec.params.contains_key("permission_set"));
+        assert!(!spec.params.contains_key("runtime"));
+        assert!(!spec.params.contains_key("appops"));
         assert!(spec.params["policy"].shape.as_ref().unwrap()["fields"]
             .get("require_all")
-            .is_some());
+            .is_none());
     }
 
     #[test]
@@ -882,5 +593,18 @@ mod tests {
         assert!(spec.params.contains_key("permission_set"));
         assert!(!spec.params.contains_key("runtime"));
         assert!(!spec.params.contains_key("appops"));
+    }
+
+    #[test]
+    fn source_specific_release_steps_are_removed_but_generic_download_remains() {
+        let specs = step_specs_result()
+            .step_specs
+            .into_iter()
+            .map(|spec| spec.type_name)
+            .collect::<Vec<_>>();
+
+        assert!(!specs.iter().any(|name| name == "resolve_remote_release"));
+        assert!(!specs.iter().any(|name| name == "resolve_github_release"));
+        assert!(specs.iter().any(|name| name == "download_remote_file"));
     }
 }

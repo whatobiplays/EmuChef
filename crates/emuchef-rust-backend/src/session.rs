@@ -1352,6 +1352,24 @@ fn authored_root_for_app_path(
     Ok(canonical_root)
 }
 
+fn wrong_document_kind(document_id: &str, expected_kind: &str) -> ApiError {
+    ApiError::invalid_request_with_details(
+        format!("Document {document_id:?} is not a {expected_kind} document."),
+        json!({ "documentId": document_id, "expectedKind": expected_kind }),
+    )
+}
+
+fn user_configuration_load_error(
+    action: &str,
+    error: crate::user_configuration::UserConfigurationLoadError,
+    details: Value,
+) -> ApiError {
+    ApiError::load_failed(
+        format!("Failed to {action} user configuration: {error}"),
+        details,
+    )
+}
+
 #[cfg(test)]
 mod catalog_refactor_dirty_session_tests {
     use super::*;
@@ -1409,9 +1427,12 @@ mod catalog_refactor_dirty_session_tests {
         fs::copy(fixtures.join("apps/demo_app.yaml"), &app_path).unwrap();
         fs::copy(fixtures.join("recipes/demo_recipe.yaml"), &recipe_path).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
         let root = authored_root.to_string_lossy().to_string();
         let recipe = sessions
             .open_recipe(recipe_path.to_str().unwrap(), Some(&root))
@@ -1488,9 +1509,12 @@ mod catalog_refactor_dirty_session_tests {
         fs::copy(fixtures.join("apps/demo_app.yaml"), &selected_path).unwrap();
         fs::copy(fixtures.join("apps/second_app.yaml"), &other_path).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
         let root = authored_root.to_string_lossy().to_string();
         let selected = sessions
             .open_app_definition(selected_path.to_str().unwrap(), Some(&root))
@@ -1534,9 +1558,12 @@ mod catalog_refactor_dirty_session_tests {
         let app_path = apps.join("demo_app.yaml");
         fs::copy(fixtures.join("apps/demo_app.yaml"), &app_path).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
         let root = authored_root.to_string_lossy().to_string();
         let document = sessions
             .open_app_definition(app_path.to_str().unwrap(), Some(&root))
@@ -1582,9 +1609,13 @@ mod catalog_refactor_dirty_session_tests {
         let app_path = apps.join("demo_app.yaml");
         fs::copy(fixtures.join("apps/demo_app.yaml"), &app_path).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
+
         let root = authored_root.to_string_lossy().to_string();
         let document = sessions
             .open_app_definition(app_path.to_str().unwrap(), Some(&root))
@@ -1636,9 +1667,12 @@ mod catalog_refactor_dirty_session_tests {
         let app_path = apps.join("demo_app.yaml");
         fs::copy(fixtures.join("apps/demo_app.yaml"), &app_path).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
         let root = authored_root.to_string_lossy().to_string();
         let document = sessions
             .open_app_definition(app_path.to_str().unwrap(), Some(&root))
@@ -1692,9 +1726,12 @@ mod catalog_refactor_dirty_session_tests {
         let observer_source = "schema_version: 1\nkind: recipe\nid: observer\nname: Observer\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts: {}\nartifact_groups: {}\nsteps:\n  - id: launch\n    type: launch_app\n    name: Launch\n    user_toggleable: false\n    app_ref: demo_app\n    dependencies: []\n    constraints:\n      capabilities: []\n      conflicts_with: []\n    skip_if: []\n    params: {}\n    verify: []\n";
         fs::write(&observer_path, observer_source).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
         let root = authored_root.to_string_lossy().to_string();
         let observer = sessions
             .open_recipe(observer_path.to_str().unwrap(), Some(&root))
@@ -1765,9 +1802,12 @@ mod catalog_refactor_dirty_session_tests {
         let app_path = apps.join("demo_app.yaml");
         fs::copy(fixtures.join("apps/demo_app.yaml"), &app_path).unwrap();
 
-        let mut sessions = DocumentSessionManager::default();
-        sessions.catalog_refactors =
-            CatalogRefactorSession::with_storage(temporary.path().join("application-state"));
+        let mut sessions = DocumentSessionManager {
+            catalog_refactors: CatalogRefactorSession::with_storage(
+                temporary.path().join("application-state"),
+            ),
+            ..DocumentSessionManager::default()
+        };
         let root = authored_root.to_string_lossy().to_string();
         let selected = sessions
             .open_app_definition(app_path.to_str().unwrap(), Some(&root))
@@ -1801,22 +1841,4 @@ mod catalog_refactor_dirty_session_tests {
             }])
         );
     }
-}
-
-fn wrong_document_kind(document_id: &str, expected_kind: &str) -> ApiError {
-    ApiError::invalid_request_with_details(
-        format!("Document {document_id:?} is not a {expected_kind} document."),
-        json!({ "documentId": document_id, "expectedKind": expected_kind }),
-    )
-}
-
-fn user_configuration_load_error(
-    action: &str,
-    error: crate::user_configuration::UserConfigurationLoadError,
-    details: Value,
-) -> ApiError {
-    ApiError::load_failed(
-        format!("Failed to {action} user configuration: {error}"),
-        details,
-    )
 }

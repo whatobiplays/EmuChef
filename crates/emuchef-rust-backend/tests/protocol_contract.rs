@@ -75,8 +75,6 @@ fn assert_step_specs_surface(result: &Value) {
     assert_eq!(
         step_types,
         vec![
-            "resolve_remote_release",
-            "resolve_github_release",
             "download_remote_file",
             "resolve_artifacts",
             "extract_artifacts",
@@ -118,35 +116,13 @@ fn assert_step_specs_surface(result: &Value) {
         .iter()
         .find(|spec| spec.type_name == "install_apk")
         .expect("install_apk StepSpec should be present");
+    assert_eq!(install_apk.param_order, vec!["app", "replace_existing"]);
     assert_eq!(
-        install_apk.param_order,
-        vec![
-            "app",
-            "expected_package_name",
-            "expected_sha256",
-            "replace_existing"
-        ]
+        install_apk.params["app"].accepted_sources,
+        vec!["artifact_ref"]
     );
-    assert_eq!(
-        install_apk.params["expected_package_name"].accepted_sources,
-        vec!["literal"]
-    );
-    assert_eq!(
-        install_apk.params["expected_package_name"].accepted_value_types,
-        vec!["string"]
-    );
-    assert!(!install_apk.params["expected_package_name"].required);
-    assert!(!install_apk.defaults.contains_key("expected_package_name"));
-    assert_eq!(
-        install_apk.params["expected_sha256"].accepted_sources,
-        vec!["literal"]
-    );
-    assert_eq!(
-        install_apk.params["expected_sha256"].accepted_value_types,
-        vec!["string"]
-    );
-    assert!(!install_apk.params["expected_sha256"].required);
-    assert!(!install_apk.defaults.contains_key("expected_sha256"));
+    assert!(!install_apk.params.contains_key("expected_package_name"));
+    assert!(!install_apk.params.contains_key("expected_sha256"));
 
     let grant_permissions = parsed
         .step_specs

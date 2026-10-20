@@ -26,6 +26,75 @@ use qualification::{
     QualificationContract, QualificationGroup, FIXTURE_PACKAGE, GLOBAL_OPT_IN,
 };
 
+const PHASE6C_APP_ID: &str = "phase6c.qualification.fixture";
+const PHASE6C_RECIPE_ID: &str = "phase6c.qualification.non_root";
+const PHASE6C_APK_ARTIFACT_ID: &str = "phase6c.qualification.non_root/fixture_apk";
+
+#[test]
+fn phase6c_qualification_plan_validates_without_a_device() {
+    let plan = phase6c_qualification_plan();
+    let install = phase6c_plan_step_in(&plan, "install_fixture");
+    let permission = phase6c_plan_step_in(&plan, "grant_fixture_permissions");
+    let launch = phase6c_plan_step_in(&plan, "launch_fixture");
+    let force_stop = phase6c_plan_step_in(&plan, "force_stop_fixture");
+
+    assert!(plan
+        .apps
+        .iter()
+        .any(|app| { app.id == PHASE6C_APP_ID && app.package_id == FIXTURE_PACKAGE }));
+    let apk_artifact = plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == PHASE6C_APK_ARTIFACT_ID)
+        .expect("Phase 6C plan should retain its APK artifact");
+    let provenance = apk_artifact
+        .app_provenance
+        .as_ref()
+        .expect("Phase 6C APK should retain App Artifact provenance");
+    assert_eq!(provenance.app_id, PHASE6C_APP_ID);
+    assert_eq!(provenance.artifact_id, "apk");
+    assert_eq!(provenance.kind, "apk");
+    assert!(matches!(
+        install.params.get("app"),
+        Some(ExecutionParamValue::Ref { ref_value })
+            if ref_value == &format!("artifacts.{PHASE6C_APK_ARTIFACT_ID}.local_path")
+    ));
+    assert_eq!(install.app_id.as_deref(), Some(PHASE6C_APP_ID));
+    for condition in install.skip_if.iter().chain(&install.verify) {
+        assert_eq!(condition.app_id.as_deref(), Some(PHASE6C_APP_ID));
+        assert!(condition.params.is_empty());
+    }
+    assert!(permission.params.is_empty());
+    assert_eq!(permission.app_id.as_deref(), Some(PHASE6C_APP_ID));
+    let permission_plan = permission
+        .permission_plan
+        .as_ref()
+        .expect("Phase 6C permission step should retain its plan");
+    assert!(permission_plan.actions.iter().any(|action| matches!(
+        action,
+        PermissionPlanAction::RuntimePermission { permission, .. }
+            if permission == "android.permission.CAMERA"
+    )));
+    assert!(permission_plan.actions.iter().any(|action| matches!(
+        action,
+        PermissionPlanAction::AppOp { op, .. } if op == "CAMERA"
+    )));
+    assert!(crate::planner::validated_plan_permission_plan(&plan, permission).is_ok());
+    assert_eq!(
+        crate::planner::validated_plan_lifecycle_target(&plan, launch).unwrap(),
+        (
+            FIXTURE_PACKAGE.to_string(),
+            Some("com.emuchef.fixture.MainActivity".to_string()),
+        )
+    );
+    assert_eq!(
+        crate::planner::validated_plan_lifecycle_target(&plan, force_stop).unwrap(),
+        (FIXTURE_PACKAGE.to_string(), None)
+    );
+    crate::planner::validate_execution_plan_local_input_bindings(&plan)
+        .expect("Phase 6C artifact inputs should validate without a device");
+}
+
 #[test]
 #[ignore = "manual mutating executor qualification; requires the install/package group and one prepared non-root device"]
 fn manual_real_adb_install_package_group() {
@@ -36,9 +105,18 @@ fn manual_real_adb_install_package_group() {
     let install = fixture_install_step();
     let preparation = qualification.cleanup(false);
     let package_absent_before = qualification.package_installed();
-    let result = run_executor_plan(qualification.device(), vec![install.clone()]);
+    let result = run_executor_plan(
+        qualification.device(),
+        vec![
+            phase6c_plan_step("resolve_fixture_artifacts"),
+            install.clone(),
+        ],
+    );
     let package_present_after_install = qualification.package_installed();
-    let idempotent = run_executor_plan(qualification.device(), vec![install]);
+    let idempotent = run_executor_plan(
+        qualification.device(),
+        vec![phase6c_plan_step("resolve_fixture_artifacts"), install],
+    );
     let cleanup = qualification.cleanup(false);
     assert!(
         preparation.success,
@@ -46,6 +124,10 @@ fn manual_real_adb_install_package_group() {
     );
     assert_eq!(package_absent_before, Ok(false));
     assert!(result.success, "fixture install result: {result:#?}");
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Executed
+    );
     assert_eq!(
         result.steps[0].status,
         crate::executor::StepRunStatus::Executed
@@ -56,7 +138,7 @@ fn manual_real_adb_install_package_group() {
         "fixture idempotency result: {idempotent:#?}"
     );
     assert_eq!(
-        idempotent.steps[0].status,
+        idempotent.steps[1].status,
         crate::executor::StepRunStatus::Skipped
     );
     assert!(cleanup.success, "fixture cleanup result: {cleanup:#?}");
@@ -231,36 +313,24 @@ fn manual_real_adb_permission_appop_group() {
         return;
     };
     let preparation = qualification.cleanup(false);
-    let mut permissions = executor_step("fixture/permissions", "grant_permissions");
-    permissions.dependencies = vec!["fixture/install".to_string()];
-    permissions.params.insert(
-        "runtime".to_string(),
-        literal(json!([{
-            "package_name": FIXTURE_PACKAGE,
-            "name": "android.permission.CAMERA",
-            "required": true
-        }])),
-    );
-    permissions.params.insert(
-        "appops".to_string(),
-        literal(json!([{
-            "package_name": FIXTURE_PACKAGE,
-            "op": "CAMERA",
-            "mode": "allow",
-            "required": false
-        }])),
-    );
-    permissions.params.insert(
-        "policy".to_string(),
-        literal(json!({ "on_failure": "warn", "require_all": false })),
-    );
+    let mut permissions = phase6c_plan_step("grant_fixture_permissions");
+    permissions
+        .permission_plan
+        .as_mut()
+        .expect("Phase 6C permission step should contain a sealed permission plan")
+        .on_failure = PermissionFailurePolicy::Warn;
     let mut already_granted = permissions.clone();
-    already_granted.id = "fixture/permissions-already-granted".to_string();
+    already_granted.id = format!("{PHASE6C_RECIPE_ID}/permissions_already_granted");
     already_granted.dependencies = vec![permissions.id.clone()];
 
     let result = run_executor_plan(
         qualification.device(),
-        vec![fixture_install_step(), permissions, already_granted],
+        vec![
+            phase6c_plan_step("resolve_fixture_artifacts"),
+            fixture_install_step(),
+            permissions,
+            already_granted,
+        ],
     );
     let camera_granted = qualification.camera_permission_granted();
     let appop_allowed = qualification
@@ -274,7 +344,11 @@ fn manual_real_adb_permission_appop_group() {
     );
     assert!(result.success, "permission/app-op result: {result:#?}");
     assert_eq!(
-        result.steps[0].status,
+        result.steps[2].status,
+        crate::executor::StepRunStatus::Executed
+    );
+    assert_eq!(
+        result.steps[3].status,
         crate::executor::StepRunStatus::Executed
     );
     assert_eq!(
@@ -282,7 +356,7 @@ fn manual_real_adb_permission_appop_group() {
         crate::executor::StepRunStatus::Executed
     );
     assert_eq!(
-        result.steps[2].status,
+        result.steps[0].status,
         crate::executor::StepRunStatus::Executed
     );
     assert_eq!(camera_granted, Ok(true));
@@ -320,24 +394,17 @@ fn manual_real_adb_launch_force_stop_group() {
         return;
     };
     let preparation = qualification.cleanup(false);
-    let mut launch = executor_step("fixture/launch", "launch_app");
-    launch.dependencies = vec!["fixture/install".to_string()];
-    launch
-        .params
-        .insert("package_name".to_string(), literal(json!(FIXTURE_PACKAGE)));
-    launch.params.insert(
-        "activity".to_string(),
-        literal(json!("com.emuchef.fixture.MainActivity")),
-    );
-    let mut stop = executor_step("fixture/force-stop", "force_stop_app");
-    stop.params
-        .insert("package_name".to_string(), literal(json!(FIXTURE_PACKAGE)));
+    let install = fixture_install_step();
+    let resolve = phase6c_plan_step("resolve_fixture_artifacts");
+    let mut launch = phase6c_plan_step("launch_fixture");
+    launch.dependencies = vec![install.id.clone()];
+    let mut stop = phase6c_plan_step("force_stop_fixture");
+    stop.dependencies.clear();
     let mut stop_again = stop.clone();
-    stop_again.id = "fixture/force-stop-again".to_string();
+    stop_again.id = format!("{PHASE6C_RECIPE_ID}/force_stop_fixture_again");
     stop_again.dependencies = vec![stop.id.clone()];
 
-    let launch_result =
-        run_executor_plan(qualification.device(), vec![fixture_install_step(), launch]);
+    let launch_result = run_executor_plan(qualification.device(), vec![resolve, install, launch]);
     let process_running_after_launch = qualification.process_running();
     let stop_result = run_executor_plan(qualification.device(), vec![stop, stop_again]);
     let cleanup = qualification.cleanup(false);
@@ -350,7 +417,7 @@ fn manual_real_adb_launch_force_stop_group() {
         "fixture launch result: {launch_result:#?}"
     );
     assert_eq!(
-        launch_result.steps[1].status,
+        launch_result.steps[2].status,
         crate::executor::StepRunStatus::Executed
     );
     assert_eq!(process_running_after_launch, Ok(true));
@@ -426,65 +493,24 @@ fn fixture_apk_checksum() -> String {
     .to_string()
 }
 
-fn fixture_install_step() -> ExecutionStep {
-    let mut install = executor_step("fixture/install", "install_apk");
-    install.params.insert(
-        "app".to_string(),
-        literal(runtime_value(
-            "file_path",
-            json!(fixture_apk_path()),
-            Some("host"),
-        )),
-    );
-    install.params.insert(
-        "expected_package_name".to_string(),
-        literal(json!(FIXTURE_PACKAGE)),
-    );
-    install.params.insert(
-        "expected_sha256".to_string(),
-        literal(json!(fixture_apk_checksum())),
-    );
-    install
-        .params
-        .insert("replace_existing".to_string(), literal(json!(true)));
-    install.skip_if = vec![condition(
-        "package_installed",
-        json!({ "package_name": FIXTURE_PACKAGE }),
-    )];
-    install.verify = vec![condition(
-        "package_installed",
-        json!({ "package_name": FIXTURE_PACKAGE }),
-    )];
-    install
-}
-
-fn run_executor_plan(
-    device: RealAdbDevice,
-    steps: Vec<ExecutionStep>,
-) -> crate::executor::ExecutionRunResult {
-    let sandbox = tempfile::tempdir().expect("qualification sandbox should be created");
-    let plan = ExecutionPlan {
-        device_plan: None,
-        resolved_inputs: Vec::new(),
-        id: "plan.phase6c.fixture.001".to_string(),
-        source: ExecutionPlanSource {
-            device_profile_ref: "fixture.non_root".to_string(),
-            device_plan_ref: "fixture.non_root".to_string(),
-            selected_recipe_refs: vec!["fixture.non_root".to_string()],
-            expanded_recipe_refs: vec!["fixture.non_root".to_string()],
-            catalog: None,
-        },
-        recipes: Vec::new(),
-        apps: Vec::new(),
-        target_device: None,
-        device_context: DeviceContext {
+/// Build the Phase 6C executor fixture through the maintained App and Recipe definitions.
+fn phase6c_qualification_plan() -> ExecutionPlan {
+    let fixture_root = fixture_root();
+    let authored_root = fixture_root.join("recipe");
+    let mut planner_input = crate::planner::PlannerInput::from_authored_root(
+        &authored_root,
+        vec![PHASE6C_RECIPE_ID.to_string()],
+        "plan.phase6c.fixture.001".to_string(),
+        PHASE6C_RECIPE_ID.to_string(),
+        PHASE6C_RECIPE_ID.to_string(),
+        DeviceContext {
             manufacturer: "Qualification fixture".to_string(),
             model: "Non-root Android device".to_string(),
             android_version: 11,
             android_api_level: Some(30),
             device_tags: Vec::new(),
         },
-        runtime_capabilities: RuntimeCapabilities {
+        RuntimeCapabilities {
             adb_available: true,
             apk_install: true,
             shared_storage_write: true,
@@ -494,12 +520,66 @@ fn run_executor_plan(
             root_shell: false,
             app_data_write: false,
         },
-        inputs: Vec::new(),
-        artifacts: Vec::new(),
-        steps,
-        schema_version: 1,
-        kind: "execution_plan",
-    };
+    )
+    .expect("Phase 6C qualification Recipe should load");
+
+    for (input_id, path) in [
+        ("fixture_apk", fixture_apk_path()),
+        (
+            "single_file",
+            fixture_root.join("corpus/source/single-file.txt"),
+        ),
+        (
+            "nested_directory",
+            fixture_root.join("corpus/source/nested"),
+        ),
+        ("fixture_archive", fixture_root.join("corpus/archive.zip")),
+    ] {
+        planner_input.explicit_input_bindings.insert(
+            format!("{PHASE6C_RECIPE_ID}/{input_id}"),
+            json!(path.to_string_lossy().into_owned()),
+        );
+    }
+
+    let app_definition = crate::authored_models::load_app_definition(
+        authored_root.join("apps/phase-6c-qualification.yaml"),
+    )
+    .expect("Phase 6C qualification App Definition should load");
+    let planning =
+        crate::planner::plan_execution_with_app_definitions(planner_input, &[app_definition]);
+    assert!(
+        planning.errors.is_empty(),
+        "Phase 6C qualification inputs should produce a valid plan: {:#?}",
+        planning.errors
+    );
+    planning
+        .execution_plan
+        .expect("Phase 6C qualification inputs should produce an execution plan")
+}
+
+fn phase6c_plan_step_in<'a>(plan: &'a ExecutionPlan, name: &str) -> &'a ExecutionStep {
+    plan.steps
+        .iter()
+        .find(|step| step.id.rsplit('/').next() == Some(name))
+        .unwrap_or_else(|| panic!("Phase 6C plan should contain step '{name}'"))
+}
+
+fn phase6c_plan_step(name: &str) -> ExecutionStep {
+    let plan = phase6c_qualification_plan();
+    phase6c_plan_step_in(&plan, name).clone()
+}
+
+fn fixture_install_step() -> ExecutionStep {
+    phase6c_plan_step("install_fixture")
+}
+
+fn run_executor_plan<E: crate::executor::adb::AdbCommandExecutor>(
+    device: RealAdbDevice<E>,
+    steps: Vec<ExecutionStep>,
+) -> crate::executor::ExecutionRunResult {
+    let sandbox = tempfile::tempdir().expect("qualification sandbox should be created");
+    let mut plan = phase6c_qualification_plan();
+    plan.steps = steps;
     let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
         device,
         sandbox.path().join("runtime"),

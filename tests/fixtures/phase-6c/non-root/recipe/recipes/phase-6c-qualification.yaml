@@ -71,31 +71,49 @@ inputs:
     metadata:
       tags:
         - qualification
+artifacts:
+  fixture_apk:
+    type: app_artifact
+    app_ref: phase6c.qualification.fixture
+    artifact: apk
+    input:
+      ref: inputs.fixture_apk
+    cache: none
 steps:
+  - id: resolve_fixture_artifacts
+    type: resolve_artifacts
+    name: Resolve qualification fixture APK
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifacts:
+        - fixture_apk
+    verify: []
   - id: install_fixture
     type: install_apk
+    app_ref: phase6c.qualification.fixture
     name: Install qualification fixture
     progress_note: Installing the qualification fixture
     user_toggleable: false
-    dependencies: []
+    dependencies:
+      - resolve_fixture_artifacts
     constraints:
       capabilities:
         - apk_install
       conflicts_with: []
     skip_if:
       - type: package_installed
-        params:
-          package_name: com.emuchef.fixture
+        params: {}
     params:
       app:
-        ref: inputs.fixture_apk
+        ref: artifacts.fixture_apk.local_path
       replace_existing: false
-      expected_package_name: com.emuchef.fixture
-      expected_sha256: 8495b56d5a191904fec5162d21a61561c4782e1d00a46748fb7ee5d3c5bb5179
     verify:
       - type: package_installed
-        params:
-          package_name: com.emuchef.fixture
+        params: {}
   - id: copy_single_file
     type: copy_files
     name: Copy qualification file
@@ -161,6 +179,7 @@ steps:
           path: /sdcard/EmuChefQualification/com.emuchef.fixture/output/archive
   - id: grant_fixture_permissions
     type: grant_permissions
+    app_ref: phase6c.qualification.fixture
     name: Apply qualification permission state
     progress_note: Applying the fixture permission and app-op state
     user_toggleable: false
@@ -172,21 +191,13 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      runtime:
-        - package_name: com.emuchef.fixture
-          name: android.permission.CAMERA
-          required: false
-      appops:
-        - package_name: com.emuchef.fixture
-          op: CAMERA
-          mode: allow
-          required: false
+      permission_set: baseline
       policy:
         on_failure: fail
-        require_all: false
     verify: []
   - id: launch_fixture
     type: launch_app
+    app_ref: phase6c.qualification.fixture
     name: Launch qualification fixture
     progress_note: Launching the qualification fixture
     user_toggleable: false
@@ -200,12 +211,11 @@ steps:
         - app_launch
       conflicts_with: []
     skip_if: []
-    params:
-      package_name: com.emuchef.fixture
-      activity: .MainActivity
+    params: {}
     verify: []
   - id: force_stop_fixture
     type: force_stop_app
+    app_ref: phase6c.qualification.fixture
     name: Stop qualification fixture
     progress_note: Stopping the qualification fixture
     user_toggleable: false
@@ -216,9 +226,7 @@ steps:
         - shell_command
       conflicts_with: []
     skip_if: []
-    params:
-      package_name: com.emuchef.fixture
+    params: {}
     verify:
       - type: package_installed
-        params:
-          package_name: com.emuchef.fixture
+        params: {}

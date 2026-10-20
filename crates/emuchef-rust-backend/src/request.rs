@@ -625,11 +625,14 @@ fn parse_app_generator_request(
     })
 }
 
+/// Holds the normalized root, forwarded payload, and selected app definition.
+type ResolvedAppGeneratorPayload = (PathBuf, Map<String, Value>, Option<SelectedExistingApp>);
+
 fn resolve_app_generator_payload(
     payload: &Map<String, Value>,
     sessions: Option<&DocumentSessionManager>,
     require_root: bool,
-) -> Result<(PathBuf, Map<String, Value>, Option<SelectedExistingApp>), ApiError> {
+) -> Result<ResolvedAppGeneratorPayload, ApiError> {
     if payload.contains_key("existingApp") {
         return Err(ApiError::invalid_request_with_details(
             "Request field 'existingApp' is not accepted; select an existing App and provide 'existingAppSnapshotId'.",
@@ -898,7 +901,7 @@ fn parse_app_recipe_collision_request(
     let app = payload
         .get("app")
         .cloned()
-        .ok_or_else(&invalid)
+        .ok_or_else(invalid)
         .and_then(|value| serde_json::from_value(value).map_err(|_| invalid()))?;
     let legacy_recipe_id = match payload.get("recipeId") {
         None => None,
@@ -907,7 +910,7 @@ fn parse_app_recipe_collision_request(
     };
     let recipe = match payload.get("recipe") {
         None => None,
-        Some(value) => Some(parse_collision_recipe_dto(value.clone()).ok_or_else(&invalid)?),
+        Some(value) => Some(parse_collision_recipe_dto(value.clone()).ok_or_else(invalid)?),
     };
     let recipe_id = match (&recipe, legacy_recipe_id) {
         (Some(recipe), Some(recipe_id)) if recipe.id == recipe_id => recipe_id,
@@ -916,11 +919,7 @@ fn parse_app_recipe_collision_request(
         (None, Some(recipe_id)) => recipe_id,
         (None, None) => return Err(invalid()),
     };
-    Ok(crate::generation::AppRecipeCollisionRequest {
-        app,
-        recipe_id,
-        recipe,
-    })
+    Ok(crate::generation::AppRecipeCollisionRequest { app, recipe_id })
 }
 
 #[derive(Deserialize)]
@@ -2131,7 +2130,6 @@ steps:
         });
         let parsed = parse_app_recipe_collision_request(new_payload.as_object().unwrap()).unwrap();
         assert_eq!(parsed.recipe_id, "app.example.install");
-        assert!(parsed.recipe.is_some());
 
         let legacy_payload = json!({
             "authoredRoot": "/tmp/authored",
@@ -2141,7 +2139,6 @@ steps:
         let parsed =
             parse_app_recipe_collision_request(legacy_payload.as_object().unwrap()).unwrap();
         assert_eq!(parsed.recipe_id, "app.example.install");
-        assert!(parsed.recipe.is_none());
 
         for invalid_payload in [
             json!({ "authoredRoot": "/tmp/authored", "app": collision_app() }),

@@ -46,14 +46,27 @@ inputs:
       allowed_extensions: []
       path_kind: directory
     default: null
+  example_app_apk:
+    type: file
+    role: apk
+    label: Example App APK
+    description: APK supplied to the example App Definition.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: [apk]
+      path_kind: file
+    default: null
 artifacts:
   example_app_apk:
-    # v1 artifact types:
-    # - remote_file
-    type: remote_file
-    url: https://example.com/example-app.apk
-    # cache: default | none
-    cache: default
+    # App installation resolves the APK from its owning App Definition.
+    type: app_artifact
+    app_ref: example.app.template
+    artifact: apk
+    input:
+      ref: inputs.example_app_apk
+    cache: none
   example_core_zip:
     type: remote_file
     url: https://example.com/example-core.zip
@@ -113,6 +126,7 @@ steps:
     verify: []
   - id: install_example_app
     type: install_apk
+    app_ref: example.app.template
     name: Install example app
     user_toggleable: false
     dependencies:
@@ -125,10 +139,9 @@ steps:
       # Current v1 condition types:
       # - path_exists      params.path
       # - file_exists      params.path
-      # - package_installed params.package_name
+      # - package_installed requires an App-bound step and uses params: {}
       - type: package_installed
-        params:
-          package_name: com.example.app
+        params: {}
     params:
       app:
         ref: artifacts.example_app_apk.local_path
@@ -171,6 +184,7 @@ steps:
     verify: []
   - id: force_stop_example_app
     type: force_stop_app
+    app_ref: example.app.template
     name: Force stop example app
     user_toggleable: false
     dependencies:
@@ -178,13 +192,11 @@ steps:
     constraints:
       capabilities: []
       conflicts_with: []
-    params:
-      # force_stop_app params:
-      # - package_name: non-empty string
-      package_name: com.example.app
+    params: {}
     verify: []
   - id: grant_example_permissions
     type: grant_permissions
+    app_ref: example.app.template
     name: Grant example permissions
     user_toggleable: false
     dependencies:
@@ -192,24 +204,8 @@ steps:
     constraints:
       capabilities: []
       conflicts_with: []
-    # grant_permissions actions are authored on this step. Multiple grant steps
-    # are allowed, and each step applies only the runtime/appops items declared
-    # in its own params.
     params:
-      runtime:
-        - package_name: com.example.app
-          name: android.permission.POST_NOTIFICATIONS
-          required: false
-          when:
-            android_api_min: 33
-      appops:
-        - package_name: com.example.app
-          op: MANAGE_EXTERNAL_STORAGE
-          mode: allow
-          required: false
-          when:
-            rooted: true
+      permission_set: baseline
       policy:
         on_failure: warn
-        require_all: false
     verify: []

@@ -1,0 +1,20 @@
+schema_version: 1
+kind: app_definition
+id: planner_app
+name: Planner Test App
+package_id: com.example.app
+launcher_activity: com.example.app.MainActivity
+artifacts:
+  apk:
+    kind: apk
+    name: Planner Test APK
+    source:
+      strategy: direct_url
+      url: https://example.com/app.apk
+permission_sets:
+  baseline:
+    runtime:
+      - permission: android.permission.POST_NOTIFICATIONS
+    app_ops:
+      - op: MANAGE_EXTERNAL_STORAGE
+        mode: allow

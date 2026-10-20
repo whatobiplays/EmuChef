@@ -715,10 +715,6 @@ impl ExecutorDevice for CopyFailureDevice {
         <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
     }
 
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
-        <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
-    }
-
     fn apply_permission_operation(
         &mut self,
         operation: crate::executor::PermissionOperation,

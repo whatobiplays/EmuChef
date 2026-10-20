@@ -17,7 +17,9 @@ use crate::executor::{
     DeviceOperationError, ExecutorAdapters, ExecutorDevice, ExecutorRunner, FakeDryRunDevice,
     StepRunStatus,
 };
-use crate::planner::{BindingSource, ExecutionParamValue, ExecutionPlan, ExecutionStep};
+use crate::planner::{
+    BindingSource, ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan, ExecutionStep,
+};
 use crate::runtime_configuration::PlanConfigurationResult;
 
 const TARGET_RECIPE: &str = "app.xaniteog.install";
@@ -71,10 +73,12 @@ struct InputContract {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InstallContract {
     step_id_suffix: String,
+    app_id: String,
     package_name: String,
-    input_ref: String,
+    artifact_local_path_ref: String,
     replace_existing: bool,
     skip_condition_type: String,
+    skip_condition_params: Value,
 }
 
 fn repository_root() -> PathBuf {
@@ -99,6 +103,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn write_xaniteog_test_apk(workspace: &tempfile::TempDir, destination: &Path) {
+    let fixture =
+        crate::apk_manifest::tests::write_valid_test_apk_with_package(workspace, TARGET_PACKAGE);
+    fs::rename(fixture, destination).expect("valid XaniteOG APK fixture should be placed");
+}
+
 fn load_contract() -> QualificationContract {
     let text = fs::read_to_string(contract_path())
         .expect("XaniteOG qualification contract should be readable");
@@ -116,7 +126,10 @@ fn load_contract() -> QualificationContract {
     );
     assert_eq!(contract.required_inputs, vec![INPUT_KEY]);
     assert!(contract.optional_inputs.is_empty());
-    assert_eq!(contract.required_operation_families, vec!["install_apk"]);
+    assert_eq!(
+        contract.required_operation_families,
+        vec!["resolve_artifacts", "install_apk"]
+    );
     assert_eq!(contract.input.key, INPUT_KEY);
     assert!(contract.input.required);
     assert_eq!(contract.input.type_name, "file");
@@ -125,10 +138,18 @@ fn load_contract() -> QualificationContract {
     assert_eq!(contract.input.allowed_extensions, vec!["apk"]);
     assert_eq!(contract.input.path_kind, "file");
     assert_eq!(contract.install.step_id_suffix, "install_xaniteog");
+    assert_eq!(contract.install.app_id, "xaniteog");
     assert_eq!(contract.install.package_name, TARGET_PACKAGE);
-    assert_eq!(contract.install.input_ref, "inputs.xaniteog_apk");
+    assert_eq!(
+        contract.install.artifact_local_path_ref,
+        "artifacts.app.xaniteog.install/xaniteog_apk.local_path"
+    );
     assert!(!contract.install.replace_existing);
     assert_eq!(contract.install.skip_condition_type, "package_installed");
+    assert_eq!(
+        contract.install.skip_condition_params,
+        Value::Object(Default::default())
+    );
     assert!(!contract.live_network_required_for_automated_qualification);
     assert_eq!(contract.automated_status, "qualified");
     assert_eq!(contract.physical_status, "deferred");
@@ -230,8 +251,7 @@ fn xaniteog_real_authored_plan_and_review_match_qualification_contract() {
     let contract = load_contract();
     let temp = tempfile::tempdir().expect("qualification tempdir should be created");
     let apk_path = temp.path().join("xaniteog.apk");
-    fs::write(&apk_path, b"deterministic XaniteOG APK fixture\n")
-        .expect("XaniteOG APK fixture should be written");
+    write_xaniteog_test_apk(&temp, &apk_path);
     let result = plan_xaniteog(Some(&apk_path));
     assert!(
         result
@@ -256,17 +276,47 @@ fn xaniteog_real_authored_plan_and_review_match_qualification_contract() {
     assert_eq!(plan.source.device_plan_ref, QUALIFICATION_DEVICE_PLAN);
     assert_eq!(plan.source.device_profile_ref, "ayaneo.pocket_s2");
     assert!(plan.recipes.iter().all(|recipe| recipe.id == TARGET_RECIPE));
-    assert_eq!(plan.steps.len(), 1);
+    assert_eq!(plan.steps.len(), 2);
+
+    let resolve = generated_step(plan, "resolve_xaniteog_artifacts");
+    assert_eq!(resolve.type_name, "resolve_artifacts");
+    assert!(resolve.dependencies.is_empty());
+    let artifact = plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id.ends_with("/xaniteog_apk"))
+        .expect("XaniteOG APK App Artifact should be part of the plan");
+    assert_eq!(plan.artifacts.len(), 1);
+    assert!(matches!(
+        &artifact.source,
+        ExecutionArtifactSource::LocalInput { input_id } if input_id == INPUT_KEY
+    ));
+    assert_eq!(
+        artifact.app_provenance.as_ref().map(|provenance| (
+            provenance.app_id.as_str(),
+            provenance.artifact_id.as_str(),
+            provenance.kind.as_str(),
+        )),
+        Some(("xaniteog", "apk", "apk"))
+    );
 
     let step = generated_step(plan, &contract.install.step_id_suffix);
     assert_eq!(step.type_name, "install_apk");
+    assert_eq!(
+        step.app_id.as_deref(),
+        Some(contract.install.app_id.as_str())
+    );
+    assert!(step
+        .dependencies
+        .iter()
+        .any(|dependency| dependency.ends_with("/resolve_xaniteog_artifacts")));
     assert_eq!(step.constraints.capabilities, vec!["apk_install"]);
     for capability in &contract.qualification_context_capabilities {
         assert!(runtime_capability_enabled(plan, capability));
     }
     assert_eq!(
         contract.required_operation_families,
-        vec![step.type_name.clone()]
+        vec!["resolve_artifacts", "install_apk"]
     );
     assert_eq!(result.resolved_inputs.len(), 1);
     let binding = &result.resolved_inputs[0];
@@ -279,7 +329,7 @@ fn xaniteog_real_authored_plan_and_review_match_qualification_contract() {
     assert_eq!(
         step.params.get("app"),
         Some(&ExecutionParamValue::Ref {
-            ref_value: format!("inputs.{INPUT_KEY}"),
+            ref_value: contract.install.artifact_local_path_ref.clone(),
         })
     );
     assert_eq!(
@@ -294,10 +344,8 @@ fn xaniteog_real_authored_plan_and_review_match_qualification_contract() {
         step.skip_if[0].type_name,
         contract.install.skip_condition_type
     );
-    assert_eq!(
-        step.skip_if[0].params.get("package_name"),
-        Some(&Value::String(contract.install.package_name.clone()))
-    );
+    assert_eq!(step.skip_if[0].app_id.as_deref(), Some("xaniteog"));
+    assert!(step.skip_if[0].params.is_empty());
 
     let review = result
         .review
@@ -389,8 +437,7 @@ impl QualificationWorkspace {
         let host_input_root = temp.path().join("host-input");
         fs::create_dir_all(&host_input_root).expect("host input root should be created");
         let apk_path = host_input_root.join("xaniteog.apk");
-        fs::write(&apk_path, b"deterministic XaniteOG APK fixture\n")
-            .expect("XaniteOG APK fixture should be written");
+        write_xaniteog_test_apk(&temp, &apk_path);
         Self {
             runtime_root: temp.path().join("runtime"),
             cache_root: temp.path().join("cache"),
@@ -552,10 +599,6 @@ impl ExecutorDevice for InstallFailureDevice {
         <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
     }
 
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
-        <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
-    }
-
     fn apply_permission_operation(
         &mut self,
         operation: crate::executor::PermissionOperation,
@@ -595,10 +638,11 @@ fn xaniteog_install_failure_stops_the_unchanged_generated_plan_truthfully() {
 
     assert_eq!(plan, plan_before);
     assert!(!result.success);
-    assert_eq!(result.steps.len(), 1);
+    assert_eq!(result.steps.len(), 2);
     let record = result
         .steps
-        .first()
+        .iter()
+        .find(|record| record.step_id.ends_with("/install_xaniteog"))
         .expect("XaniteOG install execution record should exist");
     assert_eq!(record.status, StepRunStatus::Failed);
     assert!(record

@@ -8,4 +8,4 @@ This deliberately rejects the previous model where App Definitions were catalog/
 
 Because App Definition IDs, App Artifact IDs, and App Target IDs may be referenced across authored documents, renaming them is an explicit atomic catalog refactor rather than a local field edit. The v1 authored contract is changed directly with no legacy compatibility or fallback semantics because EmuChef is still pre-1.0.
 
-These decisions describe the accepted final v1 authority model. Implementation is proceeding incrementally, so transitional authority forms may remain until the final authored-data cutover; the completed cutover leaves no legacy authority forms or fallback semantics.
+These decisions describe the current schema-v1 authority model. The authored catalog uses this model throughout; retired authority fields and fallback semantics are rejected rather than interpreted.

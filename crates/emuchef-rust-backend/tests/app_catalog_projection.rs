@@ -267,8 +267,8 @@ fn get_document_does_not_rescan_catalog_and_validate_refreshes_deterministically
     );
     assert_eq!(refreshed["ok"], true, "refresh should succeed: {refreshed}");
     let refreshed = &refreshed["result"]["document"];
-    assert_eq!(app_catalog(&refreshed)["status"], "invalid");
-    assert_eq!(app_catalog(&refreshed)["apps"], json!([]));
+    assert_eq!(app_catalog(refreshed)["status"], "invalid");
+    assert_eq!(app_catalog(refreshed)["apps"], json!([]));
 }
 
 #[test]
@@ -350,6 +350,63 @@ fn authored_root_change_retains_authored_values_and_refreshes_catalog() {
         .unwrap()
         .contains("app_ref: second_app"));
     assert_eq!(redone["canRedo"], false);
+}
+
+fn assert_duplicate_package_conflict_blocks_demo_recipe(competitor_id: &str) {
+    let workspace = TempWorkspace::copy_fixture("editor_app_catalog");
+    let source = fs::read_to_string(workspace.app_path("demo_app.yaml"))
+        .expect("fixture App Definition should be readable");
+    let mut competitor: serde_yaml::Value =
+        serde_yaml::from_str(&source).expect("fixture App Definition should be valid YAML");
+    let artifact_id = competitor["artifacts"]
+        .as_mapping()
+        .and_then(|artifacts| artifacts.keys().next())
+        .and_then(serde_yaml::Value::as_str)
+        .expect("fixture App Definition should have an artifact")
+        .to_string();
+    competitor["id"] = serde_yaml::Value::String(competitor_id.to_string());
+    let recipe_path = workspace.recipe_path("duplicate_package_probe.yaml");
+    fs::write(
+        &recipe_path,
+        format!(
+            "schema_version: 1\nkind: recipe\nid: duplicate_package_probe\nname: Duplicate package probe\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: demo_app\n    artifact: {artifact_id}\nsteps: []\n"
+        ),
+    )
+    .expect("Recipe referencing demo_app should be written");
+
+    let mut sessions = common::test_sessions();
+    let document = open_recipe(
+        &mut sessions,
+        &recipe_path,
+        Some(&workspace.authored_root()),
+    );
+    let document_id = document["documentId"].as_str().unwrap().to_string();
+    fs::write(
+        workspace.app_path(&format!("{competitor_id}.yaml")),
+        serde_yaml::to_string(&competitor).unwrap(),
+    )
+    .expect("duplicate package App Definition should be written");
+    let validated = request_document(&mut sessions, "validate", &document_id);
+    let diagnostics = validated["diagnostics"]
+        .as_array()
+        .expect("Recipe validation diagnostics should be an array");
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "app_package_id_conflict"),
+        "duplicate package conflict should block a Recipe referencing demo_app: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn duplicate_package_conflict_blocks_recipe_referencing_earlier_loaded_app() {
+    assert_duplicate_package_conflict_blocks_demo_recipe("zzz_competing");
+}
+
+#[test]
+fn duplicate_package_conflict_blocks_recipe_referencing_later_loaded_app() {
+    assert_duplicate_package_conflict_blocks_demo_recipe("aaa_competing");
 }
 
 #[test]

@@ -53,15 +53,12 @@ pub enum AdbCommandError {
     RootCheckFailed,
     RootAuthorityRevoked,
     RootAuthorityUnverified,
-    InvalidPlanCommand(String),
 }
 
 impl fmt::Display for AdbCommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AdbCommandError::Resolution(message) | AdbCommandError::InvalidPlanCommand(message) => {
-                formatter.write_str(message)
-            }
+            AdbCommandError::Resolution(message) => formatter.write_str(message),
             AdbCommandError::CommandFailed => formatter.write_str("The ADB command failed."),
             AdbCommandError::DeviceOffline => {
                 formatter.write_str("The reviewed device is offline.")
@@ -145,7 +142,7 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
         let (executable, command_args) = args.split_first().ok_or_else(|| {
-            AdbCommandError::InvalidPlanCommand("ADB command must not be empty.".to_string())
+            AdbCommandError::Resolution("ADB command must not be empty.".to_string())
         })?;
         #[cfg(test)]
         let output = match self.process_observer.as_ref() {
@@ -389,34 +386,6 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         } else {
             Ok(result)
         }
-    }
-
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), AdbCommandError> {
-        if command.is_empty() {
-            return Err(AdbCommandError::InvalidPlanCommand(
-                "Plan command must not be empty.".to_string(),
-            ));
-        }
-        if command[0] != "adb" {
-            return Err(AdbCommandError::InvalidPlanCommand(format!(
-                "Plan command must start with 'adb': {}",
-                list_repr(&command)
-            )));
-        }
-
-        let mut tail = command.into_iter().skip(1).collect::<Vec<_>>();
-        if self.serial.is_some() && !command_has_serial_flag(&tail) {
-            let serial = self
-                .serial
-                .as_deref()
-                .expect("serial should be present after is_some guard")
-                .to_string();
-            tail.splice(0..0, ["-s".to_string(), serial]);
-        }
-        let mut full_args = vec![self.executable.clone()];
-        full_args.extend(tail);
-        self.run_raw(full_args, true, ProcessOperation::GenericFallback)
-            .map(|_| ())
     }
 }
 
@@ -731,12 +700,6 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 ProcessOperation::Predicate,
             )?;
             Ok(result.returncode == 0)
-        })
-    }
-
-    pub fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
-        self.guarded(DeviceCommandEffect::Mutating, |device| {
-            device.runner.run_plan_command(command)
         })
     }
 
@@ -1177,10 +1140,6 @@ fn adb_not_found_message() -> String {
     "The configured ADB executable could not be started. Ensure adb is available on PATH or pass an explicit executable when constructing RealAdbDevice.".to_string()
 }
 
-fn command_has_serial_flag(args: &[String]) -> bool {
-    args.len() >= 2 && args[0] == "-s"
-}
-
 fn build_shell_command(args: &[String], privileged: bool) -> String {
     let command = shell_join(args);
     if privileged {
@@ -1216,15 +1175,6 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty() && line.contains('/') && !line.contains(' '))
         .map(ToString::to_string)
-}
-
-fn list_repr(values: &[String]) -> String {
-    let items = values
-        .iter()
-        .map(|value| format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{items}]")
 }
 
 #[cfg(test)]
@@ -1683,13 +1633,16 @@ mod tests {
             let mut executor = FakeAdbCommandExecutor::default();
             executor.push_completed(1, stdout, stderr);
             let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
-            let result = runner.run_plan_command(vec![
-                "adb".to_string(),
-                "shell".to_string(),
-                "printf".to_string(),
-                "%s".to_string(),
-                "mkdir: /sdcard/phase6d6-marker: No space left on device".to_string(),
-            ]);
+            let result = runner.run(
+                vec![
+                    "shell".to_string(),
+                    "printf".to_string(),
+                    "%s".to_string(),
+                    "mkdir: /sdcard/phase6d6-marker: No space left on device".to_string(),
+                ],
+                true,
+                ProcessOperation::GenericFallback,
+            );
             assert!(
                 matches!(result, Err(AdbCommandError::CommandFailed)),
                 "generic command echo must remain ordinary failure: stdout={stdout:?} stderr={stderr:?}"
@@ -1771,9 +1724,6 @@ mod tests {
         let _ = device.path_exists("/sdcard/fixture").unwrap();
         let _ = device.path_is_dir("/sdcard/fixture").unwrap();
         device
-            .run_plan_command(vec!["adb".to_string(), "version".to_string()])
-            .unwrap();
-        device
             .launch_app("com.example.fixture", Some(".MainActivity"))
             .unwrap();
         device.force_stop_app("com.example.fixture").unwrap();
@@ -1792,7 +1742,6 @@ mod tests {
                 ProcessOperation::Predicate,
                 ProcessOperation::Predicate,
                 ProcessOperation::Predicate,
-                ProcessOperation::GenericFallback,
                 ProcessOperation::Launch,
                 ProcessOperation::ForceStop,
             ]

@@ -745,14 +745,7 @@ impl CatalogRefactorSession {
                     if let Err(error) =
                         coordinator.publish_staged_file_write_until_reconciled(guard, child)
                     {
-                        if let Err(recovery) = rollback_group_publication(
-                            &coordinator,
-                            guard,
-                            operation_id,
-                            &published,
-                        ) {
-                            return Err(recovery);
-                        }
+                        rollback_group_publication(&coordinator, guard, operation_id, &published)?;
                         return Err(error);
                     }
                     published.push(child.clone());
@@ -790,14 +783,7 @@ impl CatalogRefactorSession {
                             ensure_recovery_required(&coordinator, guard, operation_id)?;
                             return Err(error);
                         }
-                        if let Err(recovery) = rollback_group_publication(
-                            &coordinator,
-                            guard,
-                            operation_id,
-                            &published,
-                        ) {
-                            return Err(recovery);
-                        }
+                        rollback_group_publication(&coordinator, guard, operation_id, &published)?;
                         return Err(error);
                     }
                 }
@@ -1370,14 +1356,19 @@ fn validate_staged_catalog_overlay(
                     .map(str::to_owned)
             })
             .collect::<HashSet<_>>();
-        affected_artifacts.extend(recipe.artifacts.iter().filter_map(|(id, artifact)| {
-            matches!(
-                artifact,
-                RecipeArtifact::AppArtifact(reference)
-                    if changed_ids.contains(&reference.app_ref)
-            )
-            .then(|| id.clone())
-        }));
+        affected_artifacts.extend(
+            recipe
+                .artifacts
+                .iter()
+                .filter(|(_, artifact)| {
+                    matches!(
+                        artifact,
+                        RecipeArtifact::AppArtifact(reference)
+                            if changed_ids.contains(&reference.app_ref)
+                    )
+                })
+                .map(|(id, _)| id.clone()),
+        );
 
         let mut definitions = Vec::new();
         for app_id in recipe_app_reference_ids(&recipe) {
@@ -1502,7 +1493,6 @@ fn prepare_catalog_change(
     let apps = app_paths
         .iter()
         .cloned()
-        .into_iter()
         .map(|path| {
             let snapshot = coordinator
                 .snapshot_file(&path)
@@ -1548,7 +1538,7 @@ fn prepare_catalog_change(
     let owner_indices = apps
         .iter()
         .enumerate()
-        .filter_map(|(index, (_, _, app_id, _))| (app_id == &owner_id).then_some(index))
+        .filter_map(|(index, (_, _, app_id, _))| (app_id == owner_id).then_some(index))
         .collect::<Vec<_>>();
     if owner_indices.len() != 1 {
         return Err(format!(
@@ -2049,7 +2039,7 @@ pub fn rewrite_app_definition(app: &mut AppDefinitionV1, intent: &CatalogChangeI
 
 fn rewrite_target_conditions(
     conditions: &mut [crate::model::StepCondition],
-    path: &PathBuf,
+    path: &Path,
     step_id: &str,
     collection: &str,
     target_id: &str,
@@ -2094,9 +2084,9 @@ fn rename_key<T>(values: &mut IndexMap<String, T>, source: &str, destination: &s
     true
 }
 
-fn site(path: &PathBuf, object: String, field: impl Into<String>) -> ReferenceSite {
+fn site(path: &Path, object: String, field: impl Into<String>) -> ReferenceSite {
     ReferenceSite {
-        path: path.clone(),
+        path: path.to_path_buf(),
         object,
         field: field.into(),
     }

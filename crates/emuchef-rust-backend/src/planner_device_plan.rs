@@ -5,7 +5,7 @@
 //! crate-internal `PlannerInput` values. It does not expose protocol, CLI,
 //! executor, apply, ADB, or real-device profile-matching behavior.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -427,9 +427,166 @@ fn load_device_plans(authored_root: &Path) -> Result<Vec<DevicePlanRecord>, Plan
         .collect()
 }
 
+pub(crate) fn validate_device_plan_files(
+    authored_root: &Path,
+) -> Result<Vec<(PathBuf, PlannerLoadError)>, PlannerLoadError> {
+    let paths = top_level_yaml_files(&authored_root.join("device_plans"))?;
+    validate_device_plan_paths(authored_root, paths)
+}
+
+pub(crate) fn validate_device_plan_paths(
+    authored_root: &Path,
+    mut paths: Vec<PathBuf>,
+) -> Result<Vec<(PathBuf, PlannerLoadError)>, PlannerLoadError> {
+    paths.sort();
+    let profiles = load_device_profiles(authored_root);
+    let recipe_root = authored_root.join("recipes");
+    let recipes = match fs::symlink_metadata(&recipe_root) {
+        Ok(_) => crate::planner::load_top_level_recipes(authored_root)
+            .map_err(recipe_catalog_unreadable)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(recipe_catalog_unreadable(error)),
+    };
+    let mut parsed_plans = Vec::with_capacity(paths.len());
+    let mut paths_by_id = BTreeMap::<String, Vec<PathBuf>>::new();
+
+    for path in paths {
+        let parsed_plan = match parse_authored_yaml::<DevicePlanYaml>(&path, "device_plan") {
+            Ok(plan) => {
+                paths_by_id
+                    .entry(plan.id.clone())
+                    .or_default()
+                    .push(path.clone());
+                Ok(plan)
+            }
+            Err(error) => {
+                let message = if error.code() == "io" {
+                    "Device Plan file could not be read."
+                } else {
+                    "Device Plan file could not be parsed as schema-v1 YAML."
+                };
+                Err(PlannerLoadError::new(error.code(), message))
+            }
+        };
+        parsed_plans.push((path, parsed_plan));
+    }
+
+    let mut issues = Vec::new();
+
+    for (path, parsed_plan) in parsed_plans {
+        let plan = match parsed_plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                issues.push((path, error));
+                continue;
+            }
+        };
+
+        if paths_by_id
+            .get(&plan.id)
+            .is_some_and(|group| group.len() > 1)
+        {
+            issues.push((
+                path.clone(),
+                PlannerLoadError::new(
+                    "device_plan_id_conflict",
+                    format!("Duplicate device_plan id '{}'.", plan.id),
+                ),
+            ));
+        }
+
+        match &profiles {
+            Ok(profiles)
+                if !profiles
+                    .iter()
+                    .any(|record| record.profile.id == plan.device_profile_ref) =>
+            {
+                issues.push((
+                    path.clone(),
+                    PlannerLoadError::new(
+                        "device_profile_not_found",
+                        format!(
+                            "Device profile '{}' referenced by device plan '{}' was not found.",
+                            plan.device_profile_ref, plan.id
+                        ),
+                    ),
+                ));
+            }
+            Err(_) => issues.push((
+                path.clone(),
+                PlannerLoadError::new(
+                    "device_profile_catalog_unavailable",
+                    "Device profile catalog could not be loaded; Device Plan profile reference cannot be validated.",
+                ),
+            )),
+            Ok(_) => {}
+        }
+
+        for selection in &plan.recipes {
+            if !recipes
+                .iter()
+                .any(|recipe| recipe.id == selection.recipe_ref)
+            {
+                issues.push((
+                    path.clone(),
+                    PlannerLoadError::new(
+                        "recipe_not_found",
+                        format!(
+                            "Recipe '{}' referenced by device plan '{}' was not found.",
+                            selection.recipe_ref, plan.id
+                        ),
+                    ),
+                ));
+            }
+        }
+
+        if let Err(error) = device_plan_input_bindings(&plan, &recipes) {
+            issues.push((path, error));
+        }
+    }
+
+    Ok(issues)
+}
+
+fn recipe_catalog_unreadable(error: impl std::fmt::Display) -> PlannerLoadError {
+    PlannerLoadError::new(
+        "recipe_catalog_unreadable",
+        format!("The Recipe catalog could not be read while validating Device Plans: {error}"),
+    )
+}
+
 fn top_level_yaml_files(directory: &Path) -> Result<Vec<PathBuf>, PlannerLoadError> {
-    if !directory.exists() {
-        return Ok(Vec::new());
+    let directory_metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(PlannerLoadError::new(
+                "io",
+                format!(
+                    "Failed to inspect catalog directory {}: {error}",
+                    directory.display()
+                ),
+            ))
+        }
+    };
+    let followed_metadata = if directory_metadata.file_type().is_symlink() {
+        fs::metadata(directory).map_err(|error| {
+            PlannerLoadError::new(
+                "io",
+                format!(
+                    "Failed to inspect catalog directory {}: {error}",
+                    directory.display()
+                ),
+            )
+        })?
+    } else {
+        directory_metadata
+    };
+    if !followed_metadata.is_dir() {
+        return Err(PlannerLoadError::new(
+            "io",
+            format!("{} is not a directory", directory.display()),
+        ));
     }
     let entries = fs::read_dir(directory).map_err(|error| {
         PlannerLoadError::new(
@@ -437,11 +594,31 @@ fn top_level_yaml_files(directory: &Path) -> Result<Vec<PathBuf>, PlannerLoadErr
             format!("Failed to read directory {}: {error}", directory.display()),
         )
     })?;
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && is_yaml_extension(path))
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            PlannerLoadError::new(
+                "io",
+                format!(
+                    "Failed to read an entry in {}: {error}",
+                    directory.display()
+                ),
+            )
+        })?;
+        let path = entry.path();
+        if !is_yaml_extension(&path) {
+            continue;
+        }
+        let metadata = fs::metadata(&path).map_err(|error| {
+            PlannerLoadError::new(
+                "io",
+                format!("Failed to inspect {}: {error}", path.display()),
+            )
+        })?;
+        if metadata.is_file() {
+            paths.push(path);
+        }
+    }
     paths.sort();
     Ok(paths)
 }

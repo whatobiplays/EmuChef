@@ -399,23 +399,21 @@ function ConstraintStringRow({
   );
 }
 
-const VERIFY_TYPES: Array<{ type: SupportedVerifyType; label: string; fieldName: "path" | "package_name" }> = [
+const VERIFY_TYPES: Array<{ type: SupportedVerifyType; label: string; fieldName: "path" }> = [
   { type: "path_exists", label: "Path exists", fieldName: "path" },
   { type: "file_exists", label: "File exists", fieldName: "path" },
-  { type: "package_installed", label: "Package installed", fieldName: "package_name" },
 ];
 
 /**
  * Add-entry kinds for one condition section.
  *
- * `package_installed` keeps the legacy form that authors a package name and
- * is offered only by steps without App Definition context;
  * `app_package_installed` authors the parameterless form that inherits the
  * package from the enclosing step App Definition;
  * `app_target_path_exists` and `app_target_file_exists` author App Target
  * path checks that inherit the App Definition from the step. The app-aware
- * kinds are offered only by app-context steps. Existing rows of every form
- * stay readable and editable.
+ * kinds are offered only by app-context steps. Unsupported existing rows stay
+ * visible as raw JSON so authors can repair them without preserving an invalid
+ * form in a structured editor.
  */
 type ConditionAddType =
   | SupportedVerifyType
@@ -442,17 +440,17 @@ function appTargetAddType(addType: ConditionAddType): AppConditionType | null {
   return APP_TARGET_ADD_TYPES[addType] ?? null;
 }
 
-function verifyFieldLabel(fieldName: "path" | "package_name"): string {
-  return fieldName === "package_name" ? "Package name" : "Path";
+function verifyFieldLabel(_fieldName: "path"): string {
+  return "Path";
 }
 
 /**
  * Structured condition editor shared by `skip_if` and `verify`.
  *
  * Both fields author the same condition shape, so they share every row kind:
- * literal path or package fields, App Target path checks, the canonical
- * parameterless app-aware package check, and a raw JSON fallback for
- * unsupported shapes that are never coerced.
+ * literal path rows, App Target path checks, the canonical parameterless
+ * App-context package check, and a raw JSON fallback for unsupported shapes
+ * that are never coerced.
  */
 function ConditionSectionEditor({
   appCatalog,
@@ -487,14 +485,10 @@ function ConditionSectionEditor({
   const addTargetSeed =
     appTargetConditionType === null ? null : conditionTargetSeed(selectedApp, appTargetConditionType);
   const selectedType = VERIFY_TYPES.find((option) => option.type === addType) ?? VERIFY_TYPES[0];
-  // Steps with App Definition context may author the parameterless package
-  // check and App Target checks; the legacy parameterized package form stays
-  // readable in existing rows but is not offered for new checks there. Steps
-  // without app context keep only the literal forms.
+  // Parameterless package checks and App Target checks require step App
+  // context. Package-authored legacy rows remain visible as raw JSON.
   const addTypeOptions: Array<{ type: ConditionAddType; label: string }> = [
-    ...(appRef === null
-      ? VERIFY_TYPES
-      : VERIFY_TYPES.filter((option) => option.type !== "package_installed")),
+    ...VERIFY_TYPES,
     ...(appRef === null ? [] : APP_TARGET_ADD_TYPE_OPTIONS),
     ...(appRef === null
       ? []
@@ -506,9 +500,7 @@ function ConditionSectionEditor({
   }, [value]);
 
   useEffect(() => {
-    if (appRef !== null && addType === "package_installed") {
-      setAddType("app_package_installed");
-    } else if (appRef === null && (addType === "app_package_installed" || appTargetAddType(addType) !== null)) {
+    if (appRef === null && (addType === "app_package_installed" || appTargetAddType(addType) !== null)) {
       setAddType("path_exists");
     }
   }, [addType, appRef]);

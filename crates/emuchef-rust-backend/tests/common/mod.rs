@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use emuchef_rust_backend::session::DocumentSessionManager;
 
+#[allow(dead_code)] // Some integration-test targets do not need isolated catalog storage.
 static CATALOG_STORAGE: OnceLock<std::path::PathBuf> = OnceLock::new();
 static APPLICATION_DATA: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -39,6 +40,7 @@ pub fn test_application_data() -> &'static std::path::Path {
 
 /// Create a session manager whose durable catalog state is isolated from the
 /// developer's configured application-data directory.
+#[allow(dead_code)] // The shared test module is included by targets that do not use this helper.
 pub fn test_sessions() -> DocumentSessionManager {
     test_application_data();
     let storage = CATALOG_STORAGE.get_or_init(|| {

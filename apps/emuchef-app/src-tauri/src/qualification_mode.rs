@@ -559,9 +559,9 @@ pub(crate) fn register_qualification_target_with_mode(
         .qualification_repository
         .get()
         .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
-    with_inactive_qualification_session(&state, repository, || {
+    with_inactive_qualification_session(state, repository, || {
         register_qualification_target_with_repository(
-            &candidate_handle,
+            candidate_handle,
             mode,
             &state.qualification_repository,
         )
@@ -678,7 +678,7 @@ fn begin_qualification_session_with_source<
     if executions.has_in_flight() {
         return Err(safe_qualification_error("qualification_execution_active"));
     }
-    with_inactive_qualification_session(&state, repository, || {
+    with_inactive_qualification_session(state, repository, || {
         repository
             .require_recordable()
             .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
@@ -707,7 +707,7 @@ fn begin_qualification_session_with_source<
             source.capture_selected_device(&request.device_handle, &request.device_plan)?;
         let activation_authority = match capture.qualification_context.as_ref() {
             Some(context) => crate::qualification_session::capture_begin_device_authority(
-                &state,
+                state,
                 &capture.observation,
                 context,
             )?,
@@ -739,7 +739,7 @@ fn begin_qualification_session_with_source<
             "deviceTargetId": request.target_id,
         });
         let candidate_handle = crate::qualification_session::publish_pending_candidate(
-            &state,
+            state,
             repository,
             &provisional_payload,
         )
@@ -749,12 +749,12 @@ fn begin_qualification_session_with_source<
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = repository.discard_candidate(&candidate_handle);
-                    crate::qualification_session::forget_candidate(&state, &candidate_handle);
+                    crate::qualification_session::forget_candidate(state, &candidate_handle);
                     return Err(error);
                 }
             };
         let started = crate::qualification_session::begin_with_device_authority(
-            &state,
+            state,
             crate::qualification_session::BeginSessionRequest {
                 session_handle,
                 candidate_handle: candidate_handle.clone(),

@@ -512,10 +512,6 @@ impl ExecutorDevice for VerificationFailDevice {
         <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
     }
 
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
-        <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
-    }
-
     fn apply_permission_operation(
         &mut self,
         operation: crate::executor::PermissionOperation,
@@ -572,8 +568,14 @@ fn verification_fail_device_delegates_non_verification_operations() {
         .path_is_dir("/sdcard/other")
         .expect("directory predicate should delegate"));
     device
-        .run_plan_command(vec!["qualification".to_string()])
-        .expect("plan command should delegate");
+        .apply_permission_operation(
+            crate::executor::PermissionOperation::GrantRuntimePermission {
+                package_name: "com.example.qualification".to_string(),
+                permission: "android.permission.CAMERA".to_string(),
+                permission_set: crate::planner::PermissionSetKind::Baseline,
+            },
+        )
+        .expect("permission operation should delegate");
     device
         .launch_app("com.example.qualification", Some(".MainActivity"))
         .expect("launch should delegate");

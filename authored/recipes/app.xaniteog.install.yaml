@@ -19,23 +19,44 @@ inputs:
       allowed_extensions: ["apk"]
       path_kind: file
     default: null
+artifacts:
+  xaniteog_apk:
+    type: app_artifact
+    app_ref: xaniteog
+    artifact: apk
+    input:
+      ref: inputs.xaniteog_apk
+    cache: none
 steps:
+  - id: resolve_xaniteog_artifacts
+    type: resolve_artifacts
+    name: Resolve XaniteOG APK
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifacts:
+        - xaniteog_apk
+    verify: []
   - id: install_xaniteog
     type: install_apk
+    app_ref: xaniteog
     name: Install XaniteOG APK
     progress_note: Installing XaniteOG on the selected device
     user_toggleable: false
-    dependencies: []
+    dependencies:
+      - resolve_xaniteog_artifacts
     constraints:
       capabilities:
         - apk_install
       conflicts_with: []
     skip_if:
       - type: package_installed
-        params:
-          package_name: Ali.Xanite
+        params: {}
     params:
       app:
-        ref: inputs.xaniteog_apk
+        ref: artifacts.xaniteog_apk.local_path
       replace_existing: false
     verify: []

@@ -23,10 +23,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MAX_TERMINAL_RECORDS: usize = 64;
 static NEXT_WRITER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Coordinates writes that target one canonical authored catalog root.
+/// Coordinates authored-file publication within a canonical catalog or standalone directory.
 #[derive(Clone, Debug)]
 pub struct CatalogChangeCoordinator {
     authored_root: PathBuf,
+    authored_catalog_root: Option<PathBuf>,
     storage_directory: PathBuf,
     staging_directory: PathBuf,
     lock_path: PathBuf,
@@ -322,25 +323,46 @@ impl CatalogChangeCoordinator {
             }
             None => None,
         };
-        let inferred = parent
+        let lexical_candidate = parent
             .ancestors()
-            .find(|path| path.join("apps").is_dir() && path.join("recipes").is_dir());
-        let inferred_root = inferred.filter(|candidate| {
-            fs::canonicalize(candidate)
-                .is_ok_and(|canonical_root| canonical_parent.starts_with(&canonical_root))
-        });
+            .find(|candidate| parent.starts_with(candidate.join("recipes")));
+        let inferred_root = match lexical_candidate {
+            Some(candidate) => {
+                let recipes = candidate.join("recipes");
+                reject_symlink_if_present(candidate)?;
+                reject_symlink_if_present(&recipes)?;
+                let canonical_root = fs::canonicalize(candidate)?;
+                let canonical_recipes = fs::canonicalize(&recipes)?;
+                if !canonical_parent.starts_with(&canonical_root)
+                    || !canonical_parent.starts_with(&canonical_recipes)
+                {
+                    return Err(CatalogChangeError::InvalidRoot(
+                        "destination resolves outside the inferred authored catalog".into(),
+                    ));
+                }
+                Some(candidate)
+            }
+            None => None,
+        };
         if root.is_some() && requested_root.is_none() && inferred_root.is_some() {
             return Err(CatalogChangeError::InvalidRoot(
                 "the destination belongs to a different authored catalog root".into(),
             ));
         }
-        let coordinator_root = requested_root.or(inferred_root).unwrap_or(parent);
-        let coordinator = match storage_base {
+        let catalog_root = requested_root.or(inferred_root);
+        let coordinator_root = catalog_root.unwrap_or(parent);
+        let mut coordinator = match storage_base {
             Some(storage_base) => Self::open_with_storage(coordinator_root, storage_base),
             None => Self::open(coordinator_root),
         }?;
+        coordinator.authored_catalog_root = catalog_root.map(|_| coordinator.authored_root.clone());
         coordinator.validate_destination(destination)?;
         Ok(coordinator)
+    }
+
+    /// Return the authored catalog root when this coordinator represents one.
+    pub(crate) fn authored_catalog_root(&self) -> Option<&Path> {
+        self.authored_catalog_root.as_deref()
     }
 
     /// Reject links and destinations outside this lock's canonical root.
@@ -469,6 +491,7 @@ impl CatalogChangeCoordinator {
         let lock_path = storage_directory.join("publication.lock");
         reject_symlink_if_present(&lock_path)?;
         Ok(Self {
+            authored_catalog_root: Some(authored_root.clone()),
             authored_root,
             storage_directory,
             staging_directory: staging,
@@ -2438,7 +2461,7 @@ mod tests {
                 0o700
             );
             assert_eq!(
-                fs::metadata(&coordinator.storage_directory())
+                fs::metadata(coordinator.storage_directory())
                     .unwrap()
                     .permissions()
                     .mode()

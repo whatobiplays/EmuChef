@@ -316,34 +316,6 @@ pub(crate) fn qualification_transition_lock(state: &AppState) -> QualificationTr
     }
 }
 
-/// Request and reconcile one inventory using explicit native authority inputs.
-/// Polling, qualification, and final execution all use this same path.
-pub(crate) fn list_and_reconcile_inventory_with_authority<F>(
-    handles: &Mutex<SessionHandles>,
-    root_qualification: &Mutex<RootQualificationStore>,
-    adb_path: &str,
-    runtime_generation: u64,
-    platform_tools_revision: u64,
-    request: &mut F,
-) -> Result<Vec<DeviceDto>, String>
-where
-    F: FnMut(&str, Value) -> Result<Value, String>,
-{
-    let inventory = request("listAdbDevices", json!({ "adbPath": adb_path })).map_err(|_| {
-        safe_error(
-            "adb_inventory_failed",
-            "Connected Android devices could not be listed.",
-        )
-    })?;
-    reconcile_inventory_with_context(
-        handles,
-        root_qualification,
-        &inventory,
-        runtime_generation,
-        platform_tools_revision,
-    )
-}
-
 /// Latest backend-authored input contract set accepted for the current runtime
 /// session. The frontend request sequence rejects out-of-order descriptions;
 /// this snapshot gives native pickers the same contract without trusting React
@@ -1160,7 +1132,7 @@ pub(crate) fn probe_device_facts(
     device_handle: &str,
     state: &AppState,
 ) -> Result<DeviceProbeResult, String> {
-    let adb_path = current_adb_path(&state)?;
+    let adb_path = current_adb_path(state)?;
     probe_device_facts_with(device_handle, state, |serial| {
         state
             .sidecar
@@ -1261,11 +1233,11 @@ where
             "The selected device changed. Refresh device discovery and try again.",
         ));
     }
-    handles.set_facts_for_epoch(&device_handle, session_epoch, facts.clone())?;
+    handles.set_facts_for_epoch(device_handle, session_epoch, facts.clone())?;
     drop(handles);
     if let Some(typed_facts) = typed.as_ref() {
         crate::device_observation::commit_selected_observation_in_transition(
-            &state,
+            state,
             crate::device_observation::SelectedDeviceObservation::new(device_handle)
                 .with_probe_facts(typed_facts)
                 .with_session_epoch(session_epoch),
@@ -1339,7 +1311,7 @@ fn match_device_result(
             device_handle,
             session_epoch,
         );
-    let catalog = catalog(&state)?;
+    let catalog = catalog(state)?;
     let exact_serial = facts
         .get("serial")
         .and_then(Value::as_str)
@@ -1584,7 +1556,6 @@ pub fn create_review(
                 "The reviewed plan omitted its safe presentation.",
             )
         })?;
-    let catalog_digest = catalog(&state)?.digest().to_string();
     let platform_tools_identity = state
         .adb
         .lock()
@@ -1599,7 +1570,6 @@ pub fn create_review(
         response: result.clone(),
         target,
         catalog_identity,
-        catalog_digest,
         plan_digest: digest.clone(),
         device_handle: device_handle.clone(),
         qualification_context: state
@@ -2262,7 +2232,7 @@ pub(crate) fn public_configuration_description(result: &Value, exact_serial: &st
         .into_iter()
         .flatten()
         .map(|recipe| {
-            let mut public = json!({
+            let public = json!({
                 "id": recipe.get("id"),
                 "name": recipe.get("name"),
                 "description": recipe.get("description"),
@@ -2765,7 +2735,6 @@ mod tests {
             response: json!({ "plan": { "id": "plan" } }),
             target: json!({ "deviceHandle": device_handle }),
             catalog_identity: json!({ "sourceId": "catalog" }),
-            catalog_digest: "sha256:catalog".to_string(),
             plan_digest: "sha256:plan".to_string(),
             device_handle: device_handle.to_string(),
             qualification_context: None,

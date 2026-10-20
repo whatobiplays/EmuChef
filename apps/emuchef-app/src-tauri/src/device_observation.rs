@@ -33,10 +33,11 @@ pub enum DeviceQualificationState {
     Supported,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum CapabilityOutcome {
     Available,
     Unsupported,
+    #[default]
     Unknown,
 }
 
@@ -58,11 +59,6 @@ impl CapabilityOutcome {
     }
 }
 
-impl Default for CapabilityOutcome {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QualificationContextKey {
     pub(crate) device_handle: String,
@@ -512,12 +508,12 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
         let observation = SelectedDeviceObservation::new(device_handle)
             .with_probe_facts(&facts)
             .with_profile_id(profile_id)
-            .with_snapshot(&snapshot)
+            .with_snapshot(snapshot)
             .with_session_epoch(probe.session_epoch);
         if observation.android_api != snapshot.android_api_level.map(u64::from) {
             return Err(unverified_device_error());
         }
-        let capabilities = capabilities_from_snapshot(&snapshot);
+        let capabilities = capabilities_from_snapshot(snapshot);
         commit_selected_observation(state, observation.clone())?;
         Ok(SelectedDeviceCapture {
             observation,
@@ -1268,14 +1264,12 @@ pub(crate) fn commit_snapshot_observation(
                 failure_target.clone(),
             );
         }
-        if let Err(error) = commit_selected_observation_in_transition(
+        commit_selected_observation_in_transition(
             state,
             SelectedDeviceObservation::new(identity)
                 .with_snapshot(&current.snapshot)
                 .with_session_epoch(context.session_epoch),
-        ) {
-            return Err(error);
-        }
+        )?;
         if current.snapshot.state != DeviceQualificationState::Supported {
             crate::qualification_session::observe_device_observation_failure_in_transition(
                 state,
@@ -1365,6 +1359,8 @@ enum ObservationFailureContext<'a> {
     Qualification { state: &'a AppState },
 }
 
+// Keep each authority source explicit at this trust boundary.
+#[allow(clippy::too_many_arguments)]
 fn qualify_reconciled_current_with_context<F>(
     handles: &Mutex<SessionHandles>,
     root_qualification: &Mutex<RootQualificationStore>,

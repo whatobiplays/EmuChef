@@ -1,8 +1,8 @@
 # App Definition and Recipe Authority Model
 
-**Status:** Accepted final v1 target architecture. The completed contract has no transitional legacy authority forms or fallback semantics. Implementation is proceeding incrementally, so some transitional forms remain until the final authored-data cutover; this document does not claim that every described capability is available today.
+**Status:** Implemented schema-v1 authority contract. App Definitions own application identity, APK artifact policy, permission sets, and app targets. Recipes express workflow and reference those authorities; retired package-based install, lifecycle, and permission forms are invalid and are never normalized.
 
-The App Definition document editor, App Generator workflows, planner-derived Recipe availability ([#19](https://github.com/whatobiplays/EmuChef/issues/19)), catalog-backed Recipe controls ([#21](https://github.com/whatobiplays/EmuChef/issues/21)), and atomic catalog refactors ([#22](https://github.com/whatobiplays/EmuChef/issues/22)) are implemented. The final authored-data and v1 compatibility cutover remains pending under [#23](https://github.com/whatobiplays/EmuChef/issues/23).
+The App Definition editor, App Generator workflows, planner-derived Recipe availability, catalog-backed Recipe controls, atomic catalog refactors, and schema-v1 authored-data cutover are implemented. The canonical contract is documented here without a legacy/current dual form.
 
 ## 1. Authority model
 
@@ -21,11 +21,13 @@ An Execution Plan may retain immutable denormalized IDs and presentation snapsho
 
 "Fully resolved" does not mean all network results have already been fetched. A late-bound release policy may remain in the Execution Plan, provided it is self-contained and requires no authored-catalog dereference.
 
-## 2. Direct schema-v1 migration
+## 2. Direct schema-v1 contract
 
-The accepted final v1 contract changes App Definition v1 and Recipe v1 directly. After the final cutover, there are no legacy readers, fallback semantics, mixed old/new forms, or compatibility aliases. All app-aware authored data and the generator, editor, validation, planner, review, and documentation surfaces conform to that contract at cutover.
-
-Implementation is proceeding in incremental migration slices. Transitional forms may remain before the final cutover, which Issue #23 tracks. The old forms are rejected when that cutover is complete.
+App Definition v1 and Recipe v1 use the app-aware contract throughout authored
+data, generation, editing, validation, planning, review, and execution. Legacy
+readers, fallback semantics, mixed old/new forms, and compatibility aliases
+are not supported. Authored documents that use those forms fail validation
+instead of being silently migrated or normalized.
 
 ## 3. App Definition v1
 
@@ -295,7 +297,7 @@ Rules:
 - app-op mode is explicit, with only `allow` accepted in v1;
 - duplicate logical actions are rejected within a set and across baseline/elevated.
 
-The planner resolves API applicability for the target device. If zero actions in a selected set are applicable, the Execution Plan retains the permission step with a not-applicable disposition; execution reports it skipped without warning or failure.
+The planner resolves actions from the referenced App Definition and their API applicability for the target device into the step-local permission plan. Execution runs applicable actions from that retained plan. When none apply, the plan retains each action's not-applicable reason and execution reports the step skipped without warning or failure.
 
 Recipe-owned failure policy is only:
 
@@ -577,13 +579,13 @@ Accordingly, product configuration must not determine Recipe availability by uni
 
 The old `requiredCapabilities` union is removed from product Recipe projection.
 
-In the accepted target, `available` and `unavailableCapabilities` are planner-derived:
+The implemented Recipe availability projection derives `available` and `unavailableCapabilities` through the planner:
 - an optional/gated elevated permission step on a non-root device does not make the Recipe unavailable;
 - a genuinely root-only Recipe may be unavailable and report `root_shell`.
 
 ## 15. Product catalog projection
 
-The target product catalog exposes App Definitions as first-class safe entities, including at least:
+The implemented product catalog projection exposes App Definitions as first-class safe entities, including at least:
 
 - ID;
 - name;
@@ -611,7 +613,7 @@ Recipes do not gain an automatic Android compatibility selector solely to choose
 
 ## 17. Config Editor
 
-The Config Editor has an App Definition document editor. Completing the authority-aware Recipe editing workflow remains target work; Issue #21 tracks catalog-backed controls for app-aware Recipe steps.
+The Config Editor provides typed App Definition and Recipe document workflows. Recipe app selectors use the authored catalog, and app-aware controls resolve their choices from the selected App Definition.
 
 The document system shares lifecycle mechanics while preserving typed domain models:
 
@@ -630,7 +632,7 @@ Document session lifecycle
 - dirty state;
 - reference diagnostics.
 
-In the completed target workflow, Recipe app selectors are catalog-backed rather than free text.
+Recipe app selectors are catalog-backed rather than free text.
 
 Once an app is selected:
 - `install_apk` choices filter to coherent APK App Artifacts;
@@ -640,7 +642,7 @@ Once an app is selected:
 
 ## 18. Generator
 
-The Config Editor includes an App Generator component. Completing its authority-aware new-app and existing-app workflows remains target work tracked by Issue #20. The target generator has two modes:
+The Config Editor includes an App Generator with authority-aware new-app and existing-app workflows. The generator has two modes:
 
 ### New app
 Create App Definition + Recipe.
@@ -680,8 +682,6 @@ All authored App and Recipe writers share one authored-root publication boundary
 Grouped publication stages files in the stable, private application-owned journal directory, synchronizes staged files and containing directories, rechecks the authoritative snapshot under the lock, and publishes by same-filesystem rename. Coordinators discover each root's journal by hashing its canonical authored path beneath the application data directory, so recovery does not depend on the working directory, catalog-local state, or a prior sidecar process. If application staging and the authored destination are on different filesystems, the operation is rejected before publication rather than falling back to an unsafe copy. Restrictive permissions, no-follow file access, ownership digests, and fail-closed unresolved recovery preserve safe replay across sidecar restart and complete application relaunch. The number of terminal `.json` records is count-bounded; older full records are renamed to `.receipt` files and retained for outcome replay and operation-ID reuse protection. Receipt storage therefore grows with terminal operations; pruning it requires a retention or acknowledgement policy that preserves the promised replay behavior.
 
 Preview rejection, completed publication, and unresolved recovery are distinct durable states. Repeating a completed apply request returns its terminal receipt from stable storage without republishing, including after the editor and sidecar have restarted. Staged overlay validation checks the changed App identity and typed reference closure plus catalog-global App identity and package uniqueness; it preserves unrelated pre-existing Recipe errors. Recovery discovery and retry are public editor operations. Retry re-scans the affected dependency closure under the recovery lock and fails closed when a Recipe added after preview introduces another reference to the old identity. It rolls safe work forward and rolls back only destinations whose current digest proves the operation still owns them. External edits are never overwritten. Clean affected sessions refresh after publication, including an App path change, while any dirty affected Recipe or App Definition blocks the operation as one aggregate conflict.
-
-This implemented refactor behavior does not perform the final schema-v1 authored-data or compatibility cutover. Those changes remain Issue #23 work.
 
 In the accepted architecture, App Definition IDs, App Artifact IDs, and App Target IDs are stable cross-document identities that may be renamed through explicit **catalog refactor** operations. Issue #22 implements that behavior; the detailed rules below define its current contract.
 
@@ -728,19 +728,14 @@ Blocking catalog conflicts include:
 
 Same source URL, repository, latest-release policy, checksum, or other source overlap is warning-level rather than identity.
 
-## 21. Existing authored-data migration
+## 21. Authored-data contract
 
-The final authored-data cutover updates all remaining app-aware authored data after the incremental migration slices are complete. Issue #23 tracks this unfinished cutover. The consequences below describe the accepted final v1 target.
+App-aware authored Recipes use canonical App Definition references:
+- APK installation resolves a Recipe `app_artifact` whose App Artifact kind is `apk` and whose `app_ref` matches the install step's `app_ref`;
+- package identity and trusted checksum policy come from the App Definition and its App Artifact, not duplicate Recipe parameters;
+- `package_installed` conditions on app-aware steps have empty parameter maps and inherit package identity from `app_ref`;
+- lifecycle steps carry `app_ref` and no package or activity override parameters;
+- permission steps carry `app_ref`, select a declared permission set, and are generated only when the author enables applicable permission automation;
+- generic `remote_file` artifacts and `download_remote_file` remain available for non-app resources.
 
-Expected consequences include:
-- create an ARMSX1 App Definition;
-- migrate Obtainium, RetroArch, XaniteOG, and their Recipes;
-- correct RetroArch package authority to `com.retroarch.aarch64`;
-- move app-owned APK/source policy into App Definitions;
-- migrate app-specific paths out of Recipes into App Targets;
-- `feature.copy_bios` becomes RetroArch-aware because its current destination is intrinsically a RetroArch target;
-- `feature.copy_roms` remains generic because its destination is user-configured;
-- split generated permission actions into baseline/elevated App Definition sets;
-- remove package/activity/permission duplication from app-aware Recipe steps.
-
-At final cutover, architecture and generator documentation that describes App Definitions as non-authoritative metadata is replaced in place. The completed repository documents one authority model, not a legacy/current dual contract.
+RetroArch, Obtainium, XaniteOG, and ARMSX1 Recipes use App Definition-owned APK authority. RetroArch retains its intentional package-installed skip behavior and its named App Target destinations. XaniteOG's user-provided APK is resolved through a Recipe App Artifact binding rather than installed directly from an input reference. Source-policy overlap remains advisory; App ID, package identity, Recipe ID, destination, and reference-integrity conflicts remain blocking.

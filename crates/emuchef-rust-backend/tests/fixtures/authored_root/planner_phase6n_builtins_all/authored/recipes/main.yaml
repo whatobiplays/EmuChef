@@ -10,8 +10,9 @@ provides:
 inputs: {}
 artifacts:
   app_apk:
-    type: remote_file
-    url: https://example.com/app.apk
+    type: app_artifact
+    app_ref: planner_app
+    artifact: apk
     cache: default
   archive_zip:
     type: remote_file
@@ -84,6 +85,7 @@ steps:
     verify: []
   - id: install
     type: install_apk
+    app_ref: planner_app
     name: Install APK
     user_toggleable: false
     dependencies:
@@ -99,6 +101,7 @@ steps:
     verify: []
   - id: grant
     type: grant_permissions
+    app_ref: planner_app
     name: Grant Permissions
     user_toggleable: false
     dependencies:
@@ -108,21 +111,13 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      runtime:
-        - package_name: com.example.app
-          name: android.permission.POST_NOTIFICATIONS
-          required: false
-      appops:
-        - package_name: com.example.app
-          op: MANAGE_EXTERNAL_STORAGE
-          mode: allow
-          required: false
+      permission_set: baseline
       policy:
         on_failure: fail
-        require_all: true
     verify: []
   - id: launch
     type: launch_app
+    app_ref: planner_app
     name: Launch App
     user_toggleable: true
     dependencies:
@@ -132,9 +127,7 @@ steps:
         - app_launch
       conflicts_with: []
     skip_if: []
-    params:
-      package_name: com.example.app
-      activity: .MainActivity
+    params: {}
     verify: []
   - id: wait
     type: wait
@@ -151,6 +144,7 @@ steps:
     verify: []
   - id: force_stop
     type: force_stop_app
+    app_ref: planner_app
     name: Force Stop
     user_toggleable: true
     dependencies:
@@ -160,6 +154,5 @@ steps:
         - shell_command
       conflicts_with: []
     skip_if: []
-    params:
-      package_name: com.example.app
+    params: {}
     verify: []

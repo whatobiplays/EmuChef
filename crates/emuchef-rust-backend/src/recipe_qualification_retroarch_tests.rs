@@ -813,23 +813,37 @@ fn seed_artifact_cache(cache_root: &Path, plan: &ExecutionPlan, system_mode: Sys
             artifact.cache, "default",
             "every qualified artifact must use the default cache mode"
         );
-        if let Some(provenance) = &artifact.app_provenance {
+        let is_app_apk = if let Some(provenance) = &artifact.app_provenance {
             assert_eq!(provenance.app_id, "retroarch");
-            assert_eq!(provenance.kind, "file");
+            let expected_kind = if provenance.artifact_id == "apk" {
+                "apk"
+            } else {
+                "file"
+            };
+            assert_eq!(provenance.kind, expected_kind);
             assert!(matches!(
                 &artifact.source,
                 ExecutionArtifactSource::DirectUrl { .. }
             ));
-        }
+            provenance.artifact_id == "apk"
+        } else {
+            false
+        };
         let path = artifact_cache_path(cache_root, artifact);
         let leaf = artifact
             .id
             .rsplit('/')
             .next()
             .expect("artifact id should have a leaf");
-        if artifact.type_name == "remote_file" && leaf == "retroarch_apk" {
-            fs::write(&path, b"retroarch deterministic apk fixture\n")
-                .expect("apk fixture should be written");
+        if is_app_apk {
+            let fixture_workspace =
+                tempfile::tempdir().expect("RetroArch APK fixture root should be created");
+            let fixture_apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+                &fixture_workspace,
+                RETROARCH_PACKAGE,
+            );
+            fs::copy(fixture_apk, &path)
+                .expect("valid RetroArch APK fixture should be copied into the cache");
             continue;
         }
         let entries: &[&str] = match leaf {
@@ -930,10 +944,6 @@ impl ExecutorDevice for FirstLaunchFailureDevice {
 
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
         <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
-    }
-
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
-        <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
     }
 
     fn apply_permission_operation(

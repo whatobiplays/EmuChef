@@ -5,12 +5,20 @@ name: Phase 6C Qualification Fixture
 description: Local non-root executor qualification fixture for development-only testing.
 category: utility
 package_id: com.emuchef.fixture
+launcher_activity: com.emuchef.fixture.MainActivity
 artifacts:
   apk:
     kind: apk
     name: Qualification Fixture APK
     source:
       strategy: user_provided
+permission_sets:
+  baseline:
+    runtime:
+      - permission: android.permission.CAMERA
+    app_ops:
+      - op: CAMERA
+        mode: allow
 targets:
   qualification_config:
     kind: directory

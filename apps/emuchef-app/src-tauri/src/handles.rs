@@ -42,7 +42,6 @@ pub struct ReviewedPlanSnapshot {
     pub response: Value,
     pub target: Value,
     pub catalog_identity: Value,
-    pub catalog_digest: String,
     pub plan_digest: String,
     pub device_handle: String,
     /// Complete native qualification context captured when the review was built.
@@ -263,6 +262,7 @@ impl SessionHandles {
     }
 
     /// Return the native continuity epoch for one currently retained device.
+    #[cfg(test)]
     pub fn device_session_epoch(&self, handle: &str) -> Option<u64> {
         self.devices_by_handle
             .get(handle)
@@ -306,6 +306,7 @@ impl SessionHandles {
         })
     }
 
+    #[cfg(test)]
     pub fn set_facts(&mut self, handle: &str, facts: Value) -> Result<(), String> {
         let epoch = self.device_session_epoch(handle).ok_or_else(|| {
             stable_handle_error("device_unknown", "This device is no longer available.")
@@ -601,7 +602,6 @@ mod tests {
             response: json!({ "plan": { "id": "plan" } }),
             target: json!({ "serial": "trusted" }),
             catalog_identity: json!({ "sourceId": "catalog" }),
-            catalog_digest: "sha256:catalog".to_string(),
             plan_digest: "sha256:plan".to_string(),
             device_handle: device_handle.to_string(),
             qualification_context: None,
@@ -1190,13 +1190,10 @@ mod tests {
         store.set_facts(&handle, json!({ "model": "one" })).unwrap();
         let mut catalog_review = review_snapshot(&handle);
         catalog_review.catalog_identity["contentDigest"]["value"] = json!("changed");
-        catalog_review.catalog_digest = "sha256:changed-catalog".to_string();
         let catalog = store.insert_review(catalog_review);
-        // The handle store retains catalog provenance without treating it as
-        // session freshness authority.
         assert_eq!(
-            store.review(&catalog).unwrap().catalog_digest,
-            "sha256:changed-catalog"
+            store.review(&catalog).unwrap().catalog_identity["contentDigest"]["value"],
+            "changed"
         );
     }
 

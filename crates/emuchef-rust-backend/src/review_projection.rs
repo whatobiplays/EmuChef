@@ -245,10 +245,7 @@ pub(crate) fn project_review(
 fn action_section(step: &ExecutionStep) -> Option<&'static str> {
     match step.type_name.as_str() {
         "wait" | "extract_artifacts" | "extract_archive" => Some("preparation"),
-        "resolve_artifacts"
-        | "resolve_remote_release"
-        | "resolve_github_release"
-        | "download_remote_file" => Some("downloads"),
+        "resolve_artifacts" | "download_remote_file" => Some("downloads"),
         "install_apk" => Some("installs"),
         "copy_files" => Some("copies"),
         "grant_permissions" => Some("permissions"),

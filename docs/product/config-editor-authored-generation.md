@@ -1,16 +1,7 @@
 # Config Editor Authored Generation
 
 ## Status
-
-Implemented current-state design. Typed authored foundations, standard
-read-only device-profile generation, local APK generation, and public GitHub,
-GitLab, Forgejo/Codeberg, or direct HTTPS APK source generation are implemented.
-App Definitions use the schema-v1 authority contract, and the product catalog
-projects identity from a catalog-validated App Definition set. Recipe, planner,
-review, and executor authority migration remains later work, so generated App
-Definitions and Recipes temporarily duplicate the same app facts. Extended
-device capability checks and authenticated/private source access remain later
-work.
+Implemented current-state design. Typed authored foundations, device-profile generation, local APK generation, remote APK generation, App Definition authority, catalog-backed Recipe validation, planning, review, and execution are implemented. App Definitions own app identity, APK policy, permission sets, and app targets; Recipes reference those authorities and describe workflow. Private source access remains outside the supported workflow.
 
 This document defines the Config Editor workflows for generating authored
 content and editing App Definition documents:
@@ -34,7 +25,7 @@ direct editing; it does not change the generator draft or publication flow.
 
 Generation operations are side-effect free until an explicit save. Network analysis may retrieve bounded metadata and a selected APK into a generator-owned temporary workspace, but it does not install APKs, execute repository content, modify a device, or publish catalog files.
 
-App Definitions are schema-v1 documents that own intrinsic app identity and reusable app policy: package identity, app-owned artifacts and their sources, permission sets, App Targets, launcher activity, and presentation metadata. They are not execution authority yet; the generated recipe remains the executable planning and provisioning authority, so the two documents temporarily duplicate the same app facts.
+App Definitions own intrinsic app identity and reusable policy: package identity, App Artifacts and their sources, permission sets, App Targets, launcher activity, and presentation metadata. Recipes own procedural ordering and reference the owning App Definition; they do not duplicate application authority.
 
 This scope does not generate device plans, infer configuration-copy behavior
 from README prose, or automatically add unreviewed root, force-stop, app-data,
@@ -88,67 +79,19 @@ digest may inform review but may not substitute for manifest package evidence
 or an explicitly trusted publisher checksum.
 
 ### Installation strategies
-
-The wizard exposes three source-neutral recipe strategies when the selected source supports them.
+App generation writes App Definition authority for app identity and APK policy. Every install Recipe step uses `app_ref` and resolves `params.app` from a Recipe `app_artifact` referencing an App Artifact of kind `apk` owned by that same App Definition.
 
 #### Pinned release
-
-This is the default for a selected release asset or direct HTTPS APK. The
-recipe declares a `remote_file` artifact with the exact asset URL, resolves it,
-and installs it. The generated install step enforces the package name extracted
-during inspection. The App Definition records the same source as a `direct_url`
-artifact: the normalized public HTTPS URL plus the trusted publisher SHA-256 in
-lowercase when the author supplied one; the locally calculated inspection
-digest never supplies that field automatically.
+A pinned APK source is declared on the App Definition App Artifact. The Recipe contains an `app_artifact` reference and a `resolve_artifacts` step; it does not duplicate the URL as a generic Recipe `remote_file`. A publisher-provided checksum belongs to the App Artifact, while locally calculated inspection hashes are review metadata only.
 
 #### Latest compatible release
-
-This is available for public GitHub, GitLab, and Forgejo-compatible repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The pattern is optional: the author may clear it, and the saved App Definition then selects candidate assets by artifact kind alone. The rule is previewed against the selected release, and review is blocked unless it resolves exactly one eligible APK; zero eligible assets fail as no-match and multiple eligible assets fail as ambiguous.
-
-The generated recipe uses explicit `resolve_remote_release` and
-`download_remote_file` steps. Runtime resolution dispatches by provider,
-excludes drafts or unpublished releases, excludes prereleases unless the author
-enables them, orders releases deterministically, and fails safely when the saved
-rule matches zero or multiple assets. An absent pattern is omitted from the
-saved App Definition rather than stored as an empty string, and selection then
-falls back to artifact kind alone, which still requires exactly one eligible
-APK. The install step enforces the inspected package name against the resolved
-APK. Latest-compatible generation does not persist the authoring-time
-calculated digest as a trusted expected checksum.
+The App Definition owns the latest-release provider and selection policy. The Recipe still resolves the App Artifact through `resolve_artifacts`; it does not contain source-specific `resolve_remote_release` or `resolve_github_release` steps. `download_remote_file` remains supported for independent generic resources. Release matching must identify exactly one eligible APK.
 
 #### User-provided APK
-
-This is the default for a local APK and is available from any source. The
-recipe declares a required `file` input with role `apk` and installs the input.
-It never persists the developer's local absolute APK path. The App Definition
-declares a named `apk` artifact whose source strategy is `user_provided`. Because
-the runtime APK may differ from the authoring sample, the strategy omits
-package/checksum enforcement and permission selections derived from that
-sample.
+The App Definition declares a user-provided APK artifact. The Recipe binds its required APK input to that artifact with an `app_artifact` reference, resolves it, and installs its local path. The input path remains runtime data and is not persisted as application identity or source policy.
 
 ### Generated recipe
-
-The starter recipe is intentionally minimal:
-
-- optional `resolve_artifacts` for a pinned remote source;
-- optional `resolve_remote_release` followed by `download_remote_file` for latest-compatible provider sources;
-- `install_apk` constrained by `apk_install`;
-- `package_installed` skip condition using the reviewed package name;
-- optional package and checksum enforcement as described above; and
-- an optional `grant_permissions` step for reviewed eligible selections.
-
-The generator uses the existing recipe model and step specifications. It does not maintain a second recipe representation.
-
-Immediately before installation, `expected_package_name` causes the executor to
-reinspect the resolved APK with the bounded Rust manifest parser and compare the
-package exactly and case-sensitively. `expected_sha256`, when present, causes a
-streamed file digest comparison. A mismatch or redacted inspection/read failure
-prevents the ADB install call. Both parameters are optional so legacy and
-user-provided recipes retain their previous behavior when the fields are
-absent. These checks are integrity controls, not APK signature verification.
-
-The current native inspection supplies no launcher activity, so the normal
-Config Editor flow does not derive a launch step from the inspected APK.
+Generated install steps carry `app_ref`; their APK parameter references `artifacts.<id>.local_path` for the owning APK App Artifact. `package_installed` skip conditions have empty parameter maps and inherit package identity from the App Definition. Lifecycle and permission steps also use App Definition context rather than duplicated package, activity, or permission facts. Generic downloads remain independently available for non-app resources. Permission steps are emitted only when the author explicitly enables applicable permission automation.
 
 ### Permission automation
 
@@ -173,23 +116,28 @@ and fails closed.
 Only explicit selections matched back to the trusted native inspection may
 produce automation, and only package-enforced pinned or latest-compatible
 recipes are eligible. Runtime actions use `pm grant`; the initial supported
-app-op maps `MANAGE_EXTERNAL_STORAGE` to mode `allow`. Generated actions use
-the inspected expected package, set `required: false`, and use:
+app-op maps `MANAGE_EXTERNAL_STORAGE` to mode `allow`. Generated automation is
+stored in the App Definition's `permission_sets.baseline.runtime` or
+`permission_sets.elevated.app_ops` entries. The App Definition owns package
+identity; permission actions do not repeat it and do not carry per-action
+failure policy or `required` flags. A Recipe grants a selected set through an
+App-bound `grant_permissions` step:
 
 ```yaml
-policy:
-  on_failure: warn
-  require_all: false
+type: grant_permissions
+app_ref: example_app
+params:
+  permission_set: baseline
+  policy:
+    on_failure: warn
 ```
 
-The step requires `shell_command`, never blanket `root_shell`. Root and Android
-API applicability are action-scoped through supported `when.rooted`,
-`when.android_api_min`, and `when.android_api_max` conditions. Current
-generation emits a non-null API minimum for every action, an API maximum only
-when catalog or manifest facts provide one, and `rooted: true` only for a
-selected action whose reviewed catalog entry requires root. The executor
-evaluates these conditions against the actual target device and marks an unmet
-condition `not_applicable` without suppressing eligible actions.
+All permission sets require `shell_command`; the `elevated` set additionally
+requires `root_shell` and executes through the reviewed root-authority path.
+Individual actions may declare `android_api_min` and `android_api_max`. The
+planner evaluates those bounds against the target device and marks actions
+outside their supported API range `not_applicable` without suppressing other
+eligible actions.
 
 The exact-name catalog covers reviewed public dangerous permissions but does
 not infer platform behavior for arbitrary names. Runtime-restricted,
@@ -245,19 +193,18 @@ resolved release must still contain exactly one eligible asset: zero eligible
 assets is a no-match failure and multiple eligible assets is an ambiguity
 failure. `invert_asset_pattern` is legal only alongside a pattern and is
 omitted canonically when false.
-The generated Recipe resolves a filename pattern by positive match only, so a
-reviewed inversion is blocking until the recipe-authority migration teaches
-release resolution to invert; hand-authored App Definitions outside the
-generator still accept inversion.
+The App Artifact source policy retains `invert_asset_pattern` through planning
+and execution. Release selection keeps pattern matches when the flag is false
+and non-matches when it is true. The generated Recipe selects the App Artifact;
+it does not duplicate or reinterpret the source filter.
 
 Verified permission selections populate the App Definition permission sets.
-Rust partitions every inspection-verified selection by its root requirement:
+Rust partitions each inspection-verified selection by its root requirement:
 actions that run without root form the `baseline` set, actions that require
-root form the `elevated` set, and an empty partition is omitted. A permission
-set that is present but empty is invalid. The generated Recipe permission step
-continues to be produced from those same trusted selections on the current
-execution contract, and permission-set editing beyond those structured
-selections remains a later dedicated-editor concern.
+root form the `elevated` set, and an empty partition is omitted. Generated
+Recipes reference the applicable named set from `grant_permissions`; permission
+definitions remain App-owned. A present but empty set is invalid. Editing
+permission sets outside the structured generator selections remains deferred.
 
 `launcher_activity` is recorded only when inspection verified the exact
 launcher component and the author enabled launch-once generation, converting
@@ -273,16 +220,14 @@ is transient draft and review evidence: it appears in generator review, and it
 is never written into the saved App Definition, including
 `metadata.apk_inspection`.
 
-The generator continues to emit the existing Recipe contract, so an App
-Definition and its Recipe temporarily duplicate the same app facts until later
-authority-migration tickets land.
-The reviewed App Definition artifact is the authority for the download policy
-the duplicate Recipe copies: a retained remote artifact supplies the URL,
-checksum, provider, service origin, repository, filename pattern, and
-prerelease policy, and clearing a field there clears it in the generated
-Recipe. Replacing or removing the remote artifact without changing the source
-selection is blocking, because the Recipe would otherwise keep resolving and
-installing a download the saved App Definition no longer declares.
+Generators emit canonical schema-v1 Recipes. APK install parameters reference
+the local path of a Recipe App Artifact, and the install step carries the same
+`app_ref` as that App Artifact. Package, launcher, source, checksum, and
+permission identity remain owned by the App Definition. Recipe App Artifact
+references identify which App Artifact to resolve; changing or removing its
+source changes the App Definition instead of duplicating policy in Recipe
+parameters. A generated source must pair with one unambiguous App Artifact of
+the selected kind.
 Several artifacts that share the reviewed source strategy and none of them
 under the generated artifact id are equally blocking
 (`remote_source_artifact_ambiguous`), because generation cannot tell which
@@ -348,18 +293,15 @@ Before saving, Rust scans the selected authored root for:
   another App Definition;
 - an App Definition source repository or direct download address also used by
   another App Definition; and
-- overlapping package/checksum enforcement or an identical APK
-  security-and-permission fingerprint under another recipe ID.
+- App/artifact reference-integrity conflicts.
 
-App Definition ID, App Definition `package_id`, recipe ID, destination path,
-and identical APK security-automation fingerprint conflicts are blocking. App
-Definition source repository, direct URL, and latest-policy overlaps, plus
-other package or checksum overlaps, are warnings requiring review. Rust derives
-the security fingerprint from the complete generated recipe returned by the
-trusted generation request; React cannot supply the recipe or the fingerprint.
-Collision requests without a complete recipe retain the earlier recipe checks.
-See [Phase 5B](phase-5b-apk-verification-and-permission-automation.md) for
-exact comparability and fingerprint semantics.
+App Definition ID, App Definition `package_id`, Recipe ID, destination path,
+and reference-integrity conflicts are blocking. Source-policy overlaps are
+advisory. Recipe-derived APK package/checksum/permission fingerprints are not
+collision authority. Rust checks the complete generated Recipe returned by
+the trusted generation request; React cannot supply authored paths or
+collision findings. Collision requests without a complete Recipe retain the
+same identity, destination, and reference-integrity checks.
 
 ## Device profile generator
 
@@ -766,17 +708,13 @@ reports a bounded advisory retry indication when GitHub supplies valid numeric
 retry or reset metadata; the indication does not guarantee that a later request
 will succeed. GitHub authentication remains future refinement work.
 
-Pinned generation records the durable source in the App Definition as a
-`direct_url` artifact (the normalized public HTTPS APK URL plus the lowercase
-trusted publisher SHA-256 when the author supplied one) and emits the
-`remote_file` artifact plus resolve/install steps in the recipe. Until the Recipe
-authority migration lands, that trusted checksum is also written into the
-generated Recipe, so the value temporarily exists in both documents. Authors
-may instead choose the user-provided APK strategy, which records a `user_provided`
-artifact source and preserves the Phase 3 `user_provided_apk` recipe input
-shape without remote identity. Authentication, private repositories,
-arbitrary-site scraping, background refresh, and split-package formats remain
-excluded.
+Pinned generation records the source on the App Definition APK App Artifact
+and emits a Recipe App Artifact reference plus `resolve_artifacts` and install
+steps. Publisher checksums remain on the App Artifact and are never copied
+into Recipe install parameters. The user-provided strategy binds a required
+Recipe input to a `user_provided` App Artifact. Authentication, private
+repositories, arbitrary-site scraping, background refresh, and split-package
+formats remain excluded.
 
 ### Phase 5: GitHub release-pattern testing
 

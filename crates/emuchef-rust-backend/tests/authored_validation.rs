@@ -128,6 +128,13 @@ fn diagnostics_for_validate_path(fixture: &str) -> Value {
     response["result"]["diagnostics"].clone()
 }
 
+fn diagnostics_for_validate_path_with_root(fixture: &str, authored_root: &Path) -> Value {
+    let path = fixture_path(fixture);
+    let response = one_shot_response(validate_path_request_with_root(&path, authored_root));
+    assert_eq!(response["ok"], true, "{fixture}");
+    response["result"]["diagnostics"].clone()
+}
+
 fn diagnostics_for_open_and_validate(fixture: &str) -> (Value, Value) {
     let path = fixture_path(fixture);
     let responses = sidecar_responses(&jsonl_input(vec![
@@ -208,6 +215,29 @@ fn assert_editor_local_fixture_diagnostics(
         assert_limited_context_warning(diagnostics, Some(object_id));
         assert_error_diagnostic(diagnostics, code, object_id, field);
     }
+}
+
+/// Checks an app-backed recipe fixture against a temporary authored catalog.
+fn assert_app_backed_fixture_diagnostics(
+    fixture: &str,
+    code: &str,
+    object_id: &str,
+    field: Option<&str>,
+) {
+    let temporary = tempfile::tempdir().expect("authored root should be created");
+    let authored_root = temporary.path().join("authored");
+    let apps = authored_root.join("apps");
+    fs::create_dir_all(authored_root.join("recipes"))
+        .expect("authored recipes directory should be created");
+    fs::create_dir_all(&apps).expect("authored apps directory should be created");
+    fs::write(
+        apps.join("test.app.yaml"),
+        "schema_version: 1\nkind: app_definition\nid: test.app\nname: Test app\npackage_id: com.example.test\nartifacts:\n  apk:\n    kind: apk\n    source:\n      strategy: user_provided\n",
+    )
+    .expect("App Definition should be written");
+
+    let diagnostics = diagnostics_for_validate_path_with_root(fixture, &authored_root);
+    assert_error_diagnostic(&diagnostics, code, object_id, field);
 }
 
 #[test]
@@ -361,7 +391,7 @@ fn catalog_backed_recipe_validation_checks_app_context_for_every_authored_step()
     let recipe_path = recipes.join("app_context.yaml");
     fs::write(
         &recipe_path,
-        "schema_version: 1\nkind: recipe\nid: test.app_context\nname: App context\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: test.app\n    artifact: apk\n  other_installer:\n    type: app_artifact\n    app_ref: other.app\n    artifact: apk\nsteps:\n  - id: resolve\n    type: resolve_artifacts\n    name: Resolve artifacts\n    user_toggleable: false\n    params:\n      artifacts: [installer, other_installer]\n  - id: missing_context\n    type: install_apk\n    name: Missing context\n    user_toggleable: false\n    dependencies: [resolve]\n    params:\n      app:\n        ref: artifacts.installer.local_path\n  - id: unknown_context\n    type: launch_app\n    name: Unknown context\n    user_toggleable: false\n    constraints:\n      capabilities: [root_shell]\n    app_ref: missing.app\n    params:\n      package_name: com.example.test\n  - id: inapplicable_context\n    type: resolve_artifacts\n    name: Inapplicable context\n    user_toggleable: false\n    app_ref: test.app\n    params:\n      artifacts: [installer]\n  - id: incoherent_context\n    type: install_apk\n    name: Incoherent context\n    user_toggleable: false\n    app_ref: test.app\n    dependencies: [resolve]\n    params:\n      app:\n        ref: artifacts.other_installer.local_path\n",
+        "schema_version: 1\nkind: recipe\nid: test.app_context\nname: App context\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts:\n  installer:\n    type: app_artifact\n    app_ref: test.app\n    artifact: apk\n  other_installer:\n    type: app_artifact\n    app_ref: other.app\n    artifact: apk\nsteps:\n  - id: resolve\n    type: resolve_artifacts\n    name: Resolve artifacts\n    user_toggleable: false\n    params:\n      artifacts: [installer, other_installer]\n  - id: missing_context\n    type: install_apk\n    name: Missing context\n    user_toggleable: false\n    dependencies: [resolve]\n    params:\n      app:\n        ref: artifacts.installer.local_path\n  - id: unknown_context\n    type: launch_app\n    name: Unknown context\n    user_toggleable: false\n    constraints:\n      capabilities: [root_shell]\n    app_ref: missing.app\n  - id: inapplicable_context\n    type: resolve_artifacts\n    name: Inapplicable context\n    user_toggleable: false\n    app_ref: test.app\n    params:\n      artifacts: [installer]\n  - id: incoherent_context\n    type: install_apk\n    name: Incoherent context\n    user_toggleable: false\n    app_ref: test.app\n    dependencies: [resolve]\n    params:\n      app:\n        ref: artifacts.other_installer.local_path\n",
     )
     .expect("Recipe should be written");
 
@@ -392,12 +422,14 @@ fn catalog_backed_recipe_validation_checks_app_context_for_every_authored_step()
         context_free_diagnostics[0]["code"],
         "validation_context_limited"
     );
-    assert!(!context_free_diagnostics.iter().any(|diagnostic| {
-        matches!(
+    assert!(context_free_diagnostics.iter().any(|diagnostic| {
+        diagnostic["code"] == "app_context_required" && diagnostic["field"] == "steps[1].app_ref"
+    }));
+    assert!(context_free_diagnostics.iter().all(|diagnostic| {
+        !matches!(
             diagnostic["code"].as_str(),
             Some(
-                "app_context_required"
-                    | "app_definition_unknown"
+                "app_definition_unknown"
                     | "app_context_inapplicable"
                     | "app_install_artifact_provenance_invalid"
             )
@@ -475,15 +507,15 @@ fn top_level_param_refs_validate_only_authored_param_refs() {
         "phase6k_unknown_input_ref.yaml",
         "unknown_input_ref",
         "phase6k.unknown_input_ref",
-        Some("steps[0].params.app"),
+        Some("steps[0].params.source"),
     );
-    assert_editor_local_fixture_diagnostics(
+    assert_app_backed_fixture_diagnostics(
         "phase6k_unknown_artifact_ref.yaml",
         "unknown_artifact_ref",
         "phase6k.unknown_artifact_ref",
         Some("steps[0].params.app"),
     );
-    assert_editor_local_fixture_diagnostics(
+    assert_app_backed_fixture_diagnostics(
         "phase6k_unknown_artifact_field.yaml",
         "unknown_artifact_field",
         "phase6k.unknown_artifact_field",
@@ -639,10 +671,11 @@ fn diagnostics_refresh_after_commands_undo_redo_and_save() {
         document_request("validate-after-command", "validate"),
         document_request("undo", "undo"),
         document_request("redo", "redo"),
+        document_request("undo-invalid-edit", "undo"),
         document_request("save", "saveRecipe"),
     ]));
 
-    assert_eq!(responses.len(), 6);
+    assert_eq!(responses.len(), 7);
     assert_eq!(responses[0]["ok"], true);
     let opened = &responses[0]["result"]["document"];
     assert_eq!(opened["dirty"], false);
@@ -689,13 +722,17 @@ fn diagnostics_refresh_after_commands_undo_redo_and_save() {
         Some("steps[0].params.duration_ms"),
     );
 
-    let saved = &responses[5]["result"]["document"];
-    assert_eq!(saved["dirty"], false);
-    assert_eq!(saved["yaml"], redone["yaml"]);
-    assert_error_diagnostic(
-        &saved["diagnostics"],
-        "param_contract_violation",
-        "phase6e.minimal",
-        Some("steps[0].params.duration_ms"),
+    let valid_again = &responses[5]["result"]["document"];
+    assert_eq!(
+        responses[5]["result"]["commandResult"],
+        json!({"changed": true})
     );
+    assert_eq!(valid_again["dirty"], false);
+    assert_eq!(valid_again["yaml"], opened["yaml"]);
+
+    let saved = &responses[6]["result"]["document"];
+    assert_eq!(saved["dirty"], false);
+    assert_eq!(saved["yaml"], opened["yaml"]);
+    assert_eq!(saved["diagnostics"].as_array().unwrap().len(), 1);
+    assert_limited_context_warning(&saved["diagnostics"], Some("phase6e.minimal"));
 }

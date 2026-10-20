@@ -91,7 +91,7 @@ fn catalog_model_validation_reports_all_files_in_stable_relative_path_order() {
 }
 
 #[test]
-fn malformed_models_do_not_suppress_valid_recipe_diagnostics() {
+fn unrelated_malformed_models_do_not_enter_recipe_admission_diagnostics() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
@@ -132,12 +132,5 @@ steps: []
         .iter()
         .map(|diagnostic| diagnostic["code"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        codes,
-        [
-            "authored_id_invalid",
-            "device_model_pattern_invalid",
-            "recipe_not_found"
-        ]
-    );
+    assert_eq!(codes, ["recipe_not_found"]);
 }

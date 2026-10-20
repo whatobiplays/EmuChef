@@ -42,6 +42,12 @@ Rust is the sole product runtime. The Cargo package
 - document sessions, command application, undo/redo, save, YAML emission, and
   reference indexing.
 
+The `validate` CLI accepts either a recipe path or `--authored-root`. If both
+are absent, it prints usage and an error to stderr, exits with status 2, and
+writes no stdout. Recipe validation prints a text summary beginning with
+`Validation status:`, followed by `Validated paths:` and any `Issues:`; the
+`Errors:` count follows those sections.
+
 The retired Python implementation, tests, dependencies, package metadata, and
 entrypoints are absent from the repository. Python is not required for product
 builds, development, tests, packaging, release qualification, or either Tauri
@@ -92,17 +98,21 @@ artifact with an `app_artifact` reference and attach app context to individual
 steps with `app_ref`. Planning copies the referenced app's identity and
 presentation into the execution plan and records late-bound release policy
 there, so review and execution use the reviewed plan without reopening the app
-catalog. Existing Recipes that have not migrated retain their current
-form-based artifact, install, and package-condition behavior until their own
-migration.
+catalog. App-backed artifact references, APK installation, and package-state
+conditions require the reviewed App Definition context. Package-state
+conditions read the package identity from their bound App Definition and use
+an empty parameter map; legacy package-name conditions and app-less APK
+installation forms are invalid.
 
 The RetroArch App Definition owns named `kind: file` direct-URL artifacts for
 seven frontend archives, thirteen core archives, and three core-system
 archives. Its provisioning Recipe references these resources through the
 existing Recipe artifact IDs and keeps cache selection, artifact groups,
 extraction, step dependencies, and app-aware copy destinations. The Recipe's
-`retroarch_apk` remote-file declaration and legacy APK installation remain
-unchanged.
+`retroarch_apk` is a Recipe App Artifact reference to RetroArch's `apk`
+App Artifact. The install step carries `app_ref: retroarch`, and its
+`package_installed` condition is parameterless so package identity comes from
+the App Definition.
 
 An App Definition target names a file or directory at `app_data`,
 `external_app_data`, `shared_storage`, or `absolute_device_path`. App-aware
@@ -122,8 +132,8 @@ select exactly one `permission_set`: `baseline` or `elevated`. Their
 App Definition actions and target API applicability into the step-local
 `ExecutionStep.permission_plan`; that plan is the only executable action
 source, contains the reviewed package identity and per-action applicability,
-and is covered by the canonical execution-plan digest. New-form `params` do
-not contain duplicate runtime or app-op action arrays. Review, execution, and
+and is covered by the canonical execution-plan digest. Canonical schema-v1
+`params` do not contain duplicate runtime or app-op action arrays. Review, execution, and
 reporting read the same retained plan and app snapshot.
 
 Bounded actions cannot be planned when the Android API level is unknown;
@@ -149,8 +159,10 @@ Ordinary action failures continue across independent applicable actions. Under
 `warn`, each failed action is reported as a warning and the step succeeds with
 warnings; under `fail`, the step fails with an execution error. Root-authority,
 identity, transport, and interruption failures stop execution immediately.
-Legacy permission steps keep their existing package-based behavior until the
-compatibility cutover.
+Permission automation is App Definition-owned. A Recipe `grant_permissions`
+step names `app_ref`, selects a declared `baseline` or `elevated`
+`permission_set`, and may set its failure policy. Generators create these steps
+only when the author explicitly enables applicable permission automation.
 
 RetroArch places `MANAGE_EXTERNAL_STORAGE` in its App Definition's `elevated`
 set, so all-files access automation runs only on rooted devices. Unrooted
@@ -196,9 +208,10 @@ one fully qualified Android class name. Planning requires it for app-aware
 launch, then seals the package and activity as literal values beside the App
 snapshot in the reviewed plan. Force-stop seals the package alone. Execution
 and retained final-launch eligibility verify the plan-local snapshot and
-concrete target before contacting the device. Existing lifecycle steps without
-app context remain valid only when they carry a valid literal Android package
-and, for launch, an optional valid literal activity. Config Editor exposes an
+concrete target before contacting the device. Schema-v1 lifecycle steps
+resolve package identity from the referenced App Definition; launch also
+resolves its launcher activity there. Package and activity literals are not
+accepted as lifecycle authority. Config Editor exposes an
 editable App Definition ID for launch and force-stop steps, while other step
 types retain their existing read-only display of an assigned context. Changing
 the ID preserves any authored parameters so the author can clear them
@@ -838,6 +851,15 @@ undo/redo, validation, YAML, authored-root, and close behavior. Transport
 request identifiers are removed before responses reach frontend code. The
 sidecar also exposes `saveDocument` and `saveDocumentAs`, which dispatch by
 document type alongside the App Definition-specific save operations.
+
+Recipe document admission validates the Recipe's own steps and references,
+relevant App Definitions, dependencies, and authority graph. Catalog-wide
+authored-root validation still reports diagnostics from every catalog entry,
+but unrelated malformed entries do not reject an otherwise valid Recipe.
+Recipe Save As validates against the destination catalog while publication is
+coordinated. Successful publication refreshes the document path, authored root,
+diagnostics, and App catalog projection to the destination; rejected admission
+does not publish a destination file.
 
 ### App Definition documents
 

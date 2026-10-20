@@ -106,11 +106,9 @@ pub(super) fn validate_app_authority(
 
     for (_, recipe_id, step) in selected_steps {
         let Some(app_ref) = step.app_ref.as_deref() else {
-            let recipe = recipes.get(recipe_id);
             let app_context_required =
                 step_specs::step_spec_for(&step.type_name).is_some_and(|spec| {
                     spec.app_context == step_specs::AppContextRequirement::Required
-                        && !recipe.is_some_and(|recipe| is_legacy_app_step_form(recipe, step))
                 });
             if app_context_required {
                 errors.push(app_authority_error(
@@ -119,12 +117,15 @@ pub(super) fn validate_app_authority(
                     json!({ "recipe_ref": recipe_id, "step_id": step.id }),
                 ));
             }
-            if step.skip_if.iter().chain(&step.verify).any(|condition| {
-                condition.type_name == "package_installed" && condition.params.is_empty()
-            }) {
+            if step
+                .skip_if
+                .iter()
+                .chain(&step.verify)
+                .any(|condition| condition.type_name == "package_installed")
+            {
                 errors.push(app_authority_error(
                     "app_condition_context_required",
-                    "A parameterless package_installed condition requires an app context on its step.",
+                    "A package_installed condition requires an app context on its step.",
                     json!({ "recipe_ref": recipe_id, "step_id": step.id }),
                 ));
             }
@@ -243,31 +244,6 @@ pub(crate) fn validate_recipe_app_authority(
         errors.extend(target_errors);
     }
     errors
-}
-
-fn is_legacy_app_step_form(recipe: &Recipe, step: &Step) -> bool {
-    match step.type_name.as_str() {
-        "install_apk" => !step.params.get("app").is_some_and(|value| {
-            let ParamValue::Ref(reference) = value else {
-                return false;
-            };
-            let Some(artifact_id) = reference
-                .strip_prefix("artifacts.")
-                .and_then(|value| value.strip_suffix(".local_path"))
-            else {
-                return false;
-            };
-            matches!(
-                recipe.artifacts.get(artifact_id),
-                Some(RecipeArtifact::AppArtifact(_))
-            )
-        }),
-        "grant_permissions" => ["runtime", "appops", "policy"]
-            .iter()
-            .any(|parameter| step.params.contains_key(*parameter)),
-        "launch_app" | "force_stop_app" => step_specs::is_valid_legacy_lifecycle_form(step),
-        _ => false,
-    }
 }
 
 fn validate_app_install_binding(
@@ -547,9 +523,7 @@ pub(super) fn validate_selected_user_provided_inputs(
         if value.is_none() && allow_missing_value {
             continue;
         }
-        if !value
-            .is_some_and(|value| value.as_str().is_some_and(|path| !path.trim().is_empty()))
-        {
+        if !value.is_some_and(|value| value.as_str().is_some_and(|path| !path.trim().is_empty())) {
             errors.push(app_authority_error(
                 "app_artifact_input_binding_missing_value",
                 "A selected user-provided App Artifact requires a value for its Recipe file input.",
