@@ -359,6 +359,9 @@ pub(crate) enum StepFailureKind {
     RootAuthorityUnverified,
     RootDenied,
     RootUnavailable,
+    InstallSigningRejected,
+    InstallVersionRejected,
+    InstallRejected,
     OperationFailed,
 }
 
@@ -403,6 +406,9 @@ pub(crate) enum DeviceOperationKind {
     RootAuthorityUnverified,
     RootDenied,
     RootUnavailable,
+    InstallSigningRejected,
+    InstallVersionRejected,
+    InstallRejected,
     Other,
 }
 
@@ -3159,6 +3165,36 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
             message: "Continued root authority could not be confirmed safely.".to_string(),
             cleanup: None,
         },
+        adb::AdbCommandError::Resolution(message)
+            if message.starts_with("android_signing_failed:") =>
+        {
+            DeviceOperationError {
+                kind: DeviceOperationKind::InstallSigningRejected,
+                message: "The device operation could not be started or completed safely."
+                    .to_string(),
+                cleanup: None,
+            }
+        }
+        adb::AdbCommandError::Resolution(message)
+            if message.starts_with("android_version_failed:") =>
+        {
+            DeviceOperationError {
+                kind: DeviceOperationKind::InstallVersionRejected,
+                message: "The device operation could not be started or completed safely."
+                    .to_string(),
+                cleanup: None,
+            }
+        }
+        adb::AdbCommandError::Resolution(message)
+            if message.starts_with("android_install_failed:") =>
+        {
+            DeviceOperationError {
+                kind: DeviceOperationKind::InstallRejected,
+                message: "The device operation could not be started or completed safely."
+                    .to_string(),
+                cleanup: None,
+            }
+        }
         adb::AdbCommandError::Resolution(_) | adb::AdbCommandError::RootCheckFailed => {
             DeviceOperationError::other(
                 "The device operation could not be started or completed safely.",
@@ -3756,6 +3792,13 @@ impl From<DeviceOperationError> for StepFailure {
             }
             DeviceOperationKind::RootDenied => Some(StepFailureKind::RootDenied),
             DeviceOperationKind::RootUnavailable => Some(StepFailureKind::RootUnavailable),
+            DeviceOperationKind::InstallSigningRejected => {
+                Some(StepFailureKind::InstallSigningRejected)
+            }
+            DeviceOperationKind::InstallVersionRejected => {
+                Some(StepFailureKind::InstallVersionRejected)
+            }
+            DeviceOperationKind::InstallRejected => Some(StepFailureKind::InstallRejected),
             DeviceOperationKind::Other => Some(StepFailureKind::OperationFailed),
         };
         Self {

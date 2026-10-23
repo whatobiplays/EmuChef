@@ -14,7 +14,7 @@ artifacts:
       provider: github
       base_url: https://github.com
       repository: ARMSX2/ARMSX1
-      asset_pattern: '^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$'
+      asset_pattern: '^ARMSX1-(?:release-[0-9]{8}-arm64-v8a|[0-9]+\.[0-9]+\.[0-9]+)\.apk$'
       prerelease: false
 metadata:
   homepage: https://github.com/ARMSX2/ARMSX1
