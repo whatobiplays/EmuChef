@@ -1,0 +1,55 @@
+CONTEXT.md
+  s_f2942942c3caab::t_3ebb010c5d8d12 470-484,1619-1645
+Makefile
+  s_f2942942c3caab::t_e78f4bfb46d7a3 42,54,81,92-96
+authored/apps/armsx1.yaml
+  s_f2942942c3caab::t_d91a6ad8c57093 17
+crates/emuchef-rust-backend/src/executor.rs
+  s_f2942942c3caab::t_1d1a1a441ee224 362-364,409-411,3168-3197,3795-3801
+crates/emuchef-rust-backend/src/executor/adb.rs
+  s_f2942942c3caab::t_97c0c1dc6ac189 385-389,396-429,1222-1401,1433-1522
+crates/emuchef-rust-backend/src/executor_tests.rs
+  s_f2942942c3caab::t_1d3a77b231c9c4 1931-1986,3747,3756,3788-3911
+crates/emuchef-rust-backend/src/lib.rs
+  s_f2942942c3caab::t_d9d7a3c87fc994 57-60
+crates/emuchef-rust-backend/src/planner_runtime.rs
+  s_f2942942c3caab::t_8426dc27f3478c 259
+crates/emuchef-rust-backend/src/planner_tests.rs
+  s_f2942942c3caab::t_fe464ba3f191b5 7037-7040
+crates/emuchef-rust-backend/src/recipe_qualification_armsx1_emulator_tests.rs
+  s_f2942942c3caab::t_b169ca8d45c61a 1-5676
+crates/emuchef-rust-backend/src/recipe_qualification_armsx1_tests.rs
+  s_f2942942c3caab::t_aaf3ea2cfa314f 1-1270
+docs/manual/armsx1-emulator-qualification.md
+  s_f2942942c3caab::t_ea831e8602a063 1-94
+docs/product/product-roadmap.md
+  s_f2942942c3caab::t_2afab0df98afa5 30
+docs/product/recipe-qualification-armsx1.md
+  s_f2942942c3caab::t_dc3d78196edd98 1-9
+docs/testing/recipe-qualification/armsx1/incremental-provenance.json
+  s_f2942942c3caab::t_804876c4fb7a27 1-88
+tests/fixtures/recipe-qualification/armsx1/github-releases.json
+  s_f2942942c3caab::t_0d68b302520d4a 1-208
+tests/fixtures/recipe-qualification/armsx1/qualification-contract.json
+  s_f2942942c3caab::t_7a1932176c0e02 1
+tools/qualify-armsx1-emulator.mjs
+  s_f2942942c3caab::t_0b223538e2258c 1-1262
+tools/qualify-armsx1-emulator.test.mjs
+  s_f2942942c3caab::t_ef4c0dcb3e337f 1-1890
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bf3b83561b44cee5a4ea28d7db0bc1356766f859",
+  "prompts": {},
+  "sessions": {
+    "s_f2942942c3caab": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15855-1bcd-7d92-b495-2b4e1d2b21cb",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
