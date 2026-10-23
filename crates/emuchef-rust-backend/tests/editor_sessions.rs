@@ -209,6 +209,52 @@ fn save_recipe_as_writes_target_updates_path_and_preserves_history() {
 }
 
 #[test]
+fn standalone_recipe_save_as_keeps_authored_root_unbound() {
+    let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+    let save_as_path = temp_recipe.dir().join("standalone_saved_as.yaml");
+    let input = format!(
+        "{}\n{}\n{}\n",
+        json!({
+            "id": "open-standalone",
+            "type": "openRecipe",
+            "payload": {"path": temp_recipe.path}
+        }),
+        json!({
+            "id": "save-as-standalone",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": "doc-1", "path": save_as_path}
+        }),
+        json!({
+            "id": "get-after-save-as",
+            "type": "getDocument",
+            "payload": {"documentId": "doc-1"}
+        }),
+    );
+
+    let responses = sidecar_responses(&input);
+
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(
+        responses[0]["result"]["document"]["authoredRoot"],
+        Value::Null
+    );
+    assert_eq!(responses[1]["id"], "save-as-standalone");
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(
+        responses[1]["result"]["document"]["authoredRoot"],
+        Value::Null
+    );
+    assert!(save_as_path.is_file());
+    assert_eq!(responses[2]["id"], "get-after-save-as");
+    assert_eq!(responses[2]["ok"], true);
+    assert_eq!(
+        responses[2]["result"]["document"]["authoredRoot"],
+        Value::Null
+    );
+}
+
+#[test]
 fn save_recipe_as_validates_payload_and_unknown_documents() {
     let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
     let input = format!(

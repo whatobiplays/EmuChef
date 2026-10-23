@@ -23,7 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MAX_TERMINAL_RECORDS: usize = 64;
 static NEXT_WRITER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Coordinates authored-file publication within a canonical catalog or standalone directory.
+/// Coordinates authored-file publication within a canonical catalog or
+/// standalone directory, scoped to one canonical publication root.
 #[derive(Clone, Debug)]
 pub struct CatalogChangeCoordinator {
     authored_root: PathBuf,
