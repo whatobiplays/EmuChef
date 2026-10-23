@@ -467,6 +467,21 @@ Authored source lives under `authored/`:
 - `device_profiles/` defines match criteria and capability defaults;
 - `device_plans/` selects profiles and recipes.
 
+### ARMSX1 latest-release source policy
+
+The `armsx1` App Definition resolves only stable GitHub releases from
+`ARMSX2/ARMSX1`, excludes draft and prerelease releases, and requires package
+identity `com.nanodata.armsx`. Its anchored APK policy accepts the complete
+filenames `ARMSX1-release-YYYYMMDD-arm64-v8a.apk` and
+`ARMSX1-MAJOR.MINOR.PATCH.apk`. Debug, source, nightly, and malformed filename
+forms remain ineligible.
+
+Selection first identifies the newest eligible stable release and then applies
+the App-owned asset policy to that release. A newer eligible release without a
+matching APK fails with `remote_asset_no_match`; selection does not fall back
+to an older release. Multiple matching APKs in the selected release fail as
+ambiguous.
+
 Product catalog operations consume a resolved local snapshot rather than a
 repository-specific global root. A snapshot carries `bundled` or
 `local_directory` source kind, source id, optional version and cache key, and an
@@ -1600,6 +1615,33 @@ local-artifact baseline, real-device apply and idempotent rerun, clean-cache
 HTTP(S) resolution, warm-cache and offline warm-cache reruns, matching cache
 manifests, and no leaked partial files on commit
 `5dca50603cf3a4831867c229157a94906151cbb7`.
+
+### ARMSX1 emulator qualification target
+
+The operator procedure for live ARMSX1 qualification requires serial
+`emulator-5554` and AVD `EmuChef-ARMSX1-Android16-ARM64`. Diagnostic mode
+verifies that exact serial-to-AVD identity using read-only ADB observations.
+Normal Node live invocation validates the selected AVD identity and accepts
+any syntactically valid emulator serial. Before mutation-capable work, the
+Rust live qualification test independently requires `emulator-5554` and
+rejects any other serial. The reviewed install and package-edit target binding
+uses that same serial. Neither workflow enumerates attached devices or proves
+that `emulator-5554` is the only running emulator. Offline qualification and
+live emulator qualification remain separate evidence paths.
+
+Before the ARMSX1 APK install operation reaches ADB, the Rust qualification test
+verifies the downloaded digest, package identity, ARM64 native library, and APK
+signature. The `apksigner` verifier must be available on `PATH` or under an
+Android SDK build-tools directory found through `ANDROID_HOME` or
+`ANDROID_SDK_ROOT`. Missing verifier, verifier execution failure, and APK
+signature rejection use the stable codes `apk_preinstall_signature_verifier_unavailable`,
+`apk_preinstall_signature_verifier_failed`, and
+`apk_preinstall_signature_rejected`. These failures belong to APK identity
+verification; the install and version stages remain `NOT_RUN`, and package,
+ABI, and signing evidence reflects only completed checks. The
+`android_signing_failed` code and `install_signing` category describe a
+signing rejection returned by Android after the package-manager install
+command was issued.
 
 ## Release State
 

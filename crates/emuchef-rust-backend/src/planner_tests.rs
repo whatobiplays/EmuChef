@@ -7034,7 +7034,10 @@ fn armsx1_plan_contains_app_identity_and_late_bound_release_policy() {
         } if provider == "github"
             && service_origin == "https://github.com"
             && repository == "ARMSX2/ARMSX1"
-            && asset_pattern.as_deref() == Some(r"^ARMSX1-release-[0-9]{8}-arm64-v8a\.apk$")
+            && asset_pattern.as_deref()
+                == Some(
+                    r"^ARMSX1-(?:release-[0-9]{8}-arm64-v8a|[0-9]+\.[0-9]+\.[0-9]+)\.apk$",
+                )
     ));
     let install = plan
         .steps

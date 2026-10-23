@@ -39,7 +39,7 @@ CLEAN_RUST_TARGET_DIRS := \
 CLEAN_TAURI_GENERATED_DIRS := $(EMUCHEF_APP_PREFIX)/src-tauri/gen $(CONFIG_EDITOR_PREFIX)/src-tauri/gen
 CLEAN_RUNTIME_SCRATCH_DIRS := .emuchef_cache .emuchef_runtime/executions
 
-.PHONY: help install ensure-deps build test clean device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev
+.PHONY: help install ensure-deps build test clean device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev qualify-armsx1-emulator
 
 help:
 	@printf '%s\n' \
@@ -51,6 +51,7 @@ help:
 		'  test          Run Rust, application, security, typecheck, and lint tests' \
 		'  clean         Remove generated build output and reconstructable caches' \
 		'  device-qualification-check    Validate device qualification definitions, evidence, and matrix' \
+		'  qualify-armsx1-emulator      Opt-in live qualification; requires exact dedicated AVD identity and operator attestation' \
 		'  emuchef-app   Launch the EmuChef app in development mode' \
 		'  config-editor Launch the Config Editor app in development mode' \
 		'  dev           Launch both applications in development mode'
@@ -77,6 +78,7 @@ build: ensure-deps
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run build
 
 test: ensure-deps device-qualification-check cargo-test-freshness-check backend-test-fresh
+	node --test tools/qualify-armsx1-emulator.test.mjs
 	cargo test --manifest-path $(BACKEND_MANIFEST)
 	cargo test --manifest-path $(EMUCHEF_TAURI_MANIFEST)
 	npm --prefix $(EMUCHEF_APP_PREFIX) run test
@@ -86,6 +88,11 @@ test: ensure-deps device-qualification-check cargo-test-freshness-check backend-
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run check:rust-runtime
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run typecheck
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run lint
+
+# Explicit opt-in only. The runner independently validates an exclusively dedicated AVD.
+qualify-armsx1-emulator:
+	node --test tools/qualify-armsx1-emulator.test.mjs
+	node tools/qualify-armsx1-emulator.mjs
 
 device-qualification-check:
 	node --test tools/device-qualification.test.mjs

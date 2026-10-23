@@ -382,11 +382,49 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
             return Err(AdbCommandError::DeviceStorageExhausted);
         }
         if check && result.returncode != 0 {
-            Err(AdbCommandError::CommandFailed)
+            if operation == ProcessOperation::Install {
+                Err(classify_install_rejection(&result))
+            } else {
+                Err(AdbCommandError::CommandFailed)
+            }
         } else {
             Ok(result)
         }
     }
+}
+
+/// Convert Android package-manager rejection markers to stable, sanitized
+/// categories without retaining command output, package names, or paths.
+fn classify_install_rejection(result: &AdbCommandResult) -> AdbCommandError {
+    let diagnostic = format!("{}\n{}", result.stdout, result.stderr).to_ascii_uppercase();
+    if diagnostic.contains("INSTALL_FAILED_VERSION_DOWNGRADE") {
+        return AdbCommandError::Resolution(
+            "android_version_failed: Android rejected a version downgrade.".to_owned(),
+        );
+    }
+
+    const SIGNING_FAILURES: [&str; 4] = [
+        "INSTALL_FAILED_UPDATE_INCOMPATIBLE",
+        "INSTALL_FAILED_SHARED_USER_INCOMPATIBLE",
+        "INSTALL_PARSE_FAILED_NO_CERTIFICATES",
+        "INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES",
+    ];
+    if SIGNING_FAILURES
+        .iter()
+        .any(|marker| diagnostic.contains(marker))
+    {
+        return AdbCommandError::Resolution(
+            "android_signing_failed: Android rejected the APK signing identity.".to_owned(),
+        );
+    }
+
+    if diagnostic.contains("INSTALL_FAILED_") || diagnostic.contains("INSTALL_PARSE_FAILED_") {
+        return AdbCommandError::Resolution(
+            "android_install_failed: Android rejected the APK installation.".to_owned(),
+        );
+    }
+
+    AdbCommandError::CommandFailed
 }
 
 /// Bind generic reviewed-plan commands to a known mutating operation shape
@@ -1181,6 +1219,186 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn process_executor_times_out_and_reaps_a_sleeping_fake_adb_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().expect("fake ADB directory should be created");
+        let executable = directory.path().join("sleeping-adb");
+        std::fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 5\n")
+            .expect("fake ADB script should be written");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake ADB script metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("fake ADB script should be executable");
+
+        let mut executor = ProcessAdbCommandExecutor::default();
+        let _deadline = crate::owned_process::arm_test_process_deadline(
+            ProcessOperation::Probe,
+            Duration::from_millis(100),
+        );
+        let error = executor
+            .run_for(
+                &[executable.to_string_lossy().into_owned()],
+                ProcessOperation::Probe,
+            )
+            .expect_err("sleeping fake ADB should be terminated at its deadline");
+
+        assert!(matches!(
+            error,
+            AdbCommandError::TimedOut {
+                cleanup: ProcessCleanup::Confirmed
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutating_adb_timeout_is_reported_after_child_reaping() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
+        const COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
+        const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+        let directory = tempfile::tempdir().expect("fake ADB directory should be created");
+        let executable = directory.path().join("sleeping-mutating-adb");
+        let started_pid_file = directory.path().join("mutation-started-pid");
+        let quoted_started_pid_file = shell_quote(started_pid_file.to_string_lossy().as_ref());
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {quoted_started_pid_file}\nexec /bin/sleep 5\n"
+            ),
+        )
+        .expect("fake ADB script should be written");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake ADB script metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("fake ADB script should be executable");
+
+        let args = vec![
+            executable.to_string_lossy().into_owned(),
+            "-s".to_string(),
+            "reviewed-emulator".to_string(),
+            "install".to_string(),
+            "-r".to_string(),
+            "fixture.apk".to_string(),
+        ];
+        let startup_wait_started = std::time::Instant::now();
+        let runner = std::thread::spawn(move || {
+            // The owned-process runner starts its relative deadline immediately after spawn.
+            // Reserve a bounded startup window so the child gets the full command timeout
+            // after the parent confirms that the fake mutating command has started.
+            let _deadline = crate::owned_process::arm_test_process_deadline(
+                ProcessOperation::Install,
+                STARTUP_TIMEOUT + COMMAND_TIMEOUT,
+            );
+            let mut executor = ProcessAdbCommandExecutor::default();
+            executor.run_for(&args, ProcessOperation::Install)
+        });
+
+        let startup_confirmed = loop {
+            if started_pid_file.exists() {
+                break startup_wait_started.elapsed() <= STARTUP_TIMEOUT;
+            }
+            if startup_wait_started.elapsed() >= STARTUP_TIMEOUT {
+                break false;
+            }
+            std::thread::sleep(STARTUP_POLL_INTERVAL);
+        };
+        let command_started = std::time::Instant::now();
+        let result = runner
+            .join()
+            .expect("fake ADB runner thread should finish after process cleanup");
+        let command_elapsed = command_started.elapsed();
+        let error = result.expect_err("mutating fake ADB should stop at its deadline");
+
+        assert!(
+            startup_confirmed,
+            "fake install must report child startup within the bounded handshake"
+        );
+        assert!(
+            command_elapsed >= COMMAND_TIMEOUT - Duration::from_millis(50),
+            "the fake child must receive the command timeout after confirmed startup"
+        );
+        assert!(
+            command_elapsed <= STARTUP_TIMEOUT + COMMAND_TIMEOUT,
+            "fake install timeout must remain within the bounded startup and command budgets"
+        );
+
+        assert!(
+            matches!(
+                error,
+                AdbCommandError::TimedOut {
+                    cleanup: ProcessCleanup::Confirmed
+                }
+            ),
+            "fake install must time out only after confirmed cleanup"
+        );
+
+        let child_pid = std::fs::read_to_string(&started_pid_file)
+            .expect("fake install must record its PID before blocking")
+            .trim()
+            .to_string();
+        assert!(!child_pid.is_empty(), "fake install PID must be recorded");
+        let child_is_alive = std::process::Command::new("/bin/kill")
+            .args(["-0", child_pid.as_str()])
+            .status()
+            .expect("the Unix process liveness check should run")
+            .success();
+        assert!(!child_is_alive, "timed out fake install must be reaped");
+    }
+
+    #[test]
+    fn process_executor_times_out_and_reaps_a_fake_preflight_child() {
+        use std::time::Duration;
+
+        let observer = OwnedProcessObservationHandle::default();
+        let mut executor = ProcessAdbCommandExecutor::with_process_observer(observer.clone());
+        let executable = std::env::current_exe()
+            .expect("test executable should be available")
+            .to_string_lossy()
+            .into_owned();
+        let _deadline = crate::owned_process::arm_test_process_deadline(
+            ProcessOperation::Probe,
+            Duration::from_millis(100),
+        );
+        let error = executor
+            .run_for(
+                &[
+                    executable,
+                    "--exact".to_string(),
+                    "owned_process::tests::timeout_helper".to_string(),
+                    "--ignored".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                ProcessOperation::Probe,
+            )
+            .expect_err("the fake preflight child should exceed its deadline");
+
+        assert!(matches!(
+            error,
+            AdbCommandError::TimedOut {
+                cleanup: ProcessCleanup::Confirmed
+            }
+        ));
+        assert!(observer.events().iter().any(|event| {
+            event.operation() == ProcessOperation::Probe
+                && matches!(
+                    event,
+                    crate::owned_process::OwnedProcessLifecycleEvent::Terminal { .. }
+                )
+        }));
+    }
+
     #[test]
     fn process_executor_forwards_device_copy_observation_without_changing_result() {
         let observer = crate::owned_process::OwnedProcessObservationHandle::default();
@@ -1210,6 +1428,96 @@ mod tests {
                     crate::owned_process::OwnedProcessLifecycleEvent::Terminal { .. }
                 )
         }));
+    }
+
+    #[test]
+    fn install_signing_rejection_is_distinct_and_does_not_echo_adb_diagnostics() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(
+            1,
+            "",
+            "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: package=com.private.app cert=private-fingerprint]",
+        );
+        let mut runner =
+            AdbCommandRunner::with_executor("adb", Some("emulator-5554".into()), executor);
+
+        let error = runner
+            .run(
+                vec!["install".into(), "-r".into(), "/tmp/private.apk".into()],
+                true,
+                ProcessOperation::Install,
+            )
+            .expect_err("Android signer mismatch should reject the replacement");
+
+        assert_eq!(
+            error,
+            AdbCommandError::Resolution(
+                "android_signing_failed: Android rejected the APK signing identity.".into()
+            )
+        );
+        let message = error.to_string();
+        for forbidden in [
+            "emulator-5554",
+            "private.app",
+            "private-fingerprint",
+            "/tmp/private.apk",
+        ] {
+            assert!(!message.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn other_install_rejections_use_a_distinct_sanitized_install_error() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(
+            1,
+            "",
+            "Failure [INSTALL_FAILED_INVALID_APK: /tmp/private.apk]",
+        );
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+
+        let error = runner
+            .run(
+                vec!["install".into(), "fixture.apk".into()],
+                true,
+                ProcessOperation::Install,
+            )
+            .expect_err("invalid APK should fail installation");
+
+        assert_eq!(
+            error,
+            AdbCommandError::Resolution(
+                "android_install_failed: Android rejected the APK installation.".into()
+            )
+        );
+        assert!(!error.to_string().contains("/tmp/private.apk"));
+    }
+
+    #[test]
+    fn install_version_downgrade_is_classified_without_echoing_diagnostics() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(
+            1,
+            "",
+            "Failure [INSTALL_FAILED_VERSION_DOWNGRADE: package=com.private.app]",
+        );
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+
+        let error = runner
+            .run(
+                vec!["install".into(), "fixture.apk".into()],
+                true,
+                ProcessOperation::Install,
+            )
+            .expect_err("version downgrade should be rejected");
+
+        assert_eq!(
+            error,
+            AdbCommandError::Resolution(
+                "android_version_failed: Android rejected a version downgrade.".into()
+            )
+        );
+        assert!(!error.to_string().contains("private.app"));
     }
 
     fn probe_with(

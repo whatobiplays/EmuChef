@@ -256,7 +256,7 @@ mod tests {
                 "service_origin": "https://github.com",
                 "repository": "ARMSX2/ARMSX1",
                 "include_prereleases": false,
-                "asset_pattern": "^ARMSX1-release-[0-9]{8}-arm64-v8a\\.apk$",
+                "asset_pattern": "^ARMSX1-(?:release-[0-9]{8}-arm64-v8a|[0-9]+\\.[0-9]+\\.[0-9]+)\\.apk$",
             })
         );
     }

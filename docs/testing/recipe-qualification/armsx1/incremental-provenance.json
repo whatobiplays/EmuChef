@@ -1,0 +1,88 @@
+{
+  "purpose": "Incremental provenance for the ARMSX1 install failure classification correction.",
+  "baseline_commit": "7ecb0920be52d86f1874afa3da13182cfde58467",
+  "baseline_review_bundle": "/Users/daniel/.codex/review-bundles/2026-10-20-armsx1-scope-safety-correction-review.tar.gz",
+  "baseline_review_bundle_sha256": "1aa2b859d9f0d652499d05cf0f1ade35ec2b35df39bc31366994841fda3e786a",
+  "baseline_sources": {
+    "crates/emuchef-rust-backend/src/executor_tests.rs": {
+      "sha256": "d53e35a2292bde24b90f6a1333749b1561c7beb9bd3e5e734393865d634e2b29",
+      "size_bytes": 205528,
+      "source": "prior review bundle snapshot; manifest verified"
+    },
+    "crates/emuchef-rust-backend/src/recipe_qualification_armsx1_emulator_tests.rs": {
+      "sha256": "d5d1f62c25159838de303c7a1afd45906f7c7527381d47ed9b58f316ca513235",
+      "size_bytes": 99736,
+      "source": "prior review bundle snapshot; manifest verified"
+    },
+    "crates/emuchef-rust-backend/src/executor.rs": {
+      "sha256": "65dfda24db30211caf26c954f704376673a61a0c8ce7fa2a3cbba126923ad8cd",
+      "size_bytes": 176147,
+      "source": "verified HEAD blob at baseline commit; pre-implementation read-only worktree status inventory reported this path was not pre-existing modified; prior review archive did not contain an executor.rs source snapshot"
+    }
+  },
+  "current_sources": {
+    "crates/emuchef-rust-backend/src/executor.rs": {
+      "sha256": "f2d0c19e0d7833ccdd8b1d3e82d0b29595b14452f03a6680a9cecb0dd140d016",
+      "size_bytes": 177878
+    },
+    "crates/emuchef-rust-backend/src/executor_tests.rs": {
+      "sha256": "17e4067dca6d27f0b77f66ebcf9eb61a6c32b6c220477a37eae956e48d89d3e9",
+      "size_bytes": 210291
+    },
+    "crates/emuchef-rust-backend/src/recipe_qualification_armsx1_emulator_tests.rs": {
+      "sha256": "84507f8c6fb52aede95798bba5b33727c13895a8b5df48a4b8a349b824d0f69a",
+      "size_bytes": 101827
+    }
+  },
+  "incremental_source_paths": [
+    "crates/emuchef-rust-backend/src/executor.rs",
+    "crates/emuchef-rust-backend/src/executor_tests.rs",
+    "crates/emuchef-rust-backend/src/recipe_qualification_armsx1_emulator_tests.rs"
+  ],
+  "notes": [
+    "The prior bundle manifest supplies exact snapshots for executor_tests.rs and recipe_qualification_armsx1_emulator_tests.rs.",
+    "executor.rs baseline is the verified HEAD blob plus the pre-implementation read-only status inventory, which did not list executor.rs as pre-existing modified. The prior review archive omitted an executor.rs source snapshot; no snapshot is claimed.",
+    "This is incremental provenance only. It does not assert formal parent/child run lineage and does not alter either prior RESULT.json or run.json."
+  ],
+  "baseline_manifest_sha256": "71f06935e6ad163294e08d6c4c2cd00e968098df0988bf7dbc33e8ff7c7ccc92",
+  "baseline_worktree_inventory": {
+    "head": "7ecb0920be52d86f1874afa3da13182cfde58467",
+    "source": "pre-implementation read-only inventory agent report",
+    "modified_tracked_paths": [
+      "Makefile",
+      "crates/emuchef-rust-backend/src/executor/adb.rs",
+      "crates/emuchef-rust-backend/src/executor_tests.rs",
+      "crates/emuchef-rust-backend/src/lib.rs",
+      "docs/product/product-roadmap.md"
+    ],
+    "untracked_paths": [
+      "crates/emuchef-rust-backend/src/recipe_qualification_armsx1_emulator_tests.rs",
+      "crates/emuchef-rust-backend/src/recipe_qualification_armsx1_tests.rs",
+      "docs/manual/armsx1-emulator-qualification.md",
+      "docs/product/recipe-qualification-armsx1.md",
+      "docs/testing/recipe-qualification/armsx1/",
+      "tests/fixtures/recipe-qualification/armsx1/",
+      "tools/qualify-armsx1-emulator.mjs",
+      "tools/qualify-armsx1-emulator.test.mjs"
+    ],
+    "executor_rs_status": "not listed as pre-existing modified in the inventory"
+  },
+  "source_deltas": {
+    "crates/emuchef-rust-backend/src/executor.rs": {
+      "baseline": "HEAD blob at baseline commit",
+      "current_sha256": "f2d0c19e0d7833ccdd8b1d3e82d0b29595b14452f03a6680a9cecb0dd140d016",
+      "delta": "43 insertions, 0 deletions versus HEAD; adds InstallSigningRejected, InstallVersionRejected, InstallRejected and maps matching sanitized install prefixes.",
+      "baseline_evidence": "Pre-implementation status inventory plus verified HEAD blob. The prior review archive omitted executor.rs snapshot; no archive snapshot is claimed."
+    },
+    "crates/emuchef-rust-backend/src/executor_tests.rs": {
+      "baseline": "prior review archive snapshot, manifest verified",
+      "baseline_sha256": "d53e35a2292bde24b90f6a1333749b1561c7beb9bd3e5e734393865d634e2b29",
+      "current_sha256": "17e4067dca6d27f0b77f66ebcf9eb61a6c32b6c220477a37eae956e48d89d3e9"
+    },
+    "crates/emuchef-rust-backend/src/recipe_qualification_armsx1_emulator_tests.rs": {
+      "baseline": "prior review archive snapshot, manifest verified",
+      "baseline_sha256": "d5d1f62c25159838de303c7a1afd45906f7c7527381d47ed9b58f316ca513235",
+      "current_sha256": "84507f8c6fb52aede95798bba5b33727c13895a8b5df48a4b8a349b824d0f69a"
+    }
+  }
+}

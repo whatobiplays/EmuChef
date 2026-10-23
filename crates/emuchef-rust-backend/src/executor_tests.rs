@@ -1929,6 +1929,62 @@ fn completed_root_denial_rechecks_identity_once_and_identity_failure_wins() {
 }
 
 #[test]
+fn runner_rejects_a_plan_target_identity_mismatch_before_install() {
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &workspace,
+        "com.example.expected",
+    );
+    let mut execution_plan = local_input_app_install_plan(
+        &apk,
+        "com.example.expected",
+        Some(crate::planner::ExecutionArtifactAppProvenance {
+            app_id: "example-app".to_string(),
+            artifact_id: "apk".to_string(),
+            kind: "apk".to_string(),
+        }),
+    );
+    execution_plan.target_device = Some(TargetDeviceBinding {
+        serial: "reviewed-serial".to_string(),
+        manufacturer: Some("Google".to_string()),
+        model: Some("sdk_gphone64_arm64".to_string()),
+        android_api_level: Some(36),
+    });
+
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    push_identity_sample(&mut command_executor, "a1b2");
+    push_identity_sample(&mut command_executor, "a1b2");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        workspace.path().join("runtime"),
+        workspace.path().join("cache"),
+        workspace.path().join("device"),
+        vec![workspace.path().to_path_buf()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+
+    let result = runner.run(&execution_plan);
+
+    assert_eq!(
+        result.steps[1].failure_kind,
+        Some(StepFailureKind::DeviceIdentityChanged(
+            IdentityCheckPhase::PreOperation
+        ))
+    );
+    let operations = runner.adapters().device().command_executor().operations();
+    assert_eq!(
+        operations.len(),
+        4,
+        "the guard should sample identity twice"
+    );
+    assert!(operations
+        .iter()
+        .all(|operation| *operation != ProcessOperation::Install));
+}
+
+#[test]
 fn failed_root_preflight_aborts_root_steps_without_privileged_conditions_or_later_mutation() {
     let mut device = crate::executor::FakeDryRunDevice::default();
     device.set_root_preflight_result(Err("root access denied".to_string()));
@@ -3688,7 +3744,7 @@ fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and
 #[test]
 fn adb_result_mapping_uses_fake_executor_without_launching_processes() {
     let mut executor = FakeAdbCommandExecutor::default();
-    executor.push_completed(1, "", "Failure [INSTALL_FAILED_ALREADY_EXISTS]\n");
+    executor.push_completed(1, "", "ordinary ADB failure\n");
     let mut device = RealAdbDevice::with_executor("adb", None, executor);
 
     let err = device
@@ -3697,7 +3753,7 @@ fn adb_result_mapping_uses_fake_executor_without_launching_processes() {
 
     assert_eq!(err, "The ADB command failed.");
     assert!(!err.contains("/tmp/example app.apk"));
-    assert!(!err.contains("INSTALL_FAILED_ALREADY_EXISTS"));
+    assert!(!err.contains("ordinary ADB failure"));
     assert_eq!(
         device.command_executor().calls(),
         &[vec![
@@ -3727,6 +3783,130 @@ fn adb_result_mapping_uses_fake_executor_without_launching_processes() {
             "com.example.app".to_string(),
         ]]
     );
+}
+
+#[test]
+fn adb_install_failures_keep_a_non_generic_executor_classification() {
+    for (diagnostic, expected_kind) in [
+        (
+            "android_signing_failed: Android rejected APK signing identity.",
+            StepFailureKind::InstallSigningRejected,
+        ),
+        (
+            "android_version_failed: Android rejected a version downgrade.",
+            StepFailureKind::InstallVersionRejected,
+        ),
+        (
+            "android_install_failed: Android rejected APK installation.",
+            StepFailureKind::InstallRejected,
+        ),
+    ] {
+        let failure = crate::executor::StepFailure::from(map_adb_error(
+            AdbCommandError::Resolution(diagnostic.to_string()),
+        ));
+
+        assert_eq!(
+            failure.failure_kind,
+            Some(expected_kind),
+            "{diagnostic} must retain its install-specific executor classification",
+        );
+        assert_eq!(
+            failure.message,
+            "The device operation could not be started or completed safely."
+        );
+        assert!(!failure.message.contains("android_"));
+    }
+
+    let fallback = crate::executor::StepFailure::from(map_adb_error(AdbCommandError::Resolution(
+        "unrecognized sanitized resolution".to_string(),
+    )));
+    assert_eq!(
+        fallback.failure_kind,
+        Some(StepFailureKind::OperationFailed)
+    );
+}
+
+#[test]
+fn real_adb_runner_preserves_install_failure_kind_in_armsx1_evidence() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk_with_package(
+        &workspace,
+        "com.example.expected",
+    );
+
+    for (stderr, expected_kind, expected_category) in [
+        (
+            "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: package=com.private.app cert=private-fingerprint]",
+            StepFailureKind::InstallSigningRejected,
+            crate::recipe_qualification_armsx1_emulator_tests::OutcomeCategory::InstallSigning,
+        ),
+        (
+            "Failure [INSTALL_FAILED_VERSION_DOWNGRADE: package=com.private.app]",
+            StepFailureKind::InstallVersionRejected,
+            crate::recipe_qualification_armsx1_emulator_tests::OutcomeCategory::Version,
+        ),
+        (
+            "Failure [INSTALL_FAILED_INVALID_APK: package=com.private.app]",
+            StepFailureKind::InstallRejected,
+            crate::recipe_qualification_armsx1_emulator_tests::OutcomeCategory::Install,
+        ),
+    ] {
+        let mut execution_plan = app_context_install_plan(
+            String::new(),
+            "com.example.expected",
+            Some(crate::planner::ExecutionArtifactAppProvenance {
+                app_id: "example-app".to_string(),
+                artifact_id: "apk".to_string(),
+                kind: "apk".to_string(),
+            }),
+        );
+        execution_plan.artifacts[0].source = crate::planner::ExecutionArtifactSource::LocalInput {
+            input_id: "example.recipe/user_apk".to_string(),
+        };
+        execution_plan.inputs = vec![ExecutionInputValue {
+            id: "example.recipe/user_apk".to_string(),
+            value: RuntimeValue {
+                type_name: "file_path".to_string(),
+                value: json!(apk),
+                location: Some("host".to_string()),
+            },
+        }];
+        execution_plan.steps[1].verify.clear();
+
+        let mut adb = FakeAdbCommandExecutor::default();
+        adb.push_completed(1, "", stderr);
+        let device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), adb);
+        let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+            device,
+            workspace.path().join("runtime"),
+            workspace.path().join("cache"),
+            workspace.path().join("device"),
+            vec![workspace.path().to_path_buf()],
+            false,
+        ));
+
+        let result = runner.run(&execution_plan);
+        let install_record = result
+            .steps
+            .iter()
+            .find(|record| record.step_id == "example.recipe/install")
+            .expect("executor should construct an install failure record");
+        assert_eq!(install_record.failure_kind, Some(expected_kind));
+        assert_eq!(
+            install_record.message.as_deref(),
+            Some("The device operation could not be started or completed safely.")
+        );
+        assert!(!install_record
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("private-fingerprint"));
+
+        let failure = crate::recipe_qualification_armsx1_emulator_tests::classify_execution_failure(
+            &result,
+        );
+        assert_eq!(failure.primary, Some(expected_category));
+    }
 }
 
 #[test]
