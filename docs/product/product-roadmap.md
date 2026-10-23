@@ -28,7 +28,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 | Product or track | Current state | Next priority |
 |---|---|---|
 | EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; standalone RetroArch including its explicit first-launch/bootstrap lifecycle, BIOS, Obtainium, ROM/content-copy, XaniteOG, combined RetroArch + BIOS, and deterministic ARMSX1 automated recipe qualification is recorded; the first guarded ARMSX1 live emulator attempt stopped before Android package-manager installation because the host APK signature verifier was unavailable, and the second attempt passed verified installation and same-version replacement on an operator-identified Android 16 ARM64 AVD; physical Android handheld qualification and final product acceptance remain pending; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Continue bounded automated qualification of remaining authored workflows; run the guarded ARMSX1 emulator qualification only with exact AVD identity and operator attestation; manual/physical evidence collection remains owner-deferred |
-| Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
+| Config Editor | Authored generation implemented through GitHub release-pattern testing; new feature and refinement development owner-deferred as of 2026-10-23 | Preserve implemented functionality; use existing repository-local authoring skills while prioritizing EmuChef proper; resume Config Editor enhancements only by explicit owner decision |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
 
@@ -1030,14 +1030,20 @@ Implemented authored-generation work includes:
 
 The authoritative current-state design is `docs/product/config-editor-authored-generation.md`.
 
+**Development decision (2026-10-23): Deferred.** New Config Editor feature and refinement work is on hold while EmuChef proper receives development priority. This is a scheduling decision, not a removal, rollback, or deprecation of implemented Config Editor functionality. Corrective maintenance may be separately authorized without reopening the enhancement backlog.
+
+**Interim authoring workflow:** Use the existing repository-local `.agents/skills/create-recipe` and `.agents/skills/edit-recipe` skills to create and maintain recipes. Where related authored objects need changes, use the existing app-definition, device-plan, and device-profile creation/editing skills rather than requiring new Config Editor UI features. These are agent-assisted catalog-authoring workflows, not new end-user functionality in EmuChef proper. Existing authored-schema, validation, trust, execution, and physical-device authorization boundaries remain unchanged; using a skill does not authorize physical execution or bypass review.
+
 ## 16. Remaining Config Editor refinements
 
-These items are not part of EmuChef proper Phase 5. They remain unsequenced until explicitly promoted to `Next`.
+**Status: Deferred**
+
+These Config Editor refinements are retained as a future backlog only. All items below are owner-deferred as of 2026-10-23, are not part of the active EmuChef proper roadmap, and must not be promoted to `Next` or implemented without an explicit product-owner decision to resume Config Editor development and define a bounded scope.
 
 ### 16.1 OS-keychain GitHub credentials
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Reduce unauthenticated GitHub API rate-limit friction.
 - Define secure storage, access, revocation, and lifecycle behavior.
@@ -1047,7 +1053,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 ### 16.2 Dedicated app-definition editor
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Open and edit existing app definitions directly.
 - Validate identifiers and authored fields through Rust.
@@ -1056,7 +1062,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 ### 16.3 Dedicated device-profile editor
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Provide a first-class profile-authoring surface.
 - Explain match scope, inheritance, and capability consequences.
@@ -1065,7 +1071,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 ### 16.4 Obtainium import
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Import compatible source and update definitions.
 - Normalize imported data into EmuChef-authored contracts.
@@ -1074,7 +1080,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 ### 16.5 Source-update checks
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Detect whether authored remote sources have newer releases or changed assets.
 - Avoid background polling unless separately designed.
@@ -1083,7 +1089,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 ### 16.6 Alias management
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Create and maintain package or application aliases.
 - Surface collisions and stale aliases.
@@ -1092,7 +1098,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 ### 16.7 Device-plan assistance
 
 **Owner: Config Editor**  
-**Status: Planned**
+**Status: Deferred**
 
 - Help authors associate apps and recipes with supported device plans.
 - Explain plan compatibility and required capabilities.
