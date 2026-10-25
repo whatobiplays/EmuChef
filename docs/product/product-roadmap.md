@@ -1,3 +1,13 @@
+> **HISTORICAL PHASE ROADMAP — no longer the active backlog after T02.**
+> The accepted product intent lives in [EmuChef requirements](emuchef-requirements.md),
+> the [product charter](../../PRODUCT.md) and [ADRs](../adr/). Open evidence and
+> release obligations are carried in [qualification obligations](qualification-obligations.md).
+> The [EmuChef GitHub wayfinder map](https://github.com/whatobiplays/EmuChef/issues/43) and children are the live work-status
+> and dependency authority after publication. The historical "next action" lines
+> below describe the old plan; they do not grant physical/device/release
+> authorization or supersede current requirements. Keep historical evidence and
+> referenced contracts intact.
+>
 # EmuChef Product Roadmap
 
 ## 1. Purpose and authority

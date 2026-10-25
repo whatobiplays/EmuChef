@@ -4,140 +4,123 @@
 
 ## Platform
 
-web
+desktop
 
-The products are delivered as native macOS/Tauri desktop applications with
-React presentation layers. The current supported packaging focus is Apple
-Silicon macOS.
+Native Apple Silicon macOS via Tauri/React and a trusted Rust/sidecar runtime.
+The product is not a web-hosted service. Intel/universal macOS, Windows, Linux
+and other packaging targets are outside the initial release scope.
 
 ## Users
 
 ### EmuChef proper
 
-Nontechnical Android handheld owners who need to configure one device safely
-and reproducibly. They connect a device, confirm detected facts, choose an
-appropriate setup, provide required files and values, review the resulting
-plan, and simulate or—when real-device execution is explicitly enabled for a
-supported setup—apply it.
+Nontechnical Android handheld owners configuring one connected supported device
+through a guided setup, with visible recommendations, storage/content choices,
+app-specific settings, mandatory review, supported staged execution and
+truthful recovery/reporting.
 
 ### Config Editor
 
-Technical authors who create and maintain recipes, application definitions,
-device profiles, and related catalog content used by EmuChef proper.
+Technical authors maintaining App Definitions, Recipes, Device Profiles and
+Device Plans. **New Config Editor feature work is deferred**; only narrowly
+necessary compatibility maintenance preventing loss of new authored schema
+fields is in the current program.
 
-### Internal qualification operator
+### Qualification operator
 
-An internal technical operator maintains device-support evidence using the
-development-only qualification workflow. This is not a primary product user
-and does not define a third product workflow. The operator exercises the
-ordinary EmuChef proper workflow under stricter evidence-capture rules and does
-not gain separate device, planning, review, or execution authority.
+An operator who records bounded evidence for approved physical targets using
+the existing product authority, not a separate privileged user pathway.
 
 ## Product Purpose
 
-EmuChef proper guides a user through planning and applying a reproducible
-configuration to a supported Android handheld while making the planned impact
-and any required recovery action understandable. Ordinary builds are
-simulation-first so users can inspect behavior without changing a real device.
+EmuChef proper makes Android emulation handheld installation and configuration
+approachable, portable and reviewable. Simulation is optional. Real execution
+is controlled by exact target/strategy and evidence, and remains disabled in
+ordinary production pending explicit release authorization.
 
-Config Editor provides the authoring workflow that maintains the catalog and
-configuration data consumed by EmuChef proper.
-
-The shared Rust runtime owns validation, planning, execution, filesystem and
-device authority, and the sidecar protocol. The two applications remain
-separate products with distinct users and workflows.
+The end-user journey is **one guided setup** (UX-1 A), with additional reviews
+when first-run defaults, new file bytes or OEM-script observations change the
+trusted plan. Existing apps can be configured without reinstalling when safe.
 
 ## Positioning
 
-The product combines authored, validated configuration content with a
-target-bound, reviewable execution plan. It preserves a strict trust boundary:
-the trusted Rust/Tauri runtime retains device, filesystem, planning, execution,
-update, and external-navigation authority while React presents sanitized data.
-This makes reproducible handheld setup approachable to nontechnical users
-without turning the frontend into a source of runtime authority.
+App Definitions own intrinsic app facts and managed configuration rules;
+Recipes define bounded workflows and exposed per-app settings; Device Profiles
+and Plans determine capabilities and recommendations. The trusted Rust runtime
+resolves all authority, files and device actions; React presents sanitized
+projections and opaque handles.
+
+Non-rooted devices with manufacturer-provided script runners may use a
+**Device Profile-owned OEM execution strategy** with user-triggered privileged
+scripts, ZIP outcome reports and alternating sequential ADB stages. The runner
+never grants EmuChef direct ADB root. This is planned product behavior, not
+present implementation or qualification.
 
 ## Operating Context
 
-EmuChef proper is used on macOS with one connected Android handheld at a time.
-The workflow includes device discovery, device confirmation, setup and recipe
-selection, required input collection and repair, plan review, simulated
-execution, reporting, saved portable configurations, support diagnostics, and
-recovery of unsaved intent. Android SDK Platform-Tools is a user-supplied
-prerequisite and may be imported through the native application flow.
+One Android device at a time on Apple Silicon macOS. Android SDK Platform-Tools
+is user supplied; EmuChef does not bundle, download or silently acquire it.
+Users may select logical internal/SD Storage Targets and Setup Locations,
+ROMs/BIOS, a generated app configuration or a reusable template, and reviewed
+copy policies. Saved intent never stores reusable execution authority.
 
-Config Editor is used to author and validate the catalog and to generate or
-maintain the content that defines supported device setups. Both applications
-launch the shared Rust `emuchef --sidecar` runtime and do not share frontend
-modules or runtime state.
+A configuration file update preserves unrelated properties/comments where
+supported and binds reviewed output and original state to the target. Per-file
+original-byte backups are enabled by default, with per-file waivers after a
+backup failure or an explicitly confirmed global opt-out. Restoration does not
+imply whole-setup rollback.
 
 ## Capabilities and Constraints
 
-- Rust is the sole product runtime; Python is not a product, development,
-  testing, packaging, or release prerequisite.
-- EmuChef proper supports a guided end-user workflow for one device, saved
-  portable configurations, simulation, bounded diagnostics, local recovery,
-  and user-triggered manual update discovery.
-- Real-device execution is feature-gated, development-only by default, and
-  requires separate qualification and release approval. Execution has no
-  rollback or device-state undo.
-- EmuChef does not bundle, download, proxy, or automate license acceptance for
-  Android SDK Platform-Tools.
-- React receives sanitized projections and opaque handles. Exact serials,
-  executable paths, catalog roots, full plans, credentials, and runtime
-  authority must remain outside frontend state, markup, logs, and storage.
-- Saved configurations retain portable intent, not generated plans, device
-  facts, serials, review authority, execution authority, or sensitive values.
-- Product work distinguishes EmuChef proper, Config Editor, and Shared Runtime;
-  a shared backend implementation does not merge product ownership.
-- Confirmed open product decisions include public release qualification,
-  production trust configuration for manual updates, and the eventual scope
-  of supported root-only real-device execution.
+- **Current implementation and accepted future requirements are distinct.**
+  Runtime facts remain in `docs/architecture/` and original phase contracts.
+  Product intent is normative in
+  `docs/product/emuchef-requirements.md`; evidence obligations are tracked in
+  `docs/product/qualification-obligations.md`.
+- Mandatory review and immutable, scoped execution authority; simulation optional.
+- Rust/Tauri alone holds device, filesystem, planning, backup, update and
+  external-navigation authority. The frontend never holds raw device identities,
+  executable paths, secrets or unredacted command logs.
+- Real execution feature-gated and default-off for production. No implicit
+  privilege escalation, background auto-replay, whole-device rollback or
+  credentialed update delivery without separate approval.
+- On AYN, Retroid and AYANEO, OEM runner *feature eligibility* is Profile-based
+  and not restricted by firmware/version allowlists or per-model rollout. Exact
+  physical configuration/usability claims still require matching evidence.
+- Device- and operation-bound results must distinguish verified success,
+  partial/unverified results, blocked dependencies and independent cleanup
+  warnings. Cleanup is required when artifacts are no longer needed but a
+  failed cleanup alone is not a failed setup (Q81 C).
 
 ## Brand Commitments
 
-The product name is EmuChef. User-facing language should be understandable to
-nontechnical end users and should avoid exposing internal catalog identifiers,
-protocol details, filesystem roots, exact device serials, or implementation
-terminology where a human-facing explanation is available. Normal end-user
-device compatibility is expressed as supported or not supported. Qualification,
-registered-target, evidence-state, and support-tier terminology remains internal
-to engineering and deliberately internal operator workflows.
+Use clear language for nontechnical users: app, device, storage choice, setup
+and permissions rather than raw Recipe IDs, serials and runtime jargon.
+Prefer truthful support information, explicit consent and actionable recovery
+over unsupported automation.
 
 ## Evidence on Hand
 
-Product and workflow evidence is maintained in the repository, including:
-
-- `README.md`
-- `docs/product/product-roadmap.md`
-- `docs/product/phase-1-read-only-app.md`
-- `apps/emuchef-app/README.md`
-- `apps/config-editor/README.md`
-- the phase contracts and release evidence under `docs/product/` and
-  `docs/release/evidence/`
-
-The repository contains implementation and automated verification evidence for
-the documented workflows. It does not by itself establish public-release
-qualification, Developer ID/notarization readiness for every product surface,
-or broad real-device coverage; future work must not fabricate those claims.
+The repository contains automated and historical physical evidence for
+specific commits/workflows. It does **not** establish that the approved
+configuration generator, OEM root-script path, corrected Mirror, broad
+supported-device matrix or current EmuChef proper release is implemented or
+physically qualified. Evidence contracts and outstanding repetitions are in
+`docs/product/qualification-obligations.md`.
 
 ## Product Principles
 
-1. Make reproducible device configuration understandable and reviewable before
-   any execution.
-2. Keep trusted runtime authority in Rust/Tauri and expose only the minimum
-   sanitized information needed by the frontend.
-3. Prefer safe, bounded, recoverable workflows over hidden mutation or implied
-   authority.
-4. Keep EmuChef proper and Config Editor distinct while sharing only deliberate
-   runtime contracts.
-5. Treat accessibility, truthful status, and actionable recovery as core
-   product behavior.
+1. A clear guided setup and exact review before mutation.
+2. Portable, model-aware recommendations and trustworthy configuration composition.
+3. One trusted runtime; no implicit file/device/frontend authority.
+4. Verified outcomes, preserved recovery originals, bounded diagnostics and
+   safe device cleanup.
+5. Evidence before support or release claims; separate ownership for EmuChef
+   proper, Config Editor and shared runtime.
 
 ## Accessibility & Inclusion
 
-EmuChef proper is intended to be keyboard-complete and screen-reader
-operable, with semantic landmarks and collections, accessible validation and
-progress, bounded live announcements, focus-contained dialogs, deterministic
-focus fallback, reduced-motion support, forced-colors support, and resilience
-at narrow window sizes and increased zoom. These presentation requirements do
-not move authority out of Rust or trusted Tauri.
+Keyboard-complete and screen-reader-operable flows, semantic landmarks,
+accessible validation and progress, deterministic focus and safe fallback,
+reduced motion, forced-colors, narrow-window and zoom resilience are
+requirements of the end-user app and guided OEM stage handoffs.

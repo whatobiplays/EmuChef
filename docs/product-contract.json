@@ -2,20 +2,20 @@
   "schema_version": 1,
   "product": {
     "name": "EmuChef",
-    "purpose": "Help nontechnical Android handheld owners configure one supported device safely and reproducibly through a simulation-first, reviewable workflow while enabling technical authors to maintain the catalog that drives those configurations; Rust/Tauri remains the trusted authority and the two applications remain distinct."
+    "purpose": "Guide nontechnical Android handheld owners through one reviewed installation and configuration journey on Apple Silicon macOS, with optional simulation, model/brand recommendations, logical storage, generated app settings, and separately qualified direct-ADB/OEM-assisted execution; Rust/Tauri alone holds trusted authority and Config Editor feature work is deferred."
   },
   "primary_users": [
     {
       "id": "emuchef-end-user",
       "role": "Nontechnical Android handheld owner using EmuChef proper",
       "technical_level": "Nontechnical and needs clear guidance instead of runtime or protocol concepts",
-      "work_context": "Uses a native macOS/Tauri workflow with one connected Android handheld to detect the device, choose a setup, provide inputs, review a plan, simulate it, and apply it only when explicitly enabled and qualified."
+      "work_context": "Uses native Apple Silicon macOS/Tauri with one connected device: selects supported setup, internal/SD content and app settings, reviews exact scoped actions, then applies only through a separately qualified and authorized executor or OEM user-mediated script stage."
     },
     {
       "id": "config-author",
       "role": "Technical author maintaining Config Editor catalog content",
       "technical_level": "Technical and responsible for authored recipes, application definitions, device profiles, and validation evidence",
-      "work_context": "Creates and maintains catalog content consumed by EmuChef proper while preserving typed provenance, validation, and the separation between authoring and end-user workflows."
+      "work_context": "Maintains App Definitions, Recipes, Device Profiles and Plans; Config Editor new feature work is deferred except safe typed-schema compatibility and refuse-unsafe-save behavior."
     }
   ],
   "jobs_to_be_done": [
@@ -24,8 +24,8 @@
       "statement": "Configure a supported Android handheld through a guided, reproducible workflow."
     },
     {
-      "id": "review-and-simulate-plan",
-      "statement": "Understand planned impact and recovery before changing a real device, using simulation as the normal first step."
+      "id": "review-configuration-plan",
+      "statement": "Review exact installation, configuration, backup and copy effects; optionally simulate before an authorized supported execution."
     },
     {
       "id": "apply-qualified-configuration",
@@ -61,26 +61,31 @@
     "A product that implies rollback capabilities the runtime does not provide"
   ],
   "experience_principles": [
-    "Simulation and review before execution",
+    "Mandatory immutable review; simulation is optional",
     "Trusted Rust/Tauri authority with sanitized presentation",
     "Truthful accessible status and recovery",
     "Bounded local control",
     "Explicit separation of EmuChef proper and Config Editor",
     "Evidence before qualification or release claims",
     "End-user device compatibility uses supported or not supported language; qualification and evidence terminology stays internal to engineering and operator workflows",
-    "Internal qualification tooling observes the ordinary EmuChef workflow and never creates a parallel source of device, planning, review, or execution authority"
+    "Internal qualification tooling observes the ordinary EmuChef workflow and never creates a parallel source of device, planning, review, or execution authority",
+    "OEM-assisted execution is a Device Profile-owned user-invoked strategy, not direct ADB root; invoked attempts preserve immutable evidence and cleanup warnings remain separately tracked."
   ],
   "canonical_docs": [
-    "README.md",
     "PRODUCT.md",
-    "docs/product/product-roadmap.md",
-    "docs/product/remaining-product-backlog.md",
-    "docs/product/phase-5-app-quality-roadmap.md",
-    "docs/product/phase-6d1-execution-safety-audit.md",
-    "docs/product/recipe-qualification-obtainium.md",
-    "docs/product/recipe-qualification-bios.md",
-    "docs/product/recipe-qualification-retroarch.md",
-    "docs/product/recipe-qualification-retroarch-bios.md"
+    "docs/product/emuchef-requirements.md",
+    "CONTEXT.md",
+    "docs/product/qualification-obligations.md",
+    "docs/adr/0005-app-definitions-own-intrinsic-app-facts.md",
+    "docs/adr/0006-app-owned-configuration-definitions.md",
+    "docs/adr/0007-portable-device-storage-targets.md",
+    "docs/adr/0008-explicit-copy-intents.md",
+    "docs/adr/0009-device-scoped-recommendations.md",
+    "docs/adr/0010-per-file-configuration-recovery.md",
+    "docs/adr/0011-oem-assisted-privileged-execution.md",
+    "docs/architecture/planner-executor.md",
+    "docs/architecture/runtime-recipe-configuration.md",
+    "docs/release/release-readiness.md"
   ],
   "governance": {
     "mode": "advisory",

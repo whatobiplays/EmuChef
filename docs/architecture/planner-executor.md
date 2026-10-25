@@ -120,3 +120,9 @@ consumption: it rederives the single eligible candidate from the retained plan
 and report and invokes the existing typed `launch_app` adapter. This permits
 Tauri to issue a new handle after a failed attempt while preventing duplicate
 use of any individual handle.
+
+## Future accepted product direction, not implemented
+The normative future contract is [EmuChef requirements](../product/emuchef-requirements.md): a reviewed OEM bundle freezes content, destination, backup mode and strategy across separate invocation attempts; an actual invocation start is different from staging/acknowledgement, and unknown start evidence blocks changed-preference authority. The required implementation must stop before an unapproved overwrite on enabled-backup failure, reconcile all started attempts under a serial OEM barrier, retain Recovery Originals independently of ZIPs/staging, and treat an individual verified-owned cleanup failure as a warning with pending retry. This paragraph does not describe existing executor behavior.
+
+
+The [EmuChef product realignment proposal](../product/emuchef-product-realignment-proposal.md) records accepted owner requirements for app-generated configuration, logical storage, per-file backups/restoration, and staged review. Until the corresponding T07–T13 changes are implemented and qualified, this document's current executor/no-backup/no-restoration statements remain factual. Any new file-level restoration must be separately bounded and must not imply a transactional setup rollback or reactivation of old execution authority.

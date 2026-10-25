@@ -1,3 +1,15 @@
+> **Release scope authority:** This document describes existing historical
+> release evidence and continuing release checks. The approved initial product
+> scope and new OEM/configuration requirements live in
+> [EmuChef requirements](../product/emuchef-requirements.md); exact open
+> obligations and source contracts are indexed by
+> [qualification obligations](../product/qualification-obligations.md).
+> Evidence recorded for prior Config Editor builds, ad-hoc EmuChef packages,
+> or specific device workflows is not release approval for current EmuChef
+> proper. Current production `real-execution` remains default-off. T17Q
+> evaluates applicable obligations for a separately approved release scope;
+> T17 requires exact-build qualification and explicit release authorization.
+>
 # Release Readiness
 
 ## Available Evidence
@@ -30,22 +42,22 @@
   notarization and stapling, and local Gatekeeper acceptance for commit
   `93f816fc1ea59cd034a40432e4e2a269e11eead7`.
 
-## Required Before Public Release
+## Mandatory for the Initial EmuChef Proper Apple Silicon macOS Release
 
-- Record the
-  [macOS packaged Config Editor checklist](../manual/macos-packaged-gui-validation.md)
-  and the corresponding checklist for every other supported target.
-- Validate the signed and notarized application on a separate clean Mac.
-- Validate Phase 5B package enforcement and selected permission actions against
-  representative rooted and unrooted disposable Android devices.
-- Execute the maintained
-  [macOS signing and notarization runbook](../manual/macos-signing-notarization.md)
-  and retain external Apple submission evidence for each release.
-- Pin reviewed production Phase 4B manifest/DMG origins and the metadata public
-  key, publish credentialed signed release metadata, and record clean-Mac manual
-  DMG replacement evidence under the
-  [Phase 4B contract](../product/phase-4b-secure-end-user-update-delivery.md).
-- Add cross-platform release automation and artifact inspection.
+The initial approved **EmuChef proper** release/support scope is native Apple Silicon macOS. The following checks remain **mandatory for that scope**; T17 and a separate explicit release decision govern readiness. The older Config Editor evidence is preserved but does not attest the current EmuChef proper build.
+
+- Inspect the **current EmuChef proper macOS app/DMG artifact** (sidecar identity, metadata, entitlements, hardened runtime, signatures and path independence) and run the relevant [macOS packaged GUI validation runbook](../manual/macos-packaged-gui-validation.md) with an **EmuChef proper-specific** checklist. Prior Config Editor checklist success is not a substitute.
+- Complete Developer ID signing, hardened runtime, notarization, stapling and Gatekeeper verification for the **exact release app/DMG** under the [macOS signing and notarization runbook](../manual/macos-signing-notarization.md); retain external Apple submission evidence and validate on a separate **clean Mac**.
+- Qualify the selected rooted/non-rooted package, permission, configuration, copy, OEM and target-app workflows included in the **actual approved support scope**. T17Q must classify every applicable inherited/manual/physical obligation by its governing evidence contract; absence of required evidence blocks that claimed capability or release. Individual physical runs still require separate authorization.
+- Review and configure the Phase 4B manifest/DMG origin and trusted metadata key, publish signed production metadata and prove clean-Mac manual DMG replacement as required by the [Phase 4B contract](../product/phase-4b-secure-end-user-update-delivery.md) before claiming that update path production-ready. Existing unconfigured/fail-closed trust remains in force until separately authorized.
+- Preserve applicable macOS build reproducibility, artifact inspection, accessibility, privacy, device/identity and release-scope proof. Do not enable normal production `real-execution` merely because tracking tickets close.
+
+## Separately Scoped and Deferred Releases
+
+- **Config Editor:** New feature/refinement work and its public release remain owner-deferred. Historical Config Editor Developer ID/notarization and packaged-GUI evidence remain valid **for those recorded artifacts only**; Config Editor release is **not** an unconditional prerequisite for EmuChef proper.
+- **Additional host platforms:** Intel/universal macOS, Windows, Linux and their cross-platform release automation/inspection/clean-host requirements remain separately scoped, not unconditional blockers for the initial Apple Silicon EmuChef proper release. If support is later explicitly approved, their own applicable evidence becomes mandatory.
+- **Additional Android models/firmware:** OEM runner feature eligibility for AYN/Retroid/AYANEO is Device Profile-based, not firmware-allowlisted or per-model rollout gated. Exact supported *workflow* claims still require applicable physical and emulator-usage evidence; unsupported targets and deferred product scopes do not become automatic release obligations.
+
 
 Completed local signing and notarization for an older recorded commit do not
 establish current-commit signing, clean-Mac packaged-GUI, or public-release

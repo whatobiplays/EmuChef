@@ -1,5 +1,164 @@
 # EmuChef Context
 
+## Authority and implementation status
+
+**Accepted normative product intent:** [EmuChef requirements](docs/product/emuchef-requirements.md) contains Q1–Q83 and UX-1 A, including generated configuration, device-profile OEM root-script execution, **atomic invocation admission/closure**, per-file recovery originals and cleanup. These are **accepted requirements, not yet implemented or physically qualified**; their presence in this document does not attest that the running app supports them.
+
+**Architectural decisions:** [ADRs 0005–0011](docs/adr/) record accepted design boundaries and rationale. **Current implemented runtime behavior:** the detailed sections below and the [architecture documents](docs/architecture/) describe existing Rust/Tauri/sidecar code, which is authoritative for what currently works; do not infer code behavior from future product requirements. **Qualification evidence:** the [qualification-obligation register](docs/product/qualification-obligations.md) indexes open target/phase evidence, while original records, runbooks and validators decide actual passing, missing or deferred status. **Active scheduling/tracking:** [EmuChef wayfinder map #43](https://github.com/whatobiplays/EmuChef/issues/43) and its same 23 child issues own work order and direct body-level blockers, not execution authority or physical evidence.
+
+**Scoped release authority:** The initial EmuChef proper public-release target is Apple Silicon macOS with applicable *current-product* Developer ID, notarization, Gatekeeper, clean-Mac, host artifact inspection, privacy/accessibility and selected supported-workflow evidence. See [release readiness](docs/release/release-readiness.md). The Config Editor public release and additional host platforms/cross-platform release automation are separately scoped/deferred, not unconditional prerequisites. Historical Config Editor signed artifacts remain evidence for those artifacts alone. This local documentation and GitHub tracking reconciliation does **not** authorize runtime work, commits/pushes, physical device operations, production enablement or release.
+
+## Language
+
+**EmuChef proper**:
+The consumer application for choosing, reviewing, and applying a supported handheld setup. Simulation is optional rather than a prerequisite for an otherwise eligible reviewed apply.
+_Avoid_: Config Editor, technical authoring UI
+
+**App Configuration Definition**:
+An app-owned description of supported configuration settings and their file format, independent of any particular setup procedure.
+_Avoid_: Recipe-owned configuration format
+
+**App Target**:
+An app-owned named file or directory destination used when configuring that application; it is distinct from a user-selected storage destination.
+_Avoid_: Storage Target
+
+**Device Storage Volume**:
+A storage resource available on the connected handheld, such as internal shared storage or a removable SD card.
+_Avoid_: Hard-coded mount path
+
+**Storage Target**:
+A portable destination expressed as a selected Device Storage Volume and a relative location on it. A connected device supplies the concrete path when a setup is prepared.
+_Avoid_: Literal SD-card UUID path
+
+**Setup Location**:
+A named, user-selected Storage Target shared by related Recipes and generated app configurations for the same setup.
+_Avoid_: Recipe-local destination path
+
+**Generated App Configuration**:
+A rendered application configuration file produced from an app-owned definition or template, chosen settings, and resolved setup locations.
+_Avoid_: Unreviewed device-side file generation
+
+**Configuration Template**:
+A reusable, app-scoped source configuration file containing declared variables or replaceable properties from which a Generated App Configuration can be rendered.
+_Avoid_: Executable Recipe script
+
+**App Recipe Configuration**:
+An app-specific Recipe's configuration section, which references a base configuration file and selects the app-defined settings users may change.
+_Avoid_: App Definition setting schema
+
+**OEM Root Script Runner**:
+A device manufacturer's facility for running a user-selected script with privileged authority, distinct from EmuChef obtaining root over ADB.
+_Avoid_: Rooted ADB shell
+
+**Privileged Setup Bundle**:
+A run-bound set of staged files, generated root script and declared privileged actions prepared for execution using an OEM Root Script Runner.
+_Avoid_: Rooted execution plan
+
+**User-Mediated Privileged Execution**:
+An EmuChef-reviewed execution stage performed when the user invokes an OEM Root Script Runner, rather than EmuChef directly running root ADB commands.
+_Avoid_: Direct ADB root execution
+
+**Privileged Execution Receipt**:
+A run-bound report produced by the privileged script, distinct from independent postcondition verification.
+_Avoid_: Verified device state
+
+**Privileged Execution Stage**:
+A reviewed contiguous group of privileged Recipe actions delegated to an OEM Root Script Runner; a setup may alternate multiple such stages with ordinary ADB work.
+_Avoid_: Separate Recipe system
+
+**Privileged Results Archive**:
+A run-bound ZIP archive of privileged action outcomes and bounded diagnostics, stored separately from the staging bundle for retrieval and analysis.
+_Avoid_: Staging bundle
+
+**EmuChef Temporary Device Artifact**:
+A device-side file or directory created and owned by EmuChef for staging, execution or result collection, which must be safely cleaned up when no longer needed.
+_Avoid_: User content
+
+**OEM Stage Barrier**:
+A stage in a setup that pauses all other Recipe execution until user-mediated privileged execution and its result reconciliation are finished.
+_Avoid_: Concurrent ADB Recipe execution
+
+**Privileged Execution Attempt**:
+One individual user invocation of a reviewed OEM root-script stage, with its own immutable results archive. Multiple attempts may belong to one stage.
+_Avoid_: New Recipe or new setup
+
+**Device Cleanup Obligation**:
+An outstanding duty to remove EmuChef-owned temporary device files when safe and reachable, tracked independently from whether the setup itself succeeded.
+_Avoid_: Failed setup
+
+**Reviewed OEM Bundle**:
+A frozen, target-bound script and payload set prepared for one reviewed privileged stage, including its effective backup mode. All invocations of the same bundle inherit those reviewed terms.
+_Avoid_: Privileged Execution Attempt
+
+**Execution Admission**:
+The actual start of a privileged invocation as established by run-bound start evidence, distinct from staging or a user's acknowledgement of running it.
+_Avoid_: Awaiting device action
+
+**OEM Admission Window**:
+The device-enforced authority state for a reviewed OEM bundle that admits safe serial attempts only while the stage barrier is held and admission is open.
+_Avoid_: Host-side UI flag or staging file
+
+**OEM Admission Closure**:
+Atomic, device-proven revocation of new invocation starts for a reviewed OEM bundle; a racing start is admitted and reconciled or refused before mutation, and a retained closed script cannot run privileged actions.
+_Avoid_: Deleting the script or releasing the host UI barrier
+
+**Admission Closure Unverified**:
+An unresolved execution-authority state where closure against new invocations or the absence of active/uncertain admitted attempts cannot be proven.
+_Avoid_: Cleanup pending warning
+
+**Recovery Original**:
+The protected original bytes and restoration metadata retained in a qualified recovery store before an existing configuration is overwritten, distinct from temporary staging or result archives.
+_Avoid_: ZIP result or staging backup
+
+**Base Configuration Reference**:
+A Recipe-owned pointer to reusable configuration content used as the starting point when generating a new application configuration.
+_Avoid_: Duplicated app setting rules
+
+**Saved Configuration Artifact**:
+A retained, reusable copy of a rendered configuration, distinct from the immutable configuration snapshot approved for a particular execution.
+_Avoid_: Current execution snapshot
+
+**Configuration Library**:
+A user-controlled collection of reusable configuration templates and explicitly saved rendered configuration files; it does not authorize automatic deployment.
+_Avoid_: Reviewed Execution Plan
+
+**Template Variable**:
+A declared, typed value that a Configuration Template uses during rendering.
+_Avoid_: Unvalidated textual substitution
+
+**Scoped Recommendation**:
+A suggested setup or setting value whose applicability is limited to a known device model or brand family.
+_Avoid_: Universal default for device-specific behavior
+
+**Explicit Setting Choice**:
+A valid setting value intentionally selected by the user instead of accepting a device-specific or generic recommended value.
+_Avoid_: Recommended default
+
+**Compatibility Requirement**:
+A setting constraint necessary for a supported device or application operation, distinct from an editable recommendation.
+_Avoid_: Recommended default
+
+**Managed Configuration Update**:
+A change to declared application settings that preserves settings outside EmuChef's selected scope.
+_Avoid_: Unconditional configuration replacement
+
+**Configuration Recovery Copy**:
+A protected copy of an existing application configuration file captured before EmuChef changes that file, available for explicit per-file restoration.
+_Avoid_: Whole-setup rollback
+
+**Add or Update Copy**:
+A file transfer that creates or updates selected files without deleting unrelated destination content.
+_Avoid_: Sync
+
+**Replace Destination Copy**:
+A file transfer that explicitly replaces the designated destination and its existing contents.
+_Avoid_: Sync
+
+**Mirror Copy**:
+A file transfer whose destination contents match the source, including explicit removal of destination-only files.
+_Avoid_: Sync
+
+
 This document is the standalone current-state contract for the repository.
 
 ## Product
@@ -1651,10 +1810,7 @@ The canonical operator procedure for macOS release bundles is
 packaged sidecar, packaged runtime, and interactive editor evidence. The editor
 exposes side-effect-free planning, but not apply, through its Tauri and JSONL
 command surfaces.
-Public release readiness still requires real packaged GUI evidence on supported
-targets, reviewed production update trust and hosting, credentialed signed
-release metadata, clean-Mac manual replacement evidence, and cross-platform
-release automation.
+The **current EmuChef proper Apple Silicon macOS** release remains blocked until its exact-build packaged GUI/sidecar and macOS artifact inspection, Developer ID/hardened runtime, notarization/stapling/Gatekeeper, clean-Mac behavior, production update trust/hosting and signed metadata, qualified supported device/workflow evidence and explicit release authority are established. The Config Editor's separate release remains deferred; historical editor artifacts/checklists do not satisfy current EmuChef proper evidence. Other host platforms and their cross-platform release automation are separately scoped, **not unconditional blockers** of the initial Apple Silicon EmuChef proper release. See `docs/release/release-readiness.md` and `docs/product/qualification-obligations.md`.
 
 The macOS `0.1.0` application and disk image built from commit
 `93f816fc1ea59cd034a40432e4e2a269e11eead7` have completed Developer ID signing,

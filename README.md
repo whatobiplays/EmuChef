@@ -4,7 +4,23 @@ EmuChef is a Rust application for planning and applying reproducible Android
 handheld configurations. The repository contains separate React/Tauri apps for
 the guided end-user workflow and authored recipe editing.
 
-The canonical remaining-work plan is the [product roadmap](docs/product/product-roadmap.md). It explicitly separates **EmuChef proper** (`apps/emuchef-app`), the **Config Editor** (`apps/config-editor`), and genuinely shared Rust/Tauri infrastructure so requirements and release evidence are not conflated.
+**Product requirements:** [EmuChef requirements](docs/product/emuchef-requirements.md)
+**Delivery specification:** [Reviewed setup and OEM-assisted execution](docs/superpowers/specs/2026-10-25-emuchef-proper-delivery-spec.md) ([GitHub reference spec #67](https://github.com/whatobiplays/EmuChef/issues/67); not a new delivery ticket).
+(accepted Q1–Q83 and UX-1 A), the [product charter](PRODUCT.md), and
+[ADRs](docs/adr/). **Qualification and release obligations:**
+[carry-forward register](docs/product/qualification-obligations.md), original
+phase evidence and machine validators. The
+[product roadmap](docs/product/product-roadmap.md) is now **historical**, not
+the live work queue. The [EmuChef wayfinder map](https://github.com/whatobiplays/EmuChef/issues/43) published in T02 is the sole
+active priority/status/dependency tracker after publication. A local document
+is not a published GitHub file until committed and pushed separately.
+
+This documentation cutover preserves the distinction between **EmuChef proper**
+(`apps/emuchef-app`), **Config Editor** (`apps/config-editor`), and the
+trusted shared Rust runtime. Config Editor features remain on hold. Accepted
+generated-config, SD location, OEM root-script, and recovery behavior described
+in requirements is **planned**, not a statement that those runtime features
+already exist or are qualified.
 
 ## Runtime
 

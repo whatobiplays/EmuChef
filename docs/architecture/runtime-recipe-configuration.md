@@ -521,3 +521,9 @@ surface. Its absence does not change schema validity or execution semantics.
 The runtime falls back to step name, humanized step type, then step id. Only
 representative checked-in recipes need authored notes; deterministic fallback
 keeps the rest of the catalog usable without a bulk migration.
+
+## Proposed future schema work — not current behavior
+Normative future intent also includes device-profile OEM runner capability, typed privileged-action parity, per-stage reviewed effective backup mode, and separate immutable per-invocation start/result evidence. See [EmuChef requirements](../product/emuchef-requirements.md) and [ADR 0011](../adr/0011-oem-assisted-privileged-execution.md). Existing schema and persisted saved configurations do not yet express that authority.
+
+
+The [EmuChef product realignment proposal](../product/emuchef-product-realignment-proposal.md) assigns T05/T05b portable logical Setup Locations, T07 App Definition-owned config semantics and app Recipe `config` exposure, T08 template rendering, and T09 per-destination composition. Current schema-v1 persisted documents, directly bound `<recipe-id>/<input-id>` values, and input precedence described above remain the **implemented** contract until an explicitly approved and tested breaking pre-1.0 cutover occurs. Existing saved test configurations may be rejected after that cutover; new fields must not be silently dropped by Config Editor load/save, CLI, protocol, or catalog tooling.
