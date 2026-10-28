@@ -1,0 +1,163 @@
+apps/emuchef-app/scripts/sidecar-packaging.test.mjs
+  s_353618c23d87ca::t_d80e50ae5fa5a2 13,17
+scripts/worktree-cleanup.integration.test.mjs
+  s_7ec1465d9e6900::t_38429c52f7519e 487-489
+  s_7ec1465d9e6900::t_04b9d1c35ffbfa 356-357
+  s_12a5aa5356506e::t_6d197cb913b708 490-672
+  s_7ec1465d9e6900::t_2d5564b5e86f96 1-215,217-315,317-355,358,360-486
+  s_7ec1465d9e6900::t_7c2d419a933d71 316
+  s_7ec1465d9e6900::t_94e0b535060b1f 359
+  s_7ec1465d9e6900::t_d48cb9f11f4118 216
+scripts/worktree-cleanup.helpers.test.mjs
+  s_7ec1465d9e6900::t_2d5564b5e86f96 1,5-21,44-117
+  s_7ec1465d9e6900::t_d48cb9f11f4118 2-4,22-43
+  s_7ec1465d9e6900::t_5c43bf4c0e24a0 118-120
+  s_94209062161bec::t_25296f6778d983 121-573
+scripts/worktree-cleanup-test-fixtures.mjs
+  s_7ec1465d9e6900::t_2d5564b5e86f96 1-70,96-98,100-304
+  s_7ec1465d9e6900::t_1817bd3c13a884 71-87,94-95,99
+  s_7ec1465d9e6900::t_d99f51676590f0 88-93
+apps/config-editor/scripts/sidecar-packaging.test.mjs
+  s_353618c23d87ca::t_bba60f60940612 38,46-49
+CONTEXT.md
+  s_353618c23d87ca::t_41b528d7f03bd6 1349-1389
+apps/config-editor/scripts/prepare-rust-sidecar.mjs
+  s_7ec1465d9e6900::t_e27f1ca51e697d 14
+apps/config-editor/scripts/sidecar-packaging.mjs
+  s_353618c23d87ca::t_fe70069c2efc15 1-5,8,11,15
+scripts/worktree-cleanup.mjs
+  s_7ec1465d9e6900::t_8910acdfb13822 22-23,253-262,535
+  s_7ec1465d9e6900::t_fd1c9c1f969508 404,408
+  s_7ec1465d9e6900::t_12cd71d577bcc6 724
+  s_7ec1465d9e6900::t_a3187da3b6874b 729
+  s_7ec1465d9e6900::t_b203db2ead29ec 731-733
+  s_7ec1465d9e6900::t_adb25da3516ec1 223-226,228-230,243-246
+  s_7ec1465d9e6900::t_7d1ffc36551ae3 8
+  s_7ec1465d9e6900::t_330b34e9a290be 127,147,153
+  s_7ec1465d9e6900::t_2fcbd2b70f39cf 19,98,101-102,172,196,201-202,349-359,365-376,388,394,396,400,411,469,475-479,553-555,557-566,577-579,581-602,604-606,613-619,682-686,848
+  s_7ec1465d9e6900::t_ad0364e910cc32 56-59,442-444
+  s_7ec1465d9e6900::t_471b8d1973726a 227,430
+  s_7ec1465d9e6900::t_e8fff73aa15b20 717-723,725-728
+  s_7ec1465d9e6900::t_5ed602ec0f88e6 569-576,580
+  s_7ec1465d9e6900::t_41122e7be6483a 302,330
+  s_7ec1465d9e6900::t_b20841cb1e127e 331-332,334-336,338-342,420-423
+  s_7ec1465d9e6900::t_1ce52b781d1e71 337
+  s_7ec1465d9e6900::t_39d2d18a014314 385-387,413
+  s_7ec1465d9e6900::t_042cf64c3e1982 438-441,445-446,456
+  s_12a5aa5356506e::t_f7f18e7ebc1a20 734-846
+  s_7ec1465d9e6900::t_ea308022639e8c 1-6,9-18,20-21,24-55,60-97,99-100,103-126,128-139,145-146,148-152,154-170,173-175,177-182,193-195,197-200,203-222,231-242,247-252,263-281,292-301,303-329,343-348,377-384,415-419,424-429,431-437,447-455,457-468,470-474,480-534,536-539,543-552,603,607-612,620-681,687-716,730
+  s_7ec1465d9e6900::t_97472dea417892 171,176,183-191,282-291,333,389-393,395,397-399,401-403,405-407,409-410,412,414,556
+  s_7ec1465d9e6900::t_54fe4c82bff727 140-144,192
+  s_7ec1465d9e6900::t_aa590fb86d34a9 360-364,541
+  s_7ec1465d9e6900::t_05db89e85942c9 7,540,542
+  s_7ec1465d9e6900::t_be69ad04f92987 567-568
+  s_7ec1465d9e6900::t_c25229923bd75e 849-851
+  s_12a5aa5356506e::t_c4327b277b9be9 847,852-964
+apps/emuchef-app/scripts/sidecar-packaging.mjs
+  s_353618c23d87ca::t_8ae0543655c4b8 1-5,9,30-31
+apps/emuchef-app/scripts/prepare-rust-sidecar.mjs
+  s_353618c23d87ca::t_069043f4c9fb23 8-12,29
+  s_353618c23d87ca::t_3b7ad3aa40addb 34
+scripts/sidecar-target-contract.mjs
+  s_b88c991a15a600::t_e6958b3340f4eb 1-251
+README.md
+  s_7ec1465d9e6900::t_fbabd1ba93d42d 99
+  s_7ec1465d9e6900::t_206e9a9ef68caa 82,85-90,122-124
+  s_7ec1465d9e6900::t_28de8ccac0ea45 100,104-110,112-114
+  s_7ec1465d9e6900::t_94f5eb7fddfbc8 92-93,96-98
+  s_7ec1465d9e6900::t_05db89e85942c9 94-95
+  s_7ec1465d9e6900::t_2a1cc9cad7d326 101
+  s_7ec1465d9e6900::t_af47c3c6f5766b 120-121
+  s_7ec1465d9e6900::t_56a0980cfbcb88 102-103
+  s_7ec1465d9e6900::t_7a10b98f678d47 73-74,84,127
+  s_7ec1465d9e6900::t_5bd76f9049c1ac 128-130
+  s_41fd17bcec8651::t_f6dfbd34288fe6 131-133
+  s_7ec1465d9e6900::t_223639afd2a988 75-81,83,91,111,115-119,125-126
+scripts/worktree-cleanup.safety.test.mjs
+  s_7ec1465d9e6900::t_1f894956de01a3 328-329
+  s_7ec1465d9e6900::t_4accaef05a751a 2
+  s_7ec1465d9e6900::t_fe5edd431da8db 334-342,346-351,354,356-358,363-366,368-370
+  s_353618c23d87ca::t_83487d868d679e 372-387
+  s_7ec1465d9e6900::t_2250020dfdbc32 121,141-147,149
+  s_7ec1465d9e6900::t_2d5564b5e86f96 1,3-120,122-140,148,150-327,330-333,343-345,352-353,355,359-362,367,371
+  s_353618c23d87ca::t_c2588b2f35c77c 388-403
+Makefile
+  s_7ec1465d9e6900::t_05db89e85942c9 97
+  s_7ec1465d9e6900::t_8c14dbca070021 28
+  s_7ec1465d9e6900::t_28de8ccac0ea45 40
+  s_7ec1465d9e6900::t_7e22de1385cbf3 23,25,38-39,101-103
+  s_7ec1465d9e6900::t_f2a1f4d24c3361 24,26
+  s_7ec1465d9e6900::t_4da09d5796543c 69
+  s_7ec1465d9e6900::t_b3c6c6ad8c548e 104-106,108-111
+  s_5115ca474bf205::t_8152f667c6a64d 27
+.github/workflows/emuchef-macos-qualification.yml
+  s_7ec1465d9e6900::t_4da09d5796543c 38
+  s_353618c23d87ca::t_3f99649f1b1af8 56-57
+  s_7ec1465d9e6900::t_8742fd45945544 16
+  s_7ec1465d9e6900::t_26be67846104a6 17-18
+  s_7ec1465d9e6900::t_223639afd2a988 37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f0e2af6b2132c57a342c9ca85e7cb1c2a75b4378",
+  "prompts": {},
+  "sessions": {
+    "s_12a5aa5356506e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17420-826e-7d51-9bd9-d61b4fe696a4",
+        "model": "unknown"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_353618c23d87ca": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17a62-8123-7d40-adb8-a489a7b672dd",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_41fd17bcec8651": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17caf-3047-7282-aa8e-ac5d6282e278",
+        "model": "unknown"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_5115ca474bf205": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16d28-a945-7353-921f-e3c95a755ed6",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_7ec1465d9e6900": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1756d-6f60-77d0-a701-93a7e823cbc7",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_94209062161bec": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17e26-0b24-7303-ab10-1acf8ff78a0c",
+        "model": "unknown"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_b88c991a15a600": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17168-15be-72b3-8856-050674c248c1",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
