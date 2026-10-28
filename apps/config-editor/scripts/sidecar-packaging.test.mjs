@@ -35,6 +35,7 @@ test("builds Tauri externalBin input and packaged names for Windows target tripl
 });
 
 test("rejects malformed or unsafe target triples", () => {
+  assert.equal(validateTargetTriple("x86_64-unknown-linux-gnu"), "x86_64-unknown-linux-gnu");
   for (const value of ["", "darwin", "aarch64 apple darwin", "../aarch64-apple-darwin", "aarch64\\apple\\darwin"]) {
     assert.throws(
       () => validateTargetTriple(value, "test input"),
@@ -42,4 +43,8 @@ test("rejects malformed or unsafe target triples", () => {
       `expected '${value}' to be rejected`,
     );
   }
+  assert.throws(
+    () => validateTargetTriple("aarch64-apple-darwin-extra"),
+    /unexpected target triple/,
+  );
 });

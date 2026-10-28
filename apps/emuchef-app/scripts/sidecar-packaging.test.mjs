@@ -10,9 +10,11 @@ import {
 
 test("validates safe target triples", () => {
   assert.equal(validateTargetTriple("aarch64-apple-darwin"), "aarch64-apple-darwin");
+  assert.equal(validateTargetTriple("x86_64-unknown-linux-gnu"), "x86_64-unknown-linux-gnu");
   for (const invalid of ["", "darwin", "aarch64/apple/darwin", "aarch64 apple darwin", null]) {
     assert.throws(() => validateTargetTriple(invalid), /unexpected target triple/);
   }
+  assert.throws(() => validateTargetTriple("aarch64-apple-darwin-extra"), /unexpected target triple/);
 });
 
 test("maps known macOS architectures and qualifies only Apple Silicon", () => {

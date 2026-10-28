@@ -70,6 +70,67 @@ roots are configured when the sidecar starts. Execution has no rollback or
 device-state undo. See the
 [Phase 0 runtime contracts](docs/product/phase-0-runtime-contracts.md).
 
+## Developer cleanup
+
+`make clean-preview` checks the current Git worktree, lists eligible artifacts,
+estimates their sizes, and leaves the checkout unchanged. `make clean` removes
+recognized untracked Cargo build/test intermediates from the three worktree-local
+Tauri/backend target trees, plus each app's untracked
+`src-tauri/gen/schemas/desktop-schema.json` when present. Cargo cleanup is limited
+to recognized files under `.fingerprint`, `build`, `deps`, and `incremental` in
+`debug` and `release` profiles. A cross-target profile is eligible only when its
+target-directory name has the canonical Rust target shape and uses a recognized
+standard architecture and vendor. Unknown Cargo-shaped directories are reported
+as skipped and remain in place. Cleanup keeps target roots, the pending backend
+freshness marker, tracked files, unknown content, and every
+`target/**/bundle/**` tree.
+
+Default cleanup removes the obsolete
+`crates/emuchef-rust-backend/target/.emuchef-cargo-test-source.sha256` digest
+stamp and preserves its `.pending` marker. `backend-test-fresh` uses `.pending`
+to invalidate Cargo test artifacts, then clears it only after `cargo clean`
+succeeds and records a fresh digest.
+
+`make clean-deep` is a separate opt-in action. It prints a warning and preview,
+then removes untracked regular files under both apps' `node_modules` roots,
+including nested `.gitignore` files, and recognized files under their `dist` output. This
+includes package metadata and extensionless native executables. Tracked
+descendants and nested `.git` metadata are preserved.
+Symlink candidates are skipped and reported without following or removing them,
+including package links and npm executable entries under `node_modules/.bin`.
+It also removes prepared Tauri sidecar
+copies named
+`binaries/emuchef-<target-triple>` for non-Windows targets or
+`binaries/emuchef-<target-triple>.exe` for Windows targets, together with their
+`.metadata.json` files. Invalid platform-extension combinations and near-match
+names remain in place.
+Tracked files, `.gitignore` files, and unknown content remain in place under
+`dist` and sidecar output directories.
+
+Deep cleanup removes each app's exact `make ensure-deps` stamp:
+`apps/emuchef-app/node_modules/.emuchef-deps-stamp` and
+`apps/config-editor/node_modules/.emuchef-deps-stamp`. This makes the next
+`make ensure-deps` run `npm ci` for the missing dependency tree. The app `build`
+scripts regenerate `dist`. Regenerate a development sidecar with
+`npm --prefix apps/emuchef-app run sidecar:dev` or
+`npm --prefix apps/config-editor run sidecar:dev`. Release packaging uses the
+corresponding `sidecar:build` script. Default `make clean` retains
+`node_modules`, `dist`, sidecars, generated metadata, and dependency-install
+stamps.
+
+All cleanup paths are anchored to the current worktree. Cleanup preserves release
+bundles and manifests, `release-artifacts/**`, `docs/testing/**`,
+`docs/qualification/**`, `docs/release/**`, evidence, snapshots, fixtures,
+authored content, `.emuchef_cache`, `.emuchef_runtime/**`, freshness markers,
+tracked files, and unknown entries outside deep-cleaned `node_modules` roots.
+The obsolete Cargo freshness digest is
+removed by default cleanup; the `.pending` marker is preserved until
+`backend-test-fresh` successfully cleans the backend Cargo artifacts. Cleanup
+does not build, test, install, download,
+or use the network. `make clean` is not guaranteed safe while builds or tests are
+running; run cleanup only after builds, tests, development servers, and
+packaging are idle.
+
 ## End-User App
 
 The Apple Silicon end-user app includes a user-triggered Updates dialog for

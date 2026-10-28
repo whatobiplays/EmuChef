@@ -13,7 +13,9 @@ on:
       - "poetry.lock"
       - "uv.lock"
       - "scripts/**"
-      - "apps/config-editor/package.json"
+      - "Makefile"
+      - "scripts/worktree-cleanup.mjs"
+      - "apps/config-editor/**"
       - "apps/emuchef-app/**"
       - "crates/emuchef-rust-backend/**"
       - "authored/**"
@@ -32,6 +34,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Verify worktree cleanup with disposable Git fixtures
+        run: node --test scripts/worktree-cleanup*.test.mjs
       - name: Verify Python runtime retirement
         run: node --test --experimental-test-coverage --test-coverage-include=scripts/check-python-runtime-retirement.mjs --test-coverage-lines=95 --test-coverage-functions=95 --test-coverage-branches=95 scripts/check-python-runtime-retirement.test.mjs && node scripts/check-python-runtime-retirement.mjs
 
@@ -49,6 +53,8 @@ jobs:
         run: npm ci --prefix apps/emuchef-app
       - name: Verify packaging policy
         run: npm --prefix apps/emuchef-app run test:packaging
+      - name: Verify Config Editor sidecar packaging
+        run: npm --prefix apps/config-editor run test:sidecar-packaging
       - name: Build and qualify first local artifact
         run: npm --prefix apps/emuchef-app run package:macos:qualify -- --manifest "$RUNNER_TEMP/first.json"
       - name: Build and qualify second local artifact

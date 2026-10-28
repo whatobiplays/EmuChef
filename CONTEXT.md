@@ -1346,24 +1346,47 @@ Config Editor, and `make dev` launches both apps concurrently. These Makefile
 targets use ordinary simulation-only development commands; they intentionally
 do not use the separate real-device `tauri:dev:real` command.
 
-`make clean` reclaims repository-local generated state that the next `make
-build` or `make test` rebuilds from source, regenerates, or re-downloads: the
-Cargo build directory of each Rust workspace, the Tauri-generated
-`apps/*/src-tauri/gen` schemas, the `.emuchef_cache` artifact download cache,
-and the `.emuchef_runtime/executions` simulated-execution working directories.
-It preserves the installed dependency trees (`node_modules`, `.venv`), the
-`.emuchef_runtime/qualification-candidates` entries captured from real devices,
-the `.worktrees` checkouts, and the editor and agent tool indexes, so the
-target never forces a dependency reinstall or a device re-capture. It also
-preserves the prepared `apps/*/src-tauri/binaries/emuchef-<target-triple>`
-sidecar executables and the `apps/*/dist` frontend bundles, because compiling
-the EmuChef Tauri crate fails when either path is absent and only a Tauri dev
-or build run recreates the sidecar executables. Deleting the Cargo build
-directories also deletes the backend Cargo test freshness stamp stored inside
-them; the freshness gate recreates that stamp on the next `make test`. `make
-clean` must not run while a `make dev` session has executions in flight,
-because the simulated device state it deletes is live working state for those
-runs.
+`make clean-preview` validates the invoking Git worktree and reports the
+eligible and skipped cleanup entries with approximate sizes without changing
+the filesystem. `make clean` removes only recognized, untracked Cargo build and
+test intermediates under the three application/backend target roots and the
+Tauri-generated `apps/*/src-tauri/gen/schemas/desktop-schema.json` files. Cargo
+cleanup is restricted to recognized files below `.fingerprint`, `build`,
+`deps`, and `incremental` in `debug` and `release` profiles. Cross-target
+profiles are considered only when the target-directory name has the canonical
+Rust target shape and uses a recognized standard architecture and vendor.
+Unknown Cargo-shaped directories remain in place and are reported as skipped.
+
+Default cleanup preserves the target roots, every `target/**/bundle/**` tree,
+the backend freshness `.pending` marker, tracked files, and unknown files. It
+also preserves installed dependency trees, frontend `dist` output, prepared
+Tauri sidecars and metadata, `.emuchef_cache`, `.emuchef_runtime`, release
+artifacts, documentation evidence, snapshots, fixtures, authored content, other
+worktrees, and editor or agent indexes. Default cleanup may remove the obsolete
+backend freshness digest;
+`crates/emuchef-rust-backend/target/.emuchef-cargo-test-source.sha256.pending`
+continues to invalidate stale backend test results until `backend-test-fresh`
+recreates the digest safely.
+
+`make clean-deep` is a separate opt-in action. It prints a warning and a
+preview before removing the default eligible set plus untracked regular files
+under both applications' `node_modules` trees, their dependency-install
+stamps, recognized frontend `dist` files, prepared Tauri sidecars, and their
+metadata. The next dependency or build command may therefore reinstall
+packages, rebuild frontend output, or regenerate a sidecar. Tracked descendants,
+nested `.git` metadata, unknown frontend or binary-directory entries, symlinks,
+runtime and qualification data, and release or evidence trees remain preserved.
+
+The cleanup and both sidecar producers import the same target contract. It
+accepts canonical Rust host-target tuples, requires `.exe` for Windows targets,
+requires no executable suffix for other targets, and preserves metadata and
+near-match names that do not satisfy both rules. Both producers continue to
+obtain their default target dynamically from `rustc --print host-tuple`.
+
+Cleanup assumes an idle operator: builds, tests, development servers, and
+packaging must not be running when any cleanup action starts. The tools use
+ordinary path and symlink checks and do not add process discovery, locks, or
+coordination for active work.
 
 The checked-in `EmuChef execution feature matrix` GitHub Actions workflow is the
 continuous compile-policy authority for Phase 6A. It runs `cargo check` and
