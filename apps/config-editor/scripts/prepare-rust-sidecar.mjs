@@ -10,8 +10,8 @@ import {
   binaryExtensionForTargetTriple,
   externalBinArtifactName,
   isWindowsTargetTriple,
-  validateTargetTriple,
 } from "./sidecar-packaging.mjs";
+import { validateTargetTriple } from "../../../scripts/sidecar-target-contract.mjs";
 
 function fail(message) {
   console.error(`prepare-rust-sidecar: ${message}`);

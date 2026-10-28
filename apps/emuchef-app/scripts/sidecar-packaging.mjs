@@ -1,20 +1,12 @@
+import {
+  targetExecutableExtension,
+  validateTargetTriple,
+} from "../../../scripts/sidecar-target-contract.mjs";
+
 export const BINARY_BASENAME = "emuchef";
 export const QUALIFIED_MACOS_TARGET = "aarch64-apple-darwin";
 
-export function validateTargetTriple(value, source = "target triple") {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    !/^[A-Za-z0-9_.-]+$/.test(value) ||
-    value.split("-").length < 3 ||
-    value.includes("/") ||
-    value.includes("\\") ||
-    /\s/.test(value)
-  ) {
-    throw new Error(`${source} returned unexpected target triple '${value}'`);
-  }
-  return value;
-}
+export { validateTargetTriple };
 
 export function macosArchitecture(targetTriple) {
   const target = validateTargetTriple(targetTriple);
@@ -35,5 +27,6 @@ export function requireQualifiedMacosTarget(targetTriple) {
 }
 
 export function externalBinArtifactName(targetTriple) {
-  return `${BINARY_BASENAME}-${targetTriple}${targetTriple.includes("windows") ? ".exe" : ""}`;
+  const target = validateTargetTriple(targetTriple);
+  return `${BINARY_BASENAME}-${target}${targetExecutableExtension(target)}`;
 }

@@ -1,24 +1,18 @@
+import {
+  targetExecutableExtension,
+  validateTargetTriple,
+} from "../../../scripts/sidecar-target-contract.mjs";
+
 export const BINARY_BASENAME = "emuchef";
 
-export function validateTargetTriple(value, source) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`${source} returned an empty target triple`);
-  }
-  if (!/^[A-Za-z0-9_.-]+$/.test(value) || value.split("-").length < 3) {
-    throw new Error(`${source} returned unexpected target triple '${value}'`);
-  }
-  if (value.includes("/") || value.includes("\\") || /\s/.test(value)) {
-    throw new Error(`${source} returned unsafe target triple '${value}'`);
-  }
-  return value;
-}
+export { validateTargetTriple };
 
 export function isWindowsTargetTriple(targetTriple) {
-  return targetTriple.includes("windows");
+  return binaryExtensionForTargetTriple(targetTriple) === ".exe";
 }
 
 export function binaryExtensionForTargetTriple(targetTriple) {
-  return isWindowsTargetTriple(targetTriple) ? ".exe" : "";
+  return targetExecutableExtension(targetTriple);
 }
 
 export function externalBinArtifactName(targetTriple) {

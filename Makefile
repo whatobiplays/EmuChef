@@ -20,26 +20,12 @@ BACKEND_DIR := $(dir $(BACKEND_MANIFEST))
 BACKEND_TEST_STAMP := $(BACKEND_DIR)target/.emuchef-cargo-test-source.sha256
 BACKEND_TEST_PENDING := $(BACKEND_TEST_STAMP).pending
 
-# `make clean` scope: repository-local generated state that a later `make build`
-# or `make test` rebuilds from source, regenerates, or re-downloads. Cargo keeps
-# each workspace's build directory beside its manifest, so a workspace built
-# through an external `CARGO_TARGET_DIR` is outside this scope.
-#
-# Two generated paths stay outside the scope as well. `make test` compiles the
-# EmuChef Tauri crate, whose build script fails when
-# `src-tauri/binaries/emuchef-<target-triple>` is absent and whose
-# `generate_context!()` macro panics when the configured `frontendDist` path is
-# absent. `make build` restores `apps/*/dist`, but only a Tauri dev or build run
-# restores the sidecar executables.
-CLEAN_RUST_TARGET_DIRS := \
-	$(BACKEND_DIR)target \
-	$(dir $(EMUCHEF_TAURI_MANIFEST))target \
-	$(dir $(CONFIG_EDITOR_TAURI_MANIFEST))target
-# Tauri regenerates these from `tauri.conf.json` and the capability files.
-CLEAN_TAURI_GENERATED_DIRS := $(EMUCHEF_APP_PREFIX)/src-tauri/gen $(CONFIG_EDITOR_PREFIX)/src-tauri/gen
-CLEAN_RUNTIME_SCRATCH_DIRS := .emuchef_cache .emuchef_runtime/executions
+# Cleanup uses an explicit worktree-local allowlist. The helper is resolved
+# beside this Makefile so fixture tests can invoke this exact entrypoint from a
+# disposable Git checkout without running cleanup against the developer tree.
+CLEANUP_SCRIPT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/worktree-cleanup.mjs
 
-.PHONY: help install ensure-deps build test clean device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev qualify-armsx1-emulator
+.PHONY: help install ensure-deps build test clean clean-preview clean-deep device-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev qualify-armsx1-emulator
 
 help:
 	@printf '%s\n' \
@@ -49,7 +35,9 @@ help:
 		'  ensure-deps   Install missing or stale frontend dependencies' \
 		'  build         Build the Rust backend and both frontend applications' \
 		'  test          Run Rust, application, security, typecheck, and lint tests' \
-		'  clean         Remove generated build output and reconstructable caches' \
+		'  clean-preview Preview recognized Cargo/Tauri cleanup; no changes; idle only' \
+		'  clean         Remove known intermediates; preserve bundles/runtime/tracked/unknown; idle only' \
+		'  clean-deep    Opt-in warning: remove deps/dist/sidecars/metadata; preserve tracked/unknown; idle only' \
 		'  device-qualification-check    Validate device qualification definitions, evidence, and matrix' \
 		'  qualify-armsx1-emulator      Opt-in live qualification; requires exact dedicated AVD identity and operator attestation' \
 		'  emuchef-app   Launch the EmuChef app in development mode' \
@@ -78,6 +66,7 @@ build: ensure-deps
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run build
 
 test: ensure-deps device-qualification-check cargo-test-freshness-check backend-test-fresh
+	node --test scripts/worktree-cleanup*.test.mjs
 	node --test tools/qualify-armsx1-emulator.test.mjs
 	cargo test --manifest-path $(BACKEND_MANIFEST)
 	cargo test --manifest-path $(EMUCHEF_TAURI_MANIFEST)
@@ -105,25 +94,21 @@ backend-test-fresh:
 	@node tools/cargo-test-freshness.mjs $(BACKEND_DIR) $(BACKEND_TEST_STAMP)
 	@if [ -f $(BACKEND_TEST_PENDING) ]; then \
 		echo 'backend-test-fresh: backend source changed; cleaning emuchef-rust-backend test artifacts'; \
-		cargo clean --manifest-path $(BACKEND_MANIFEST) -p emuchef-rust-backend; \
+		cargo clean --manifest-path $(BACKEND_MANIFEST) -p emuchef-rust-backend || exit $$?; \
 		rm -f $(BACKEND_TEST_PENDING); \
 	fi
 
-# Reclaims generated state that the next `make build` or `make test` rebuilds
-# from source, regenerates, or re-downloads. Installed dependency trees, device
-# qualification candidates captured from real hardware, git worktrees, and
-# editor and agent tool indexes are preserved.
-#
-# Do not run it while `make dev` sessions have executions in flight: the
-# simulated device state it removes is live working state for those runs.
+# Cleanup validates this worktree, scans explicit artifact allowlists, and
+# preserves tracked and unknown files. Clean is not guaranteed safe during
+# concurrent builds; run it while build/test commands are idle.
+clean-preview:
+	@node "$(CLEANUP_SCRIPT)" preview
+
 clean:
-	@echo 'clean: removing Rust build directories'
-	rm -rf $(CLEAN_RUST_TARGET_DIRS)
-	@echo 'clean: removing Tauri generated schemas'
-	rm -rf $(CLEAN_TAURI_GENERATED_DIRS)
-	@echo 'clean: removing cached artifact downloads and simulated-execution scratch state'
-	rm -rf $(CLEAN_RUNTIME_SCRATCH_DIRS)
-	@echo 'clean: done; prepared sidecars, frontend bundles, dependencies, qualification candidates, and editor indexes preserved'
+	@node "$(CLEANUP_SCRIPT)" default
+
+clean-deep:
+	@node "$(CLEANUP_SCRIPT)" deep
 
 # Ordinary app development is simulation-only; real execution requires its separate guarded command.
 emuchef-app: ensure-deps
