@@ -1,0 +1,21 @@
+.github/workflows/emuchef-macos-qualification.yml
+  s_12a5aa5356506e::t_f1e53515c73aea 39
+.github/workflows/emuchef-execution-feature-matrix.yml
+  s_12a5aa5356506e::t_f1e53515c73aea 124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a9381b96b2aa1304ba52199b6838d2173c8f1a47",
+  "prompts": {},
+  "sessions": {
+    "s_12a5aa5356506e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17420-826e-7d51-9bd9-d61b4fe696a4",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
