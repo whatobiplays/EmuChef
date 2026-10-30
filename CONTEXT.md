@@ -318,6 +318,11 @@ Ordinary action failures continue across independent applicable actions. Under
 `warn`, each failed action is reported as a warning and the step succeeds with
 warnings; under `fail`, the step fails with an execution error. Root-authority,
 identity, transport, and interruption failures stop execution immediately.
+ADB command, identity, and transport failures use generic public result
+messages without command arguments or stderr. Bounded, redacted command
+arguments and stderr remain available as internal diagnostics, and stdout is
+not retained in those diagnostics. Root revocation is reported as
+`Root authority was revoked during execution.`
 Permission automation is App Definition-owned. A Recipe `grant_permissions`
 step names `app_ref`, selects a declared `baseline` or `elevated`
 `permission_set`, and may set its failure policy. Generators create these steps
@@ -2408,9 +2413,9 @@ review, required/default/alternate/invalid bindings, deterministic nested
 failure reporting without ADB, live network, physical hardware, or packaged
 GUI work. The authored `verify: []` remains without verification-predicate
 coverage. Directory-style `sync` is the authored “Mirror source” contract and
-removes destination-only files; the correction is limited to the shared
-fake-device directory-copy branch, while single-file, path-list, and unrelated
-execution branches retain their existing behavior. Physical qualification is
+removes destination-only files. Legacy path-list `sync` has no single reviewed
+source boundary and fails closed as unsupported before mutation; it is not
+timestamp-based sync and is not mapped to `Add/Update`. Physical qualification is
 deferred with cleanup authority
 `not_authorized_for_recipe_qualification`.
 
@@ -2438,22 +2443,99 @@ validated and tested. Physical qualification is not claimed.
 
 Physical qualification for all three standalone workflows is deferred by owner
 with cleanup authority `not_authorized_for_recipe_qualification`.
-Composition-level automated qualification is complete for the real
-`ayaneo.konkr_pocket_fit.base` default,
-which selects `app.retroarch.provision` followed by `feature.copy_bios` through
-`selected_recipes: None`. Its strict source-bound contract is at
-`tests/fixtures/recipe-qualification/retroarch-bios/qualification-contract.json`
-and its qualification document is
-`docs/product/recipe-qualification-retroarch-bios.md`. The combined result covers
-production planning/review, required BIOS binding failure, deterministic sandbox
-execution, repeated-run install skipping with BIOS re-execution, and failure
-semantics in which BIOS copy operations precede the forced BIOS destination
-verification failure, all results actually produced before the failure remain
-truthful, and the BIOS step and overall run fail. The generated production plan
-remains unchanged, and this makes no claim that BIOS follows the complete
-RetroArch workflow. The fake filesystem does not treat `/sdcard` and
-`/storage/emulated/0` as aliases. Phase 6E remains In progress for other
-workflow qualification and physical/full end-to-end work; Phase 6D remains In
-progress with all existing missing physical and UI-smoke evidence unchanged.
-The automated work follows the owner's sequencing decision and does not waive
-any Phase 6D requirement.
+The default `ayaneo.konkr_pocket_fit.base` selection includes both
+`app.retroarch.provision` and `feature.copy_bios`, but current planning rejects
+that composition with `app_target_destination_overlap`. Both recipes copy to
+the same `system` App Target: RetroArch uses additive `merge`, while BIOS uses
+directory `sync`, which removes destination-only files. CopyCommit reviews
+capture each destination manifest before mutation and do not compose sequential
+operations on one boundary, so the combined workflow is unsupported. The
+authored recipes and production destinations remain unchanged. The earlier
+sandbox characterization does not establish this combined flow as supported.
+The fake filesystem does not treat `/sdcard` and `/storage/emulated/0` as
+aliases. Phase 6E remains in progress for other workflow qualification and
+physical/full end-to-end work; Phase 6D retains its missing physical and
+UI-smoke evidence. This work does not waive those requirements.
+
+### Protected App Target qualification
+
+The generic protected App Target qualification is reproducible from source
+using the disposable application package `com.emuchef.fixture`; it covers
+runtime-generated file trees. The optional RetroArch package/build/APK
+qualification is reserved for T15. The production RetroArch App Definition and
+ROM Recipe destination `/sdcard/ROMs` remain authoritative. App-private
+directory copies from host sources capture one typed snapshot before review.
+App Target sources that reference runtime step outputs are rejected during
+review preparation because those outputs cannot be included in a stable source
+manifest before execution.
+The execution plan binds the operation, source path and manifest digest,
+selected destination identity, destination-before manifest digest, and exact
+deletion set. Review actions disclose every entry in that deletion set.
+Immediately before the first mutation, execution revalidates the complete source
+and destination trees against the reviewed snapshots. Drift found at that point
+rejects the operation before mutation begins. Each destination entry's identity
+and file digest are checked immediately before its overwrite or deletion. Each
+source file is opened without following symlinks and its digest is verified
+immediately before publication, so changed source content is not published.
+Drift detected after mutation begins rejects the affected publication and is
+reported as a truthful partial outcome that may include reviewed deletions or
+earlier publications already completed. Incomplete observation may still make
+the result uncertain.
+
+Mirror compares both relative path and entry kind. A destination file at a path
+that the source uses as a directory is included in the reviewed deletion set
+and removed before publication, so the resulting tree matches the source tree.
+Fake copy-commit reports with `succeeded: false` fail the step and execution,
+including reports that describe partial mutations. After final destination
+verification succeeds, helper or staging cleanup errors remain pending cleanup
+and do not change the setup result. A successful copy with staging cleanup
+pending retains its successful step and deployment status and adds an
+owner-visible warning with no local staging path. Host source files are opened
+relative to a retained source-root descriptor without following symlinks,
+checked as regular files, and verified against each reviewed SHA-256 while
+copied. Android checks the staged source digest and the exact publication
+temporary file before rename. Copy-commit source access requires Unix
+descriptor-relative no-follow filesystem operations; hosts without those
+operations reject the copy instead of using path-based opens. Non-Unix host
+support for this copy path is not qualified.
+The planner rejects selected CopyCommit operations whose destination paths are
+equal or ancestor/descendant, including overlaps across recipes. Disjoint
+sibling boundaries remain eligible. The review protocol has no sequential
+same-boundary composition: each snapshot is captured before mutation, so one
+operation cannot safely consume another operation's output. For Android shared
+storage, overlap checks also recognize `/sdcard` and `/storage/self/primary`
+as aliases of `/storage/emulated/0`; unresolved destination identity fails
+closed.
+
+Shared-storage CopyCommit runs as Android shell UID 2000 and never falls back
+to root. For `/sdcard` destinations, it preserves the reviewed spelling and
+accepts only the verified alias chain `/sdcard` to `/storage/self/primary`
+to `/storage/emulated/0`. It checks the selected-tree identity before review
+and again immediately before mutation. Unsupported permissions, aliases, or
+identity changes fail closed and leave the result uncertain when mutation
+state cannot be established. Shared-storage Mirror removes only the exact
+reviewed deletion set and verifies staged payloads before applying changes.
+The manual shared-storage qualification uses an isolated directory below
+`/sdcard/ROMs` and a sibling sentinel; it does not modify the production ROM
+Recipe destination or RetroArch definition.
+
+
+## Prepared execution reviews
+
+The native application plans the selected configuration, then sends that plan,
+the selected target device, and `real` mode to the trusted
+`prepareExecutionReview` sidecar operation. It retains the exact prepared plan,
+canonical digest, CopyCommit source and destination snapshots, and
+backend-authored review under one review handle. The UI presents the prepared
+review projection, including the selected boundary and complete copy additions,
+replacements, and deletions. Real Apply sends the exact retained plan and
+digest to `startExecution`; the backend revalidates CopyCommit identities and
+manifests immediately before mutation. Simulated execution consumes the plan
+and digest from its retained prepared response. The fake copy-commit route
+derives its isolated destination baseline from the reviewed destination
+manifest's paths and entry kinds, then verifies that the simulation deletion
+set matches the reviewed deletion set. Empty placeholder files model reviewed
+file paths; the simulation does not copy real-device file bytes into its fake
+tree. The fake destination is seeded only from the retained review snapshot and
+must match that path and kind baseline before mutation. The backend advertises
+`prepareExecutionReview` as a required protocol capability.

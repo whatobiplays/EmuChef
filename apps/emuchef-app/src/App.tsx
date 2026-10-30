@@ -2121,7 +2121,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const requestGeneration = workflow.requestGeneration;
     const runtimeGeneration = runtimeGenerationRef.current;
     try {
-      const review = await api.createReview({
+      const review = await api.prepareExecutionReview({
         deviceHandle: workflow.deviceHandle,
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,

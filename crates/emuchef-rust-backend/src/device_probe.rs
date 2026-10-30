@@ -363,6 +363,7 @@ mod tests {
             android_version: 12,
             android_api_level: Some(32),
             device_tags: vec!["profile_tag".to_string(), "handheld".to_string()],
+            root_shell_mode: None,
         }
     }
 

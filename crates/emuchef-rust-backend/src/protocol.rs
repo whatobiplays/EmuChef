@@ -49,6 +49,7 @@ pub const CAPABILITIES: &[&str] = &[
     "closeUserConfiguration",
     "describeConfiguration",
     "planConfiguration",
+    "prepareExecutionReview",
     "startExecution",
     "getExecution",
     "getExecutionEvents",

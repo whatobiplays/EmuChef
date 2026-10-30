@@ -196,6 +196,7 @@ fn assert_hello_result(result: &Value) {
             "closeUserConfiguration",
             "describeConfiguration",
             "planConfiguration",
+            "prepareExecutionReview",
             "startExecution",
             "getExecution",
             "getExecutionEvents",
@@ -464,6 +465,7 @@ fn product_catalog_and_plan_use_resolved_snapshot_identity_and_digest() {
         "payload": {
             "catalog": catalog,
             "devicePlan": "ayaneo.konkr_pocket_fit.base",
+          "selectedRecipes": ["feature.copy_bios"],
             "bindings": {
                 "feature.copy_bios/bios_source_dir": bios_source
                     .path()
@@ -480,7 +482,24 @@ fn product_catalog_and_plan_use_resolved_snapshot_identity_and_digest() {
     });
     let planned = one_shot_response(&plan_request.to_string());
     assert_eq!(planned["ok"], true, "{planned:#}");
-    assert_eq!(planned["result"]["planDigest"].as_str().unwrap().len(), 64);
+    assert_eq!(planned["result"]["copyCommitPreparationRequired"], true);
+    assert!(planned["result"].get("planDigest").is_none());
+    assert!(planned["result"].get("review").is_none());
+
+    let review_request = json!({
+        "type": "prepareExecutionReview",
+        "id": "plan-review-contract",
+        "payload": {
+            "plan": planned["result"]["plan"],
+            "mode": "dry_run"
+        }
+    });
+    let reviewed = sidecar_responses(&review_request.to_string())
+        .pop()
+        .expect("review preparation should produce one sidecar response");
+    assert_eq!(reviewed["ok"], true, "{reviewed:#}");
+    assert_eq!(reviewed["result"]["planDigest"].as_str().unwrap().len(), 64);
+    assert!(reviewed["result"]["review"].is_object());
     assert_eq!(
         planned["result"]["plan"]["source"]["catalog"]["sourceId"],
         "emuchef.bundled"

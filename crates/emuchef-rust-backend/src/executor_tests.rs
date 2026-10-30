@@ -69,6 +69,7 @@ fn fixture_device_context() -> DeviceContext {
         android_version: 13,
         android_api_level: Some(33),
         device_tags: Vec::new(),
+        root_shell_mode: None,
     }
 }
 
@@ -82,6 +83,7 @@ fn fixture_runtime_capabilities() -> RuntimeCapabilities {
         package_remove_for_user: false,
         root_shell: true,
         app_data_write: true,
+        root_shell_route: None,
     }
 }
 
@@ -96,6 +98,7 @@ fn plan_with_artifacts(
     ExecutionPlan {
         device_plan: None,
         resolved_inputs: Vec::new(),
+        copy_commit_snapshots: Vec::new(),
         id: "plan.test".to_string(),
         source: ExecutionPlanSource {
             device_profile_ref: "example.device_profile".to_string(),
@@ -798,7 +801,7 @@ fn direct_executor_reports_binding_error_without_sandbox_roots() {
 }
 
 #[test]
-fn local_input_app_artifact_is_consumed_by_extract_and_copy_without_persistent_cache() {
+fn local_input_app_artifact_extracts_then_rejects_legacy_sync_path_list_without_cache() {
     let workspace = tempfile::tempdir().expect("executor temp root should be created");
     let source = workspace.path().join("configuration.cfg");
     write_zip(&source, &[("settings.cfg", "user-provided configuration")]);
@@ -878,7 +881,15 @@ fn local_input_app_artifact_is_consumed_by_extract_and_copy_without_persistent_c
         ),
     );
 
-    assert_eq!(actual["success"], true, "{actual:#}");
+    assert_eq!(actual["success"], false, "{actual:#}");
+    assert_eq!(actual["steps"][0]["status"], "executed", "{actual:#}");
+    assert_eq!(actual["steps"][1]["status"], "executed", "{actual:#}");
+    assert_eq!(actual["steps"][2]["status"], "failed", "{actual:#}");
+    assert_eq!(
+        actual["steps"][2]["message"],
+        "copy_files unsupported: sync path_list has no single reviewed source boundary",
+        "legacy sync path-list copy must fail before mutation"
+    );
     let reported = &actual["resolved_artifacts"][0];
     assert_eq!(
         reported["calculatedSha256"],
@@ -890,10 +901,11 @@ fn local_input_app_artifact_is_consumed_by_extract_and_copy_without_persistent_c
         !cache_root.exists(),
         "user-provided bytes must not be persisted"
     );
-    assert_eq!(
-        fs::read_to_string(fake_device_root.join("sdcard/EmuChef/local-input/settings.cfg"))
-            .expect("downstream copy should consume the execution snapshot"),
-        "user-provided configuration"
+    assert!(
+        !fake_device_root
+            .join("sdcard/EmuChef/local-input/settings.cfg")
+            .exists(),
+        "an unsupported sync path-list must not create a destination file"
     );
     let snapshots = fs::read_dir(runtime_root.join("verified-artifacts"))
         .expect("execution snapshot directory should be created")
@@ -1649,6 +1661,9 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
         },
     }];
     assert!(crate::executor::reviewed_root_authorized(&execution_plan));
+    execution_plan.steps[0]
+        .params
+        .insert("copy_policy".to_string(), literal(json!("sync")));
     let mut command_executor = FakeAdbCommandExecutor::default();
     for _ in 0..3 {
         command_executor.push_completed(0, "", "");
@@ -1657,11 +1672,11 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
     // the first root preflight, so keep that command's successful result
     // separate from the root-probe responses below.
     command_executor.push_completed(0, "", "");
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
     let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
         device,
@@ -1675,25 +1690,294 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
     let result = runner.run(&execution_plan);
     assert!(
         result.success,
-        "root-authorized reviewed work should execute: {result:?}; calls={:?}",
-        runner.adapters().device().command_executor().calls()
+        "safe single-file copies must remain supported"
+    );
+    assert!(
+        !runner
+            .adapters()
+            .device()
+            .command_executor()
+            .calls()
+            .is_empty(),
+        "safe single-file copies must execute through the device adapter"
+    );
+}
+
+#[test]
+fn app_target_directory_copy_without_dest_kind_keeps_private_copy_commit_route() {
+    let temp = tempfile::tempdir().expect("test workspace should be created");
+    let source_dir = temp.path().join("source");
+    fs::create_dir_all(&source_dir).expect("source directory should be created");
+    fs::write(source_dir.join("payload.rom"), b"app-private payload\n")
+        .expect("source payload should be written");
+
+    let destination = "/data/data/com.example.app/files/roms";
+    let fake_device_root = temp.path().join("fake-device");
+    let fake_destination = fake_device_root.join("data/data/com.example.app/files/roms");
+    fs::create_dir_all(&fake_destination).expect("selected App Target should exist");
+    fs::write(fake_destination.join("destination-only.bin"), b"stale\n")
+        .expect("stale App Target entry should be written");
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "directory_path",
+            json!(source_dir.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!(destination)));
+    params.insert("copy_policy".to_string(), literal(json!("sync")));
+    let mut step = wait_step("app-target-copy", "Copy App Target", 1);
+    step.type_name = "copy_files".to_string();
+    step.app_id = Some("example-app".to_string());
+    step.params = params;
+
+    let mut execution_plan = plan(vec![step]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.app".to_string(),
+    });
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        crate::executor::FakeDryRunDevice::default(),
+        temp.path().join("runtime"),
+        temp.path().join("cache"),
+        fake_device_root,
+        vec![temp.path().to_path_buf()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+    runner
+        .prepare_copy_commit_snapshots(&mut execution_plan)
+        .expect("app-private directory copy should prepare its reviewed snapshot");
+
+    let snapshot = execution_plan
+        .copy_commit_snapshots
+        .first()
+        .expect("App Target copy should have one reviewed snapshot");
+    assert_eq!(
+        snapshot.destination_kind,
+        crate::executor::copy_commit::CopyCommitDestinationKind::AppTarget
     );
     assert_eq!(
-        runner.adapters().device().command_executor().operations(),
-        &[
-            ProcessOperation::ShellMutation,
-            ProcessOperation::ShellMutation,
-            ProcessOperation::Push,
-            ProcessOperation::DeviceCopy,
-            ProcessOperation::RootPreflight,
-            ProcessOperation::Predicate,
-            ProcessOperation::RootPreflight,
-            ProcessOperation::ShellMutation,
-            ProcessOperation::RootPreflight,
-            ProcessOperation::DeviceCopy,
-            ProcessOperation::ShellMutation,
-        ]
+        snapshot.operation,
+        crate::executor::copy_commit::CopyCommitOperation::Mirror
     );
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 1);
+
+    let result = runner.run(&execution_plan);
+
+    assert!(
+        result.success,
+        "App Target Mirror should execute: {result:#?}"
+    );
+    assert_eq!(
+        runner.adapters().device().root_preflight_calls(),
+        2,
+        "App Target review and execution each require fresh root verification"
+    );
+    assert_eq!(
+        fs::read(fake_destination.join("payload.rom"))
+            .expect("App Target payload should be copied"),
+        b"app-private payload\n"
+    );
+    assert!(
+        !fake_destination.join("destination-only.bin").exists(),
+        "App Target Mirror should apply its reviewed deletion set"
+    );
+    assert!(result.steps[0].outputs.contains_key("copy_commit_report"));
+}
+
+#[test]
+fn app_target_simulation_uses_the_reviewed_destination_baseline() {
+    let temp = tempfile::tempdir().expect("test workspace should be created");
+    let source_dir = temp.path().join("source");
+    fs::create_dir_all(&source_dir).expect("source directory should be created");
+    fs::write(source_dir.join("A.rom"), b"new A\n").expect("source ROM should be written");
+
+    let destination = "/data/data/com.example.app/files/roms";
+    let reviewed_device_root = temp.path().join("reviewed-device");
+    let reviewed_destination = reviewed_device_root.join("data/data/com.example.app/files/roms");
+    fs::create_dir_all(&reviewed_destination).expect("reviewed destination should be created");
+    fs::write(reviewed_destination.join("B.rom"), b"old B\n")
+        .expect("reviewed B ROM should be written");
+    fs::write(reviewed_destination.join("C.rom"), b"old C\n")
+        .expect("reviewed C ROM should be written");
+
+    let fake_review_request = crate::executor::copy_commit::CopyCommitRequest::reviewed_directory(
+        &source_dir,
+        &reviewed_device_root,
+        destination,
+        crate::executor::copy_commit::CopyCommitOperation::Mirror,
+    )
+    .expect("real review snapshot should be captured");
+    let reviewed_request =
+        crate::executor::copy_commit::CopyCommitRequest::reviewed_android_directory(
+            &source_dir,
+            &reviewed_device_root,
+            destination,
+            crate::executor::copy_commit::CopyCommitOperation::Mirror,
+            fake_review_request.destination_manifest,
+            "reviewed destination binding".to_string(),
+        )
+        .expect("real destination manifest should be bound to review");
+    assert_eq!(reviewed_request.reviewed_deletion_set, ["B.rom", "C.rom"]);
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "directory_path",
+            json!(source_dir.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!(destination)));
+    params.insert("copy_policy".to_string(), literal(json!("sync")));
+    let mut step = wait_step("app-target-copy", "Copy App Target", 1);
+    step.type_name = "copy_files".to_string();
+    step.app_id = Some("example-app".to_string());
+    step.params = params;
+
+    let mut execution_plan = plan(vec![step]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.app".to_string(),
+    });
+    execution_plan.copy_commit_snapshots.push(
+        crate::executor::copy_commit::ExecutionCopyCommitSnapshot::from_request(
+            "app-target-copy",
+            &source_dir,
+            &reviewed_request,
+        ),
+    );
+
+    let simulation_root = temp.path().join("simulation-device");
+    fs::create_dir_all(&simulation_root).expect("simulation root should be created empty");
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        crate::executor::FakeDryRunDevice::default(),
+        temp.path().join("runtime"),
+        temp.path().join("cache"),
+        simulation_root.clone(),
+        vec![temp.path().to_path_buf()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+
+    let result = runner.run(&execution_plan);
+
+    assert!(
+        result.success,
+        "simulation should honor the reviewed B/C deletion set: {result:#?}"
+    );
+    let report = &result.steps[0].outputs["copy_commit_report"].value;
+    assert_eq!(report["reviewedDeletionSet"], json!(["B.rom", "C.rom"]));
+    assert_eq!(report["deletedPaths"], json!(["B.rom", "C.rom"]));
+    assert_eq!(report["afterPaths"], json!(["A.rom"]));
+    let simulated_destination = simulation_root.join("data/data/com.example.app/files/roms");
+    assert_eq!(
+        fs::read_dir(&simulated_destination)
+            .expect("simulated destination should exist")
+            .count(),
+        1,
+        "Mirror simulation should leave exactly the reviewed source tree"
+    );
+    assert_eq!(
+        fs::read(simulated_destination.join("A.rom")).expect("A ROM should be published"),
+        b"new A\n"
+    );
+}
+
+#[test]
+fn app_target_simulation_fails_the_run_after_a_partial_copy_commit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("test workspace should be created");
+    let source_dir = temp.path().join("source");
+    fs::create_dir_all(source_dir.join("nested")).expect("source tree should be created");
+    fs::write(source_dir.join("first.rom"), b"first payload")
+        .expect("first source ROM should be written");
+    fs::write(source_dir.join("nested/second.rom"), b"second payload")
+        .expect("nested source ROM should be written");
+
+    let destination = "/data/data/com.example.app/files/roms";
+    let fake_device_root = temp.path().join("fake-device");
+    let fake_destination = fake_device_root.join("data/data/com.example.app/files/roms");
+    fs::create_dir_all(fake_destination.join("nested")).expect("selected App Target should exist");
+    fs::write(fake_destination.join("stale.rom"), b"stale")
+        .expect("stale destination ROM should be written");
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "directory_path",
+            json!(source_dir.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!(destination)));
+    params.insert("copy_policy".to_string(), literal(json!("sync")));
+    let mut step = wait_step("app-target-copy", "Copy App Target", 1);
+    step.type_name = "copy_files".to_string();
+    step.app_id = Some("example-app".to_string());
+    step.params = params;
+
+    let mut execution_plan = plan(vec![step]);
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "example-app".to_string(),
+        name: "Example App".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.example.app".to_string(),
+    });
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        crate::executor::FakeDryRunDevice::default(),
+        temp.path().join("runtime"),
+        temp.path().join("cache"),
+        fake_device_root,
+        vec![temp.path().to_path_buf()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+    runner
+        .prepare_copy_commit_snapshots(&mut execution_plan)
+        .expect("App Target copy should prepare a reviewed snapshot");
+
+    let nested = fake_destination.join("nested");
+    let mut permissions = fs::metadata(&nested)
+        .expect("nested destination should exist")
+        .permissions();
+    permissions.set_mode(0o555);
+    fs::set_permissions(&nested, permissions).expect("nested destination should become read-only");
+
+    let result = runner.run(&execution_plan);
+
+    let mut permissions = fs::metadata(&nested)
+        .expect("nested destination should remain present")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&nested, permissions).expect("nested destination should be restored");
+
+    assert!(
+        !result.success,
+        "a partial fake copy commit must fail its step and run: {result:#?}"
+    );
+    let report = &result.steps[0].outputs["copy_commit_report"].value;
+    assert_eq!(
+        report["outcome"],
+        serde_json::to_value(crate::executor::copy_commit::CopyCommitOutcome::Partial).unwrap()
+    );
+    assert_eq!(report["succeeded"], false);
+    assert_eq!(report["deletedPaths"], json!(["stale.rom"]));
+    assert_eq!(report["copiedPaths"], json!(["first.rom"]));
 }
 
 #[test]
@@ -1734,6 +2018,10 @@ fn root_authority_failure_after_completed_mutation_uses_exact_private_marker() {
     assert_eq!(
         fresh_failure.kind,
         DeviceOperationKind::RootAuthorityRevoked
+    );
+    assert_eq!(
+        fresh_failure.message,
+        "Root authority was revoked during execution."
     );
     assert_ne!(
         fresh_failure.message,
@@ -1856,7 +2144,7 @@ fn unauthorized_privileged_adapter_call_fails_closed_without_probe_or_command() 
 #[test]
 fn successful_check_root_does_not_authorize_a_fresh_private_path_call() {
     let mut command_executor = FakeAdbCommandExecutor::default();
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
     device
         .check_root()
@@ -2067,7 +2355,7 @@ fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
         .explicit_input_bindings
         .insert("feature.copy_roms/policy".to_string(), json!("sync"));
     let result = plan_execution(input);
-    let execution_plan = result.execution_plan.expect("ROM copy should plan");
+    let mut execution_plan = result.execution_plan.expect("ROM copy should plan");
     let step = execution_plan
         .steps
         .iter()
@@ -2089,15 +2377,18 @@ fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
     let runtime_root = tmp.path().join("runtime");
     let cache_root = tmp.path().join("cache");
     let fake_device_root = tmp.path().join("device");
-    let (actual, _) = run_value(
-        &execution_plan,
-        sandbox_adapters(
-            &runtime_root,
-            &cache_root,
-            &fake_device_root,
-            vec![source.clone()],
-        ),
-    );
+    fs::create_dir_all(&fake_device_root).unwrap();
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![source.clone()],
+    ));
+    runner
+        .prepare_copy_commit_snapshots(&mut execution_plan)
+        .expect("reviewed ROM destination snapshot should be prepared");
+    let actual = serde_json::to_value(runner.run(&execution_plan))
+        .expect("ROM copy result should serialize");
     assert_eq!(actual["success"], true, "{actual:#}");
     assert_eq!(
         fs::read(fake_device_root.join("sdcard/Games/game.rom")).unwrap(),
@@ -2922,7 +3213,12 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
         DeviceOperationKind::ProcessFailed
     );
     assert_eq!(
-        map_adb_error(AdbCommandError::CommandFailed).kind,
+        map_adb_error(AdbCommandError::CommandFailed {
+            args: Vec::new(),
+            returncode: 1,
+            stderr: String::new(),
+        })
+        .kind,
         DeviceOperationKind::CommandFailed
     );
 }
@@ -3537,7 +3833,7 @@ fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
     for _ in 0..4 {
         executor.push_completed(0, "", "");
     }
-    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
     device.configure_root_authority(true);
 
@@ -3606,7 +3902,7 @@ fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
 fn app_private_operations_route_through_safely_quoted_su_without_privileging_shared_storage() {
     let mut executor = FakeAdbCommandExecutor::default();
     for _ in 0..12 {
-        executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+        executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     }
     let mut device = RealAdbDevice::with_executor("adb", Some("root-device"), executor);
     device.configure_root_authority(true);
@@ -3689,7 +3985,7 @@ fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(0, "", "");
     executor.push_completed(0, "", "");
-    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     executor.push_completed(0, "", "");
     executor.push_completed(1, "", "su: permission denied");
     executor.push_completed(0, "", "");
@@ -3709,35 +4005,25 @@ fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and
     assert!(!result.success);
     assert_eq!(
         result.steps.len(),
-        1,
-        "device fail-stop leaves later work pending"
+        2,
+        "pre-review validation records the rejected copy and blocks dependent work"
     );
     assert_eq!(
         result.steps[0].status,
         crate::executor::StepRunStatus::Failed
     );
-    let calls = runner.adapters().device().command_executor().calls();
-    let root_probes = calls
-        .iter()
-        .filter(|call| {
-            call.ends_with(&[
-                "shell".to_string(),
-                "su".to_string(),
-                "-c".to_string(),
-                "id".to_string(),
-            ])
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(root_probes.len(), 2);
-    assert!(calls[3]
-        .last()
-        .expect("first root mutation needs a shell payload")
-        .starts_with("su -c 'rm -rf "));
-    assert_eq!(calls[4][6], "id");
     assert_eq!(
-        calls.len(),
-        6,
-        "stage cleanup is the only command after the denied root recheck"
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Blocked
+    );
+    assert!(
+        runner
+            .adapters()
+            .device()
+            .command_executor()
+            .calls()
+            .is_empty(),
+        "unsupported device sources must not reach adb"
     );
 }
 
@@ -4147,7 +4433,7 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
     for _ in 0..3 {
         executor.push_completed(0, "", "");
     }
-    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     let mut device = RealAdbDevice::with_executor("/opt/android/adb", Some("device-123"), executor);
     device.configure_root_authority(true);
 
@@ -4410,9 +4696,7 @@ fn artifact_filename_algorithm_matches_compatibility_reference() {
 }
 
 #[test]
-fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
-    // Regression for UX-039: verification must observe files materialized in the
-    // simulated-device sandbox, not only the fake adapter's in-memory path sets.
+fn resolve_extract_and_sync_path_list_fails_closed_without_copying() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -4541,21 +4825,25 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
         ),
     );
 
+    let actual = normalize_tmp_paths(actual, tmp.path());
+    assert_eq!(actual["success"], false, "{actual:#}");
+    assert_eq!(actual["steps"][0]["status"], "executed", "{actual:#}");
+    assert_eq!(actual["steps"][1]["status"], "executed", "{actual:#}");
+    assert_eq!(actual["steps"][2]["status"], "failed", "{actual:#}");
     assert_eq!(
-        normalize_tmp_paths(actual, tmp.path()),
-        read_golden("phase6p_executor_resolve_extract_copy_flow.json")
+        actual["steps"][2]["message"],
+        "copy_files unsupported: sync path_list has no single reviewed source boundary",
+        "ambiguous legacy sync path-list copy must fail before mutation"
     );
     assert_eq!(execution_plan, original_plan);
     assert_eq!(fs::read(&zip_a).unwrap(), original_zip_a);
     assert_eq!(fs::read(&zip_b).unwrap(), original_zip_b);
-    assert_eq!(
-        fs::read_to_string(fake_device_root.join("sdcard/RetroArch/cores/core_a.so")).unwrap(),
-        "alpha"
-    );
-    assert_eq!(
-        fs::read_to_string(fake_device_root.join("sdcard/RetroArch/cores/core_b.so")).unwrap(),
-        "beta"
-    );
+    assert!(!fake_device_root
+        .join("sdcard/RetroArch/cores/core_a.so")
+        .exists());
+    assert!(!fake_device_root
+        .join("sdcard/RetroArch/cores/core_b.so")
+        .exists());
     assert!(runtime_root.join("downloads").exists());
     assert!(!tmp.path().join("sdcard").exists());
 }
@@ -5093,7 +5381,7 @@ fn extract_archive_rejects_symlinked_runtime_root_before_writing() {
 }
 
 #[test]
-fn copy_replace_deletes_only_inside_fake_device_root() {
+fn copy_replace_requires_pre_review_snapshot_without_mutating_destinations() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -5145,12 +5433,19 @@ fn copy_replace_deletes_only_inside_fake_device_root() {
         ),
     );
 
-    assert_eq!(actual["success"], true);
-    assert!(!fake_device_root.join("sdcard/cores/old.so").exists());
-    assert_eq!(
-        fs::read_to_string(fake_device_root.join("sdcard/cores/new.so")).unwrap(),
-        "new"
+    assert_eq!(actual["success"], false);
+    assert!(
+        actual["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pre-review copy snapshot"),
+        "{actual:#?}"
     );
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/cores/old.so")).unwrap(),
+        "old"
+    );
+    assert!(!fake_device_root.join("sdcard/cores/new.so").exists());
     assert_eq!(fs::read_to_string(outside).unwrap(), "keep");
 }
 
@@ -5215,12 +5510,72 @@ fn copy_respects_resolved_file_and_directory_target_kinds() {
         &copy_plan("/storage/emulated/0/new-directory", "directory"),
         adapters(),
     );
-    assert_eq!(valid["success"], true);
+    assert_eq!(valid["success"], true, "{valid:#}");
     assert_eq!(
         fs::read_to_string(fake_device_root.join("storage/emulated/0/new-directory/config.cfg"))
             .unwrap(),
         "configuration"
     );
+}
+
+#[test]
+fn legacy_sync_path_list_requires_a_single_reviewed_boundary() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let first_source = fixture_root.join("first.rom");
+    let second_source = fixture_root.join("second.rom");
+    fs::write(&first_source, "first").unwrap();
+    fs::write(&second_source, "second").unwrap();
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "path_list",
+            json!([
+                first_source.to_string_lossy().to_string(),
+                second_source.to_string_lossy().to_string()
+            ]),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!("/sdcard/cores")));
+    params.insert("dest_kind".to_string(), literal(json!("directory")));
+    params.insert("copy_policy".to_string(), literal(json!("sync")));
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        note: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        permission_plan: None,
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+
+    let error = crate::executor::validate_supported_copy_plan(&execution_plan)
+        .expect_err("path-list sync must not acquire an implicit destination boundary");
+
+    assert!(error.contains("path_list"), "{error}");
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+    assert_eq!(actual["success"], false, "{actual:#}");
+    assert!(!fake_device_root.join("sdcard/cores/first.rom").exists());
+    assert!(!fake_device_root.join("sdcard/cores/second.rom").exists());
 }
 
 #[test]
@@ -5246,8 +5601,9 @@ fn copy_sync_removes_destination_only_files_from_directory_source() {
         )),
     );
     params.insert("dest".to_string(), literal(json!("/sdcard/cores")));
+    params.insert("dest_kind".to_string(), literal(json!("directory")));
     params.insert("copy_policy".to_string(), literal(json!("sync")));
-    let execution_plan = plan(vec![ExecutionStep {
+    let mut execution_plan = plan(vec![ExecutionStep {
         id: "example.recipe/copy".to_string(),
         recipe_ref: "example.recipe".to_string(),
         app_id: None,
@@ -5262,21 +5618,25 @@ fn copy_sync_removes_destination_only_files_from_directory_source() {
         verify: Vec::new(),
     }]);
 
-    let (actual, _) = run_value(
-        &execution_plan,
-        sandbox_adapters(
-            &runtime_root,
-            &cache_root,
-            &fake_device_root,
-            vec![fixture_root],
-        ),
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    ));
+    runner
+        .prepare_copy_commit_snapshots(&mut execution_plan)
+        .expect("reviewed shared destination snapshot should be prepared");
+    let actual =
+        serde_json::to_value(runner.run(&execution_plan)).expect("copy result should serialize");
+    assert_eq!(actual["success"], true, "{actual:#}");
+    assert!(
+        !fake_device_root.join("sdcard/cores/stale.so").exists(),
+        "copy result: {actual:#}"
     );
-
-    assert_eq!(actual["success"], true);
-    assert!(!fake_device_root.join("sdcard/cores/stale.so").exists());
     assert_eq!(
-        fs::read_to_string(fake_device_root.join("sdcard/cores/new.so")).unwrap(),
-        "new"
+        fs::read(fake_device_root.join("sdcard/cores/new.so")).unwrap(),
+        b"new"
     );
 }
 
@@ -5327,10 +5687,6 @@ fn copy_rejects_destination_traversal_before_writing() {
     );
 
     assert_eq!(actual["success"], false);
-    assert!(actual["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("path traversal"));
     assert!(!fake_device_root.join("escape.so").exists());
 }
 
@@ -5385,10 +5741,6 @@ fn copy_rejects_fake_device_symlink_escape() {
     );
 
     assert_eq!(actual["success"], false);
-    assert!(actual["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("symlink"));
     assert!(!outside.join("core.so").exists());
 }
 
@@ -5442,10 +5794,6 @@ fn copy_rejects_symlinked_fake_device_root_before_writing() {
     );
 
     assert_eq!(actual["success"], false);
-    assert!(actual["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("symlink"));
     assert!(!outside.join("sdcard/core.so").exists());
 }
 

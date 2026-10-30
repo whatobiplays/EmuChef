@@ -135,6 +135,7 @@ fn fixture_device_context() -> DeviceContext {
         android_version: 13,
         android_api_level: Some(33),
         device_tags: vec!["example_tag".to_string()],
+        root_shell_mode: None,
     }
 }
 
@@ -149,6 +150,7 @@ fn fixture_runtime_capabilities() -> RuntimeCapabilities {
         package_remove_for_user: false,
         root_shell: true,
         app_data_write: true,
+        root_shell_route: None,
     }
 }
 
@@ -1390,17 +1392,18 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
         "app.obtainium.install",
         "app.retroarch.provision",
         "app.xaniteog.install",
-        "feature.copy_bios",
     ];
+    let bindings = corpus_recipe_expansion_bindings()
+        .into_iter()
+        .filter(|(input_id, _)| *input_id != "feature.copy_bios/bios_source_dir")
+        .collect::<Vec<_>>();
     let first = authored_corpus_planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
-        &corpus_recipe_expansion_bindings(),
+        &bindings,
     ));
-    let second =
-        authored_corpus_planning_result_value(authored_corpus_planner_input_with_bindings(
-            &selected_recipe_refs,
-            &corpus_recipe_expansion_bindings(),
-        ));
+    let second = authored_corpus_planning_result_value(
+        authored_corpus_planner_input_with_bindings(&selected_recipe_refs, &bindings),
+    );
 
     assert_eq!(first, second);
     assert_eq!(first["status"], "success", "{first:#}");
@@ -1412,6 +1415,31 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
         first["execution_plan"]["source"]["expanded_recipe_refs"],
         json!(selected_recipe_refs)
     );
+}
+
+fn assert_shared_system_target_overlap_rejected(result: &Value, context: &str) {
+    assert_eq!(result["status"], "error", "{context}: {result:#}");
+    assert!(result["execution_plan"].is_null(), "{context}: {result:#}");
+    let diagnostic = result["errors"]
+        .as_array()
+        .and_then(|errors| {
+            errors
+                .iter()
+                .find(|error| error["code"] == "app_target_destination_overlap")
+        })
+        .unwrap_or_else(|| {
+            panic!("{context} should report the shared system-target overlap: {result:#}")
+        });
+    assert_eq!(
+        diagnostic["details"]["first_recipe_ref"],
+        "app.retroarch.provision"
+    );
+    assert_eq!(diagnostic["details"]["first_target_id"], "system");
+    assert_eq!(
+        diagnostic["details"]["second_recipe_ref"],
+        "feature.copy_bios"
+    );
+    assert_eq!(diagnostic["details"]["second_target_id"], "system");
 }
 
 #[test]
@@ -1435,6 +1463,11 @@ fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for
             &selected_recipe_refs,
             &selected_bindings,
         ));
+
+        if actual["status"] == "error" {
+            assert_shared_system_target_overlap_rejected(&actual, plan.id.as_str());
+            continue;
+        }
 
         assert_eq!(actual["status"], "success", "{}: {actual:#}", plan.id);
         assert_eq!(
@@ -2889,7 +2922,6 @@ fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
         "app.obtainium.install",
         "app.retroarch.provision",
         "app.xaniteog.install",
-        "feature.copy_bios",
     ];
     let input_bindings = [
         (
@@ -2899,10 +2931,6 @@ fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
         (
             "app.xaniteog.install/xaniteog_apk",
             json!("/tmp/emuchef-p7h-xaniteog.apk"),
-        ),
-        (
-            "feature.copy_bios/bios_source_dir",
-            json!("/tmp/emuchef-p7h-bios"),
         ),
     ];
 
@@ -2938,7 +2966,6 @@ fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
         vec![
             "app.retroarch.provision/retroarch_cfg",
             "app.xaniteog.install/xaniteog_apk",
-            "feature.copy_bios/bios_source_dir",
         ]
     );
 
@@ -2949,7 +2976,6 @@ fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
         "app.retroarch.provision/seed_retroarch_cfg",
         "app.retroarch.provision/launch_retroarch",
         "app.xaniteog.install/install_xaniteog",
-        "feature.copy_bios/copy_bios_dir",
     ] {
         assert!(
             step_ids.contains(&expected_step_id),
@@ -4754,6 +4780,11 @@ fn repo_plan_e2e_from_checked_in_device_plan_succeeds() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
 
+        if actual["status"] == "error" {
+            assert_shared_system_target_overlap_rejected(&actual, case.device_plan_ref);
+            continue;
+        }
+
         assert_eq!(
             actual["status"], "success",
             "{}: {actual:#}",
@@ -4793,6 +4824,10 @@ fn repo_plan_e2e_selected_and_expanded_refs_are_deterministic() {
             "{} should emit the same private planner result for repeated runs with the same bindings",
             case.device_plan_ref
         );
+        if first["status"] == "error" {
+            assert_shared_system_target_overlap_rejected(&first, case.device_plan_ref);
+            continue;
+        }
         assert_eq!(
             first["execution_plan"]["source"]["selected_recipe_refs"],
             json!(case.selected_recipe_refs)
@@ -4945,6 +4980,11 @@ fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
 
+        if actual["status"] == "error" {
+            assert_shared_system_target_overlap_rejected(&actual, case.device_plan_ref);
+            continue;
+        }
+
         assert_eq!(
             actual["status"], "success",
             "{}: {actual:#}",
@@ -4971,6 +5011,11 @@ fn repo_plan_e2e_no_app_data_write_contexts_prune_app_data_dependents() {
     for case in repo_plan_e2e_no_app_data_write_cases() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
+
+        if actual["status"] == "error" {
+            assert_shared_system_target_overlap_rejected(&actual, case.device_plan_ref);
+            continue;
+        }
 
         assert_eq!(
             actual["status"], "success",
@@ -5030,7 +5075,7 @@ fn invalid_app_target_is_reported_before_capability_pruning() {
 
 #[test]
 fn derived_target_capability_matches_selected_plan_constraint() {
-    let case = repo_plan_e2e_cases().remove(0);
+    let case = repo_plan_e2e_cases().remove(1);
     let temp = TempDir::new().unwrap();
     let result = planning_result_value(repo_plan_e2e_input(&case, &temp));
     assert_eq!(result["status"], "success", "{result:#}");

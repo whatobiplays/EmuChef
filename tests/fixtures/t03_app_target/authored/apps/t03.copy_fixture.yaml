@@ -1,0 +1,14 @@
+schema_version: 1
+kind: app_definition
+id: t03.copy_fixture
+name: T03 Copy Fixture
+description: Disposable synthetic application used to qualify protected App Target copy semantics.
+category: emulator
+package_id: com.emuchef.fixture
+launcher_activity: org.emuchef.t03.copyfixture.FixtureActivity
+artifacts: {}
+targets:
+  assets:
+    kind: directory
+    location: app_data
+    path: files/assets

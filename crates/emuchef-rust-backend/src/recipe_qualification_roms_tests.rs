@@ -1,13 +1,15 @@
 //! Automated qualification for the authored ROM-library copy workflow.
 //!
 //! The qualification uses the real authored catalog and runtime-configuration
-//! planner, then executes its unchanged generated plan through deterministic
-//! sandbox-root adapters. The tests intentionally do not invoke ADB, a physical
-//! device, a live network request, or an ignored physical-qualification
-//! harness.
+//! planner, prepares directory-copy snapshots before execution, and runs each
+//! reviewed plan through deterministic sandbox-root adapters. An ignored
+//! qualification test exercises the shared-storage route on the authorized
+//! AVD; no case uses a physical device or live network request.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -303,7 +305,7 @@ fn rom_sync_generated_plan_mirrors_source_directory() {
         Some(DEFAULT_DESTINATION),
         Some("sync"),
     );
-    let plan = prepared
+    let mut plan = prepared
         .plan
         .expect("production-generated ROM sync plan should exist");
     let step = generated_copy_step(&plan);
@@ -316,6 +318,14 @@ fn rom_sync_generated_plan_mirrors_source_directory() {
     );
 
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("ROM sync review should prepare trusted copy snapshots");
+    assert_eq!(plan.copy_commit_snapshots.len(), 1);
+    assert!(plan.copy_commit_snapshots[0]
+        .reviewed_deletion_set
+        .iter()
+        .any(|path| path.ends_with("destination-only.txt")));
     let result = runner.run(&plan);
 
     assert!(result.success, "generated ROM sync plan should execute");
@@ -376,10 +386,9 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
         .iter()
         .all(|diagnostic| diagnostic.severity != "error"));
     let plan = result.plan.as_ref().expect("ROM plan should be generated");
-    assert!(result
-        .plan_digest
-        .as_deref()
-        .is_some_and(|digest| !digest.is_empty()));
+    assert!(result.copy_commit_preparation_required);
+    assert!(result.plan_digest.is_none());
+    assert!(result.review.is_none());
     assert_eq!(plan.source.selected_recipe_refs, contract.selected_recipes);
     assert_eq!(plan.source.expanded_recipe_refs, contract.expanded_recipes);
     assert_eq!(plan.source.device_plan_ref, QUALIFICATION_DEVICE_PLAN);
@@ -452,10 +461,17 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
         );
     }
 
-    let review = result
-        .review
-        .as_ref()
-        .expect("production ROM review should exist");
+    fs::create_dir_all(&workspace.fake_device_root)
+        .expect("fake device root should exist before snapshot preparation");
+    let mut reviewed_plan = plan.clone();
+    let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    runner
+        .prepare_copy_commit_snapshots(&mut reviewed_plan)
+        .expect("reviewed ROM destination snapshot should be prepared");
+    let plan_digest = crate::plan_digest::execution_plan_digest(&reviewed_plan)
+        .expect("prepared ROM plan digest should be available");
+    assert!(!plan_digest.is_empty());
+    let review = crate::review_projection::project_review(&reviewed_plan, &result.diagnostics);
     assert!(review.can_execute);
     assert_eq!(review.features.len(), 1);
     assert_eq!(review.features[0].name, "Copy ROM library");
@@ -472,7 +488,7 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
         .notices
         .iter()
         .all(|notice| notice.severity != "blocker"));
-    let serialized = serde_json::to_string(review).expect("ROM review should serialize");
+    let serialized = serde_json::to_string(&review).expect("ROM review should serialize");
     assert!(serialized.contains("rom-source"));
     assert!(serialized.contains(DEFAULT_DESTINATION));
     assert!(!serialized.contains(&workspace._temp.path().to_string_lossy().to_string()));
@@ -590,9 +606,12 @@ fn rom_default_merge_preserves_unrelated_content_and_plan_identity() {
     fs::write(&collision, b"old-gba\n").expect("collision destination file should be written");
 
     let prepared = plan_roms(Some(&workspace.rom_source_dir), None, None);
-    let plan = prepared.plan.expect("default ROM merge plan should exist");
-    let plan_before = plan.clone();
+    let mut plan = prepared.plan.expect("default ROM merge plan should exist");
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("reviewed ROM destination snapshot should be prepared");
+    let plan_before = plan.clone();
     let result = runner.run(&plan);
 
     assert!(result.success, "default ROM merge plan should execute");
@@ -617,6 +636,56 @@ fn rom_default_merge_preserves_unrelated_content_and_plan_identity() {
 }
 
 #[test]
+fn rom_shared_directory_snapshots_preserve_selected_spelling() {
+    for destination in ["/sdcard/ROMs", "/storage/emulated/0/RetroArch/system"] {
+        let workspace = RomQualificationWorkspace::new();
+        let stale_file = workspace
+            .fake_device_file(
+                destination
+                    .strip_prefix('/')
+                    .expect("shared destination should be absolute"),
+            )
+            .join("destination-only.txt");
+        fs::create_dir_all(
+            stale_file
+                .parent()
+                .expect("destination parent should exist"),
+        )
+        .expect("destination parent should be created");
+        fs::write(&stale_file, b"stale\n").expect("stale entry should be written");
+
+        let prepared = plan_roms(
+            Some(&workspace.rom_source_dir),
+            Some(destination),
+            Some("sync"),
+        );
+        let mut plan = prepared.plan.expect("ROM sync plan should exist");
+        let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+        runner
+            .prepare_copy_commit_snapshots(&mut plan)
+            .expect("shared destination should receive a trusted snapshot");
+
+        let snapshot = plan
+            .copy_commit_snapshots
+            .first()
+            .expect("shared destination snapshot should be present");
+        assert_eq!(snapshot.destination_identity, destination);
+        assert_eq!(
+            snapshot.destination_kind,
+            crate::executor::copy_commit::CopyCommitDestinationKind::SharedDevicePath
+        );
+        assert_eq!(snapshot.reviewed_deletion_set, ["destination-only.txt"]);
+
+        let result = runner.run(&plan);
+        assert!(result.success, "reviewed shared-path sync should execute");
+        assert!(
+            !stale_file.exists(),
+            "sync should remove only reviewed stale content"
+        );
+    }
+}
+
+#[test]
 fn rom_replace_generated_plan_removes_stale_destination_content() {
     let workspace = RomQualificationWorkspace::new();
     let stale = workspace.fake_device_file("sdcard/ROMs/stale-only.txt");
@@ -629,8 +698,16 @@ fn rom_replace_generated_plan_removes_stale_destination_content() {
         Some(DEFAULT_DESTINATION),
         Some("replace"),
     );
-    let plan = prepared.plan.expect("ROM replace plan should exist");
+    let mut plan = prepared.plan.expect("ROM replace plan should exist");
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("ROM replace review should prepare trusted copy snapshots");
+    assert_eq!(plan.copy_commit_snapshots.len(), 1);
+    assert!(plan.copy_commit_snapshots[0]
+        .reviewed_deletion_set
+        .iter()
+        .any(|path| path.ends_with("stale-only.txt")));
     let result = runner.run(&plan);
 
     assert!(result.success, "ROM replace plan should execute");
@@ -649,10 +726,15 @@ fn rom_replace_generated_plan_removes_stale_destination_content() {
 #[derive(Debug, Default)]
 struct CopyFailureDevice {
     inner: FakeDryRunDevice,
+    push_attempts: Arc<Mutex<usize>>,
 }
 
 impl ExecutorDevice for CopyFailureDevice {
     fn uses_fake_device_filesystem(&self) -> bool {
+        false
+    }
+
+    fn uses_fake_copy_commit_adapter(&self) -> bool {
         false
     }
 
@@ -669,10 +751,36 @@ impl ExecutorDevice for CopyFailureDevice {
     }
 
     fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError> {
-        let _ = <FakeDryRunDevice as ExecutorDevice>::push(&mut self.inner, source, dest, sync);
+        let _ = (source, dest, sync);
+        *self
+            .push_attempts
+            .lock()
+            .expect("copy failure push counter should remain available") += 1;
         Err(DeviceOperationError::other(
             "deterministic ROM copy failure",
         ))
+    }
+
+    fn copy_commit_tree_manifest(
+        &mut self,
+        _root: &str,
+    ) -> Result<Vec<crate::executor::copy_commit::CopyManifestEntry>, DeviceOperationError> {
+        Ok(Vec::new())
+    }
+
+    fn copy_commit_path_binding(&mut self, path: &str) -> Result<String, DeviceOperationError> {
+        Ok(format!("rom-copy-failure:{path}"))
+    }
+
+    fn copy_commit_create_directory(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::mkdir_p(&mut self.inner, path)
+    }
+
+    fn copy_commit_remove_empty_directory(
+        &mut self,
+        _path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        Ok(())
     }
 
     fn mkdir_p(&mut self, path: &str) -> Result<(), DeviceOperationError> {
@@ -739,12 +847,15 @@ impl ExecutorDevice for CopyFailureDevice {
 fn rom_copy_failure_fails_the_unchanged_generated_plan_truthfully() {
     let workspace = RomQualificationWorkspace::new();
     let prepared = plan_roms(Some(&workspace.rom_source_dir), None, None);
-    let plan = prepared.plan.expect("ROM merge plan should be generated");
-    let plan_before = plan.clone();
+    let mut plan = prepared.plan.expect("ROM merge plan should be generated");
     assert!(generated_copy_step(&plan).verify.is_empty());
 
+    let push_attempts = Arc::new(Mutex::new(0));
     let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
-        CopyFailureDevice::default(),
+        CopyFailureDevice {
+            inner: FakeDryRunDevice::default(),
+            push_attempts: Arc::clone(&push_attempts),
+        },
         workspace.runtime_root.clone(),
         workspace.cache_root.clone(),
         workspace.fake_device_root.clone(),
@@ -752,8 +863,21 @@ fn rom_copy_failure_fails_the_unchanged_generated_plan_truthfully() {
         false,
     );
     let mut runner = ExecutorRunner::new(adapters);
+    fs::create_dir_all(&workspace.fake_device_root)
+        .expect("fake device root should exist before snapshot preparation");
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("reviewed ROM destination snapshot should be prepared");
+    let plan_before = plan.clone();
     let result = runner.run(&plan);
 
+    assert_eq!(
+        *push_attempts
+            .lock()
+            .expect("copy failure push counter should remain available"),
+        1,
+        "CopyCommit staging should exercise the deterministic device push failure"
+    );
     assert_eq!(
         plan, plan_before,
         "executor must not mutate the generated plan"
@@ -776,4 +900,452 @@ fn rom_copy_failure_fails_the_unchanged_generated_plan_truthfully() {
             StepRunStatus::Blocked | StepRunStatus::Cancelled
         )
     }));
+}
+
+#[derive(Debug, Default)]
+struct SharedAvdCommandRecorder {
+    inner: crate::executor::adb::ProcessAdbCommandExecutor,
+    commands: Arc<Mutex<Vec<crate::executor::adb::AdbCommandResult>>>,
+    errors: Arc<Mutex<Vec<String>>>,
+}
+
+impl crate::executor::adb::AdbCommandExecutor for SharedAvdCommandRecorder {
+    fn run_for(
+        &mut self,
+        args: &[String],
+        operation: crate::owned_process::ProcessOperation,
+    ) -> Result<crate::executor::adb::AdbCommandResult, crate::executor::adb::AdbCommandError> {
+        match crate::executor::adb::AdbCommandExecutor::run_for(&mut self.inner, args, operation) {
+            Ok(result) => {
+                self.commands
+                    .lock()
+                    .expect("ADB command evidence lock should remain available")
+                    .push(result.clone());
+                Ok(result)
+            }
+            Err(error) => {
+                self.errors
+                    .lock()
+                    .expect("ADB error evidence lock should remain available")
+                    .push(format!("args={args:?}; error={error:?}"));
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SharedAvdCleanup {
+    serial: String,
+    selected_root: Option<String>,
+    sibling_sentinel: Option<String>,
+}
+
+impl Drop for SharedAvdCleanup {
+    fn drop(&mut self) {
+        if let Some(selected_root) = &self.selected_root {
+            let _ = Command::new("adb")
+                .args([
+                    "-s",
+                    &self.serial,
+                    "shell",
+                    "rm",
+                    "-rf",
+                    "--",
+                    selected_root,
+                ])
+                .output();
+        }
+        if let Some(sibling_sentinel) = &self.sibling_sentinel {
+            let _ = Command::new("adb")
+                .args([
+                    "-s",
+                    &self.serial,
+                    "shell",
+                    "rm",
+                    "-rf",
+                    "--",
+                    sibling_sentinel,
+                ])
+                .output();
+        }
+    }
+}
+
+fn shared_avd_adb_output(serial: &str, args: &[&str]) -> Output {
+    Command::new("adb")
+        .arg("-s")
+        .arg(serial)
+        .args(args)
+        .output()
+        .expect("ADB should start for the controlled shared-storage qualification")
+}
+
+fn assert_shared_avd_shell_uid(serial: &str, phase: &str) {
+    let output = shared_avd_adb_output(serial, &["shell", "id", "-u"]);
+    assert!(
+        output.status.success(),
+        "ADB shell UID probe should succeed during {phase}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "2000",
+        "shared-storage qualification must use Android shell UID 2000 during {phase}"
+    );
+}
+
+fn assert_shared_avd_alias_chain(serial: &str) {
+    let sdcard_target = shared_avd_adb_output(serial, &["shell", "readlink", "/sdcard"]);
+    assert!(sdcard_target.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&sdcard_target.stdout).trim(),
+        "/storage/self/primary"
+    );
+    let primary_target =
+        shared_avd_adb_output(serial, &["shell", "readlink", "/storage/self/primary"]);
+    assert!(primary_target.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&primary_target.stdout).trim(),
+        "/storage/emulated/0"
+    );
+    let canonical = shared_avd_adb_output(serial, &["shell", "readlink", "-f", "/sdcard"]);
+    assert!(canonical.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&canonical.stdout).trim(),
+        "/storage/emulated/0"
+    );
+}
+
+fn assert_shared_avd_path_absent(serial: &str, path: &str) {
+    let output = shared_avd_adb_output(serial, &["shell", "test", "!", "-e", path]);
+    assert!(
+        output.status.success(),
+        "ADB path collision check should succeed for {path}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Qualify reviewed ROM Mirror behavior on the authorized non-root AVD.
+///
+/// The test creates only a unique child directory and sibling sentinel below
+/// `/sdcard/ROMs`; it requires the reviewed shared-storage alias chain and
+/// shell UID 2000, then verifies the exact stale entry is removed while the
+/// sibling sentinel remains unchanged.
+#[test]
+#[ignore = "requires the authorized EmuChef-Android16-Root AVD on emulator-5554"]
+fn avd_shared_copy_commit_mirrors_sdcard_roms_as_shell_uid() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const SERIAL: &str = "emulator-5554";
+    let state = shared_avd_adb_output(SERIAL, &["get-state"]);
+    assert!(state.status.success());
+    assert_eq!(String::from_utf8_lossy(&state.stdout).trim(), "device");
+    assert_shared_avd_shell_uid(SERIAL, "before setup");
+    assert_shared_avd_alias_chain(SERIAL);
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos()
+    );
+    let selected_root = format!("{DEFAULT_DESTINATION}/.emuchef-copycommit-{unique}");
+    let sibling_sentinel = format!("{DEFAULT_DESTINATION}/.emuchef-sibling-{unique}");
+    let sibling_sentinel_file = format!("{sibling_sentinel}/sentinel.txt");
+    shared_avd_adb_output(SERIAL, &["shell", "mkdir", "-p", DEFAULT_DESTINATION]);
+    assert_shared_avd_path_absent(SERIAL, &selected_root);
+    assert_shared_avd_path_absent(SERIAL, &sibling_sentinel);
+
+    let mkdir = shared_avd_adb_output(SERIAL, &["shell", "mkdir", &selected_root]);
+    assert!(
+        mkdir.status.success(),
+        "unique selected ROM directory should be created: {}",
+        String::from_utf8_lossy(&mkdir.stderr)
+    );
+    let mut cleanup = SharedAvdCleanup {
+        serial: SERIAL.to_string(),
+        selected_root: Some(selected_root.clone()),
+        sibling_sentinel: None,
+    };
+    let sentinel_mkdir = shared_avd_adb_output(SERIAL, &["shell", "mkdir", &sibling_sentinel]);
+    assert!(
+        sentinel_mkdir.status.success(),
+        "unique outside sibling sentinel directory should be created: {}",
+        String::from_utf8_lossy(&sentinel_mkdir.stderr)
+    );
+    cleanup.sibling_sentinel = Some(sibling_sentinel.clone());
+
+    let workspace = RomQualificationWorkspace::new();
+    fs::create_dir_all(&workspace.fake_device_root)
+        .expect("sandbox fake-device root should exist before snapshot preparation");
+    let stale_host_file = workspace.host_input_root.join("destination-only.bin");
+    let sentinel_host_file = workspace.host_input_root.join("sibling-sentinel.txt");
+    fs::write(&stale_host_file, b"stale destination entry\n")
+        .expect("stale destination fixture should be written");
+    fs::write(&sentinel_host_file, b"outside selected tree\n")
+        .expect("outside sibling sentinel should be written");
+    let stale_device_file = format!("{selected_root}/destination-only.bin");
+    let push_stale = shared_avd_adb_output(
+        SERIAL,
+        &[
+            "push",
+            stale_host_file
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+            &stale_device_file,
+        ],
+    );
+    assert!(
+        push_stale.status.success(),
+        "stale destination fixture should be pushed to the unique selected tree"
+    );
+    let stale_present = shared_avd_adb_output(SERIAL, &["shell", "test", "-e", &stale_device_file]);
+    assert!(
+        stale_present.status.success(),
+        "stale destination fixture should exist before snapshot preparation"
+    );
+    let push_sentinel = shared_avd_adb_output(
+        SERIAL,
+        &[
+            "push",
+            sentinel_host_file
+                .to_str()
+                .expect("sentinel fixture path should be UTF-8"),
+            &sibling_sentinel_file,
+        ],
+    );
+    assert!(
+        push_sentinel.status.success(),
+        "outside sibling sentinel fixture should be pushed to its unique directory"
+    );
+
+    let prepared = plan_roms(
+        Some(&workspace.rom_source_dir),
+        Some(&selected_root),
+        Some("sync"),
+    );
+    let mut plan = prepared
+        .plan
+        .expect("production-generated ROM Mirror plan should exist");
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let device = crate::executor::adb::RealAdbDevice::with_executor(
+        "adb",
+        Some(SERIAL),
+        SharedAvdCommandRecorder {
+            inner: crate::executor::adb::ProcessAdbCommandExecutor::default(),
+            commands: commands.clone(),
+            errors: errors.clone(),
+        },
+    );
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        workspace.runtime_root.clone(),
+        workspace.cache_root.clone(),
+        workspace.fake_device_root.clone(),
+        vec![workspace.host_input_root.clone()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+    assert_shared_avd_shell_uid(SERIAL, "before snapshot preparation");
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("shared ROM destination snapshot should bind under shell UID 2000");
+    let snapshot = plan
+        .copy_commit_snapshots
+        .first()
+        .expect("shared ROM plan should retain its prepared CopyCommit snapshot");
+    assert_eq!(
+        snapshot.operation,
+        crate::executor::copy_commit::CopyCommitOperation::Mirror
+    );
+    assert_eq!(snapshot.reviewed_deletion_set, ["destination-only.bin"]);
+    assert_shared_avd_shell_uid(SERIAL, "after snapshot preparation and before mutation");
+    let result = runner.run(&plan);
+    assert_shared_avd_shell_uid(SERIAL, "after CopyCommit execution");
+
+    let observed = commands
+        .lock()
+        .expect("ADB command evidence lock should remain available")
+        .clone();
+    let errors = errors
+        .lock()
+        .expect("ADB error evidence lock should remain available")
+        .clone();
+    assert!(
+        result.success,
+        "shared ROM Mirror should complete through normal shell: steps={:#?}, errors={:#?}, nonzero_commands={:#?}, recent_commands={:#?}",
+        result.steps,
+        errors,
+        observed
+            .iter()
+            .filter(|command| command.returncode != 0)
+            .collect::<Vec<_>>(),
+        observed.iter().rev().take(20).collect::<Vec<_>>()
+    );
+    assert!(
+        errors.is_empty(),
+        "ADB route recorded command errors: {errors:#?}"
+    );
+    let copy_record = result
+        .steps
+        .iter()
+        .find(|record| record.step_id.ends_with(COPY_STEP_PATH_SUFFIX))
+        .expect("ROM CopyCommit should produce an execution record");
+    let copy_report = copy_record
+        .outputs
+        .get("copy_commit_report")
+        .expect("successful CopyCommit should expose its execution report");
+    assert_eq!(
+        copy_report.value["reviewedDeletionSet"],
+        serde_json::json!(["destination-only.bin"])
+    );
+    assert_eq!(
+        copy_report.value["deletedPaths"],
+        serde_json::json!(["destination-only.bin"])
+    );
+    assert_eq!(
+        copy_report.value["destinationIdentity"].as_str(),
+        Some(selected_root.as_str())
+    );
+    assert_eq!(
+        copy_report.value["destinationBindingVerified"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(copy_report.value["stagingVerified"].as_bool(), Some(true));
+    assert_eq!(
+        copy_report.value["afterPaths"],
+        serde_json::json!([
+            "Nintendo",
+            "Nintendo/GBA",
+            "Nintendo/GBA/Metroid Fusion.gba",
+            "Sony",
+            "Sony/PSX",
+            "Sony/PSX/Crash Bandicoot.chd"
+        ])
+    );
+    let uid_results = observed
+        .iter()
+        .filter(|command| {
+            let joined = command.args.join(" ");
+            joined.contains(" shell id -u") || joined.contains(" shell 'id -u")
+        })
+        .map(|command| command.stdout.trim().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        uid_results.len() >= 2,
+        "CopyCommit should verify shell UID during snapshot and immediately before mutation; observed commands: {:?}",
+        observed
+            .iter()
+            .map(|command| &command.args)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        uid_results.iter().all(|uid| uid == "2000"),
+        "all in-route shared-storage UID probes must return 2000: {uid_results:?}"
+    );
+    assert!(
+        observed.iter().all(|command| {
+            !command.args.iter().any(|arg| arg == "su") && !command.args.join(" ").contains("su -c")
+        }),
+        "shared CopyCommit must not fall back to root commands"
+    );
+    let helper_commands = observed
+        .iter()
+        .filter(|command| {
+            command.args.iter().any(|arg| {
+                arg.contains("-helper ")
+                    && arg.contains(&selected_root)
+                    && (arg.contains("remove-file")
+                        || arg.contains("ensure-dir")
+                        || arg.contains("publish"))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        helper_commands.len(),
+        7,
+        "one reviewed deletion, four directory creations, and two file publishes should use the descriptor helper"
+    );
+    let last_helper_index = observed
+        .iter()
+        .rposition(|command| {
+            command.args.iter().any(|arg| {
+                arg.contains("-helper ")
+                    && arg.contains(&selected_root)
+                    && (arg.contains("remove-file")
+                        || arg.contains("ensure-dir")
+                        || arg.contains("publish"))
+            })
+        })
+        .expect("selected-root mutation helper should run");
+    let final_binding_probe = observed
+        .iter()
+        .enumerate()
+        .skip(last_helper_index + 1)
+        .find(|(_, command)| {
+            command
+                .args
+                .join(" ")
+                .contains(&format!("readlink -f {selected_root}"))
+        })
+        .map(|(_, command)| command)
+        .expect("reviewed spelling and alias identity should be rechecked after mutation");
+
+    let stale_check =
+        shared_avd_adb_output(SERIAL, &["shell", "test", "!", "-e", &stale_device_file]);
+    assert!(
+        stale_check.status.success(),
+        "the exact reviewed destination-only entry should be deleted; execution report: {}",
+        serde_json::to_string_pretty(&copy_report.value)
+            .expect("CopyCommit report should be JSON serializable")
+    );
+    for (relative, expected) in [
+        (
+            "Nintendo/GBA/Metroid Fusion.gba",
+            b"source-gba\n".as_slice(),
+        ),
+        ("Sony/PSX/Crash Bandicoot.chd", b"source-psx\n".as_slice()),
+    ] {
+        let remote_file = format!("{selected_root}/{relative}");
+        let local_file = workspace
+            ._temp
+            .path()
+            .join(format!("pulled-{}", relative.replace('/', "_")));
+        let pull = shared_avd_adb_output(
+            SERIAL,
+            &[
+                "pull",
+                &remote_file,
+                local_file
+                    .to_str()
+                    .expect("pull destination should be UTF-8"),
+            ],
+        );
+        assert!(pull.status.success());
+        assert_eq!(
+            fs::read(local_file).expect("mirrored payload should be readable"),
+            expected
+        );
+    }
+    let sentinel_check = shared_avd_adb_output(SERIAL, &["shell", "cat", &sibling_sentinel_file]);
+    assert!(sentinel_check.status.success());
+    assert_eq!(sentinel_check.stdout, b"outside selected tree\n");
+    eprintln!(
+        "shared-storage CopyCommit report: {}",
+        serde_json::to_string_pretty(&copy_report.value)
+            .expect("CopyCommit report should be JSON serializable")
+    );
+    eprintln!(
+        "shared-storage exact reviewed binding used by helper: {}",
+        helper_commands[0].args.join(" ")
+    );
+    eprintln!(
+        "shared-storage final post-mutation identity probe: {}",
+        final_binding_probe.args.join(" ")
+    );
+    eprintln!("shared-storage in-route shell UID probes: {uid_results:?}");
 }

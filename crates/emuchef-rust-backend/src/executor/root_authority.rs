@@ -4,9 +4,11 @@ mod tests {
 
     #[test]
     fn completed_root_probe_classifies_denied_and_unavailable_as_revoked() {
+        let denied = super::classify_probe(RootProbeOutcome::Denied).unwrap_err();
+        assert_eq!(denied, AdbCommandError::RootAuthorityRevoked);
         assert_eq!(
-            super::classify_probe(RootProbeOutcome::Denied),
-            Err(AdbCommandError::RootAuthorityRevoked)
+            denied.to_string(),
+            "Root authority was revoked during execution."
         );
         assert_eq!(
             super::classify_probe(RootProbeOutcome::Unavailable),
@@ -49,7 +51,11 @@ mod tests {
         assert!(!fresh.has_trustworthy_mutation());
         fresh.record_result(
             super::DeviceCommandEffect::Mutating,
-            &Err::<(), _>(AdbCommandError::CommandFailed),
+            &Err::<(), _>(AdbCommandError::CommandFailed {
+                args: Vec::new(),
+                returncode: 1,
+                stderr: String::new(),
+            }),
         );
         assert!(fresh.has_trustworthy_mutation());
     }
@@ -64,7 +70,11 @@ mod tests {
         );
         guard.record_result(
             super::DeviceCommandEffect::ReadOnly,
-            &Err::<(), _>(AdbCommandError::CommandFailed),
+            &Err::<(), _>(AdbCommandError::CommandFailed {
+                args: Vec::new(),
+                returncode: 1,
+                stderr: String::new(),
+            }),
         );
         assert!(!guard.has_trustworthy_mutation());
     }
@@ -107,7 +117,7 @@ impl RootAuthorityGuard {
         result: &Result<T, AdbCommandError>,
     ) {
         if effect == DeviceCommandEffect::Mutating
-            && matches!(result, Ok(_) | Err(AdbCommandError::CommandFailed))
+            && matches!(result, Ok(_) | Err(AdbCommandError::CommandFailed { .. }))
         {
             self.trustworthy_mutation_completed = true;
         }

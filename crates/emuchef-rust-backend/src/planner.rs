@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use crate::authored_models::{AppDefinitionV1, AppOpMode};
 use crate::catalog_source::CatalogIdentity;
+use crate::executor::copy_commit::ExecutionCopyCommitSnapshot;
 use crate::model::{OrderedMap, ParamValue, Recipe, RecipeArtifact, Step, StepConstraints};
 #[cfg(test)]
 use crate::planner_device_plan;
@@ -207,6 +208,9 @@ pub struct ExecutionPlan {
     /// Resolved input values and their presentation captured in recipe order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub resolved_inputs: Vec<ExecutionResolvedInputSnapshot>,
+    /// Prepared selected-tree copy state captured before execution review.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copy_commit_snapshots: Vec<ExecutionCopyCommitSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_device: Option<TargetDeviceBinding>,
     pub device_context: DeviceContext,
@@ -301,6 +305,45 @@ pub struct DeviceContext {
     pub android_version: i64,
     pub android_api_level: Option<i64>,
     pub device_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_shell_mode: Option<RootShellRoute>,
+}
+
+impl DeviceContext {
+    /// Binds the reviewed device context to the route selected by verified root preflight.
+    /// Passing `None` removes any stale mode so an unqualified route cannot survive review.
+    pub(crate) fn bind_verified_root_shell_mode(&mut self, mode: Option<RootShellRoute>) {
+        self.root_shell_mode = mode;
+    }
+}
+
+#[cfg(test)]
+mod device_context_root_shell_mode_tests {
+    use super::{DeviceContext, RootShellRoute};
+
+    #[test]
+    fn stale_or_missing_snapshot_cannot_retain_a_root_shell_mode() {
+        let mut context = DeviceContext {
+            manufacturer: "Example".to_string(),
+            model: "Test Device".to_string(),
+            android_version: 16,
+            android_api_level: Some(36),
+            device_tags: Vec::new(),
+            root_shell_mode: Some(RootShellRoute::SuCommand),
+        };
+        let old_identity = serde_json::to_value(&context).expect("device context serializes");
+
+        context.bind_verified_root_shell_mode(Some(RootShellRoute::SuZero));
+        let verified_identity = serde_json::to_value(&context).expect("device context serializes");
+        assert_ne!(old_identity, verified_identity);
+        assert_eq!(verified_identity["root_shell_mode"], "suZero");
+
+        context.bind_verified_root_shell_mode(None);
+        let unverified_identity =
+            serde_json::to_value(&context).expect("device context serializes");
+        assert_eq!(context.root_shell_mode, None);
+        assert!(unverified_identity.get("root_shell_mode").is_none());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -313,6 +356,16 @@ pub struct RuntimeCapabilities {
     pub package_remove_for_user: bool,
     pub root_shell: bool,
     pub app_data_write: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_shell_route: Option<RootShellRoute>,
+}
+
+/// The root invocation form verified during live device preflight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RootShellRoute {
+    SuCommand,
+    SuZero,
 }
 
 /// A runtime capability name recognized by planner selection.
@@ -1044,6 +1097,9 @@ fn plan_execution_with_app_definitions_inner(
     {
         input.device_context.android_api_level = Some(android_api_level);
     }
+    input
+        .device_context
+        .bind_verified_root_shell_mode(input.runtime_capabilities.root_shell_route);
     let permission_android_api_level = input.device_context.android_api_level;
     let app_definitions = match index_app_definitions(app_definitions) {
         Ok(apps) => apps,
@@ -1242,6 +1298,7 @@ fn plan_execution_with_app_definitions_inner(
             &app_definitions,
         ),
         resolved_inputs: resolved_input_snapshots,
+        copy_commit_snapshots: Vec::new(),
         target_device: input.target_device,
         device_context: input.device_context,
         runtime_capabilities: input.runtime_capabilities,

@@ -10,6 +10,7 @@ default-run = "emuchef"
 [features]
 default = []
 real-execution = []
+android-copy-commit-helper = []
 
 [[bin]]
 name = "emuchef"

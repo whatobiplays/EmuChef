@@ -252,6 +252,7 @@ fn preserves_one_shot_json_and_sidecar_dispatch() {
             "closeUserConfiguration",
             "describeConfiguration",
             "planConfiguration",
+            "prepareExecutionReview",
             "startExecution",
             "getExecution",
             "getExecutionEvents",

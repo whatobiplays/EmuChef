@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -7,6 +8,8 @@ import {
   requireQualifiedMacosTarget,
   validateTargetTriple,
 } from "./sidecar-packaging.mjs";
+
+const sidecarBuildScript = readFileSync(new URL("./prepare-rust-sidecar.mjs", import.meta.url), "utf8");
 
 test("validates safe target triples", () => {
   assert.equal(validateTargetTriple("aarch64-apple-darwin"), "aarch64-apple-darwin");
@@ -27,4 +30,12 @@ test("maps known macOS architectures and qualifies only Apple Silicon", () => {
 test("uses the Tauri external-binary target suffix", () => {
   assert.equal(externalBinArtifactName("aarch64-apple-darwin"), "emuchef-aarch64-apple-darwin");
   assert.equal(externalBinArtifactName("x86_64-pc-windows-msvc"), "emuchef-x86_64-pc-windows-msvc.exe");
+});
+
+test("release sidecar builds include the Android helper without enabling real execution", () => {
+  assert.match(
+    sidecarBuildScript,
+    /if \(profile === "release"\) args\.push\("--release", "--features", "android-copy-commit-helper"\);/,
+  );
+  assert.doesNotMatch(sidecarBuildScript, /--features[^\n]*real-execution/);
 });

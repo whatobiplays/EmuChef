@@ -22,6 +22,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "matchDevice",
     "describeConfiguration",
     "planConfiguration",
+    "prepareExecutionReview",
     "startExecution",
     "getExecution",
     "getExecutionEvents",
@@ -90,6 +91,22 @@ impl SidecarState {
     pub fn new(cache_root: PathBuf) -> Self {
         Self {
             inner: Mutex::new(SidecarClient::new(cache_root)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_backend(
+        cache_root: PathBuf,
+        config: emuchef_rust_backend::execution_session::SidecarRuntimeConfig,
+    ) -> Self {
+        let mut client = SidecarClient::new(cache_root);
+        client.generation = 1;
+        client.initialize_with_process(SidecarProcess::InProcessBackend {
+            generation: 1,
+            config,
+        });
+        Self {
+            inner: Mutex::new(client),
         }
     }
 
@@ -461,6 +478,11 @@ enum SidecarProcess {
         stdout: std::io::Cursor<Vec<u8>>,
         observer: std::sync::Arc<ScriptedProcessObserver>,
     },
+    #[cfg(test)]
+    InProcessBackend {
+        generation: u64,
+        config: emuchef_rust_backend::execution_session::SidecarRuntimeConfig,
+    },
 }
 
 #[cfg(test)]
@@ -487,6 +509,8 @@ impl SidecarProcess {
             Self::Child { generation, .. } => *generation,
             #[cfg(test)]
             Self::Scripted { generation, .. } => *generation,
+            #[cfg(test)]
+            Self::InProcessBackend { generation, .. } => *generation,
         }
     }
 
@@ -542,6 +566,15 @@ impl SidecarProcess {
                 }
                 Ok(frame)
             }
+            #[cfg(test)]
+            Self::InProcessBackend { config, .. } => {
+                let input = std::str::from_utf8(request)
+                    .map_err(|_| "Rust runtime request was not valid UTF-8.".to_string())?;
+                Ok(
+                    emuchef_rust_backend::jsonl::process_jsonl_with_config(input, config.clone())
+                        .into_bytes(),
+                )
+            }
         }
     }
 
@@ -566,6 +599,8 @@ impl SidecarProcess {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 observer.cleanup
             }
+            #[cfg(test)]
+            Self::InProcessBackend { .. } => SidecarCleanup::Confirmed,
         }
     }
 }
@@ -872,6 +907,7 @@ mod tests {
                 "matchDevice",
                 "describeConfiguration",
                 "planConfiguration",
+                "prepareExecutionReview",
                 "startExecution",
                 "getExecution",
                 "getExecutionEvents",
@@ -1119,7 +1155,7 @@ mod tests {
         );
         assert_eq!(
             payload["requiredCapabilities"].as_array().unwrap().len(),
-            24
+            25
         );
         assert_eq!(payload["optionalCapabilities"], json!([]));
         assert!(payload.get("required").is_none());
@@ -1133,7 +1169,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            24
+            25
         );
 
         let mut missing_execution = payload;

@@ -120,7 +120,7 @@ pub fn run() {
             qualification_mode::abandon_qualification_session,
             qualification_mode::record_qualification_run,
             commands::describe_configuration,
-            commands::create_review,
+            commands::prepare_execution_review,
             commands::discard_review,
             commands::get_review_status,
             commands::pick_input_path,

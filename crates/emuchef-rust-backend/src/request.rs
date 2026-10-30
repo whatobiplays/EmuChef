@@ -86,7 +86,11 @@ fn handle_validated_sidecar_object(
     sessions: &mut DocumentSessionManager,
 ) -> Result<Value, ApiError> {
     let request_type = validate_request_type(object)?;
-    validate_payload(object)?;
+    if request_type == "prepareExecutionReview" {
+        validate_prepare_execution_review_payload(object)?;
+    } else {
+        validate_payload(object)?;
+    }
 
     match request_type {
         "hello" => Ok(envelope::success(protocol::hello_result())),
@@ -147,6 +151,7 @@ fn handle_validated_sidecar_object(
         "closeUserConfiguration" => handle_close_user_configuration(object, sessions),
         "describeConfiguration" => handle_describe_configuration(object),
         "planConfiguration" => handle_plan_configuration(object),
+        "prepareExecutionReview" => handle_prepare_execution_review(object, sessions),
         "startExecution" => handle_start_execution(object, sessions),
         "getExecution" => handle_get_execution(object, sessions),
         "getExecutionEvents" => handle_get_execution_events(object, sessions),
@@ -238,6 +243,83 @@ fn handle_start_execution(
         mode,
         target,
     )?))
+}
+
+fn handle_prepare_execution_review(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    for forbidden in ["runtimeRoot", "cacheRoot", "adbPath"] {
+        if payload.contains_key(forbidden) {
+            return Err(ApiError::invalid_request_with_details(
+                format!("Request field '{forbidden}' is controlled by the sidecar."),
+                json!({ "field": forbidden }),
+            ));
+        }
+    }
+    let plan_value = payload.get("plan").ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request field 'plan' is required.",
+            json!({ "field": "plan" }),
+        )
+    })?;
+    let plan = crate::cli::parse_execution_plan_json(plan_value).map_err(|message| {
+        ApiError::new(
+            crate::errors::ApiErrorCode::InvalidExecutionPlan,
+            message,
+            json!({ "field": "plan" }),
+        )
+    })?;
+    let mode = match required_string(payload, "mode")? {
+        "real" => crate::execution_session::ExecutionMode::Real,
+        "dry_run" => crate::execution_session::ExecutionMode::DryRun,
+        _ => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request field 'mode' must be 'real' or 'dry_run'.",
+                json!({ "field": "mode" }),
+            ));
+        }
+    };
+    let target = optional_target_device(payload, "targetDevice")?;
+    let plan = sessions
+        .executions()
+        .prepare_review_plan(plan, mode, target)?;
+    let plan_digest = crate::plan_digest::execution_plan_digest(&plan).map_err(|error| {
+        ApiError::new(
+            crate::errors::ApiErrorCode::InvalidExecutionPlan,
+            format!(
+                "Execution plan could not be canonically hashed after review preparation: {error}"
+            ),
+            json!({ "field": "plan" }),
+        )
+    })?;
+    let review = crate::review_projection::project_review(&plan, &[]);
+    let plan = serde_json::to_value(plan).map_err(|error| {
+        ApiError::new(
+            crate::errors::ApiErrorCode::InternalError,
+            format!("Prepared execution plan could not be serialized: {error}"),
+            json!({}),
+        )
+    })?;
+    Ok(envelope::success(json!({
+        "plan": plan,
+        "planDigest": plan_digest,
+        "review": review,
+    })))
+}
+
+fn validate_prepare_execution_review_payload(object: &Map<String, Value>) -> Result<(), ApiError> {
+    let payload = payload_object(object)?;
+    for field in payload.keys() {
+        if !matches!(field.as_str(), "plan" | "mode" | "targetDevice") {
+            return Err(ApiError::invalid_request_with_details(
+                format!("Request field '{field}' is not supported for review preparation."),
+                json!({ "field": field }),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn handle_get_execution(

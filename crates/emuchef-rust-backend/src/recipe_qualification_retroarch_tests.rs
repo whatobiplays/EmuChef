@@ -8,7 +8,6 @@
 //! No test in this module invokes ADB, a physical device, a real network
 //! request, or an ignored physical-qualification harness.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -176,10 +175,34 @@ fn plan_retroarch_with_permissions(
             RuntimeCapabilityAvailability {
                 root_shell,
                 app_data_write: root_shell,
+                root_shell_route: root_shell.then_some(crate::planner::RootShellRoute::SuCommand),
             }
         }),
     })
     .expect("real authored RetroArch configuration should prepare")
+}
+
+fn block_unsupported_runtime_app_target_sources_before_mutation(
+    plan: &ExecutionPlan,
+    workspace: &QualificationWorkspace,
+) -> bool {
+    let Err(reason) = crate::executor::validate_supported_copy_plan(plan) else {
+        return false;
+    };
+    assert!(
+        reason.contains("App Target sources from runtime step outputs cannot be reviewed"),
+        "unexpected preflight rejection: {reason}"
+    );
+
+    let mut runner = ExecutorRunner::new(dry_run_adapters(workspace));
+    let execution = runner.run(plan);
+    assert!(!execution.success);
+    assert!(execution
+        .steps
+        .iter()
+        .all(|record| record.status != StepRunStatus::Executed));
+    assert!(runner.adapters().device().commands().is_empty());
+    true
 }
 
 /// Map an authored step id to exactly one generated step for the target recipe.
@@ -254,10 +277,11 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
         "planning must produce no error diagnostics"
     );
     let plan = result.plan.expect("plan should be generated");
-    let review =
-        serde_json::to_string(result.review.as_ref().expect("review should exist")).unwrap();
-    assert!(review.contains(RETROARCH_PACKAGE));
-    assert!(review.contains(RETROARCH_LAUNCHER));
+    assert!(result.copy_commit_preparation_required);
+    assert!(result.plan_digest.is_none());
+    assert!(result.review.is_none());
+    let workspace = QualificationWorkspace::new();
+    assert!(block_unsupported_runtime_app_target_sources_before_mutation(&plan, &workspace));
     let lifecycle = &contract.app_lifecycle;
     assert_eq!(lifecycle.app_id, "retroarch");
     assert_eq!(lifecycle.package_id, RETROARCH_PACKAGE);
@@ -305,13 +329,7 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
             );
         }
     }
-    assert!(
-        result
-            .plan_digest
-            .as_deref()
-            .is_some_and(|digest| !digest.is_empty()),
-        "plan digest should be present"
-    );
+    assert!(result.plan_digest.is_none());
 
     assert_eq!(plan.source.selected_recipe_refs, contract.selected_recipes);
     assert_eq!(plan.source.expanded_recipe_refs, contract.expanded_recipes);
@@ -654,16 +672,10 @@ fn retroarch_optional_cfg_is_not_required_for_planning() {
 }
 
 #[test]
-fn retroarch_supplied_cfg_is_bound_and_reviewed_without_parent_path_leakage() {
+fn retroarch_supplied_cfg_does_not_bypass_runtime_app_target_source_rejection() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let config_path = temp.path().join("retroarch.cfg");
     fs::write(&config_path, b"video_driver = \"vulkan\"\n").expect("config should be written");
-    let parent = config_path
-        .parent()
-        .expect("config path should have a parent")
-        .to_string_lossy()
-        .to_string();
-
     let result = plan_retroarch(Some(&config_path));
     assert!(
         result
@@ -692,57 +704,11 @@ fn retroarch_supplied_cfg_is_bound_and_reviewed_without_parent_path_leakage() {
         "supplied config must produce the seed_retroarch_cfg copy step"
     );
 
-    let review = result.review.expect("production review should be produced");
-    assert!(review.can_execute, "review must remain executable");
-    assert_eq!(review.features.len(), 1, "exactly one feature is qualified");
-    assert!(!review.features[0].automatically_added);
-    assert!(!review.features[0].name.is_empty());
-    let section_kinds = review.features[0]
-        .sections
-        .iter()
-        .map(|section| section.kind)
-        .collect::<HashSet<_>>();
-    for kind in [
-        "preparation",
-        "downloads",
-        "installs",
-        "copies",
-        "permissions",
-        "launches",
-        "device_changes",
-    ] {
-        assert!(
-            section_kinds.contains(kind),
-            "review is missing section kind {kind}"
-        );
-    }
-    assert_eq!(review.work.action_count, plan.steps.len());
-    assert_eq!(review.work.known_wait_seconds, Some(7));
-    assert!(
-        review
-            .notices
-            .iter()
-            .all(|notice| notice.severity != "blocker"),
-        "review must contain no blocker notices"
-    );
-    assert!(
-        review
-            .inputs
-            .iter()
-            .any(|input| input.summary == "retroarch.cfg"),
-        "review input summary must contain the config basename"
-    );
-
-    let serialized = serde_json::to_string(&review).expect("review should serialize");
-    assert!(serialized.contains("retroarch.cfg"));
-    assert!(
-        !serialized.contains(&parent),
-        "review must not leak the config parent directory"
-    );
-    assert!(
-        !serialized.contains("serial"),
-        "review must not expose an ADB serial"
-    );
+    assert!(result.copy_commit_preparation_required);
+    assert!(result.plan_digest.is_none());
+    assert!(result.review.is_none());
+    let workspace = QualificationWorkspace::new();
+    assert!(block_unsupported_runtime_app_target_sources_before_mutation(&plan, &workspace));
 }
 
 #[derive(Clone, Copy)]
@@ -973,11 +939,14 @@ impl ExecutorDevice for FirstLaunchFailureDevice {
 }
 
 #[test]
-fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
+fn retroarch_generated_plan_blocks_unsupported_runtime_sources_before_execution() {
     let workspace = QualificationWorkspace::new();
     let contract = load_contract();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
+    if block_unsupported_runtime_app_target_sources_before_mutation(&plan, &workspace) {
+        return;
+    }
     seed_artifact_cache(&workspace.cache_root, &plan, SystemFixtureMode::Complete);
     let mut runner = ExecutorRunner::new(dry_run_adapters(&workspace));
     let result = runner.run(&plan);
@@ -1066,10 +1035,13 @@ fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
 }
 
 #[test]
-fn retroarch_first_launch_failure_blocks_dependent_work_truthfully() {
+fn retroarch_first_launch_scenario_preflights_runtime_app_target_sources() {
     let workspace = QualificationWorkspace::new();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
+    if block_unsupported_runtime_app_target_sources_before_mutation(&plan, &workspace) {
+        return;
+    }
     let plan_before = plan.clone();
     seed_artifact_cache(&workspace.cache_root, &plan, SystemFixtureMode::Complete);
     let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
@@ -1141,10 +1113,13 @@ fn retroarch_first_launch_failure_blocks_dependent_work_truthfully() {
 }
 
 #[test]
-fn retroarch_install_skips_on_repeated_deterministic_run() {
+fn retroarch_install_scenario_preflights_runtime_app_target_sources() {
     let workspace = QualificationWorkspace::new();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
+    if block_unsupported_runtime_app_target_sources_before_mutation(&plan, &workspace) {
+        return;
+    }
     seed_artifact_cache(&workspace.cache_root, &plan, SystemFixtureMode::Complete);
     let mut runner = ExecutorRunner::new(dry_run_adapters(&workspace));
 
@@ -1185,10 +1160,13 @@ fn retroarch_install_skips_on_repeated_deterministic_run() {
 }
 
 #[test]
-fn retroarch_missing_core_system_verification_fails_and_stops_later_recipe_work() {
+fn retroarch_missing_core_scenario_preflights_runtime_app_target_sources() {
     let workspace = QualificationWorkspace::new();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
+    if block_unsupported_runtime_app_target_sources_before_mutation(&plan, &workspace) {
+        return;
+    }
     seed_artifact_cache(
         &workspace.cache_root,
         &plan,

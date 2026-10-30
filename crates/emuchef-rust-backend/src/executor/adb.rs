@@ -9,8 +9,9 @@ use crate::owned_process::{
 };
 #[cfg(test)]
 use crate::owned_process::{run_owned_process_observed, OwnedProcessObservationHandle};
-use crate::planner::TargetDeviceBinding;
+use crate::planner::{RootShellRoute, TargetDeviceBinding};
 
+use super::copy_commit::{CopyCommitMutation, CopyEntryKind, CopyManifestEntry};
 use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
 use super::root_authority::{self, DeviceCommandEffect};
 use super::root_requirements::is_app_private_path;
@@ -27,7 +28,11 @@ pub struct AdbCommandResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdbCommandError {
     Resolution(String),
-    CommandFailed,
+    CommandFailed {
+        args: Vec<String>,
+        returncode: i32,
+        stderr: String,
+    },
     DeviceOffline,
     DeviceUnauthorized,
     DeviceDisconnected,
@@ -55,11 +60,28 @@ pub enum AdbCommandError {
     RootAuthorityUnverified,
 }
 
+/// Generic public result message for a completed ADB command failure.
+pub(crate) const ADB_COMMAND_FAILURE_MESSAGE: &str = "The ADB command failed.";
+/// Generic public result message for an interrupted ADB transport.
+pub(crate) const DEVICE_TRANSPORT_INTERRUPTED_MESSAGE: &str =
+    "The device connection was interrupted during execution.";
+/// Stable public result message when reviewed root authority is revoked.
+pub(crate) const ROOT_AUTHORITY_REVOKED_MESSAGE: &str =
+    "Root authority was revoked during execution.";
+
 impl fmt::Display for AdbCommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AdbCommandError::Resolution(message) => formatter.write_str(message),
-            AdbCommandError::CommandFailed => formatter.write_str("The ADB command failed."),
+            AdbCommandError::CommandFailed {
+                args,
+                returncode,
+                stderr,
+            } => write!(
+                formatter,
+                "The ADB command failed (exit {returncode}): {}; stderr: {stderr}",
+                shell_join(args)
+            ),
             AdbCommandError::DeviceOffline => {
                 formatter.write_str("The reviewed device is offline.")
             }
@@ -76,10 +98,10 @@ impl fmt::Display for AdbCommandError {
                 formatter.write_str("The local ADB service is unavailable.")
             }
             AdbCommandError::TransportReset => {
-                formatter.write_str("The device connection was reset during execution.")
+                formatter.write_str(DEVICE_TRANSPORT_INTERRUPTED_MESSAGE)
             }
             AdbCommandError::TransportFailure => {
-                formatter.write_str("The device connection was lost during execution.")
+                formatter.write_str("The device connection lost during execution.")
             }
             AdbCommandError::DeviceIdentityChanged { phase }
             | AdbCommandError::DeviceIdentityUnverified { phase } => {
@@ -90,26 +112,138 @@ impl fmt::Display for AdbCommandError {
                 }
             }
             AdbCommandError::ProcessFailed { .. } => {
-                formatter.write_str("The ADB process failed before producing a trustworthy result.")
+                formatter.write_str("The ADB process failed before producing trustworthy result.")
             }
             AdbCommandError::TimedOut { .. } => formatter.write_str("The ADB operation timed out."),
-            AdbCommandError::RootDenied => {
-                formatter.write_str("Root access was denied by the device.")
-            }
+            AdbCommandError::RootDenied => formatter.write_str("Root access denied by device."),
             AdbCommandError::RootUnavailable => {
-                formatter.write_str("Root access is unavailable on this device.")
+                formatter.write_str("Root access unavailable on this device.")
             }
             AdbCommandError::RootCheckFailed => {
                 formatter.write_str("Root access could not be checked safely.")
             }
             AdbCommandError::RootAuthorityRevoked => {
-                formatter.write_str("Root authority was revoked during execution.")
+                formatter.write_str(ROOT_AUTHORITY_REVOKED_MESSAGE)
             }
             AdbCommandError::RootAuthorityUnverified => {
                 formatter.write_str("Continued root authority could not be confirmed safely.")
             }
         }
     }
+}
+
+/// Keep command failures actionable without retaining command output that may contain copied data.
+const MAX_ADB_DIAGNOSTIC_INPUT_CHARS: usize = 4096;
+const MAX_ADB_DIAGNOSTIC_CHARS: usize = 1024;
+const MAX_ADB_DIAGNOSTIC_TOKEN_CHARS: usize = 256;
+const REDACTED_DIAGNOSTIC_VALUE: &str = "[REDACTED]";
+
+fn command_failed(result: &AdbCommandResult) -> AdbCommandError {
+    let mut redact_next = 0;
+    let args = result
+        .args
+        .iter()
+        .map(|argument| sanitize_adb_diagnostic_text(argument, &mut redact_next))
+        .collect();
+    let mut redact_stderr_next = 0;
+    let stderr = sanitize_adb_diagnostic_text(&result.stderr, &mut redact_stderr_next);
+
+    AdbCommandError::CommandFailed {
+        args,
+        returncode: result.returncode,
+        stderr,
+    }
+}
+
+fn sanitize_adb_diagnostic_text(value: &str, redact_next: &mut usize) -> String {
+    let mut input_chars = value.chars();
+    let bounded_input = input_chars
+        .by_ref()
+        .take(MAX_ADB_DIAGNOSTIC_INPUT_CHARS)
+        .collect::<String>();
+    let input_was_truncated = input_chars.next().is_some();
+    let mut safe_tokens = Vec::new();
+
+    for token in bounded_input.split_whitespace() {
+        if *redact_next > 0 {
+            safe_tokens.push(REDACTED_DIAGNOSTIC_VALUE.to_string());
+            *redact_next -= 1;
+            if token.eq_ignore_ascii_case("bearer") {
+                *redact_next += 1;
+            }
+            continue;
+        }
+
+        if let Some((index, delimiter)) = token
+            .char_indices()
+            .find(|(_, character)| *character == '=' || *character == ':')
+        {
+            let key = &token[..index];
+            if is_sensitive_adb_diagnostic_key(key) {
+                safe_tokens.push(format!("{key}{delimiter}{REDACTED_DIAGNOSTIC_VALUE}"));
+                if key.eq_ignore_ascii_case("authorization")
+                    && token[index + delimiter.len_utf8()..].eq_ignore_ascii_case("bearer")
+                {
+                    *redact_next = 1;
+                }
+                continue;
+            }
+        }
+
+        if is_sensitive_adb_diagnostic_key(token) || token.eq_ignore_ascii_case("bearer") {
+            safe_tokens.push(token.to_string());
+            *redact_next = 1;
+        } else if token.chars().count() > MAX_ADB_DIAGNOSTIC_TOKEN_CHARS {
+            safe_tokens.push("[REDACTED-LONG-VALUE]".to_string());
+        } else {
+            safe_tokens.push(token.to_string());
+        }
+    }
+
+    if input_was_truncated {
+        safe_tokens.push("[TRUNCATED]".to_string());
+    }
+
+    let safe_text = safe_tokens.join(" ");
+    let mut safe_chars = safe_text.chars();
+    let bounded_safe_text = safe_chars
+        .by_ref()
+        .take(MAX_ADB_DIAGNOSTIC_CHARS)
+        .collect::<String>();
+    if safe_chars.next().is_some() {
+        format!("{bounded_safe_text}[TRUNCATED]")
+    } else {
+        bounded_safe_text
+    }
+}
+
+fn is_sensitive_adb_diagnostic_key(key: &str) -> bool {
+    let normalized = key
+        .trim_start_matches('-')
+        .trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+        })
+        .replace('-', "_")
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "password"
+            | "passwd"
+            | "token"
+            | "secret"
+            | "api_key"
+            | "apikey"
+            | "api_secret"
+            | "authorization"
+            | "cookie"
+            | "private_key"
+            | "client_secret"
+            | "access_key"
+            | "refresh_token"
+            | "credential"
+            | "credentials"
+    )
 }
 
 pub trait AdbCommandExecutor: fmt::Debug {
@@ -182,6 +316,23 @@ pub enum RootProbeFailureReason {
     UnexpectedResponse,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RootProbeEvidence {
+    pub outcome: RootProbeOutcome,
+    pub route: Option<RootShellRoute>,
+}
+
+impl RootProbeEvidence {
+    pub(crate) fn status_json(&self) -> serde_json::Value {
+        let mut value = self.outcome.status_json();
+        if let Some(route) = self.route {
+            value["rootShellRoute"] =
+                serde_json::to_value(route).expect("a root-shell route is always serializable");
+        }
+        value
+    }
+}
+
 impl RootProbeOutcome {
     pub fn status_json(&self) -> serde_json::Value {
         match self {
@@ -201,6 +352,7 @@ impl RootProbeOutcome {
     }
 }
 
+#[cfg(test)]
 pub fn probe_root<E: AdbCommandExecutor>(
     executor: &mut E,
     adb_path: &str,
@@ -228,33 +380,160 @@ pub fn probe_root<E: AdbCommandExecutor>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn probe_root_typed<E: AdbCommandExecutor>(
     executor: &mut E,
     adb_path: &str,
     serial: &str,
 ) -> Result<RootProbeOutcome, AdbCommandError> {
-    let args = vec![
+    probe_root_route_typed(executor, adb_path, serial).map(|evidence| evidence.outcome)
+}
+
+pub(crate) fn probe_root_with_route<E: AdbCommandExecutor>(
+    executor: &mut E,
+    adb_path: &str,
+    serial: &str,
+) -> RootProbeEvidence {
+    match probe_root_route_typed(executor, adb_path, serial) {
+        Ok(evidence) => evidence,
+        Err(AdbCommandError::TimedOut { .. }) => RootProbeEvidence {
+            outcome: RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::TimedOut,
+                message: "Root authorization timed out. Try again.",
+            },
+            route: None,
+        },
+        Err(error) => {
+            let (reason, message) = if error.is_transport_failure() {
+                (
+                    RootProbeFailureReason::Transport,
+                    "The device connection failed during root access check.",
+                )
+            } else {
+                (
+                    RootProbeFailureReason::UnexpectedResponse,
+                    "The root access check could not be completed.",
+                )
+            };
+            RootProbeEvidence {
+                outcome: RootProbeOutcome::CheckFailed { reason, message },
+                route: None,
+            }
+        }
+    }
+}
+
+fn probe_root_route_typed<E: AdbCommandExecutor>(
+    executor: &mut E,
+    adb_path: &str,
+    serial: &str,
+) -> Result<RootProbeEvidence, AdbCommandError> {
+    let su_command_result =
+        run_root_probe_with_mode(executor, adb_path, serial, RootShellMode::SuCommand)?;
+    let su_command_outcome = classify_root_result(&su_command_result);
+    if su_command_outcome == RootProbeOutcome::Granted {
+        return Ok(RootProbeEvidence {
+            outcome: su_command_outcome,
+            route: Some(RootShellRoute::SuCommand),
+        });
+    }
+    if !is_unsupported_su_command(&su_command_result) {
+        return Ok(RootProbeEvidence {
+            outcome: su_command_outcome,
+            route: None,
+        });
+    }
+
+    let su_zero_result =
+        run_root_probe_with_mode(executor, adb_path, serial, RootShellMode::SuUserId)?;
+    let su_zero_outcome = classify_root_result(&su_zero_result);
+    Ok(RootProbeEvidence {
+        route: (su_zero_outcome == RootProbeOutcome::Granted).then_some(RootShellRoute::SuZero),
+        outcome: su_zero_outcome,
+    })
+}
+
+fn run_root_probe_with_mode<E: AdbCommandExecutor>(
+    executor: &mut E,
+    adb_path: &str,
+    serial: &str,
+    root_shell_mode: RootShellMode,
+) -> Result<AdbCommandResult, AdbCommandError> {
+    let mut args = vec![
         adb_path.to_string(),
         "-s".to_string(),
         serial.to_string(),
         "shell".to_string(),
-        "su".to_string(),
-        "-c".to_string(),
-        "id".to_string(),
     ];
+    match root_shell_mode {
+        RootShellMode::SuCommand => {
+            args.extend(["su".to_string(), "-c".to_string(), "id".to_string()]);
+        }
+        RootShellMode::SuUserId => {
+            args.extend(["su".to_string(), "0".to_string(), "id".to_string()]);
+        }
+    }
     let result = executor.run_for(&args, ProcessOperation::RootPreflight)?;
-    let result = classify_completed_transport(result)?;
+    classify_completed_transport(result)
+}
+
+fn is_unsupported_su_command(result: &AdbCommandResult) -> bool {
+    if result.returncode == 0 {
+        return false;
+    }
+    let output = format!("{}\n{}", result.stdout, result.stderr).to_ascii_lowercase();
+    output.contains("invalid uid/gid '-c'")
+}
+
+fn root_identity_has_uid_zero(stdout: &str) -> bool {
+    let normalized = stdout.trim().to_ascii_lowercase();
+    normalized == "0"
+        || normalized
+            .split_whitespace()
+            .any(|part| part.starts_with("uid=0(") || part == "uid=0")
+}
+
+fn root_identity_has_verified_context(stdout: &str) -> bool {
+    stdout.split_whitespace().any(|part| {
+        let Some(context) = part.strip_prefix("context=") else {
+            return false;
+        };
+        let mut components = context.split(':');
+        let user = components.next();
+        let role = components.next();
+        let domain = components.next();
+        let level = components.next();
+        matches!(user, Some("u"))
+            && matches!(role, Some("r"))
+            && matches!(domain, Some("su" | "magisk" | "superuser"))
+            && level.is_some_and(|level| level.starts_with('s'))
+    })
+}
+
+fn probe_root_typed_with_mode<E: AdbCommandExecutor>(
+    executor: &mut E,
+    adb_path: &str,
+    serial: &str,
+    root_shell_mode: RootShellMode,
+) -> Result<RootProbeOutcome, AdbCommandError> {
+    let result = run_root_probe_with_mode(executor, adb_path, serial, root_shell_mode)?;
     Ok(classify_root_result(&result))
 }
 
 fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
-    let normalized_stdout = result.stdout.trim().to_ascii_lowercase();
-    if normalized_stdout.starts_with("uid=0(") || normalized_stdout.starts_with("uid=0 ") {
+    if root_identity_has_uid_zero(&result.stdout)
+        && root_identity_has_verified_context(&result.stdout)
+    {
         return RootProbeOutcome::Granted;
     }
     let combined = format!("{}\n{}", result.stdout, result.stderr);
     let lower = combined.to_ascii_lowercase();
-    if is_unavailable_root(&lower) {
+    if result.returncode == 0 && root_identity_has_uid_zero(&result.stdout) {
+        RootProbeOutcome::CheckFailed {
+            reason: RootProbeFailureReason::UnexpectedResponse,
+            message: "The root access check returned an unexpected response.",
+        }
+    } else if is_unavailable_root(&lower) {
         RootProbeOutcome::Unavailable
     } else if is_denied_root(&lower) {
         RootProbeOutcome::Denied
@@ -266,11 +545,30 @@ fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
     }
 }
 
+/// Interprets the fixed `test` status protocol used by CopyCommit path checks.
+/// Android `test` returns 1 for a false predicate; diagnostics and every other
+/// status indicate that the check itself did not complete safely.
+fn copy_commit_predicate_result(result: &AdbCommandResult) -> Result<bool, AdbCommandError> {
+    if result.stdout.is_empty() && result.stderr.is_empty() {
+        match result.returncode {
+            0 => return Ok(true),
+            1 => return Ok(false),
+            _ => {}
+        }
+    }
+
+    Err(AdbCommandError::CommandFailed {
+        args: result.args.clone(),
+        returncode: result.returncode,
+        stderr: "CopyCommit path predicate could not be evaluated safely".to_string(),
+    })
+}
+
 impl AdbCommandError {
     fn allows_post_identity_probe(&self) -> bool {
         matches!(
             self,
-            Self::CommandFailed
+            Self::CommandFailed { .. }
                 | Self::RootDenied
                 | Self::RootUnavailable
                 | Self::RootCheckFailed
@@ -385,7 +683,7 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
             if operation == ProcessOperation::Install {
                 Err(classify_install_rejection(&result))
             } else {
-                Err(AdbCommandError::CommandFailed)
+                Err(command_failed(&result))
             }
         } else {
             Ok(result)
@@ -424,7 +722,7 @@ fn classify_install_rejection(result: &AdbCommandResult) -> AdbCommandError {
         );
     }
 
-    AdbCommandError::CommandFailed
+    command_failed(result)
 }
 
 /// Bind generic reviewed-plan commands to a known mutating operation shape
@@ -460,12 +758,53 @@ fn reviewed_plan_operation(args: &[String]) -> ProcessOperation {
     }
 }
 
+/// Stage the helper embedded in the backend executable for `adb push`.
+///
+/// Tauri packages the backend sidecar, not Cargo's build directory. Embedding
+/// the Android helper keeps the packaged sidecar self-contained; a private
+/// temporary file supplies the local pathname required by `adb push`.
+#[cfg(feature = "android-copy-commit-helper")]
+fn stage_android_copy_commit_helper(abi: &str) -> Result<tempfile::NamedTempFile, AdbCommandError> {
+    let payload: &[u8] = match abi {
+        "arm64-v8a" => include_bytes!(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64")),
+        "x86_64" => include_bytes!(env!("EMU_CHEF_COPY_COMMIT_HELPER_X86_64")),
+        other => {
+            return Err(AdbCommandError::Resolution(format!(
+                "selected-root helper does not include Android binary device ABI {other:?} (supported: arm64-v8a, x86_64)"
+            )));
+        }
+    };
+    let mut staged = tempfile::NamedTempFile::new().map_err(|_| {
+        AdbCommandError::Resolution("selected-root helper payload could not be staged".into())
+    })?;
+    std::io::Write::write_all(&mut staged, payload).map_err(|_| {
+        AdbCommandError::Resolution("selected-root helper payload could not be written".into())
+    })?;
+    Ok(staged)
+}
+
 #[derive(Debug)]
 pub struct RealAdbDevice<E: AdbCommandExecutor = ProcessAdbCommandExecutor> {
     runner: AdbCommandRunner<E>,
     last_error: Option<AdbCommandError>,
     identity: super::identity::IdentityGuard,
     root_authority: root_authority::RootAuthorityGuard,
+    root_shell_mode: RootShellMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootShellMode {
+    SuCommand,
+    SuUserId,
+}
+
+impl From<RootShellRoute> for RootShellMode {
+    fn from(route: RootShellRoute) -> Self {
+        match route {
+            RootShellRoute::SuCommand => Self::SuCommand,
+            RootShellRoute::SuZero => Self::SuUserId,
+        }
+    }
 }
 
 impl RealAdbDevice<ProcessAdbCommandExecutor> {
@@ -475,6 +814,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
             last_error: None,
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
+            root_shell_mode: RootShellMode::SuCommand,
         }
     }
 
@@ -493,6 +833,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
             last_error: None,
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
+            root_shell_mode: RootShellMode::SuCommand,
         }
     }
 }
@@ -509,6 +850,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             last_error: None,
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
+            root_shell_mode: RootShellMode::SuCommand,
         }
     }
 
@@ -533,6 +875,12 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.root_authority.configure(reviewed_root_authorized);
     }
 
+    pub(crate) fn configure_root_shell_route(&mut self, route: Option<RootShellRoute>) {
+        self.root_shell_mode = route
+            .map(RootShellMode::from)
+            .unwrap_or(RootShellMode::SuCommand);
+    }
+
     pub(crate) fn root_authority_failure_after_mutation(&self) -> bool {
         self.root_authority.has_trustworthy_mutation()
     }
@@ -552,11 +900,21 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         effect: DeviceCommandEffect,
         operation: impl FnOnce(&mut Self) -> Result<T, AdbCommandError>,
     ) -> Result<T, String> {
+        let result = self.guarded_typed(effect, operation);
+        self.map_public(result)
+    }
+
+    fn guarded_typed<T>(
+        &mut self,
+        effect: DeviceCommandEffect,
+        operation: impl FnOnce(&mut Self) -> Result<T, AdbCommandError>,
+    ) -> Result<T, AdbCommandError> {
         if let Err(error) = self
             .identity
             .check(&mut self.runner, IdentityCheckPhase::PreOperation)
         {
-            return self.map_public(Err(error));
+            self.last_error = Some(error.clone());
+            return Err(error);
         }
         let result = operation(self);
         self.root_authority.record_result(effect, &result);
@@ -569,10 +927,14 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 .identity
                 .check(&mut self.runner, IdentityCheckPhase::PostOperation)
             {
-                return self.map_public(Err(error));
+                self.last_error = Some(error.clone());
+                return Err(error);
             }
         }
-        self.map_public(result)
+        if let Err(error) = &result {
+            self.last_error = Some(error.clone());
+        }
+        result
     }
 
     pub fn check_root(&mut self) -> Result<(), String> {
@@ -586,7 +948,12 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             let error = AdbCommandError::RootCheckFailed;
             return Err(error);
         };
-        let result = probe_root_typed(&mut self.runner.executor, &self.runner.executable, &serial);
+        let result = probe_root_typed_with_mode(
+            &mut self.runner.executor,
+            &self.runner.executable,
+            &serial,
+            self.root_shell_mode,
+        );
         let result = result?;
         match result {
             RootProbeOutcome::Granted => Ok(()),
@@ -738,6 +1105,416 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 ProcessOperation::Predicate,
             )?;
             Ok(result.returncode == 0)
+        })
+    }
+
+    /// Inspects a selected directory through bounded `find` and `sha256sum`
+    /// operations. Symbolic links and unsupported filesystem objects are
+    /// rejected rather than followed into another destination boundary.
+    pub(crate) fn copy_commit_tree_manifest(
+        &mut self,
+        root: &str,
+    ) -> Result<Vec<CopyManifestEntry>, AdbCommandError> {
+        let root_path = Path::new(root);
+        if !root_path.is_absolute()
+            || root_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir
+                        | std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(AdbCommandError::Resolution(
+                "copy commit tree root must be absolute and traversal-free".to_string(),
+            ));
+        }
+        let privileged = super::root_requirements::is_app_private_path(root);
+        self.guarded_typed(DeviceCommandEffect::ReadOnly, |device| {
+            if !privileged {
+                copy_commit_require_shell_uid(device)?;
+                copy_commit_verify_sdcard_alias_chain(device, root)?;
+            }
+            let directory = device.run_shell_with_privilege_unchecked(
+                vec!["test".to_string(), "-d".to_string(), root.to_string()],
+                false,
+                privileged,
+                ProcessOperation::Predicate,
+            )?;
+            if !copy_commit_predicate_result(&directory)? {
+                return Err(AdbCommandError::CommandFailed {
+                    args: directory.args,
+                    returncode: directory.returncode,
+                    stderr: "selected copy root is not a directory".to_string(),
+                });
+            }
+            let symlink = device.run_shell_with_privilege_unchecked(
+                vec!["test".to_string(), "-L".to_string(), root.to_string()],
+                false,
+                privileged,
+                ProcessOperation::Predicate,
+            )?;
+            if copy_commit_predicate_result(&symlink)? {
+                return Err(AdbCommandError::CommandFailed {
+                    args: symlink.args,
+                    returncode: symlink.returncode,
+                    stderr: "selected copy root is a symbolic link".to_string(),
+                });
+            }
+
+            let all = copy_commit_find_paths(
+                device,
+                root,
+                &["find", root, "-mindepth", "1", "-print0"],
+                privileged,
+            )?;
+            let directories = copy_commit_find_paths(
+                device,
+                root,
+                &["find", root, "-mindepth", "1", "-type", "d", "-print0"],
+                privileged,
+            )?;
+            let files = copy_commit_find_paths(
+                device,
+                root,
+                &["find", root, "-mindepth", "1", "-type", "f", "-print0"],
+                privileged,
+            )?;
+            let links = copy_commit_find_paths(
+                device,
+                root,
+                &["find", root, "-mindepth", "1", "-type", "l", "-print0"],
+                privileged,
+            )?;
+            if !links.is_empty() {
+                return Err(AdbCommandError::CommandFailed {
+                    args: vec!["find".to_string(), root.to_string()],
+                    returncode: 1,
+                    stderr: format!("selected copy tree contains symbolic links: {links:?}"),
+                });
+            }
+            if all.len() != directories.len() + files.len() {
+                return Err(AdbCommandError::CommandFailed {
+                    args: vec!["find".to_string(), root.to_string()],
+                    returncode: 1,
+                    stderr: "selected copy tree contains an unsupported filesystem object"
+                        .to_string(),
+                });
+            }
+
+            let directory_paths = directories
+                .iter()
+                .map(|(full_path, _)| full_path.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let file_paths = files
+                .iter()
+                .map(|(full_path, _)| full_path.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let mut manifest = Vec::with_capacity(all.len());
+            for (full_path, relative_path) in all {
+                let entry_identity =
+                    Some(copy_commit_stat_identity(device, &full_path, privileged)?);
+                if directory_paths.contains(&full_path) {
+                    manifest.push(CopyManifestEntry {
+                        relative_path,
+                        kind: CopyEntryKind::Directory,
+                        sha256: None,
+                        entry_identity,
+                    });
+                } else if file_paths.contains(&full_path) {
+                    let digest = device.run_shell_with_privilege_unchecked(
+                        vec!["sha256sum".to_string(), full_path.clone()],
+                        true,
+                        privileged,
+                        ProcessOperation::Predicate,
+                    )?;
+                    let sha256 = digest
+                        .stdout
+                        .split_whitespace()
+                        .next()
+                        .filter(|value| {
+                            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .ok_or_else(|| AdbCommandError::CommandFailed {
+                            args: digest.args.clone(),
+                            returncode: digest.returncode,
+                            stderr: "sha256sum returned an invalid digest".to_string(),
+                        })?
+                        .to_ascii_lowercase();
+                    manifest.push(CopyManifestEntry {
+                        relative_path,
+                        kind: CopyEntryKind::File,
+                        sha256: Some(sha256),
+                        entry_identity,
+                    });
+                } else {
+                    return Err(AdbCommandError::CommandFailed {
+                        args: vec!["find".to_string(), root.to_string()],
+                        returncode: 1,
+                        stderr: "copy tree entry type changed during inspection".to_string(),
+                    });
+                }
+            }
+            manifest.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+            Ok(manifest)
+        })
+    }
+
+    /// Captures the canonical pathname and device/inode identities of a
+    /// selected directory and its parent for mutation-time revalidation.
+    pub(crate) fn copy_commit_path_binding(
+        &mut self,
+        path: &str,
+    ) -> Result<String, AdbCommandError> {
+        let selected = Path::new(path);
+        if !selected.is_absolute()
+            || selected.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir
+                        | std::path::Component::ParentDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(AdbCommandError::Resolution(
+                "copy commit destination must be absolute and traversal-free".to_string(),
+            ));
+        }
+        let parent = selected
+            .parent()
+            .filter(|parent| *parent != Path::new("/"))
+            .ok_or_else(|| {
+                AdbCommandError::Resolution(
+                    "copy commit destination has no bindable parent".to_string(),
+                )
+            })?;
+        let parent = parent.to_string_lossy().into_owned();
+        let privileged = super::root_requirements::is_app_private_path(path);
+        self.guarded_typed(DeviceCommandEffect::ReadOnly, |device| {
+            if !privileged {
+                copy_commit_require_shell_uid(device)?;
+                copy_commit_verify_sdcard_alias_chain(device, path)?;
+            }
+            let canonical = device.run_shell_with_privilege_unchecked(
+                vec!["readlink".to_string(), "-f".to_string(), path.to_string()],
+                true,
+                privileged,
+                ProcessOperation::Predicate,
+            )?;
+            let canonical_path = canonical.stdout.trim();
+            let expected_canonical = if privileged {
+                path.to_string()
+            } else {
+                copy_commit_expected_canonical_path(path)
+            };
+            if canonical_path != expected_canonical {
+                return Err(AdbCommandError::CommandFailed {
+                    args: canonical.args,
+                    returncode: 1,
+                    stderr: format!(
+                        "selected path resolves to {canonical_path:?}, not expected canonical path {expected_canonical:?}"
+                    ),
+                });
+            }
+            let parent_identity = copy_commit_stat_identity(device, &parent, privileged)?;
+            let selected_identity = copy_commit_stat_identity(device, path, privileged)?;
+            Ok(format!(
+                "{canonical_path}|parent:{parent_identity}|selected:{selected_identity}"
+            ))
+        })
+    }
+
+    /// Creates a single directory without accepting an existing path.
+    pub(crate) fn copy_commit_create_directory(
+        &mut self,
+        path: &str,
+    ) -> Result<(), AdbCommandError> {
+        self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+            device
+                .run_shell_unchecked(
+                    vec!["mkdir".to_string(), path.to_string()],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
+        })
+    }
+
+    /// Removes exactly one empty directory; it never recurses.
+    pub(crate) fn copy_commit_remove_empty_directory(
+        &mut self,
+        path: &str,
+    ) -> Result<(), AdbCommandError> {
+        self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+            device
+                .run_shell_unchecked(
+                    vec!["rmdir".to_string(), path.to_string()],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
+        })
+    }
+
+    /// Installs the ABI-matched one-shot helper beside the reviewed staging
+    /// tree. The helper is used only for manifest-derived selected-root edits.
+    pub(crate) fn copy_commit_prepare_mutation_helper(
+        &mut self,
+        stage_root: &str,
+        helper_path: &str,
+    ) -> Result<(), AdbCommandError> {
+        #[cfg(not(feature = "android-copy-commit-helper"))]
+        {
+            let _ = (stage_root, helper_path);
+            Err(AdbCommandError::Resolution(
+                "selected-root no-follow mutation is unavailable because this build lacks the `android-copy-commit-helper` feature"
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(feature = "android-copy-commit-helper")]
+        {
+            if helper_path != format!("{stage_root}-helper") {
+                return Err(AdbCommandError::Resolution(
+                    "selected-root helper path is outside its reviewed staging identity"
+                        .to_string(),
+                ));
+            }
+            self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+                let abi = device.run_shell_unchecked(
+                    vec!["getprop".to_string(), "ro.product.cpu.abi".to_string()],
+                    true,
+                    ProcessOperation::Predicate,
+                )?;
+            match abi.stdout.trim() {
+                "arm64-v8a" | "x86_64" => {}
+                other => {
+                    return Err(AdbCommandError::Resolution(format!(
+                        "selected-root helper does not include an Android binary for device ABI {other:?} (supported: arm64-v8a, x86_64)"
+                    )));
+                }
+            }
+            let staged_helper = stage_android_copy_commit_helper(abi.stdout.trim())?;
+            let local_helper = staged_helper.path().to_string_lossy().into_owned();
+            device.runner.run(
+                    vec![
+                        "push".to_string(),
+                    local_helper,
+                        helper_path.to_string(),
+                    ],
+                    true,
+                    ProcessOperation::Push,
+                )?;
+                device.run_shell_unchecked(
+                    vec![
+                        "chmod".to_string(),
+                        "700".to_string(),
+                        helper_path.to_string(),
+                    ],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )?;
+                Ok(())
+            })
+        }
+    }
+
+    /// Applies one reviewed manifest entry from a descriptor-anchored
+    /// selected-root directory using the one-shot helper.
+    pub(crate) fn copy_commit_apply_selected_root_mutation(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        expected_entry: &str,
+        mutation: &CopyCommitMutation,
+    ) -> Result<(), AdbCommandError> {
+        #[cfg(not(feature = "android-copy-commit-helper"))]
+        {
+            let _ = (
+                selected_root,
+                destination_binding,
+                stage_root,
+                helper_path,
+                expected_entry,
+                mutation,
+            );
+            Err(AdbCommandError::Resolution(
+                "selected-root no-follow mutation is unavailable because this build lacks the `android-copy-commit-helper` feature"
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(feature = "android-copy-commit-helper")]
+        {
+            let privileged = super::root_requirements::is_app_private_path(selected_root);
+            if !privileged && self.copy_commit_path_binding(selected_root)? != destination_binding {
+                return Err(AdbCommandError::Resolution(
+                    "shared-storage destination identity changed immediately before mutation"
+                        .to_string(),
+                ));
+            }
+            let (action, relative_path, expected_source_sha256) = match mutation {
+                CopyCommitMutation::EnsureDirectory { relative_path } => {
+                    ("ensure-dir", relative_path, None)
+                }
+                CopyCommitMutation::RemoveFile { relative_path } => {
+                    ("remove-file", relative_path, None)
+                }
+                CopyCommitMutation::RemoveDirectory { relative_path } => {
+                    ("remove-dir", relative_path, None)
+                }
+                CopyCommitMutation::PublishFile {
+                    relative_path,
+                    expected_source_sha256,
+                } => (
+                    "publish",
+                    relative_path,
+                    Some(expected_source_sha256.as_str()),
+                ),
+            };
+            let mut helper_arguments = vec![
+                helper_path.to_string(),
+                selected_root.to_string(),
+                destination_binding.to_string(),
+                stage_root.to_string(),
+                action.to_string(),
+                relative_path.to_string(),
+                expected_entry.to_string(),
+            ];
+            if let Some(expected_source_sha256) = expected_source_sha256 {
+                helper_arguments.push(expected_source_sha256.to_string());
+            }
+            self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+                device
+                    .run_shell_with_privilege_unchecked(
+                        helper_arguments,
+                        true,
+                        privileged,
+                        ProcessOperation::ShellMutation,
+                    )
+                    .map(|_| ())
+            })
+        }
+    }
+
+    /// Removes only the temporary helper executable after the selected-root
+    /// operation completes.
+    pub(crate) fn copy_commit_cleanup_mutation_helper(
+        &mut self,
+        helper_path: &str,
+    ) -> Result<(), AdbCommandError> {
+        self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+            device
+                .run_shell_unchecked(
+                    vec!["rm".to_string(), "-f".to_string(), helper_path.to_string()],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
         })
     }
 
@@ -894,7 +1671,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             self.revalidate_root_authority_unchecked()?;
         }
         self.runner.run(
-            vec!["shell".to_string(), build_shell_command(&args, privileged)],
+            vec![
+                "shell".to_string(),
+                build_shell_command_with_mode(&args, privileged, self.root_shell_mode),
+            ],
             check,
             operation,
         )
@@ -907,8 +1687,12 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         let Some(serial) = self.runner.serial.clone() else {
             return Err(AdbCommandError::RootAuthorityUnverified);
         };
-        let outcome =
-            probe_root_typed(&mut self.runner.executor, &self.runner.executable, &serial)?;
+        let outcome = probe_root_typed_with_mode(
+            &mut self.runner.executor,
+            &self.runner.executable,
+            &serial,
+            self.root_shell_mode,
+        )?;
         match root_authority::classify_probe(outcome) {
             Ok(()) => Ok(()),
             Err(error @ AdbCommandError::RootAuthorityRevoked)
@@ -941,6 +1725,173 @@ enum FakeAdbResponse {
     MissingBinary,
     TimedOut,
     ProcessFailed(ProcessFailureKind),
+}
+
+fn copy_commit_require_shell_uid<E: AdbCommandExecutor>(
+    device: &mut RealAdbDevice<E>,
+) -> Result<(), AdbCommandError> {
+    let result = device.run_shell_with_privilege_unchecked(
+        vec!["id".to_string(), "-u".to_string()],
+        true,
+        false,
+        ProcessOperation::Predicate,
+    )?;
+    let uid = result.stdout.trim();
+    if uid != "2000" {
+        return Err(AdbCommandError::CommandFailed {
+            args: result.args,
+            returncode: result.returncode,
+            stderr: format!("shared-storage CopyCommit requires shell UID 2000, got {uid:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn copy_commit_verify_sdcard_alias_chain<E: AdbCommandExecutor>(
+    device: &mut RealAdbDevice<E>,
+    path: &str,
+) -> Result<(), AdbCommandError> {
+    let known_prefixes = ["/sdcard", "/storage/self/primary", "/storage/emulated/0"];
+    let uses_known_alias = known_prefixes.iter().any(|prefix| {
+        path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    });
+    if !uses_known_alias {
+        return Ok(());
+    }
+
+    for (alias, expected) in [
+        ("/sdcard", "/storage/self/primary"),
+        ("/storage/self/primary", "/storage/emulated/0"),
+    ] {
+        let result = device.run_shell_with_privilege_unchecked(
+            vec!["readlink".to_string(), alias.to_string()],
+            true,
+            false,
+            ProcessOperation::Predicate,
+        )?;
+        if result.stdout.trim() != expected {
+            return Err(AdbCommandError::CommandFailed {
+                args: result.args,
+                returncode: 1,
+                stderr: format!(
+                    "unsupported shared-storage alias: {alias:?} must resolve to {expected:?}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn copy_commit_expected_canonical_path(path: &str) -> String {
+    for (alias, canonical) in [
+        ("/sdcard", "/storage/emulated/0"),
+        ("/storage/self/primary", "/storage/emulated/0"),
+    ] {
+        if path == alias {
+            return canonical.to_string();
+        }
+        if let Some(suffix) = path
+            .strip_prefix(alias)
+            .filter(|suffix| suffix.starts_with('/'))
+        {
+            return format!("{canonical}{suffix}");
+        }
+    }
+    path.to_string()
+}
+
+fn copy_commit_find_paths<E: AdbCommandExecutor>(
+    device: &mut RealAdbDevice<E>,
+    root: &str,
+    args: &[&str],
+    privileged: bool,
+) -> Result<Vec<(String, String)>, AdbCommandError> {
+    let result = device.run_shell_with_privilege_unchecked(
+        args.iter()
+            .map(|argument| (*argument).to_string())
+            .collect(),
+        true,
+        privileged,
+        ProcessOperation::Predicate,
+    )?;
+    let bytes = result.stdout.as_bytes();
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        return Err(AdbCommandError::CommandFailed {
+            args: result.args,
+            returncode: result.returncode,
+            stderr: "find returned a non-NUL-terminated manifest".to_string(),
+        });
+    }
+    let prefix = format!("{}/", root.trim_end_matches('/'));
+    let mut paths = Vec::new();
+    for raw_path in bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let full_path = std::str::from_utf8(raw_path)
+            .map_err(|_| AdbCommandError::CommandFailed {
+                args: result.args.clone(),
+                returncode: result.returncode,
+                stderr: "find returned a non-UTF-8 path".to_string(),
+            })?
+            .to_string();
+        let relative_path =
+            full_path
+                .strip_prefix(&prefix)
+                .ok_or_else(|| AdbCommandError::CommandFailed {
+                    args: result.args.clone(),
+                    returncode: result.returncode,
+                    stderr: format!(
+                        "find returned a path outside the selected root: {full_path:?}"
+                    ),
+                })?;
+        let relative = Path::new(relative_path);
+        if relative_path.is_empty()
+            || relative_path.contains(['\n', '\r'])
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(AdbCommandError::CommandFailed {
+                args: result.args.clone(),
+                returncode: result.returncode,
+                stderr: format!("find returned an unsafe selected-tree path: {relative_path:?}"),
+            });
+        }
+        let relative_path = relative_path.to_string();
+        paths.push((full_path, relative_path));
+    }
+    Ok(paths)
+}
+
+fn copy_commit_stat_identity<E: AdbCommandExecutor>(
+    device: &mut RealAdbDevice<E>,
+    path: &str,
+    privileged: bool,
+) -> Result<String, AdbCommandError> {
+    let result = device.run_shell_with_privilege_unchecked(
+        vec![
+            "stat".to_string(),
+            "-c".to_string(),
+            "%d:%i".to_string(),
+            path.to_string(),
+        ],
+        true,
+        privileged,
+        ProcessOperation::Predicate,
+    )?;
+    let identity = result.stdout.trim();
+    if identity.is_empty() || identity.contains(['\n', '\r']) {
+        return Err(AdbCommandError::CommandFailed {
+            args: result.args,
+            returncode: result.returncode,
+            stderr: "stat returned an invalid device/inode identity".to_string(),
+        });
+    }
+    Ok(identity.to_string())
 }
 
 #[cfg(test)]
@@ -1171,19 +2122,34 @@ fn classify_transport_line(line: &str) -> Option<AdbCommandError> {
 }
 
 fn error_string(error: AdbCommandError) -> String {
-    error.to_string()
+    match error {
+        AdbCommandError::CommandFailed { .. } => ADB_COMMAND_FAILURE_MESSAGE.to_string(),
+        error => error.to_string(),
+    }
 }
 
 fn adb_not_found_message() -> String {
     "The configured ADB executable could not be started. Ensure adb is available on PATH or pass an explicit executable when constructing RealAdbDevice.".to_string()
 }
 
-fn build_shell_command(args: &[String], privileged: bool) -> String {
+fn build_shell_command_with_mode(
+    args: &[String],
+    privileged: bool,
+    root_shell_mode: RootShellMode,
+) -> String {
     let command = shell_join(args);
-    if privileged {
-        shell_join(&["su".to_string(), "-c".to_string(), command])
-    } else {
-        command
+    if !privileged {
+        return command;
+    }
+    match root_shell_mode {
+        RootShellMode::SuCommand => shell_join(&["su".to_string(), "-c".to_string(), command]),
+        RootShellMode::SuUserId => shell_join(&[
+            "su".to_string(),
+            "0".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            command,
+        ]),
     }
 }
 
@@ -1218,6 +2184,30 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "android-copy-commit-helper")]
+    #[test]
+    fn packaged_android_helper_materializes_outside_the_cargo_build_tree() {
+        let helper = stage_android_copy_commit_helper("arm64-v8a")
+            .expect("packaged Android helper should materialize for adb push");
+        let bytes = std::fs::read(helper.path()).expect("materialized helper should be readable");
+        let build_output = std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64"));
+
+        assert_eq!(
+            &bytes[..4],
+            b"\x7fELF",
+            "helper payload should be an Android ELF"
+        );
+        assert_ne!(
+            helper.path(),
+            build_output,
+            "ADB must push the packaged payload staged at runtime, not Cargo OUT_DIR"
+        );
+        assert!(
+            !helper.path().starts_with(build_output.parent().unwrap()),
+            "runtime helper payload must not depend on the Cargo build tree"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1534,10 +2524,33 @@ mod tests {
     }
 
     #[test]
-    fn root_probe_uses_exact_serialized_su_id_command_and_grants_uid_zero() {
+    fn root_shell_modes_build_exact_helper_argv_for_both_supported_su_forms() {
+        let helper_argv = vec![
+            "/data/local/tmp/emuchef/t03-copy-helper".to_string(),
+            "--manifest".to_string(),
+            "/data/local/tmp/emuchef/plan.json".to_string(),
+        ];
+
+        let su_command =
+            build_shell_command_with_mode(&helper_argv, true, RootShellMode::SuCommand);
+        assert_eq!(
+            su_command,
+            "su -c '/data/local/tmp/emuchef/t03-copy-helper --manifest /data/local/tmp/emuchef/plan.json'"
+        );
+
+        let su_zero = build_shell_command_with_mode(&helper_argv, true, RootShellMode::SuUserId);
+        assert_eq!(
+            su_zero,
+            "su 0 sh -c '/data/local/tmp/emuchef/t03-copy-helper --manifest /data/local/tmp/emuchef/plan.json'"
+        );
+    }
+
+    #[test]
+    fn root_probe_preserves_su_c_when_uid_and_selinux_context_are_verified() {
         let (outcome, calls) = probe_with(|executor| {
-            executor.push_completed(0, "uid=0(root) gid=0(root) groups=0(root)\n", "");
+            executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
         });
+
         assert_eq!(outcome, RootProbeOutcome::Granted);
         assert_eq!(
             calls,
@@ -1551,6 +2564,169 @@ mod tests {
                 "id",
             ]]
         );
+    }
+
+    #[test]
+    fn root_probe_uses_su_zero_after_su_c_reports_unsupported_syntax() {
+        let (outcome, calls) = probe_with(|executor| {
+            executor.push_completed(1, "", "su: invalid uid/gid '-c'\n");
+            executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
+        });
+
+        assert_eq!(outcome, RootProbeOutcome::Granted);
+        assert_eq!(
+            calls,
+            vec![
+                vec![
+                    "/managed/platform-tools/adb",
+                    "-s",
+                    "opaque-serial",
+                    "shell",
+                    "su",
+                    "-c",
+                    "id",
+                ],
+                vec![
+                    "/managed/platform-tools/adb",
+                    "-s",
+                    "opaque-serial",
+                    "shell",
+                    "su",
+                    "0",
+                    "id",
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn root_probe_does_not_fallback_for_unrecognized_su_c_error() {
+        let (outcome, calls) = probe_with(|executor| {
+            executor.push_completed(1, "", "su: invalid uid '-c'\n");
+        });
+
+        assert!(matches!(outcome, RootProbeOutcome::CheckFailed { .. }));
+        assert_eq!(
+            calls.len(),
+            1,
+            "unrecognized su -c errors must not trigger su 0"
+        );
+    }
+
+    #[test]
+    fn root_probe_fails_closed_when_uid_zero_has_no_verified_selinux_context() {
+        let (outcome, calls) = probe_with(|executor| {
+            executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+        });
+
+        assert!(!matches!(outcome, RootProbeOutcome::Granted));
+        assert_eq!(
+            calls.len(),
+            1,
+            "an incomplete identity must not trigger fallback"
+        );
+    }
+
+    #[test]
+    fn copy_commit_predicate_maps_status_one_to_false_and_rejects_probe_errors() {
+        let result = |returncode, stdout: &str, stderr: &str| AdbCommandResult {
+            args: vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "test -L path".to_string(),
+            ],
+            returncode,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        };
+
+        assert_eq!(
+            copy_commit_predicate_result(&result(0, "", "")),
+            Ok(true),
+            "a successful predicate status is true"
+        );
+        assert_eq!(
+            copy_commit_predicate_result(&result(1, "", "")),
+            Ok(false),
+            "test -L returns 1 for a normal non-symlink result"
+        );
+        assert!(matches!(
+            copy_commit_predicate_result(&result(1, "", "Permission denied")),
+            Err(AdbCommandError::CommandFailed { returncode: 1, .. })
+        ));
+        assert!(matches!(
+            copy_commit_predicate_result(&result(2, "", "")),
+            Err(AdbCommandError::CommandFailed { returncode: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn shared_copy_commit_binding_checks_shell_uid_and_reviewed_sdcard_alias_chain() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "2000\n", "");
+        executor.push_completed(0, "/storage/self/primary\n", "");
+        executor.push_completed(0, "/storage/emulated/0\n", "");
+        executor.push_completed(0, "/storage/emulated/0/ROMs\n", "");
+        executor.push_completed(0, "253:102\n", "");
+        executor.push_completed(0, "253:103\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+        let binding = device
+            .copy_commit_path_binding("/sdcard/ROMs")
+            .expect("reviewed shared ROM path binding should be captured");
+
+        assert_eq!(
+            binding,
+            "/storage/emulated/0/ROMs|parent:253:102|selected:253:103"
+        );
+        let calls = device.command_executor().calls();
+        assert_eq!(
+            calls[0],
+            vec!["adb", "-s", "emulator-5554", "shell", "id -u"]
+        );
+        assert!(calls.iter().any(|call| {
+            call.last()
+                .is_some_and(|command| command.contains("readlink /sdcard"))
+        }));
+        assert!(calls.iter().any(|call| {
+            call.last()
+                .is_some_and(|command| command.contains("readlink /storage/self/primary"))
+        }));
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument == "su")));
+    }
+
+    #[test]
+    fn shared_copy_commit_binding_rejects_non_shell_uid_without_root_fallback() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "0\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+        assert!(device.copy_commit_path_binding("/sdcard/ROMs").is_err());
+
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].last().map(String::as_str), Some("id -u"));
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument == "su")));
+    }
+
+    #[test]
+    fn shared_copy_commit_binding_rejects_unreviewed_sdcard_alias_chain() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "2000\n", "");
+        executor.push_completed(0, "/storage/emulated/0\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+        assert!(device.copy_commit_path_binding("/sdcard/ROMs").is_err());
+
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument == "su")));
     }
 
     #[test]
@@ -1589,7 +2765,7 @@ mod tests {
         let (granted, _) = probe_with(|executor| {
             executor.push_completed(
                 1,
-                "uid=0(root) gid=0(root)\n",
+                "uid=0(root) gid=0(root) context=u:r:su:s0\n",
                 "permission denied for a later diagnostic",
             )
         });
@@ -1734,7 +2910,7 @@ mod tests {
         ] {
             assert!(matches!(
                 checked_error(text, ""),
-                AdbCommandError::CommandFailed
+                AdbCommandError::CommandFailed { .. }
             ));
         }
     }
@@ -1952,10 +3128,91 @@ mod tests {
                 ProcessOperation::GenericFallback,
             );
             assert!(
-                matches!(result, Err(AdbCommandError::CommandFailed)),
+                matches!(result, Err(AdbCommandError::CommandFailed { .. })),
                 "generic command echo must remain ordinary failure: stdout={stdout:?} stderr={stderr:?}"
             );
         }
+    }
+
+    #[test]
+    fn command_failure_diagnostic_is_preserved_internally_without_stdout_payload() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(17, "private stdout payload", "mkdir: Permission denied\n");
+        let mut runner =
+            AdbCommandRunner::with_executor("adb", Some("emulator-5554".into()), executor);
+
+        let error = runner
+            .run(
+                vec![
+                    "shell".to_string(),
+                    "mkdir".to_string(),
+                    "/data/user/0/com.emuchef.fixture/files/assets".to_string(),
+                ],
+                true,
+                ProcessOperation::ShellMutation,
+            )
+            .expect_err("nonzero ADB result should be reported as a command failure");
+        let expected_args = vec![
+            "adb",
+            "-s",
+            "emulator-5554",
+            "shell",
+            "mkdir",
+            "/data/user/0/com.emuchef.fixture/files/assets",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let expected = "The ADB command failed (exit 17): adb -s emulator-5554 shell mkdir /data/user/0/com.emuchef.fixture/files/assets; stderr: mkdir: Permission denied";
+
+        match &error {
+            AdbCommandError::CommandFailed {
+                args,
+                returncode,
+                stderr,
+            } => {
+                assert_eq!(args, &expected_args);
+                assert_eq!(*returncode, 17);
+                assert_eq!(stderr, "mkdir: Permission denied");
+            }
+            other => panic!("expected a structured command failure, got {other:?}"),
+        }
+
+        assert_eq!(error.to_string(), expected);
+        let operation_error = crate::executor::map_adb_error(error);
+        assert_eq!(
+            operation_error.kind,
+            crate::executor::DeviceOperationKind::CommandFailed
+        );
+        assert_eq!(operation_error.message, "The ADB command failed.");
+        assert!(!operation_error.message.contains("emulator-5554"));
+        assert!(!operation_error.message.contains("Permission denied"));
+        assert!(!operation_error.message.contains("private stdout payload"));
+    }
+
+    #[test]
+    fn command_failure_diagnostic_redacts_sensitive_values() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(19, "", "token=stderr-secret\n");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+
+        let error = runner
+            .run(
+                vec![
+                    "shell".to_string(),
+                    "echo".to_string(),
+                    "--token=argument-secret".to_string(),
+                ],
+                true,
+                ProcessOperation::ShellMutation,
+            )
+            .expect_err("nonzero ADB result should be reported as a command failure");
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains("--token=[REDACTED]"));
+        assert!(diagnostic.contains("token=[REDACTED]"));
+        assert!(!diagnostic.contains("argument-secret"));
+        assert!(!diagnostic.contains("stderr-secret"));
     }
 
     #[test]
@@ -2007,6 +3264,31 @@ mod tests {
         assert_eq!(
             probe_root_typed(&mut executor, "adb", "reviewed-serial"),
             Err(AdbCommandError::DeviceUnauthorized)
+        );
+    }
+
+    #[test]
+    fn controlled_review_device_uses_the_fixed_su_zero_route() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_root_shell_route(Some(RootShellRoute::SuZero));
+
+        device
+            .check_root()
+            .expect("the fixed su 0 probe should verify UID 0");
+
+        assert_eq!(
+            device.command_executor().calls(),
+            &[vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "serial".to_string(),
+                "shell".to_string(),
+                "su".to_string(),
+                "0".to_string(),
+                "id".to_string(),
+            ]]
         );
     }
 

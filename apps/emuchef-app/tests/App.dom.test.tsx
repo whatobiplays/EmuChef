@@ -29,7 +29,7 @@ const mockApi = vi.hoisted(() => ({
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
-  createReview: vi.fn(),
+  prepareExecutionReview: vi.fn(),
   discardReview: vi.fn(),
   pickInputPath: vi.fn(),
   pickPlatformToolsZip: vi.fn(),
@@ -1468,7 +1468,7 @@ describe("device qualification controller integration", () => {
 
     // Only the explicit root command caused the reload: no review replacement
     // or execution progress signal was involved.
-    expect(mockApi.createReview).not.toHaveBeenCalled();
+    expect(mockApi.prepareExecutionReview).not.toHaveBeenCalled();
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
   });
 
@@ -1594,7 +1594,7 @@ describe("device qualification controller integration", () => {
       required: false,
       sensitive: false,
     }));
-    mockApi.createReview.mockResolvedValue({
+    mockApi.prepareExecutionReview.mockResolvedValue({
       reviewHandle: "review-opaque",
       setup: { name: "Reviewed setup" },
       target: { label: "Connected Android device" },
@@ -1612,12 +1612,12 @@ describe("device qualification controller integration", () => {
     await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
     await user.click(beginSession);
     await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
-    expect(mockApi.createReview).not.toHaveBeenCalled();
+    expect(mockApi.prepareExecutionReview).not.toHaveBeenCalled();
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await waitFor(() => expect(mockApi.createReview).toHaveBeenCalledTimes(1));
-    expect(mockApi.createReview).toHaveBeenCalledWith(expect.objectContaining({
+    await waitFor(() => expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(1));
+    expect(mockApi.prepareExecutionReview).toHaveBeenCalledWith(expect.objectContaining({
       devicePlan: "plan.supported",
       selectedRecipes: ["recipe.one"],
     }));
@@ -1726,7 +1726,7 @@ describe("Phase 5D input collection and repair", () => {
       }],
       diagnostics: [],
     });
-    mockApi.createReview.mockReturnValue(review.promise);
+    mockApi.prepareExecutionReview.mockReturnValue(review.promise);
     await advanceToInputs(user);
     await user.click(screen.getByRole("button", { name: "Review plan" }));
 
@@ -2263,7 +2263,7 @@ test("an authoritative inventory poll reloads qualification status without a man
     required: false,
     sensitive: false,
   }));
-  mockApi.createReview.mockResolvedValue({
+  mockApi.prepareExecutionReview.mockResolvedValue({
     reviewHandle: "review-opaque",
     setup: { name: "Reviewed setup" },
     target: { label: "Connected Android device" },

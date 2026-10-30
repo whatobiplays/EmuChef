@@ -63,6 +63,23 @@ impl CatalogDescriptor {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_root(root: PathBuf) -> Result<Self, String> {
+        let digest = verify_and_digest(&root)?;
+        Ok(Self {
+            root,
+            identity: CatalogIdentityDto {
+                source_kind: "bundled",
+                source_id: "emuchef.test",
+                version: Some("test".to_string()),
+                content_digest: CatalogDigestDto {
+                    algorithm: "sha256",
+                    value: digest,
+                },
+            },
+        })
+    }
+
     pub fn resolve(app: &AppHandle) -> Result<Self, String> {
         let ordinary_root = if cfg!(debug_assertions) {
             Path::new(env!("CARGO_MANIFEST_DIR"))

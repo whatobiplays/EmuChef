@@ -54,6 +54,8 @@ mod product_catalog;
 pub mod protocol;
 mod raw_request;
 #[cfg(test)]
+mod recipe_qualification_app_target_tests;
+#[cfg(test)]
 mod recipe_qualification_armsx1_emulator_tests;
 #[cfg(test)]
 mod recipe_qualification_armsx1_tests;

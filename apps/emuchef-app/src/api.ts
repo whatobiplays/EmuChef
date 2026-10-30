@@ -102,13 +102,13 @@ export const api = {
     bindings: Record<string, unknown>;
     requestGeneration: number;
   }) => invoke<ConfigurationDescription>("describe_configuration", request),
-  createReview: (request: {
+  prepareExecutionReview: (request: {
     deviceHandle: string;
     devicePlan: string;
     selectedRecipes: string[] | null;
     bindings: Record<string, unknown>;
     requestGeneration: number;
-  }) => invoke<ReviewSummary>("create_review", request),
+  }) => invoke<ReviewSummary>("prepare_execution_review", request),
   discardReview: (reviewHandle: string) => invoke<void>("discard_review", { reviewHandle }),
   startSimulatedExecution: (reviewHandle: string) =>
     invoke<ExecutionSnapshot>("start_simulated_execution", { reviewHandle }),

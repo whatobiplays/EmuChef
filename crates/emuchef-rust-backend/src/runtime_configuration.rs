@@ -47,6 +47,8 @@ pub(crate) struct ConfigurationContextRequest {
 pub(crate) struct RuntimeCapabilityAvailability {
     pub root_shell: bool,
     pub app_data_write: bool,
+    #[serde(default)]
+    pub root_shell_route: Option<crate::planner::RootShellRoute>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -138,6 +140,7 @@ pub struct PlanConfigurationResult {
     pub plan_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) review: Option<ReviewProjection>,
+    pub copy_commit_preparation_required: bool,
     pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
 }
@@ -280,6 +283,7 @@ pub(crate) fn prepare_configuration(
             package_remove_for_user: false,
             root_shell: false,
             app_data_write: false,
+            root_shell_route: None,
         }),
         device_context: request.device_context,
         target_device: request.target_device,
@@ -345,6 +349,7 @@ pub(crate) fn plan_configuration(
             plan: None,
             plan_digest: None,
             review: None,
+            copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
         });
@@ -355,6 +360,7 @@ pub(crate) fn plan_configuration(
             plan: None,
             plan_digest: None,
             review: None,
+            copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
         });
@@ -374,25 +380,38 @@ pub(crate) fn plan_configuration(
             .into_iter()
             .map(|message| planner_result_diagnostic("error", message)),
     );
-    let plan_digest = result
+    let copy_commit_preparation_required = result
         .execution_plan
         .as_ref()
-        .map(crate::plan_digest::execution_plan_digest)
-        .transpose()
-        .map_err(|error| {
-            ConfigurationContextError::Catalog(PlannerLoadError::new(
-                "plan_digest_failed",
-                error.to_string(),
-            ))
-        })?;
-    let review = result
-        .execution_plan
-        .as_ref()
-        .map(|plan| project_review(plan, &diagnostics));
+        .is_some_and(crate::executor::plan_requires_copy_commit_preparation);
+    let plan_digest = if copy_commit_preparation_required {
+        None
+    } else {
+        result
+            .execution_plan
+            .as_ref()
+            .map(crate::plan_digest::execution_plan_digest)
+            .transpose()
+            .map_err(|error| {
+                ConfigurationContextError::Catalog(PlannerLoadError::new(
+                    "plan_digest_failed",
+                    error.to_string(),
+                ))
+            })?
+    };
+    let review = if copy_commit_preparation_required {
+        None
+    } else {
+        result
+            .execution_plan
+            .as_ref()
+            .map(|plan| project_review(plan, &diagnostics))
+    };
     Ok(PlanConfigurationResult {
         plan: result.execution_plan,
         plan_digest,
         review,
+        copy_commit_preparation_required,
         resolved_inputs,
         diagnostics,
     })
@@ -787,6 +806,7 @@ fn all_runtime_capabilities() -> crate::planner::RuntimeCapabilities {
         package_remove_for_user: true,
         root_shell: true,
         app_data_write: true,
+        root_shell_route: None,
     }
 }
 
@@ -962,8 +982,12 @@ fn apply_runtime_capability_availability(
     availability: Option<&RuntimeCapabilityAvailability>,
 ) -> crate::planner::RuntimeCapabilities {
     if let Some(availability) = availability {
-        capabilities.root_shell &= availability.root_shell;
-        capabilities.app_data_write &= availability.app_data_write;
+        let route_is_verified = availability.root_shell_route.is_some();
+        capabilities.root_shell &= availability.root_shell && route_is_verified;
+        capabilities.app_data_write &= availability.app_data_write && route_is_verified;
+        capabilities.root_shell_route = (availability.root_shell && route_is_verified)
+            .then_some(availability.root_shell_route)
+            .flatten();
     }
     capabilities
 }
@@ -1025,6 +1049,7 @@ mod tests {
             package_remove_for_user: true,
             root_shell: true,
             app_data_write: true,
+            root_shell_route: None,
         }
     }
 
@@ -1035,6 +1060,7 @@ mod tests {
             Some(&RuntimeCapabilityAvailability {
                 root_shell: false,
                 app_data_write: false,
+                root_shell_route: None,
             }),
         );
         assert!(!masked.root_shell);
@@ -1063,6 +1089,7 @@ mod tests {
             runtime_capability_availability: Some(RuntimeCapabilityAvailability {
                 root_shell: false,
                 app_data_write: false,
+                root_shell_route: None,
             }),
         })
         .unwrap();
@@ -1070,5 +1097,39 @@ mod tests {
         assert!(!input.runtime_capabilities.root_shell);
         assert!(!input.runtime_capabilities.app_data_write);
         assert!(input.runtime_capabilities.shared_storage_write);
+    }
+
+    #[test]
+    fn runtime_root_route_requires_and_preserves_verified_route() {
+        let masked = apply_runtime_capability_availability(
+            capabilities(),
+            Some(&RuntimeCapabilityAvailability {
+                root_shell: true,
+                app_data_write: true,
+                root_shell_route: None,
+            }),
+        );
+        assert!(!masked.root_shell);
+        assert!(!masked.app_data_write);
+        assert_eq!(masked.root_shell_route, None);
+
+        let selected = apply_runtime_capability_availability(
+            capabilities(),
+            Some(&RuntimeCapabilityAvailability {
+                root_shell: true,
+                app_data_write: true,
+                root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
+            }),
+        );
+        assert!(selected.root_shell);
+        assert!(selected.app_data_write);
+        assert_eq!(
+            selected.root_shell_route,
+            Some(crate::planner::RootShellRoute::SuZero)
+        );
+        assert_eq!(
+            serde_json::to_value(selected).unwrap()["root_shell_route"],
+            "suZero"
+        );
     }
 }
