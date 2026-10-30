@@ -203,6 +203,66 @@ describe("execution recovery actions", () => {
     expect(screen.queryByText(/some device changes completed before this failed result/i)).toBeNull();
   });
 
+  test("successful copy with pending staging cleanup shows an owner-visible warning", () => {
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      status: "succeeded_with_warnings",
+      warnings: [{
+        message: "The copy completed successfully, but temporary staging cleanup is still pending.",
+        remediation: {
+          kind: "view_report",
+          title: "Review temporary storage",
+          message: "The copy completed. Temporary staging cleanup is pending. Check available device storage and contact support if the warning persists.",
+        },
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        classification: "success_with_warnings",
+        counts: {
+          total: 1,
+          completed: 1,
+          skipped: 0,
+          blocked: 0,
+          failed: 0,
+          cancelled: 0,
+          pending: 0,
+        },
+        warningCount: 1,
+      },
+    };
+
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Completed with warnings")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Run notices" })).toBeTruthy();
+    expect(screen.getByText(/copy completed successfully, but temporary staging cleanup is still pending/i)).toBeTruthy();
+    expect(screen.getByText("Review temporary storage:")).toBeTruthy();
+  });
+
   test("real timeout results keep the timeout guidance and fresh-repair boundary", () => {
     const snapshot: RealExecutionSnapshot = {
       ...failedSnapshot(),

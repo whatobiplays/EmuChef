@@ -283,6 +283,7 @@ fn capabilities_include_additive_product_runtime_surface() {
             "closeUserConfiguration",
             "describeConfiguration",
             "planConfiguration",
+            "prepareExecutionReview",
             "startExecution",
             "getExecution",
             "getExecutionEvents",

@@ -190,6 +190,37 @@ impl AdbManager {
         manager
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_installation(root: PathBuf) -> Self {
+        Self {
+            current: Some(ResolvedAdb {
+                path: root.join("adb"),
+                version: "test".to_string(),
+                warning: None,
+                managed_relative_path: None,
+            }),
+            root,
+            last_error: None,
+            revision: 1,
+        }
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "real-execution"))]
+    pub(crate) fn with_verified_test_installation(
+        root: PathBuf,
+        path: PathBuf,
+    ) -> Result<Self, String> {
+        let current = validate_development_adb(&path, &RealProcessExecutor).map_err(|_| {
+            "The test Platform-Tools executable could not be validated.".to_string()
+        })?;
+        Ok(Self {
+            root,
+            current: Some(current),
+            last_error: None,
+            revision: 1,
+        })
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }

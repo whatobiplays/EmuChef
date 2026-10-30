@@ -1011,6 +1011,12 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
         })?,
         None => Vec::new(),
     };
+    let copy_commit_snapshots = match data.get(yaml_key("copy_commit_snapshots")) {
+        Some(value) => serde_json::from_value(yaml_to_json(value)?).map_err(|error| {
+            CliError::Message(format!("Invalid reviewed copy snapshots: {error}"))
+        })?,
+        None => Vec::new(),
+    };
     Ok(ExecutionPlan {
         id: required_string(data, "id")?,
         source: ExecutionPlanSource {
@@ -1027,6 +1033,7 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
         recipes,
         apps,
         resolved_inputs,
+        copy_commit_snapshots,
         target_device: data
             .get(yaml_key("target_device"))
             .map(parse_target_device)
@@ -1037,6 +1044,14 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
             android_version: required_i64(device_context, "android_version")?,
             android_api_level: optional_i64(device_context, "android_api_level")?,
             device_tags: string_list(device_context, "device_tags")?,
+            root_shell_mode: device_context
+                .get(yaml_key("root_shell_mode"))
+                .map(|value| {
+                    serde_json::from_value(yaml_to_json(value)?).map_err(|error| {
+                        CliError::Message(format!("Invalid reviewed root shell mode: {error}"))
+                    })
+                })
+                .transpose()?,
         },
         runtime_capabilities: RuntimeCapabilities {
             adb_available: required_bool(runtime_capabilities, "adb_available")?,
@@ -1050,6 +1065,14 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
             )?,
             root_shell: required_bool(runtime_capabilities, "root_shell")?,
             app_data_write: required_bool(runtime_capabilities, "app_data_write")?,
+            root_shell_route: runtime_capabilities
+                .get(yaml_key("root_shell_route"))
+                .map(|value| {
+                    serde_json::from_value(yaml_to_json(value)?).map_err(|error| {
+                        CliError::Message(format!("Invalid reviewed root shell route: {error}"))
+                    })
+                })
+                .transpose()?,
         },
         inputs: parse_inputs(data)?,
         artifacts: parse_artifacts(data)?,

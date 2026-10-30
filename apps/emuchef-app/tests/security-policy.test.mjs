@@ -772,7 +772,7 @@ test("Phase 6D.6 UI-smoke qualification is gate-first and exposes only opaque ha
   assert.match(shell, /data-development-qualification="phase6d6-ui-smoke"/);
   assert.doesNotMatch(
     shell,
-    /startRealExecution|launchConfiguredApp|executionCapabilities|pollDevices|probeDevice|createReview/,
+  /startRealExecution|launchConfiguredApp|executionCapabilities|pollDevices|probeDevice|prepareExecutionReview/,
   );
 
   const qualificationScript = scripts["tauri:dev:phase6d6-ui-smoke"];

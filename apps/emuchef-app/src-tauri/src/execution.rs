@@ -1211,6 +1211,21 @@ pub fn start_real_execution(
     request: Value,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    start_real_execution_with_monitor(request, &state, move |execution_handle| {
+        spawn_real_execution_terminal_monitor(app, execution_handle);
+    })
+}
+
+/// Run the real-apply command flow while leaving terminal-monitor scheduling
+/// injectable for headless Tauri command tests.
+pub(crate) fn start_real_execution_with_monitor<F>(
+    request: Value,
+    state: &AppState,
+    spawn_monitor: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(String),
+{
     if !cfg!(feature = "real-execution") {
         return Err(safe_error(
             "real_execution_disabled",
@@ -1234,7 +1249,7 @@ pub fn start_real_execution(
             )
         })?;
     let admission_fence = match crate::qualification_session::capture_execution_admission_fence(
-        &state,
+        state,
         &request.review_handle,
     ) {
         Ok(fence) => fence,
@@ -1245,7 +1260,7 @@ pub fn start_real_execution(
     };
     match start_real_execution_inner(
         &request.review_handle,
-        &state,
+        state,
         &mut executions,
         admission_fence,
     ) {
@@ -1257,7 +1272,7 @@ pub fn start_real_execution(
                 .and_then(Value::as_str)
                 .map(str::to_string)
             {
-                spawn_real_execution_terminal_monitor(app, execution_handle);
+                spawn_monitor(execution_handle);
             }
             Ok(public)
         }
@@ -3825,6 +3840,10 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
         "missing_capability" => (internal, "The device lacks a required capability."),
         "step_conflict" => (internal, "Conflicting work prevented this operation."),
         "operation_timed_out" => (internal, "A device operation timed out."),
+        "copy_staging_cleanup_pending" => (
+            internal,
+            "The copy completed successfully, but temporary staging cleanup is still pending.",
+        ),
         "device_storage_exhausted" => (internal, "The device ran out of storage during execution."),
         "device_offline" => (
             internal,
@@ -3861,10 +3880,14 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
         "execution_worker_panicked" => (internal, "The execution worker stopped unexpectedly."),
         _ => ("execution_issue", "Execution reported an issue."),
     };
-    let message = issue_action_context(mapping, issue).map_or_else(
-        || message.to_string(),
-        |(feature, action)| format!("{action} in {feature} did not complete. {message}"),
-    );
+    let message = if internal == "copy_staging_cleanup_pending" {
+        message.to_string()
+    } else {
+        issue_action_context(mapping, issue).map_or_else(
+            || message.to_string(),
+            |(feature, action)| format!("{action} in {feature} did not complete. {message}"),
+        )
+    };
     json!({
         "message": message,
         "remediation": remediation_for_code(code),
@@ -3916,6 +3939,11 @@ fn action_context_for_step_id(
 
 fn remediation_for_code(code: &str) -> Value {
     let (kind, title, message) = match code {
+        "copy_staging_cleanup_pending" => (
+            "view_report",
+            "Review temporary storage",
+            "The copy completed. Temporary staging cleanup is pending. Check available device storage and contact support if the warning persists.",
+        ),
         "artifact_tls_verification_failed"
         | "artifact_digest_mismatch"
         | "artifact_size_mismatch"
@@ -5446,6 +5474,39 @@ pub(crate) mod tests {
         );
         assert_eq!(projected["remediation"]["kind"], "generate_fresh_plan");
         assert!(!projected.to_string().contains("private timeout detail"));
+    }
+
+    #[test]
+    fn copy_cleanup_warning_projects_successful_deployment_and_safe_guidance() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let projected = project_real_issue(
+            &mapping,
+            &json!({
+                "code": "copy_staging_cleanup_pending",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/copy",
+                "message": "cleanup pending staging path /private/tmp/emuchef-copy-stage: permission denied"
+            }),
+        );
+
+        let message = projected["message"].as_str().unwrap();
+        assert!(message.contains("copy completed successfully"));
+        assert!(message.contains("cleanup is still pending"));
+        assert!(!message.contains("did not complete"));
+        assert!(!projected
+            .to_string()
+            .contains("/private/tmp/emuchef-copy-stage"));
+        assert_eq!(projected["remediation"]["kind"], "view_report");
+        assert_eq!(
+            projected["remediation"]["title"],
+            "Review temporary storage"
+        );
     }
 
     #[test]
@@ -11373,12 +11434,24 @@ pub(crate) mod tests {
             requests: Mutex::new(Vec::new()),
             result: Ok(json!({ "execution": { "executionId": "private" } })),
         };
-        let retained = review();
+        let mut retained = review();
+        retained.response["plan"]["copy_commit_snapshots"] = json!([{
+            "destinationBinding": "reviewed-device-parent-and-tree-identity",
+            "sourceManifest": [{ "relativePath": "new.rom", "kind": "file", "size": 7 }],
+            "destinationBeforeManifest": [{ "relativePath": "stale.rom", "kind": "file", "size": 9 }],
+            "reviewedDeletionSet": ["stale.rom"]
+        }]);
+        retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
         request_real_start(&runtime, &retained).unwrap();
         let requests = runtime.requests.lock().unwrap();
         assert_eq!(requests[0].0, "startExecution");
         assert_eq!(requests[0].1["mode"], "real");
         assert_eq!(requests[0].1["plan"], retained.response["plan"]);
+        assert_eq!(
+        requests[0].1["plan"]["copy_commit_snapshots"],
+        retained.response["plan"]["copy_commit_snapshots"],
+        "Apply must use the exact destination binding, manifest, and deletion list retained by review"
+    );
         assert_eq!(requests[0].1["planDigest"], retained.plan_digest);
         assert_eq!(requests[0].1["targetDevice"], retained.target);
         for forbidden in ["adbPath", "runtimeRoot", "cacheRoot", "artifactPath"] {

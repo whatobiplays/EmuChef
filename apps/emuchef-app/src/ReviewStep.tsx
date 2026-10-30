@@ -25,14 +25,24 @@ export function ReviewStep({
   onStartSimulation,
 }: ReviewStepProps) {
   const executionStarting = executionKind === "starting";
-  const startDisabled = busy || executionStarting || reviewStale || !review.canExecute;
-  const realStartDisabled = startDisabled
-    || (qualification !== undefined && qualification?.state !== "supported");
-  const targetIdentity = [review.target.manufacturer, review.target.model].filter(Boolean).join(" ");
+  const startDisabled =
+    busy || executionStarting || reviewStale || !review.canExecute;
+  const realStartDisabled =
+    startDisabled ||
+    (qualification !== undefined && qualification?.state !== "supported");
+  const targetIdentity = [review.target.manufacturer, review.target.model]
+    .filter(Boolean)
+    .join(" ");
   const androidDetails = [
-    review.target.androidVersion === undefined ? null : `Android ${review.target.androidVersion}`,
-    review.target.androidApiLevel === undefined ? null : `API ${review.target.androidApiLevel}`,
-  ].filter(Boolean).join(" · ");
+    review.target.androidVersion === undefined
+      ? null
+      : `Android ${review.target.androidVersion}`,
+    review.target.androidApiLevel === undefined
+      ? null
+      : `API ${review.target.androidApiLevel}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <>
@@ -46,10 +56,16 @@ export function ReviewStep({
         </p>
       )}
       {reviewStale && (
-        <section className="simulation-banner" role="alert" aria-labelledby="stale-review-heading">
+        <section
+          className="simulation-banner"
+          role="alert"
+          aria-labelledby="stale-review-heading"
+        >
           <h3 id="stale-review-heading">Review is out of date</h3>
           <p>
-            This plan belongs to an earlier attempt and cannot be run again. Return to setup and repair the saved choices to generate a fresh plan and review.
+            This plan belongs to an earlier attempt and cannot be run again.
+            Return to setup and repair the saved choices to generate a fresh
+            plan and review.
           </p>
         </section>
       )}
@@ -62,35 +78,154 @@ export function ReviewStep({
         </p>
       </section>
       {review.inputs.length > 0 && (
-        <section className="review-inputs" aria-labelledby="selected-options-heading">
+        <section
+          className="review-inputs"
+          aria-labelledby="selected-options-heading"
+        >
           <h3 id="selected-options-heading">Selected options</h3>
           <dl>
             {review.inputs.map((input, index) => (
               <div key={`${input.label}-${index}`}>
                 <dt>{input.label}</dt>
-                <dd>{input.summary}{input.required ? " · Required" : ""}</dd>
+                <dd>
+                  {input.summary}
+                  {input.required ? " · Required" : ""}
+                </dd>
               </div>
             ))}
           </dl>
         </section>
       )}
       {review.features.map((feature, featureIndex) => (
-        <article className="review-group" key={`${feature.name}-${featureIndex}`}>
+        <article
+          className="review-group"
+          key={`${feature.name}-${featureIndex}`}
+        >
           <h3>
             {feature.name}
-            {feature.automaticallyAdded && <small> · Added automatically</small>}
+            {feature.automaticallyAdded && (
+              <small> · Added automatically</small>
+            )}
           </h3>
           {feature.description && <p>{feature.description}</p>}
           {feature.sections.map((section) => (
-            <section key={section.kind} aria-labelledby={`feature-${featureIndex}-${section.kind}`}>
-              <h4 id={`feature-${featureIndex}-${section.kind}`}>{section.label}</h4>
+            <section
+              key={section.kind}
+              aria-labelledby={`feature-${featureIndex}-${section.kind}`}
+            >
+              <h4 id={`feature-${featureIndex}-${section.kind}`}>
+                {section.label}
+              </h4>
               <ol>
                 {section.actions.map((action, actionIndex) => (
                   <li key={`${action.title}-${actionIndex}`}>
                     <strong>{action.title}</strong>
                     {action.description && <span>{action.description}</span>}
-                    {action.requirement === "conditional" && <em>Conditional</em>}
-                    {action.deviceLocation && <small>Destination: {action.deviceLocation}</small>}
+                    {action.requirement === "conditional" && (
+                      <em>Conditional</em>
+                    )}
+                    {action.deviceLocation && (
+                      <small>Destination: {action.deviceLocation}</small>
+                    )}
+                    {action.copyChanges && (
+                      <section aria-label="Copy changes">
+                        <h5>Copy changes</h5>
+                        <dl>
+                          <div>
+                            <dt>Selected boundary</dt>
+                            <dd>
+                              <code>{action.copyChanges.selectedBoundary}</code>
+                            </dd>
+                          </div>
+                        </dl>
+                        <p aria-label="Copy operation totals">
+                          <span>
+                            {action.copyChanges.additions.length} additions
+                          </span>
+                          {" · "}
+                          <span>
+                            {action.copyChanges.replacements.length}{" "}
+                            replacements
+                          </span>
+                          {" · "}
+                          <span>
+                            {action.copyChanges.deletions.length} deletions
+                          </span>
+                        </p>
+                        {[
+                          {
+                            label: "Additions",
+                            entries: action.copyChanges.additions,
+                          },
+                          {
+                            label: "Replacements",
+                            entries: action.copyChanges.replacements,
+                          },
+                          {
+                            label: "Deletions",
+                            entries: action.copyChanges.deletions,
+                          },
+                        ].map(
+                          ({ label, entries }) =>
+                            entries.length > 0 && (
+                              <section
+                                aria-label={`${label} summary`}
+                                key={`${label}-summary`}
+                              >
+                                <strong>{label}</strong>
+                                <ul>
+                                  {entries
+                                    .slice(0, 2)
+                                    .map((entry, entryIndex) => (
+                                      <li key={`${entry}-${entryIndex}`}>
+                                        {entry}
+                                      </li>
+                                    ))}
+                                </ul>
+                                {entries.length > 2 && (
+                                  <p>{entries.length - 2} more</p>
+                                )}
+                              </section>
+                            ),
+                        )}
+                        {action.copyChanges.additions.length +
+                          action.copyChanges.replacements.length +
+                          action.copyChanges.deletions.length >
+                          0 && (
+                          <details>
+                            <summary>Show all copy changes</summary>
+                            {[
+                              {
+                                label: "Additions",
+                                entries: action.copyChanges.additions,
+                              },
+                              {
+                                label: "Replacements",
+                                entries: action.copyChanges.replacements,
+                              },
+                              {
+                                label: "Deletions",
+                                entries: action.copyChanges.deletions,
+                              },
+                            ].map(
+                              ({ label, entries }) =>
+                                entries.length > 0 && (
+                                  <section aria-label={label} key={label}>
+                                    <h6>{label}</h6>
+                                    <ul>
+                                      {entries.map((entry, entryIndex) => (
+                                        <li key={`${entry}-${entryIndex}`}>
+                                          {entry}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </section>
+                                ),
+                            )}
+                          </details>
+                        )}
+                      </section>
+                    )}
                   </li>
                 ))}
               </ol>
@@ -109,13 +244,19 @@ export function ReviewStep({
         </section>
       ))}
       <p>
-        {review.work.actionCount} {review.work.actionCount === 1 ? "action" : "actions"}
-        {review.work.knownWaitSeconds !== undefined && ` · ${review.work.knownWaitSeconds} seconds of known waits`}
+        {review.work.actionCount}{" "}
+        {review.work.actionCount === 1 ? "action" : "actions"}
+        {review.work.knownWaitSeconds !== undefined &&
+          ` · ${review.work.knownWaitSeconds} seconds of known waits`}
       </p>
       <div className="button-row">
-        <button className="secondary" onClick={onBack}>Back</button>
+        <button className="secondary" onClick={onBack}>
+          Back
+        </button>
         <button
-          aria-describedby={startDisabled ? "execution-start-reason" : undefined}
+          aria-describedby={
+            startDisabled ? "execution-start-reason" : undefined
+          }
           disabled={startDisabled}
           onClick={onStartSimulation}
         >
@@ -137,14 +278,18 @@ export function ReviewStep({
             ? "This reviewed plan is out of date. Repair the setup and generate a fresh review before running again."
             : !review.canExecute
               ? "This plan contains work EmuChef cannot review safely. Update EmuChef or the setup catalog before continuing."
-            : "The installation is already being prepared."}
+              : "The installation is already being prepared."}
         </p>
       )}
-      {!startDisabled && realStartDisabled && realExecutionCompiled && qualification !== undefined && (
-        <p className="disabled-reason" id="execution-start-reason">
-          Complete the current device qualification before applying this setup.
-        </p>
-      )}
+      {!startDisabled &&
+        realStartDisabled &&
+        realExecutionCompiled &&
+        qualification !== undefined && (
+          <p className="disabled-reason" id="execution-start-reason">
+            Complete the current device qualification before applying this
+            setup.
+          </p>
+        )}
     </>
   );
 }

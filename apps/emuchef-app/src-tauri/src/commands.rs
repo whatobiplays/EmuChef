@@ -1465,8 +1465,34 @@ pub fn describe_configuration(
     Ok(public)
 }
 
+/// Prepare one plan through the trusted sidecar before it is projected to React
+/// or retained for execution. The prepared response carries the exact plan,
+/// digest, selected-tree snapshots, and backend-authored review.
+fn plan_and_prepare_execution_review<F>(payload: Value, request: &mut F) -> Result<Value, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    let target_device = payload.get("targetDevice").cloned().unwrap_or(Value::Null);
+    let plan_configuration = request("planConfiguration", payload)?;
+    let Some(plan) = plan_configuration
+        .get("plan")
+        .filter(|value| !value.is_null())
+        .cloned()
+    else {
+        return Ok(plan_configuration);
+    };
+    request(
+        "prepareExecutionReview",
+        json!({
+            "plan": plan,
+            "mode": "real",
+            "targetDevice": target_device
+        }),
+    )
+}
+
 #[tauri::command]
-pub fn create_review(
+pub fn prepare_execution_review(
     device_handle: String,
     device_plan: String,
     selected_recipes: Option<Vec<String>>,
@@ -1474,6 +1500,30 @@ pub fn create_review(
     request_generation: u64,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let sidecar = &state.sidecar;
+    prepare_execution_review_with_runtime(
+        device_handle,
+        device_plan,
+        selected_recipes,
+        bindings,
+        request_generation,
+        &state,
+        &mut |operation, payload| sidecar.request(operation, payload),
+    )
+}
+
+fn prepare_execution_review_with_runtime<F>(
+    device_handle: String,
+    device_plan: String,
+    selected_recipes: Option<Vec<String>>,
+    bindings: HashMap<String, Value>,
+    request_generation: u64,
+    state: &AppState,
+    request: &mut F,
+) -> Result<Value, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
     state
         .input_contracts
         .lock()
@@ -1503,7 +1553,7 @@ pub fn create_review(
         ));
     }
     let payload = configuration_payload(
-        &state,
+        state,
         &device_handle,
         &device_plan,
         selected_recipes,
@@ -1517,15 +1567,12 @@ pub fn create_review(
         .get("catalog")
         .cloned()
         .expect("configuration payload always binds a catalog");
-    let result = state
-        .sidecar
-        .request("planConfiguration", payload)
-        .map_err(|_| {
-            safe_error(
-                "review_generation_failed",
-                "The reviewed plan could not be generated.",
-            )
-        })?;
+    let result = plan_and_prepare_execution_review(payload, request).map_err(|_| {
+        safe_error(
+            "review_generation_failed",
+            "The reviewed plan could not be generated.",
+        )
+    })?;
     let plan = result
         .get("plan")
         .filter(|value| !value.is_null())
@@ -1586,7 +1633,7 @@ pub fn create_review(
         created: Instant::now(),
         last_access: Instant::now(),
     };
-    let transition = qualification_transition_lock(&state);
+    let transition = qualification_transition_lock(state);
     let mut handles = state.handles.lock().map_err(|_| {
         safe_error(
             "session_state_unavailable",
@@ -1610,7 +1657,7 @@ pub fn create_review(
     let review_handle = handles.insert_review(snapshot.clone());
     drop(handles);
     crate::qualification_session::observe_in_transition(
-        &state,
+        state,
         crate::qualification_session::QualificationLifecycleObservation::ReviewCreated(Box::new(
             crate::qualification_session::review_observation(&review_handle, &snapshot),
         )),
@@ -1982,26 +2029,31 @@ fn configuration_payload(
             )
         })?
         .qualification_context(device_handle);
-    let root_granted = state
-        .root_qualification
-        .lock()
-        .map_err(|_| {
+    let root_key = qualification_context
+        .as_ref()
+        .map(RootQualificationKey::from_context)
+        .unwrap_or_else(|| RootQualificationKey::new(device_handle, 0, 0));
+    let (root_granted, root_shell_route) = {
+        let root_store = state.root_qualification.lock().map_err(|_| {
             safe_error(
                 "qualification_state_unavailable",
                 "Device qualification state is unavailable.",
             )
-        })?
-        .get(
-            &qualification_context
-                .as_ref()
-                .map(RootQualificationKey::from_context)
-                .unwrap_or_else(|| RootQualificationKey::new(device_handle, 0, 0)),
+        })?;
+        let route = root_store.root_shell_route(&root_key);
+        (
+            root_store.get(&root_key) == Some(RootQualificationState::Granted) && route.is_some(),
+            route,
         )
-        .is_some_and(|result| result == RootQualificationState::Granted);
-    payload["runtimeCapabilityAvailability"] = json!({
+    };
+    let mut runtime_capabilities = json!({
         "rootShell": root_granted,
         "appDataWrite": root_granted,
     });
+    if let Some(route) = root_shell_route.filter(|_| root_granted) {
+        runtime_capabilities["rootShellRoute"] = json!(route);
+    }
+    payload["runtimeCapabilityAvailability"] = runtime_capabilities;
     Ok(payload)
 }
 
@@ -2626,6 +2678,41 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "real-execution")]
+    struct SyntheticAppPackageCleanup {
+        adb_path: std::path::PathBuf,
+        serial: String,
+    }
+
+    #[cfg(feature = "real-execution")]
+    impl Drop for SyntheticAppPackageCleanup {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new(&self.adb_path)
+                .args([
+                    "-s",
+                    self.serial.as_str(),
+                    "shell",
+                    "pm",
+                    "uninstall",
+                    "--user",
+                    "0",
+                ])
+                .arg("com.emuchef.fixture")
+                .output();
+        }
+    }
+
+    #[cfg(feature = "real-execution")]
+    fn find_copy_changes(value: &Value) -> Option<&Value> {
+        match value {
+            Value::Object(object) => object
+                .get("copyChanges")
+                .or_else(|| object.values().find_map(find_copy_changes)),
+            Value::Array(items) => items.iter().find_map(find_copy_changes),
+            _ => None,
+        }
+    }
+
     fn reset_test_state(root: &std::path::Path) -> AppState {
         AppState {
             sidecar: SidecarState::new(root.join("sidecar-cache")),
@@ -2658,6 +2745,488 @@ mod tests {
                 .expect("production update document should be valid in tests"),
             update_activity: crate::updates::ActivityGate::default(),
         }
+    }
+
+    #[test]
+    fn production_review_bridge_fails_closed_without_root_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|candidate| {
+                candidate
+                    .join("tests/fixtures/t03_app_target/authored")
+                    .is_dir()
+            })
+            .expect("repository should contain the synthetic App Target fixture");
+        let catalog_root = repository_root.join("tests/fixtures/t03_app_target/authored");
+        let source_root = root.join("selected-source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(source_root.join("selected.rom"), b"selected source tree\n").unwrap();
+
+        let runtime_root = root.join("sidecar-runtime");
+        let cache_root = root.join("sidecar-cache");
+        let mut state = reset_test_state(root);
+        state.sidecar = SidecarState::with_test_backend(
+            cache_root.clone(),
+            emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                runtime_root,
+                cache_root,
+                adb_path: "unused-test-adb".to_string(),
+            },
+        );
+        state.catalog = CatalogDescriptor::for_test_root(catalog_root);
+        state.adb = Mutex::new(crate::adb::AdbManager::with_test_installation(
+            root.join("platform-tools"),
+        ));
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "synthetic-app-target-device",
+                        "state": "available",
+                        "transportId": "synthetic-app-target-transport",
+                        "model": "Synthetic App Target"
+                    }]
+                }))
+                .unwrap();
+            let device_handle = handles.single_available_device_handle().unwrap();
+            handles
+                .set_facts(
+                    &device_handle,
+                    json!({
+                        "manufacturer": "EmuChef",
+                        "model": "Synthetic App Target",
+                        "android_version": 14,
+                        "android_api_level": 34
+                    }),
+                )
+                .unwrap();
+            device_handle
+        };
+        assert!(state
+            .input_contracts
+            .lock()
+            .unwrap()
+            .replace(1, &json!({ "inputs": [] })));
+
+        let sidecar = &state.sidecar;
+        let mut plan_request = None;
+        let mut plan_response = None;
+        let review_result = prepare_execution_review_with_runtime(
+            device_handle,
+            "t03.copy_fixture.base".to_string(),
+            Some(vec!["t03.copy_app_target".to_string()]),
+            HashMap::from([
+                (
+                    "t03.copy_app_target/source".to_string(),
+                    json!(source_root.to_string_lossy().into_owned()),
+                ),
+                ("t03.copy_app_target/policy".to_string(), json!("merge")),
+            ]),
+            1,
+            &state,
+            &mut |operation, payload| {
+                if operation == "planConfiguration" {
+                    plan_request = Some(payload.clone());
+                }
+                let response = sidecar.request(operation, payload);
+                if operation == "planConfiguration" {
+                    plan_response = Some(response.clone());
+                }
+                response
+            },
+        );
+
+        let error =
+            review_result.expect_err("App Target planning must require live root preflight");
+        assert!(error.contains("review_not_ready"), "{error}");
+        let plan_request = plan_request.expect("the bridge should send a planner request");
+        assert_eq!(
+            plan_request["runtimeCapabilityAvailability"],
+            json!({ "rootShell": false, "appDataWrite": false }),
+            "missing root preflight must remain unavailable to the trusted planner"
+        );
+        let plan_response = plan_response
+            .expect("the planner response should be captured")
+            .expect("the sidecar should return the fail-closed planner result");
+        assert!(plan_response["plan"].is_null());
+        assert_eq!(
+            plan_response["diagnostics"][0]["code"],
+            "empty_execution_plan"
+        );
+    }
+
+    #[cfg(feature = "real-execution")]
+    #[test]
+    #[ignore = "requires the authorized emulator-5554 AVD and its verified su 0 route"]
+    fn controlled_avd_tauri_review_retains_copy_manifest_for_real_apply() {
+        const SERIAL: &str = "emulator-5554";
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|candidate| {
+                candidate
+                    .join("tests/fixtures/t03_app_target/authored")
+                    .is_dir()
+            })
+            .expect("repository should contain the synthetic App Target fixture");
+        let catalog_root = repository_root.join("tests/fixtures/t03_app_target/authored");
+        let source_root = root.join("selected-source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(source_root.join("selected.rom"), b"selected source tree\n").unwrap();
+
+        let adb_path = std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH should identify the authorized ADB binary"),
+        )
+        .map(|directory| directory.join("adb"))
+        .find(|candidate| candidate.is_file())
+        .expect("the authorized Android platform-tools ADB should be installed");
+        let platform_tools_root = adb_path
+            .parent()
+            .expect("ADB binary should have a platform-tools directory")
+            .to_path_buf();
+        let adb_path_string = adb_path.to_string_lossy().into_owned();
+        let runtime_root = root.join("sidecar-runtime");
+        let cache_root = root.join("sidecar-cache");
+        let mut state = reset_test_state(root);
+        state.sidecar = SidecarState::with_test_backend(
+            cache_root.clone(),
+            emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                runtime_root,
+                cache_root,
+                adb_path: adb_path_string.clone(),
+            },
+        );
+        state.catalog = CatalogDescriptor::for_test_root(catalog_root);
+        state.adb = Mutex::new(
+            crate::adb::AdbManager::with_verified_test_installation(
+                platform_tools_root,
+                adb_path.clone(),
+            )
+            .expect("the controlled AVD must use the validated installed ADB binary"),
+        );
+        assert!(state
+            .input_contracts
+            .lock()
+            .unwrap()
+            .replace(1, &json!({ "inputs": [] })));
+
+        let run_shell_probe = |arguments: &[&str]| {
+            let output = std::process::Command::new(&adb_path)
+                .args(["-s", SERIAL, "shell"])
+                .args(arguments)
+                .output()
+                .expect("ADB shell probe should start");
+            assert!(
+                output.status.success(),
+                "ADB shell probe failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        assert_eq!(run_shell_probe(&["id", "-u"]), "2000");
+        assert_eq!(run_shell_probe(&["id", "-Z"]), "u:r:shell:s0");
+        assert_eq!(run_shell_probe(&["su", "0", "id", "-u"]), "0");
+        assert_eq!(run_shell_probe(&["su", "0", "id", "-Z"]), "u:r:su:s0");
+        assert_eq!(run_shell_probe(&["getenforce"]), "Enforcing");
+
+        let fixture_apk = root.join("t03-copy-fixture.apk");
+        let build_apk = std::process::Command::new("bash")
+            .arg(repository_root.join("scripts/build-t03-app-target-fixture.sh"))
+            .args(["--output"])
+            .arg(&fixture_apk)
+            .output()
+            .expect("the source-built synthetic App Target fixture should start building");
+        assert!(
+            build_apk.status.success(),
+            "synthetic fixture APK build failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&build_apk.stdout),
+            String::from_utf8_lossy(&build_apk.stderr)
+        );
+        let install = std::process::Command::new(&adb_path)
+            .args(["-s", SERIAL, "install", "-r"])
+            .arg(&fixture_apk)
+            .output()
+            .expect("ADB should install only the synthetic fixture APK");
+        assert!(
+            install.status.success(),
+            "synthetic fixture install failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&install.stdout),
+            String::from_utf8_lossy(&install.stderr)
+        );
+        let _fixture_cleanup = SyntheticAppPackageCleanup {
+            adb_path: adb_path.clone(),
+            serial: SERIAL.to_string(),
+        };
+        let launch = std::process::Command::new(&adb_path)
+            .args([
+                "-s",
+                SERIAL,
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-n",
+                "com.emuchef.fixture/org.emuchef.t03.copyfixture.FixtureActivity",
+            ])
+            .output()
+            .expect("ADB should launch the synthetic fixture activity");
+        assert!(
+            launch.status.success(),
+            "synthetic fixture launch failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&launch.stdout),
+            String::from_utf8_lossy(&launch.stderr)
+        );
+
+        let passive = crate::device_observation::refresh_current_qualification(&state, None)
+            .expect("the actual AVD should pass device qualification preflight");
+        assert_eq!(
+            passive.snapshot.state,
+            crate::device_observation::DeviceQualificationState::Supported
+        );
+        let device_handle = state
+            .handles
+            .lock()
+            .unwrap()
+            .single_available_device_handle()
+            .expect("the preflight should reconcile exactly one available AVD");
+        let serial = state
+            .handles
+            .lock()
+            .unwrap()
+            .device(&device_handle)
+            .unwrap()
+            .serial
+            .clone();
+        assert_eq!(
+            serial, SERIAL,
+            "the controlled test must not select another device"
+        );
+
+        let root_observation =
+            crate::device_qualification::check_device_root_observation(&device_handle, &state)
+                .expect("the production root preflight should use the verified su 0 route");
+        assert_eq!(
+            root_observation.qualification,
+            crate::device_qualification::RootQualificationState::Granted
+        );
+        let root_key = state
+            .handles
+            .lock()
+            .unwrap()
+            .qualification_context(&device_handle)
+            .map(|context| {
+                crate::device_qualification::RootQualificationKey::from_context(&context)
+            })
+            .expect("root evidence should be bound to the reconciled device context");
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(crate::device_qualification::RootQualificationState::Granted)
+        );
+
+        let device_probe = crate::commands::probe_device_facts(&device_handle, &state)
+            .expect("the selected AVD should pass the production device probe");
+        assert_eq!(device_probe.serial, SERIAL);
+        assert!(
+            device_probe.typed.is_some(),
+            "the trusted probe must establish typed device identity and capabilities"
+        );
+        assert_eq!(
+            state.handles.lock().unwrap().facts(&device_handle).unwrap(),
+            &device_probe.facts,
+            "planning must use the facts retained by the real device probe"
+        );
+        assert_eq!(
+            state.root_qualification.lock().unwrap().get(&root_key),
+            Some(crate::device_qualification::RootQualificationState::Granted),
+            "the same root evidence must remain bound to the probed device session"
+        );
+        println!(
+            "T03 app bridge preflight: serial={}, session_epoch={}, root={:?}, device_facts={}",
+            device_probe.serial,
+            device_probe.session_epoch,
+            root_observation.qualification,
+            device_probe.facts
+        );
+
+        let app = tauri::test::mock_app();
+        assert!(app.manage(state));
+        let state = app.state::<AppState>();
+        let public_review = super::prepare_execution_review(
+            device_handle,
+            "t03.copy_fixture.base".to_string(),
+            Some(vec!["t03.copy_app_target".to_string()]),
+            HashMap::from([
+                (
+                    "t03.copy_app_target/source".to_string(),
+                    json!(source_root.to_string_lossy().into_owned()),
+                ),
+                ("t03.copy_app_target/policy".to_string(), json!("merge")),
+            ]),
+            1,
+            app.state(),
+        )
+        .unwrap_or_else(|error| {
+            panic!("the Tauri review command should prepare the synthetic App Target: {error}")
+        });
+
+        let review_handle = public_review["reviewHandle"].as_str().unwrap();
+        let retained = state
+            .handles
+            .lock()
+            .unwrap()
+            .review(review_handle)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            retained.response["plan"]["runtime_capabilities"]["root_shell_route"], "suZero",
+            "the reviewed plan must retain the route selected by live root preflight"
+        );
+        let snapshots = retained.response["plan"]["copy_commit_snapshots"]
+            .as_array()
+            .expect("the retained plan should contain selected-tree snapshots");
+        assert_eq!(snapshots.len(), 1);
+        assert!(
+            snapshots[0]["destinationBinding"].as_str().is_some(),
+            "the real Tauri review must bind the selected Android destination"
+        );
+        assert_eq!(
+            snapshots[0]["destinationIdentity"],
+            "/data/user/0/com.emuchef.fixture/files/assets"
+        );
+        assert_eq!(snapshots[0]["sourceManifest"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            snapshots[0]["sourceManifest"][0]["relativePath"],
+            "selected.rom"
+        );
+        assert_eq!(snapshots[0]["destinationBeforeManifest"], json!([]));
+        assert_eq!(
+            snapshots[0]["reviewedDeletionSet"],
+            json!([]),
+            "the reviewed merge operation must disclose its exact empty deletion set"
+        );
+        assert_eq!(retained.response["planDigest"], retained.plan_digest);
+        assert_eq!(
+            retained.response["plan"]["runtime_capabilities"]["root_shell_route"], "suZero",
+            "the Tauri review must retain the route selected by trusted root preflight"
+        );
+        assert_eq!(
+            retained.response["plan"]["device_context"]["root_shell_mode"],
+            "suZero"
+        );
+        assert_eq!(
+            public_review["features"], retained.response["review"]["features"],
+            "React should receive the projection derived from the retained prepared plan"
+        );
+        let public_copy_changes = find_copy_changes(&public_review)
+            .expect("the prepared review should project copy changes to the UI");
+        let retained_copy_changes = find_copy_changes(&retained.response["review"])
+            .expect("the native snapshot should retain the same copy projection");
+        assert_eq!(public_copy_changes, retained_copy_changes);
+        assert!(public_copy_changes["selectedBoundary"].is_string());
+
+        let destination = snapshots[0]["destinationIdentity"].as_str().unwrap();
+        let drift_marker = format!("{destination}/unreviewed-drift.rom");
+        let create_destination = std::process::Command::new(&adb_path)
+            .args(["-s", SERIAL, "shell", "su", "0", "mkdir", "-p", destination])
+            .output()
+            .expect("the verified root route should create the selected destination");
+        assert!(
+            create_destination.status.success(),
+            "could not create selected destination: stdout={} stderr={}",
+            String::from_utf8_lossy(&create_destination.stdout),
+            String::from_utf8_lossy(&create_destination.stderr)
+        );
+        let drift = std::process::Command::new(&adb_path)
+            .args(["-s", SERIAL, "shell", "su", "0", "touch", &drift_marker])
+            .output()
+            .expect("the verified root route should create the drift marker");
+        assert!(
+            drift.status.success(),
+            "could not create selected-tree drift: stdout={} stderr={}",
+            String::from_utf8_lossy(&drift.stdout),
+            String::from_utf8_lossy(&drift.stderr)
+        );
+
+        // MockRuntime cannot satisfy the Wry-only Tauri command wrapper. This
+        // invokes its shared command flow; the controlled backend AVD test
+        // separately verifies the adapter's exact drift rejection.
+        let apply = crate::execution::start_real_execution_with_monitor(
+            json!({
+                "reviewHandle": review_handle,
+                "confirmation": {
+                    "phrase": "APPLY TO DEVICE",
+                    "irreversibleChangesAcknowledged": true,
+                    "noRollbackAcknowledged": true,
+                    "keepDeviceConnectedAcknowledged": true
+                }
+            }),
+            &state,
+            |_| {},
+        )
+        .expect("the Tauri Apply flow should retain a handle for terminal drift reporting");
+        assert_eq!(apply["reviewHandle"], review_handle);
+        let execution_handle = apply["executionHandle"]
+            .as_str()
+            .expect("Tauri Apply should return its execution handle")
+            .to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let terminal = loop {
+            let snapshot =
+                crate::execution::get_real_execution(execution_handle.clone(), app.state());
+            match snapshot {
+                Ok(snapshot) if snapshot["terminal"] == true => break Ok(snapshot),
+                Ok(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(error) => break Err(error),
+                Ok(snapshot) => {
+                    panic!("Tauri Apply did not reach a terminal drift result: {snapshot:#?}")
+                }
+            }
+        };
+        match terminal {
+            Ok(report) => {
+                assert_eq!(report["status"], "failed", "{report:#?}");
+                assert!(
+                    serde_json::to_string(&report)
+                        .unwrap()
+                        .contains("selected destination changed after review"),
+                    "Tauri Apply must report selected-tree drift: {report:#?}"
+                );
+            }
+            Err(error) => {
+                let error: Value = serde_json::from_str(&error)
+                    .expect("the unavailable execution result should be structured");
+                assert_eq!(
+                    error["code"], "execution_unavailable",
+                    "unexpected Tauri Apply status failure: {error:#?}"
+                );
+                println!(
+                    "T03 Tauri Apply terminal status unavailable: {}; selected-tree drift rejection is separately asserted by the controlled backend AVD test.",
+                    error["message"].as_str().unwrap_or("unknown outcome")
+                );
+            }
+        }
+
+        let copied_file = format!("{destination}/selected.rom");
+        let mutation_probe = std::process::Command::new(&adb_path)
+            .args(["-s", SERIAL, "shell", "su", "0", "test", "-e", &copied_file])
+            .output()
+            .expect("the verified root route should inspect the selected destination");
+        assert_eq!(
+            mutation_probe.status.code(),
+            Some(1),
+            "drift rejection must happen before copying the reviewed source"
+        );
+        assert!(
+            String::from_utf8_lossy(&mutation_probe.stderr).is_empty(),
+            "the selected-file probe must be a normal false result, not a command error"
+        );
     }
 
     #[test]
@@ -3598,6 +4167,75 @@ mod tests {
             observed,
             (1..=4).collect::<Vec<u64>>(),
             "consecutive acquisitions must allocate consecutive revisions"
+        );
+    }
+}
+#[cfg(test)]
+mod prepared_review_bridge_tests {
+    use super::plan_and_prepare_execution_review;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn review_bridge_returns_the_prepared_plan_digest_snapshots_and_copy_changes() {
+        let plan = json!({
+            "id": "synthetic-app-target",
+            "steps": [{
+                "target": {"location": "app_data", "directory": "target"}
+            }]
+        });
+        let plan_configuration = json!({
+            "plan": plan,
+            "digest": "unprepared-digest",
+            "review": {"copyChanges": null}
+        });
+        let prepared_review = json!({
+            "plan": {"id": "prepared-app-target", "steps": ["prepared-copy"]},
+            "digest": "prepared-digest",
+            "selectedTreeSnapshots": [{"path": "app_data/target", "digest": "tree-digest"}],
+            "review": {
+                "copyChanges": {
+                    "selectedBoundary": "app_data/target",
+                    "additions": ["Copy the selected app files"],
+                    "replacements": [],
+                    "deletions": []
+                }
+            }
+        });
+        let mut calls = Vec::new();
+
+        let target_device = json!({
+            "serial": "synthetic-device",
+            "manufacturer": "Synthetic",
+            "model": "App Target"
+        });
+        let result = plan_and_prepare_execution_review(
+            json!({
+                "devicePlan": "synthetic-app-target",
+                "targetDevice": target_device
+            }),
+            &mut |operation: &str, payload: Value| {
+                calls.push((operation.to_owned(), payload));
+                match operation {
+                    "planConfiguration" => Ok(plan_configuration.clone()),
+                    "prepareExecutionReview" => Ok(prepared_review.clone()),
+                    _ => Err(format!("unexpected operation: {operation}")),
+                }
+            },
+        )
+        .expect("production review preparation should succeed");
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "planConfiguration");
+        assert_eq!(calls[1].0, "prepareExecutionReview");
+        assert_eq!(calls[1].1["plan"], plan);
+        assert_eq!(calls[1].1["mode"], "real");
+        assert_eq!(calls[1].1["targetDevice"], target_device);
+        assert_eq!(result, prepared_review);
+        assert_eq!(result["digest"], "prepared-digest");
+        assert_eq!(result["selectedTreeSnapshots"][0]["digest"], "tree-digest");
+        assert_eq!(
+            result["review"]["copyChanges"]["selectedBoundary"],
+            "app_data/target"
         );
     }
 }

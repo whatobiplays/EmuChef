@@ -10,6 +10,12 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::State;
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum RootShellRoute {
+    SuCommand,
+    SuZero,
+}
 
 use crate::commands::{current_adb_path, safe_error, AppState};
 use crate::device_observation::{
@@ -131,6 +137,7 @@ pub(crate) struct RootQualificationInvalidation {
 #[derive(Debug, Default)]
 pub(crate) struct RootQualificationStore {
     records: HashMap<RootQualificationKey, RootQualificationState>,
+    routes: HashMap<RootQualificationKey, RootShellRoute>,
     in_flight: Option<RootQualificationAttempt>,
     next_id: u64,
 }
@@ -152,15 +159,31 @@ impl RootQualificationStore {
         Ok(attempt)
     }
 
+    #[cfg(test)]
     pub(crate) fn complete(
         &mut self,
         attempt: RootQualificationAttempt,
         result: RootQualificationState,
     ) -> bool {
+        self.complete_with_route(attempt, result, None)
+    }
+
+    pub(crate) fn complete_with_route(
+        &mut self,
+        attempt: RootQualificationAttempt,
+        result: RootQualificationState,
+        route: Option<RootShellRoute>,
+    ) -> bool {
         if self.in_flight.as_ref() != Some(&attempt) {
             return false;
         }
         self.in_flight = None;
+        self.routes.remove(&attempt.key);
+        if result == RootQualificationState::Granted {
+            if let Some(route) = route {
+                self.routes.insert(attempt.key.clone(), route);
+            }
+        }
         self.records.insert(attempt.key, result);
         true
     }
@@ -180,8 +203,13 @@ impl RootQualificationStore {
         self.records.get(key).cloned()
     }
 
+    pub(crate) fn root_shell_route(&self, key: &RootQualificationKey) -> Option<RootShellRoute> {
+        self.routes.get(key).copied()
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.records.clear();
+        self.routes.clear();
         self.in_flight = None;
         self.next_id = self.next_id.saturating_add(1).max(1);
     }
@@ -199,6 +227,8 @@ impl RootQualificationStore {
             .any(|key| key.device_handle == device_handle);
         if removed_record {
             self.records
+                .retain(|key, _| key.device_handle != device_handle);
+            self.routes
                 .retain(|key, _| key.device_handle != device_handle);
             invalidation.device_handle = Some(device_handle.to_string());
         }
@@ -228,6 +258,8 @@ impl RootQualificationStore {
             .map(|record_key| record_key.device_handle.clone());
         if removed_device.is_some() {
             self.records
+                .retain(|record_key, _| key.is_some_and(|expected| record_key == expected));
+            self.routes
                 .retain(|record_key, _| key.is_some_and(|expected| record_key == expected));
             invalidation.device_handle = removed_device;
         }
@@ -260,7 +292,11 @@ impl<'a> RootQualificationAttemptGuard<'a> {
         }
     }
 
-    fn complete(mut self, result: RootQualificationState) -> Result<bool, String> {
+    fn complete(
+        mut self,
+        result: RootQualificationState,
+        route: Option<RootShellRoute>,
+    ) -> Result<bool, String> {
         let mut store = self.store.lock().map_err(|_| {
             safe_error(
                 "qualification_state_unavailable",
@@ -271,7 +307,7 @@ impl<'a> RootQualificationAttemptGuard<'a> {
             .attempt
             .take()
             .expect("root attempt guard must contain an attempt before completion");
-        Ok(store.complete(attempt, result))
+        Ok(store.complete_with_route(attempt, result, route))
     }
 }
 
@@ -375,6 +411,16 @@ pub(crate) fn check_device_root_observation(
             )
         })?
         .get(&key);
+    let previous_route = state
+        .root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .root_shell_route(&key);
     let attempt = state
         .root_qualification
         .lock()
@@ -387,22 +433,20 @@ pub(crate) fn check_device_root_observation(
         .begin(key.clone())
         .map_err(|code| safe_error(code, "A root access check is already in progress."))?;
     let attempt_guard = RootQualificationAttemptGuard::new(&state.root_qualification, attempt);
-    let qualification = match state.sidecar.request(
+    let (qualification, root_shell_route) = match state.sidecar.request(
         "checkRoot",
         json!({ "adbPath": adb_path, "serial": target.serial }),
     ) {
-        Ok(value) => serde_json::from_value::<RootQualificationState>(value).unwrap_or(
+        Ok(value) => parse_root_probe_response(value),
+        Err(_) => (
             RootQualificationState::CheckFailed {
                 reason: RootQualificationFailureReason::UnexpectedResponse,
-                message: "The root access check returned an unexpected response.".to_string(),
+                message: "The root access check could not be completed.".to_string(),
             },
+            None,
         ),
-        Err(_) => RootQualificationState::CheckFailed {
-            reason: RootQualificationFailureReason::UnexpectedResponse,
-            message: "The root access check could not be completed.".to_string(),
-        },
     };
-    let changed = previous.as_ref() != Some(&qualification);
+    let changed = previous.as_ref() != Some(&qualification) || previous_route != root_shell_route;
     let transition = crate::commands::qualification_transition_lock(state);
     {
         let handles = state.handles.lock().map_err(|_| {
@@ -424,7 +468,7 @@ pub(crate) fn check_device_root_observation(
             ));
         }
     }
-    let committed = attempt_guard.complete(qualification.clone())?;
+    let committed = attempt_guard.complete(qualification.clone(), root_shell_route)?;
     if !committed {
         return Err(safe_error(
             "root_check_stale",
@@ -472,6 +516,34 @@ pub(crate) fn check_device_root_observation(
         result.qualification.clone(),
         result,
     ))
+}
+
+fn parse_root_probe_response(value: Value) -> (RootQualificationState, Option<RootShellRoute>) {
+    let qualification = serde_json::from_value::<RootQualificationState>(value.clone()).unwrap_or(
+        RootQualificationState::CheckFailed {
+            reason: RootQualificationFailureReason::UnexpectedResponse,
+            message: "The root access check returned an unexpected response.".to_string(),
+        },
+    );
+    let route = value
+        .get("rootShellRoute")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<RootShellRoute>(value).ok());
+
+    if qualification == RootQualificationState::Granted && route.is_none() {
+        return (
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::UnexpectedResponse,
+                message: "The root access check omitted its verified invocation route.".to_string(),
+            },
+            None,
+        );
+    }
+    if qualification == RootQualificationState::Granted {
+        (qualification, route)
+    } else {
+        (qualification, None)
+    }
 }
 
 /// Publish root authority only after the product root result has been retained.
@@ -522,6 +594,42 @@ mod tests {
                 "message": "Root authorization timed out. Try again."
             })
         );
+    }
+
+    #[test]
+    fn granted_root_probe_requires_and_retains_its_selected_route() {
+        let (granted, route) = parse_root_probe_response(json!({
+            "status": "granted",
+            "rootShellRoute": "suZero"
+        }));
+        assert_eq!(granted, RootQualificationState::Granted);
+        assert_eq!(route, Some(RootShellRoute::SuZero));
+
+        let (missing_route, route) = parse_root_probe_response(json!({ "status": "granted" }));
+        assert!(matches!(
+            missing_route,
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::UnexpectedResponse,
+                ..
+            }
+        ));
+        assert_eq!(route, None);
+    }
+
+    #[test]
+    fn root_store_binds_selected_route_to_generation_and_invalidates_it() {
+        let mut store = RootQualificationStore::default();
+        let key = RootQualificationKey::new("opaque-device", 4, 9);
+        let attempt = store.begin(key.clone()).unwrap();
+        assert!(store.complete_with_route(
+            attempt,
+            RootQualificationState::Granted,
+            Some(RootShellRoute::SuZero),
+        ));
+        assert_eq!(store.root_shell_route(&key), Some(RootShellRoute::SuZero));
+
+        store.invalidate();
+        assert_eq!(store.root_shell_route(&key), None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Resolve named App Definition targets before selecting executable steps.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -12,6 +13,8 @@ use crate::runtime_refs::{parse_reference, RuntimeRef};
 use crate::step_specs;
 
 use super::{make_execution_step_id, reference_value_type, PlannerMessage};
+
+type DestinationTargetIdentity = (String, String, Option<(String, String)>, String);
 
 /// A complete, immutable interpretation of one authored target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +78,9 @@ pub(super) fn resolve_usage(
 ) -> Result<HashMap<String, ResolvedStepUsage>, Vec<PlannerMessage>> {
     let mut resolved = HashMap::new();
     let mut errors = Vec::new();
+    // App Target IDs are scoped to an App Definition. Retain that identity so
+    // an explicit shared target is not mistaken for independent destinations.
+    let mut destination_targets: Vec<DestinationTargetIdentity> = Vec::new();
     for recipe_id in expanded_recipe_refs {
         let Some(recipe) = recipes.get(recipe_id) else {
             continue;
@@ -129,7 +135,18 @@ pub(super) fn resolve_usage(
                                 );
                                 add_capability(&mut usage.capabilities, target.capability);
                                 usage.dest_kind = Some(target.kind);
-                                usage.dest = Some(target.path);
+                                let destination_path = target.path;
+                                usage.dest = Some(destination_path.clone());
+                                let target_identity = step
+                                    .app_ref
+                                    .as_ref()
+                                    .map(|app_id| (app_id.clone(), target_id.clone()));
+                                destination_targets.push((
+                                    recipe_id.clone(),
+                                    target_id.clone(),
+                                    target_identity,
+                                    destination_path,
+                                ));
                             }
                             Err(error) => errors.push(error),
                         }
@@ -138,6 +155,19 @@ pub(super) fn resolve_usage(
                     if object.contains_key("app_target") {
                         errors.push(message("app_target_malformed", recipe_id, step));
                     }
+                }
+            }
+            if step.type_name == "copy_files" {
+                if let Some(ParamValue::Literal(Value::String(destination_path))) =
+                    step.params.get("dest")
+                {
+                    let destination_label = "literal_destination";
+                    destination_targets.push((
+                        recipe_id.clone(),
+                        destination_label.to_string(),
+                        None,
+                        destination_path.clone(),
+                    ));
                 }
             }
             for (conditions, paths) in [
@@ -208,6 +238,24 @@ pub(super) fn resolve_usage(
             resolved.insert(make_execution_step_id(recipe_id, &step.id), usage);
         }
     }
+
+    for first_index in 0..destination_targets.len() {
+        let (first_recipe, first_target, _first_identity, first_path) =
+            &destination_targets[first_index];
+        for (second_recipe, second_target, _second_identity, second_path) in
+            destination_targets.iter().skip(first_index + 1)
+        {
+            if device_paths_overlap(first_path, second_path) {
+                errors.push(destination_target_overlap_message(
+                    first_recipe,
+                    first_target,
+                    second_recipe,
+                    second_target,
+                ));
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(resolved)
     } else {
@@ -349,6 +397,53 @@ fn message(code: &str, recipe_id: &str, step: &Step) -> PlannerMessage {
             step.id
         ),
         details: json!({ "recipe_ref": recipe_id, "step_id": step.id }),
+    }
+}
+
+fn device_paths_overlap(first: &str, second: &str) -> bool {
+    let first = canonical_shared_storage_alias(first);
+    let second = canonical_shared_storage_alias(second);
+    let first = Path::new(&first);
+    let second = Path::new(&second);
+    first.starts_with(second) || second.starts_with(first)
+}
+
+fn canonical_shared_storage_alias(path: &str) -> String {
+    const ALIASES: [(&str, &str); 2] = [
+        ("/sdcard", "/storage/emulated/0"),
+        ("/storage/self/primary", "/storage/emulated/0"),
+    ];
+    for (alias, canonical) in ALIASES {
+        if path == alias {
+            return canonical.to_string();
+        }
+        if let Some(suffix) = path
+            .strip_prefix(alias)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            return format!("{canonical}/{suffix}");
+        }
+    }
+    path.to_string()
+}
+
+fn destination_target_overlap_message(
+    first_recipe: &str,
+    first_target: &str,
+    second_recipe: &str,
+    second_target: &str,
+) -> PlannerMessage {
+    PlannerMessage {
+        code: "app_target_destination_overlap".to_string(),
+        message: format!(
+            "Selected destination targets '{first_recipe}/{first_target}' and '{second_recipe}/{second_target}' overlap."
+        ),
+        details: json!({
+            "first_recipe_ref": first_recipe,
+            "first_target_id": first_target,
+            "second_recipe_ref": second_recipe,
+            "second_target_id": second_target,
+        }),
     }
 }
 
@@ -716,5 +811,259 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.code == "app_context_inapplicable"));
+    }
+
+    #[test]
+    fn retroarch_provision_and_bios_recipes_cannot_share_the_system_target() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let provision =
+            load_recipe_from_path(root.join("recipes/app.retroarch.provision.yaml")).unwrap();
+        let bios = load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipe_refs = vec![provision.id.clone(), bios.id.clone()];
+        let recipes = HashMap::from([(provision.id.clone(), provision), (bios.id.clone(), bios)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+
+        let errors = resolve_usage(&recipes, &recipe_refs, &apps, None)
+            .expect_err("merge and sync copies cannot share the same selected destination");
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "app_target_destination_overlap"));
+    }
+
+    #[test]
+    fn copy_steps_in_one_recipe_cannot_share_a_selected_destination() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let mut recipe =
+            load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        recipe.id = "planner_overlap_same_recipe".to_string();
+        let mut second_step = recipe.steps[0].clone();
+        second_step.id = "copy_bios_again".to_string();
+        recipe.steps.push(second_step);
+
+        let app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let recipe_refs = vec![recipe.id.clone()];
+        let recipes = HashMap::from([(recipe.id.clone(), recipe)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+        let errors = resolve_usage(&recipes, &recipe_refs, &apps, None)
+            .expect_err("two copy steps in one recipe must not compose on one boundary");
+
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "app_target_destination_overlap"));
+    }
+
+    #[test]
+    fn the_same_target_id_for_different_apps_is_still_an_overlap() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let template = load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        let mut first = template.clone();
+        first.id = "planner_overlap_first".to_string();
+        first.steps[0].app_ref = Some("retroarch".to_string());
+        let mut second = template;
+        second.id = "planner_overlap_second".to_string();
+        second.steps[0].app_ref = Some("other_app".to_string());
+
+        let first_app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+        let mut second_app = first_app.clone();
+        second_app.id = "other_app".to_string();
+        let recipe_refs = vec![first.id.clone(), second.id.clone()];
+        let recipes = HashMap::from([(first.id.clone(), first), (second.id.clone(), second)]);
+        let apps = HashMap::from([
+            (first_app.id.clone(), first_app),
+            (second_app.id.clone(), second_app),
+        ]);
+
+        let errors = resolve_usage(&recipes, &recipe_refs, &apps, None).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "app_target_destination_overlap"));
+    }
+
+    #[test]
+    fn selected_destination_targets_with_the_same_boundary_are_rejected() {
+        assert_destination_overlap("/opt/retroarch/system", "/opt/retroarch/system");
+    }
+
+    #[test]
+    fn selected_destination_target_ancestor_overlap_is_rejected() {
+        assert_destination_overlap("/opt/retroarch/system", "/opt/retroarch/system/bios");
+    }
+
+    #[test]
+    fn selected_destination_target_descendant_overlap_is_rejected() {
+        assert_destination_overlap("/opt/retroarch/system/bios", "/opt/retroarch/system");
+    }
+
+    #[test]
+    fn selected_destination_target_prefix_siblings_are_allowed() {
+        assert!(resolve_two_destination_targets(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system-backup",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn selected_app_target_and_literal_destination_with_the_same_boundary_are_rejected() {
+        assert_app_target_literal_overlap("/opt/retroarch/system", "/opt/retroarch/system");
+    }
+
+    #[test]
+    fn selected_app_target_and_literal_destination_ancestor_overlap_is_rejected() {
+        assert_app_target_literal_overlap("/opt/retroarch/system", "/opt/retroarch/system/bios");
+    }
+
+    #[test]
+    fn selected_app_target_and_literal_destination_descendant_overlap_is_rejected() {
+        assert_app_target_literal_overlap("/opt/retroarch/system/bios", "/opt/retroarch/system");
+    }
+
+    #[test]
+    fn selected_app_target_and_literal_destination_prefix_siblings_are_allowed() {
+        assert!(resolve_app_target_literal_destinations(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system-backup",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn selected_literal_destinations_with_the_same_boundary_are_rejected() {
+        assert_literal_destination_overlap("/opt/retroarch/system", "/opt/retroarch/system");
+    }
+
+    #[test]
+    fn selected_literal_destinations_with_android_storage_aliases_are_rejected() {
+        assert_literal_destination_overlap("/sdcard/ROMs", "/storage/emulated/0/ROMs");
+    }
+
+    fn assert_destination_overlap(first_path: &str, second_path: &str) {
+        assert_destination_overlap_result(
+            resolve_two_destination_targets(first_path, second_path),
+            first_path,
+            second_path,
+            "first_destination",
+            "second_destination",
+        );
+    }
+
+    fn assert_app_target_literal_overlap(first_path: &str, second_path: &str) {
+        assert_destination_overlap_result(
+            resolve_app_target_literal_destinations(first_path, second_path),
+            first_path,
+            second_path,
+            "first_destination",
+            "literal_destination",
+        );
+    }
+
+    fn assert_literal_destination_overlap(first_path: &str, second_path: &str) {
+        assert_destination_overlap_result(
+            resolve_two_literal_destinations(first_path, second_path),
+            first_path,
+            second_path,
+            "literal_destination",
+            "literal_destination",
+        );
+    }
+
+    fn assert_destination_overlap_result(
+        result: Result<(), Vec<PlannerMessage>>,
+        first_path: &str,
+        second_path: &str,
+        first_destination: &str,
+        second_destination: &str,
+    ) {
+        let errors = result.expect_err("overlapping selected destination targets must be rejected");
+        let error = errors
+            .iter()
+            .find(|error| error.code == "app_target_destination_overlap")
+            .expect("overlap must have a dedicated planner error");
+
+        assert!(error.message.contains("planner_overlap_first"));
+        assert!(error.message.contains("planner_overlap_second"));
+        assert!(error.message.contains(first_destination));
+        assert!(error.message.contains(second_destination));
+        assert!(!error.message.contains(first_path));
+        assert!(!error.message.contains(second_path));
+        assert!(!error.details.to_string().contains(first_path));
+        assert!(!error.details.to_string().contains(second_path));
+    }
+
+    fn resolve_two_destination_targets(
+        first_path: &str,
+        second_path: &str,
+    ) -> Result<(), Vec<PlannerMessage>> {
+        resolve_destination_pair(first_path, second_path, false, false)
+    }
+
+    fn resolve_app_target_literal_destinations(
+        first_path: &str,
+        second_path: &str,
+    ) -> Result<(), Vec<PlannerMessage>> {
+        resolve_destination_pair(first_path, second_path, false, true)
+    }
+
+    fn resolve_two_literal_destinations(
+        first_path: &str,
+        second_path: &str,
+    ) -> Result<(), Vec<PlannerMessage>> {
+        resolve_destination_pair(first_path, second_path, true, true)
+    }
+
+    fn resolve_destination_pair(
+        first_path: &str,
+        second_path: &str,
+        first_is_literal: bool,
+        second_is_literal: bool,
+    ) -> Result<(), Vec<PlannerMessage>> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let template = load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
+        let mut first = template.clone();
+        first.id = "planner_overlap_first".to_string();
+        let mut second = template;
+        second.id = "planner_overlap_second".to_string();
+        let mut app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
+
+        for (recipe, target_id, path, is_literal) in [
+            (
+                &mut first,
+                "first_destination",
+                first_path,
+                first_is_literal,
+            ),
+            (
+                &mut second,
+                "second_destination",
+                second_path,
+                second_is_literal,
+            ),
+        ] {
+            let step = &mut recipe.steps[0];
+            step.app_ref = Some("retroarch".to_string());
+            if is_literal {
+                step.params
+                    .insert("dest".to_string(), ParamValue::Literal(json!(path)));
+            } else {
+                step.params.insert(
+                    "dest".to_string(),
+                    ParamValue::AppTarget(target_id.to_string()),
+                );
+                app.targets.insert(
+                    target_id.to_string(),
+                    AppTargetV1 {
+                        kind: AppTargetKind::Directory,
+                        location: AppTargetLocation::AbsoluteDevicePath,
+                        path: path.to_string(),
+                    },
+                );
+            }
+        }
+
+        let recipe_refs = vec![first.id.clone(), second.id.clone()];
+        let recipes = HashMap::from([(first.id.clone(), first), (second.id.clone(), second)]);
+        let apps = HashMap::from([(app.id.clone(), app)]);
+        resolve_usage(&recipes, &recipe_refs, &apps, None).map(|_| ())
     }
 }

@@ -1,8 +1,8 @@
 //! Automated qualification for the authored BIOS-copy workflow.
 //!
 //! These tests bind expectations to the authored recipe bytes, plan the real
-//! catalog through runtime configuration, inspect the production review, and
-//! execute the unchanged generated plan through deterministic device adapters.
+//! catalog through runtime configuration, prepare copy snapshots before
+//! reviewing or executing plans, and use deterministic device adapters.
 //! No test in this module invokes ADB, a physical device, a live network
 //! request, or an ignored physical-qualification harness.
 
@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::executor::copy_commit::CopyManifestEntry;
 use crate::executor::{
     DeviceOperationError, ExecutorAdapters, ExecutorDevice, ExecutorRunner, FakeDryRunDevice,
     StepRunStatus,
@@ -181,19 +182,29 @@ fn bios_contract_binds_current_source_and_deferred_physical_status() {
 #[test]
 fn bios_real_authored_plan_and_review_match_qualification_contract() {
     let contract = load_contract();
-    let temp = tempfile::tempdir().expect("tempdir should be created");
-    let bios_dir = temp.path().join("bios-source");
-    fs::create_dir(&bios_dir).expect("BIOS source directory should be created");
-    let result = plan_bios(Some(&bios_dir));
+    let workspace = BiosQualificationWorkspace::new();
+    let result = plan_bios(Some(&workspace.bios_source_dir));
     assert!(result
         .diagnostics
         .iter()
         .all(|diagnostic| diagnostic.severity != "error"));
-    let plan = result.plan.as_ref().expect("BIOS plan should be generated");
-    assert!(result
-        .plan_digest
-        .as_deref()
-        .is_some_and(|digest| !digest.is_empty()));
+    assert!(result.copy_commit_preparation_required);
+    assert!(result.plan_digest.is_none());
+    assert!(result.review.is_none());
+    let mut plan = result
+        .plan
+        .as_ref()
+        .expect("BIOS plan should be generated")
+        .clone();
+    let mut runner = ExecutorRunner::new(normal_bios_adapters(&workspace));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("BIOS review should prepare trusted copy snapshots");
+    assert_eq!(plan.copy_commit_snapshots.len(), 1);
+    let plan_digest = crate::plan_digest::execution_plan_digest(&plan)
+        .expect("prepared BIOS plan should have a canonical digest");
+    assert!(!plan_digest.is_empty());
+    let review = crate::review_projection::project_review(&plan, &[]);
     assert_eq!(plan.source.selected_recipe_refs, contract.selected_recipes);
     assert_eq!(plan.source.expanded_recipe_refs, contract.expanded_recipes);
     assert_eq!(plan.source.device_plan_ref, QUALIFICATION_DEVICE_PLAN);
@@ -207,14 +218,14 @@ fn bios_real_authored_plan_and_review_match_qualification_contract() {
         vec![TARGET_RECIPE]
     );
 
-    let step = generated_step(plan);
+    let step = generated_step(&plan);
     assert_eq!(step.type_name, "copy_files");
     assert_eq!(
         step.constraints.capabilities,
         contract.recipe_constraint_capabilities
     );
     for capability in &contract.qualification_context_capabilities {
-        assert!(runtime_capability_enabled(plan, capability));
+        assert!(runtime_capability_enabled(&plan, capability));
     }
     assert_eq!(
         contract.required_operation_families,
@@ -228,7 +239,9 @@ fn bios_real_authored_plan_and_review_match_qualification_contract() {
     assert_eq!(binding.source, Some(BindingSource::Explicit));
     assert_eq!(
         binding.value,
-        Some(Value::String(bios_dir.to_string_lossy().into_owned()))
+        Some(Value::String(
+            workspace.bios_source_dir.to_string_lossy().into_owned()
+        ))
     );
 
     assert_eq!(
@@ -250,10 +263,6 @@ fn bios_real_authored_plan_and_review_match_qualification_contract() {
         Some(&Value::String(BIOS_DESTINATION.to_string()))
     );
 
-    let review = result
-        .review
-        .as_ref()
-        .expect("production review should exist");
     assert!(review.can_execute);
     assert_eq!(review.features.len(), 1);
     assert!(!review.features[0].automatically_added);
@@ -266,9 +275,9 @@ fn bios_real_authored_plan_and_review_match_qualification_contract() {
         .notices
         .iter()
         .all(|notice| notice.severity != "blocker"));
-    let serialized = serde_json::to_string(review).expect("review should serialize");
+    let serialized = serde_json::to_string(&review).expect("review should serialize");
     assert!(serialized.contains("bios-source"));
-    assert!(!serialized.contains(&temp.path().to_string_lossy().to_string()));
+    assert!(!serialized.contains(&workspace._temp.path().to_string_lossy().to_string()));
     assert!(!serialized.contains("serial"));
 }
 
@@ -325,6 +334,8 @@ impl BiosQualificationWorkspace {
         let runtime_root = temp.path().join("runtime");
         let cache_root = temp.path().join("cache");
         let fake_device_root = temp.path().join("fake-device");
+        fs::create_dir_all(fake_device_root.join(BIOS_DESTINATION.trim_start_matches('/')))
+            .expect("fake BIOS destination directory should be created");
         let host_input_root = temp.path().join("host-input");
         let bios_source_dir = host_input_root.join("bios-source");
         let psx_path = bios_source_dir.join("sony/psx/scph5501.bin");
@@ -367,7 +378,7 @@ fn normal_bios_adapters(workspace: &BiosQualificationWorkspace) -> ExecutorAdapt
 fn bios_generated_plan_copies_nested_files_successfully_without_network_or_adb() {
     let workspace = BiosQualificationWorkspace::new();
     let prepared = plan_bios(Some(&workspace.bios_source_dir));
-    let plan = prepared.plan.expect("BIOS plan should be generated");
+    let mut plan = prepared.plan.expect("BIOS plan should be generated");
     let step = generated_step(&plan);
     assert_eq!(step.type_name, "copy_files");
     assert_eq!(
@@ -390,6 +401,9 @@ fn bios_generated_plan_copies_nested_files_successfully_without_network_or_adb()
     );
 
     let mut runner = ExecutorRunner::new(normal_bios_adapters(&workspace));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("BIOS execution should use trusted copy snapshots");
     let result = runner.run(&plan);
 
     assert!(
@@ -450,6 +464,9 @@ impl ExecutorDevice for VerificationFailDevice {
     fn uses_fake_device_filesystem(&self) -> bool {
         false
     }
+    fn uses_fake_copy_commit_adapter(&self) -> bool {
+        true
+    }
 
     fn install_apk(
         &mut self,
@@ -508,6 +525,17 @@ impl ExecutorDevice for VerificationFailDevice {
         }
     }
 
+    fn copy_commit_tree_manifest(
+        &mut self,
+        root: &str,
+    ) -> Result<Vec<CopyManifestEntry>, DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::copy_commit_tree_manifest(&mut self.inner, root)
+    }
+
+    fn copy_commit_path_binding(&mut self, path: &str) -> Result<String, DeviceOperationError> {
+        Ok(format!("verification-fail-device:{path}"))
+    }
+
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
         <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
     }
@@ -536,6 +564,15 @@ impl ExecutorDevice for VerificationFailDevice {
 fn verification_fail_device_delegates_non_verification_operations() {
     let mut device = VerificationFailDevice::for_missing_path(BIOS_DESTINATION);
     assert!(!device.uses_fake_device_filesystem());
+    assert!(device.uses_fake_copy_commit_adapter());
+    assert!(
+        <VerificationFailDevice as ExecutorDevice>::copy_commit_tree_manifest(
+            &mut device,
+            BIOS_DESTINATION,
+        )
+        .expect("selected BIOS destination manifest should be inspectable")
+        .is_empty()
+    );
     device
         .install_apk(Path::new("/tmp/qualification.apk"), true)
         .expect("install should delegate");
@@ -588,8 +625,7 @@ fn verification_fail_device_delegates_non_verification_operations() {
 fn bios_destination_verification_failure_fails_the_unchanged_generated_plan() {
     let workspace = BiosQualificationWorkspace::new();
     let prepared = plan_bios(Some(&workspace.bios_source_dir));
-    let plan = prepared.plan.expect("BIOS plan should be generated");
-    let plan_before = plan.clone();
+    let mut plan = prepared.plan.expect("BIOS plan should be generated");
     let device = VerificationFailDevice::for_missing_path(BIOS_DESTINATION);
     let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
         device,
@@ -600,11 +636,15 @@ fn bios_destination_verification_failure_fails_the_unchanged_generated_plan() {
         false,
     );
     let mut runner = ExecutorRunner::new(adapters);
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("BIOS verification test should prepare trusted copy snapshots");
+    let plan_before = plan.clone();
     let result = runner.run(&plan);
 
     assert_eq!(
         plan, plan_before,
-        "executor qualification must not mutate the plan"
+        "executor qualification must not mutate the reviewed plan"
     );
     assert!(!result.success);
     let record = result
@@ -618,26 +658,20 @@ fn bios_destination_verification_failure_fails_the_unchanged_generated_plan() {
         .as_deref()
         .is_some_and(|message| !message.is_empty()));
 
+    assert_eq!(
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/RetroArch/system/sony/psx/scph5501.bin")
+        )
+        .expect("the selected fake tree should be copied before verification"),
+        b"psx-bios\n"
+    );
     let commands = runner.adapters().device().commands();
-    let mkdir_index = commands
-        .iter()
-        .position(|command| {
-            command.first().map(String::as_str) == Some("mkdir_p")
-                && command.get(1).map(String::as_str) == Some(BIOS_DESTINATION)
-        })
-        .expect("copy should create the authored destination");
-    let push_index = commands
-        .iter()
-        .position(|command| command.first().map(String::as_str) == Some("push_sync"))
-        .expect("copy should delegate at least one synced push");
-    let verify_index = commands
-        .iter()
-        .position(|command| {
+    assert!(
+        commands.iter().any(|command| {
             command.first().map(String::as_str) == Some("path_exists")
                 && command.get(1).map(String::as_str) == Some(BIOS_DESTINATION)
-        })
-        .expect("authored destination verification should be observed");
-    assert!(mkdir_index < push_index);
-    assert!(push_index < verify_index);
+        }),
+        "authored destination verification should still observe the missing path"
+    );
     assert_ne!(record.status, StepRunStatus::Executed);
 }

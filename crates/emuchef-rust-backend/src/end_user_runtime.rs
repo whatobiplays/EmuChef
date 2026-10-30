@@ -17,7 +17,7 @@ use crate::device_probe::{
     DeviceProbeError, ProcessCommandRunner,
 };
 use crate::errors::ApiError;
-use crate::executor::adb::{probe_root, ProcessAdbCommandExecutor};
+use crate::executor::adb::{probe_root_with_route, ProcessAdbCommandExecutor};
 use crate::owned_process::ProcessOperation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,7 +141,7 @@ pub(crate) fn qualify_device(adb_path: &str, serial: &str) -> Result<Value, ApiE
 /// the executor boundary; this function only serializes its sanitized outcome.
 pub(crate) fn check_root(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
     let mut executor = ProcessAdbCommandExecutor::default();
-    Ok(probe_root(&mut executor, adb_path, serial).status_json())
+    Ok(probe_root_with_route(&mut executor, adb_path, serial).status_json())
 }
 
 fn qualify_device_with_runner(

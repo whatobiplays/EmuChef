@@ -75,9 +75,24 @@ pub(crate) struct ReviewAction {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Exact entries the reviewed copy operation may remove.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_deletion_set: Option<Vec<String>>,
+    /// Manifest-derived changes within a reviewed selected directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_changes: Option<ReviewCopyChanges>,
     pub requirement: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_location: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewCopyChanges {
+    pub selected_boundary: String,
+    pub additions: Vec<String>,
+    pub replacements: Vec<String>,
+    pub deletions: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -364,15 +379,74 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
             .filter(|note| *note != title)
             .map(str::to_string)
     };
+    let copy_snapshot = plan
+        .copy_commit_snapshots
+        .iter()
+        .find(|snapshot| snapshot.step_id == step.id);
+    let copy_changes = copy_snapshot.map(|snapshot| {
+        let replaces_selected_tree = matches!(
+            snapshot.operation,
+            crate::executor::copy_commit::CopyCommitOperation::Replace
+        );
+        let additions = snapshot
+            .source_manifest
+            .iter()
+            .filter(|source| {
+                !snapshot
+                    .destination_before_manifest
+                    .iter()
+                    .any(|destination| destination.relative_path == source.relative_path)
+            })
+            .map(|entry| entry.relative_path.clone())
+            .collect::<Vec<_>>();
+        let replacements = snapshot
+            .source_manifest
+            .iter()
+            .filter(|source| {
+                snapshot
+                    .destination_before_manifest
+                    .iter()
+                    .any(|destination| {
+                        destination.relative_path == source.relative_path
+                            && (replaces_selected_tree
+                                || !copy_entries_have_same_content(source, destination))
+                    })
+            })
+            .map(|entry| entry.relative_path.clone())
+            .collect::<Vec<_>>();
+        ReviewCopyChanges {
+            selected_boundary: snapshot.destination_identity.clone(),
+            additions,
+            replacements,
+            deletions: snapshot.reviewed_deletion_set.clone(),
+        }
+    });
     ReviewAction {
         title,
         description,
+        reviewed_deletion_set: copy_snapshot.map(|snapshot| snapshot.reviewed_deletion_set.clone()),
+        copy_changes,
         requirement: if step.skip_if.is_empty() {
             "required"
         } else {
             "conditional"
         },
         device_location: device_destination(step),
+    }
+}
+
+fn copy_entries_have_same_content(
+    source: &crate::executor::copy_commit::CopyManifestEntry,
+    destination: &crate::executor::copy_commit::CopyManifestEntry,
+) -> bool {
+    if source.kind != destination.kind {
+        return false;
+    }
+    match source.kind {
+        crate::executor::copy_commit::CopyEntryKind::Directory => true,
+        crate::executor::copy_commit::CopyEntryKind::File => {
+            source.sha256.is_some() && source.sha256 == destination.sha256
+        }
     }
 }
 
@@ -630,6 +704,7 @@ mod tests {
 
     fn immutable_review_plan() -> ExecutionPlan {
         ExecutionPlan {
+            copy_commit_snapshots: Vec::new(),
             id: "plan.review-snapshot".into(),
             source: crate::planner::ExecutionPlanSource {
                 device_profile_ref: "profile.review".into(),
@@ -669,6 +744,7 @@ mod tests {
                 android_version: 14,
                 android_api_level: Some(35),
                 device_tags: Vec::new(),
+                root_shell_mode: None,
             },
             runtime_capabilities: crate::planner::RuntimeCapabilities {
                 adb_available: false,
@@ -679,6 +755,7 @@ mod tests {
                 package_remove_for_user: false,
                 root_shell: false,
                 app_data_write: false,
+                root_shell_route: None,
             },
             inputs: Vec::new(),
             artifacts: Vec::new(),
@@ -811,6 +888,7 @@ mod tests {
         let mut plan = ExecutionPlan {
             device_plan: None,
             resolved_inputs: Vec::new(),
+            copy_commit_snapshots: Vec::new(),
             id: "plan.review".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),
@@ -834,6 +912,7 @@ mod tests {
                 android_version: 14,
                 android_api_level: Some(35),
                 device_tags: Vec::new(),
+                root_shell_mode: None,
             },
             runtime_capabilities: RuntimeCapabilities {
                 adb_available: true,
@@ -844,6 +923,7 @@ mod tests {
                 package_remove_for_user: false,
                 root_shell: false,
                 app_data_write: false,
+                root_shell_route: None,
             },
             inputs: Vec::new(),
             artifacts: vec![ExecutionArtifact {
@@ -988,6 +1068,7 @@ mod tests {
         let mut plan = ExecutionPlan {
             device_plan: None,
             resolved_inputs: Vec::new(),
+            copy_commit_snapshots: Vec::new(),
             id: "plan.permission-review".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),
@@ -1011,6 +1092,7 @@ mod tests {
                 android_version: 15,
                 android_api_level: Some(35),
                 device_tags: Vec::new(),
+                root_shell_mode: None,
             },
             runtime_capabilities: RuntimeCapabilities {
                 adb_available: true,
@@ -1021,6 +1103,7 @@ mod tests {
                 package_remove_for_user: false,
                 root_shell: true,
                 app_data_write: false,
+                root_shell_route: None,
             },
             inputs: Vec::new(),
             artifacts: Vec::new(),

@@ -343,6 +343,20 @@ impl ExecutionSessionManager {
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
     ) -> Result<Value, ApiError> {
+        crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                message,
+                json!({ "field": "plan" }),
+            )
+        })?;
+        crate::executor::validate_copy_commit_snapshot_coverage(&plan).map_err(|message| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                message,
+                json!({ "field": "plan" }),
+            )
+        })?;
         let actual_digest = crate::plan_digest::execution_plan_digest(&plan).map_err(|_| {
             ApiError::new(
                 ApiErrorCode::InvalidExecutionPlan,
@@ -502,6 +516,101 @@ impl ExecutionSessionManager {
             "accepted": true,
             "status": "running",
         }))
+    }
+
+    /// Inspect and bind copy sources and selected destinations before producing
+    /// the digest and review shown to a user. Execution later revalidates these
+    /// same immutable snapshots before mutating the selected directory.
+    pub(crate) fn prepare_review_plan(
+        &self,
+        plan: ExecutionPlan,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+    ) -> Result<ExecutionPlan, ApiError> {
+        self.prepare_review_plan_with_device_factory(
+            plan,
+            mode,
+            supplied_target,
+            crate::executor::adb::RealAdbDevice::new,
+        )
+    }
+
+    /// Run shared copy-review preparation with an explicitly selected real-device constructor.
+    ///
+    /// Both production and controlled-AVD review preparation use this path so source resolution,
+    /// planning, snapshot capture, and root-authority checks stay identical.
+    fn prepare_review_plan_with_device_factory<F>(
+        &self,
+        mut plan: ExecutionPlan,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+        real_device_factory: F,
+    ) -> Result<ExecutionPlan, ApiError>
+    where
+        F: FnOnce(String, Option<String>) -> crate::executor::adb::RealAdbDevice,
+    {
+        if !crate::executor::plan_requires_copy_commit_preparation(&plan) {
+            return Ok(plan);
+        }
+
+        crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                format!("Copy review preparation failed: {message}"),
+                json!({ "field": "plan" }),
+            )
+        })?;
+
+        let target = preflight_target(&plan, mode, supplied_target, &self.config.adb_path)?;
+        if mode == ExecutionMode::Real && target.is_none() {
+            return Err(ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                "A selected device is required to prepare a real copy review.",
+                json!({ "field": "targetDevice" }),
+            ));
+        }
+
+        let review_root = self.config.runtime_root.join("copy-review-preparation");
+        let fake_device_root = review_root.join("simulated-device");
+        std::fs::create_dir_all(&fake_device_root).map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                format!("Copy review filesystem could not be prepared: {error}"),
+                json!({ "field": "plan" }),
+            )
+        })?;
+        let read_only_roots = read_only_roots(&plan);
+        let preparation = match mode {
+            ExecutionMode::DryRun => {
+                let adapters = ExecutorAdapters::<FakeDryRunDevice>::with_sandbox_roots(
+                    review_root,
+                    self.config.cache_root.clone(),
+                    fake_device_root,
+                    read_only_roots,
+                );
+                prepare_copy_commit_snapshots(&mut plan, adapters)
+            }
+            ExecutionMode::Real => {
+                let serial = target.map(|binding| binding.serial);
+                let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+                    real_device_factory(self.config.adb_path.clone(), serial),
+                    review_root,
+                    self.config.cache_root.clone(),
+                    fake_device_root,
+                    read_only_roots,
+                    true,
+                );
+                prepare_copy_commit_snapshots(&mut plan, adapters)
+            }
+        };
+        preparation.map_err(|message| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                format!("Copy review preparation failed: {message}"),
+                json!({ "field": "plan" }),
+            )
+        })?;
+        Ok(plan)
     }
 
     /// Launch the single app proven eligible by a retained successful real execution.
@@ -1122,6 +1231,13 @@ fn push_test_identity_sample(executor: &mut FakeAdbCommandExecutor, android_id: 
     executor.push_completed(0, &format!("{android_id}\n"), "");
 }
 
+fn prepare_copy_commit_snapshots<D: ExecutorDevice>(
+    plan: &mut ExecutionPlan,
+    adapters: ExecutorAdapters<D>,
+) -> Result<(), String> {
+    ExecutorRunner::new(adapters).prepare_copy_commit_snapshots(plan)
+}
+
 fn run_with_device<D: ExecutorDevice>(
     state: &Arc<Mutex<ExecutionState>>,
     execution_id: &str,
@@ -1214,12 +1330,20 @@ fn finish_attempt(
                     step_id: Some(step_record.step_id.clone()),
                 });
             }
-            StepRunStatus::Executed => collect_permission_warnings(
-                &mut record.report,
-                recipe_id,
-                &step_record.step_id,
-                &step_record.outputs,
-            ),
+            StepRunStatus::Executed => {
+                collect_permission_warnings(
+                    &mut record.report,
+                    recipe_id.clone(),
+                    &step_record.step_id,
+                    &step_record.outputs,
+                );
+                collect_copy_staging_cleanup_warning(
+                    &mut record.report,
+                    recipe_id,
+                    &step_record.step_id,
+                    &step_record.outputs,
+                );
+            }
             StepRunStatus::Skipped | StepRunStatus::Cancelled => {}
         }
     }
@@ -1318,6 +1442,34 @@ fn collect_permission_warnings(
                 step_id: Some(step_id.to_string()),
             });
         }
+    }
+}
+
+fn collect_copy_staging_cleanup_warning(
+    report: &mut ExecutionReport,
+    recipe_id: Option<String>,
+    step_id: &str,
+    outputs: &OrderedMap<RuntimeValue>,
+) {
+    let copy_report = outputs.get("copy_commit_report").map(|value| &value.value);
+    let succeeded = copy_report
+        .and_then(|value| value.get("succeeded"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let cleanup_pending = copy_report
+        .and_then(|value| value.get("stagingCleanupError"))
+        .and_then(Value::as_str)
+        .is_some_and(|message| !message.trim().is_empty());
+
+    if succeeded && cleanup_pending {
+        report.warnings.push(ExecutionIssue {
+            code: "copy_staging_cleanup_pending".to_string(),
+            message:
+                "The copy completed successfully, but temporary staging cleanup is still pending."
+                    .to_string(),
+            recipe_id,
+            step_id: Some(step_id.to_string()),
+        });
     }
 }
 
@@ -1656,6 +1808,77 @@ mod tests {
         assert_eq!(overall_status(&result, false), ExecutionStatus::Failed);
         result.cancelled = true;
         assert_eq!(overall_status(&result, false), ExecutionStatus::Cancelled);
+    }
+
+    #[test]
+    fn successful_copy_cleanup_pending_is_serialized_as_an_owner_visible_warning() {
+        let execution_id = "execution-copy-cleanup".to_string();
+        let plan = test_plan("plan.copy-cleanup");
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let mut report = initial_report(&execution_id, &plan, &digest, ExecutionMode::Real, None);
+        report.recipes[0].steps[0].status = StepExecutionStatus::Succeeded;
+        let state = Arc::new(Mutex::new(ExecutionState::default()));
+        lock(&state).records.insert(
+            execution_id.clone(),
+            ExecutionRecord {
+                report,
+                events: Vec::new(),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "copy_commit_report".to_string(),
+            RuntimeValue {
+                type_name: "copy_commit_report".to_string(),
+                value: json!({
+                    "succeeded": true,
+                    "outcome": "succeeded",
+                    "stagingCleanupError": "cleanup pending staging path /private/tmp/emuchef-copy-stage: permission denied"
+                }),
+                location: None,
+            },
+        );
+
+        finish_attempt(
+            &state,
+            &execution_id,
+            ExecutionRunResult {
+                success: true,
+                cancelled: false,
+                total_steps: 1,
+                steps: vec![StepRunRecord {
+                    step_id: plan.steps[0].id.clone(),
+                    status: StepRunStatus::Executed,
+                    message: None,
+                    outputs,
+                    failure_kind: None,
+                    cleanup: None,
+                }],
+                resolved_releases: Vec::new(),
+                resolved_artifacts: Vec::new(),
+            },
+        );
+
+        let state = lock(&state);
+        let serialized = serde_json::to_value(&state.records[&execution_id].report).unwrap();
+        assert_eq!(serialized["status"], "succeeded_with_warnings");
+        assert_eq!(serialized["recipes"][0]["steps"][0]["status"], "succeeded");
+        assert_eq!(serialized["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            serialized["warnings"][0]["code"],
+            "copy_staging_cleanup_pending"
+        );
+        assert_eq!(serialized["warnings"][0]["stepId"], plan.steps[0].id);
+        assert_eq!(serialized["warnings"][0]["recipeId"], "recipe.example");
+        assert!(serialized["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("staging cleanup is still pending"));
+        assert!(!serialized["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("/private/tmp/emuchef-copy-stage"));
     }
 
     #[test]
@@ -3212,6 +3435,7 @@ mod tests {
         ExecutionPlan {
             device_plan: None,
             resolved_inputs: Vec::new(),
+            copy_commit_snapshots: Vec::new(),
             id: id.to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "profile.example".to_string(),
@@ -3233,6 +3457,7 @@ mod tests {
                 android_version: 14,
                 android_api_level: Some(35),
                 device_tags: Vec::new(),
+                root_shell_mode: None,
             },
             runtime_capabilities: RuntimeCapabilities {
                 adb_available: true,
@@ -3243,6 +3468,7 @@ mod tests {
                 package_remove_for_user: true,
                 root_shell: false,
                 app_data_write: false,
+                root_shell_route: None,
             },
             inputs: Vec::new(),
             artifacts: Vec::new(),

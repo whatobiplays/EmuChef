@@ -1,0 +1,58 @@
+schema_version: 1
+kind: recipe
+id: t03.copy_app_target
+name: Qualify synthetic App Target copy
+recipe_dependencies: []
+provides:
+  features: []
+inputs:
+  source:
+    type: directory
+    role: generic
+    label: Synthetic source tree
+    description: Deterministic source tree for protected App Target copy tests.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+  policy:
+    type: enum
+    role: copy_policy
+    label: Copy policy
+    required: false
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+    default: merge
+    options:
+      - value: merge
+        label: Add or update
+      - value: replace
+        label: Replace selected tree
+      - value: sync
+        label: Mirror selected tree
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: copy_assets
+    type: copy_files
+    name: Copy synthetic assets
+    user_toggleable: false
+    app_ref: t03.copy_fixture
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.source
+      dest:
+        app_target: assets
+      copy_policy:
+        ref: inputs.policy
+    verify: []

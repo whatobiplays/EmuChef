@@ -832,6 +832,7 @@ fn synthetic_device_context(profile: &DeviceProfileYaml) -> DeviceContext {
             .unwrap_or(0),
         android_api_level: None,
         device_tags: profile.device_tags.clone(),
+        root_shell_mode: None,
     }
 }
 
@@ -861,6 +862,7 @@ fn runtime_capabilities(capabilities: &RuntimeCapabilitiesYaml) -> RuntimeCapabi
         package_remove_for_user: capabilities.package_remove_for_user,
         root_shell: capabilities.root_shell,
         app_data_write: capabilities.app_data_write,
+        root_shell_route: None,
     }
 }
 

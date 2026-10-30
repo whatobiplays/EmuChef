@@ -509,6 +509,7 @@ fn phase6c_qualification_plan() -> ExecutionPlan {
             android_version: 11,
             android_api_level: Some(30),
             device_tags: Vec::new(),
+            root_shell_mode: None,
         },
         RuntimeCapabilities {
             adb_available: true,
@@ -519,6 +520,7 @@ fn phase6c_qualification_plan() -> ExecutionPlan {
             package_remove_for_user: false,
             root_shell: false,
             app_data_write: false,
+            root_shell_route: None,
         },
     )
     .expect("Phase 6C qualification Recipe should load");
@@ -599,6 +601,7 @@ fn permission_executor_plan(
     ExecutionPlan {
         device_plan: None,
         resolved_inputs: Vec::new(),
+        copy_commit_snapshots: Vec::new(),
         id: "plan.permission-operation-test".to_string(),
         source: ExecutionPlanSource {
             device_profile_ref: "fixture.permission".to_string(),
@@ -622,6 +625,7 @@ fn permission_executor_plan(
             android_version: 15,
             android_api_level: Some(35),
             device_tags: Vec::new(),
+            root_shell_mode: None,
         },
         runtime_capabilities: RuntimeCapabilities {
             adb_available: true,
@@ -632,6 +636,7 @@ fn permission_executor_plan(
             package_remove_for_user: false,
             root_shell: root_available,
             app_data_write: false,
+            root_shell_route: None,
         },
         inputs: Vec::new(),
         artifacts: Vec::new(),
@@ -757,7 +762,7 @@ fn real_adb_baseline_permission_operation_uses_complete_adb_command_without_root
 #[test]
 fn real_adb_elevated_permission_operation_uses_reviewed_root_and_revalidates_per_command() {
     let mut command_executor = FakeAdbCommandExecutor::default();
-    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
     command_executor.push_completed(0, "", "");
     let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
     let plan = permission_executor_plan(

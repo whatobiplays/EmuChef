@@ -6,6 +6,7 @@
 //! constrained to explicit sandbox roots.
 
 pub mod adb;
+pub mod copy_commit;
 pub(crate) mod identity;
 pub(crate) mod root_authority;
 pub(crate) mod root_requirements;
@@ -22,6 +23,11 @@ use tempfile::TempPath;
 
 use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
+use crate::executor::copy_commit::{
+    AndroidCopyCommitAdapter, CopyCommitAdapter, CopyCommitDestinationKind, CopyCommitError,
+    CopyCommitMutation, CopyCommitOperation, CopyCommitRequest, CopyManifestEntry,
+    ExecutionCopyCommitSnapshot, FakeFilesystemCopyCommitAdapter,
+};
 use crate::model::OrderedMap;
 use crate::owned_process::ProcessCleanup;
 use crate::planner::{
@@ -464,9 +470,7 @@ impl DeviceOperationError {
                 "The reviewed device is disconnected or missing."
             }
             DeviceOperationKind::AdbServerUnavailable => "The local ADB service is unavailable.",
-            DeviceOperationKind::TransportReset => {
-                "The device connection was reset during execution."
-            }
+            DeviceOperationKind::TransportReset => adb::DEVICE_TRANSPORT_INTERRUPTED_MESSAGE,
             DeviceOperationKind::TransportFailure => {
                 "The device connection was lost during execution."
             }
@@ -560,6 +564,8 @@ pub trait ExecutorDevice: std::fmt::Debug {
     /// Configure private execution-time root authority from the reviewed plan.
     /// This lifecycle hook is not part of the executor-visible operation surface.
     fn configure_root_authority(&mut self, _reviewed_root_authorized: bool) {}
+    /// Configure the invocation form captured by root preflight and review.
+    fn configure_root_shell_route(&mut self, _route: Option<crate::planner::RootShellRoute>) {}
 
     /// Identify adapters that revalidate root at each root-wrapped command.
     /// This lifecycle hook prevents duplicate runner-level preflight probes.
@@ -573,6 +579,15 @@ pub trait ExecutorDevice: std::fmt::Debug {
 
     fn uses_fake_device_filesystem(&self) -> bool {
         false
+    }
+    /// Selects the sandbox-backed adapter for reviewed selected-tree copies.
+    ///
+    /// This capability is independent from ordinary fake-device filesystem
+    /// behavior. Composite test devices can delegate normal device operations
+    /// while preparing and committing reviewed trees in the sandbox. Devices
+    /// default to the same adapter choice as their ordinary filesystem mode.
+    fn uses_fake_copy_commit_adapter(&self) -> bool {
+        self.uses_fake_device_filesystem()
     }
 
     fn install_apk(
@@ -616,6 +631,79 @@ pub trait ExecutorDevice: std::fmt::Debug {
         activity: Option<&str>,
     ) -> Result<(), DeviceOperationError>;
     fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError>;
+
+    /// Inspect one selected Android directory without following symbolic links.
+    /// Adapters that cannot provide a deterministic manifest reject this
+    /// capability so reviewed copy operations fail closed.
+    fn copy_commit_tree_manifest(
+        &mut self,
+        _root: &str,
+    ) -> Result<Vec<CopyManifestEntry>, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support selected-tree manifest inspection",
+        ))
+    }
+
+    /// Return a canonical pathname plus device/inode identities for the
+    /// selected directory and its parent.
+    fn copy_commit_path_binding(&mut self, _path: &str) -> Result<String, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support selected-path identity binding",
+        ))
+    }
+
+    /// Create exactly one new directory, failing if the path already exists.
+    fn copy_commit_create_directory(&mut self, _path: &str) -> Result<(), DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support exclusive directory creation",
+        ))
+    }
+
+    /// Remove exactly one empty directory. Recursive deletion is not part of
+    /// the selected-tree copy contract.
+    fn copy_commit_remove_empty_directory(
+        &mut self,
+        _path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support exact empty-directory removal",
+        ))
+    }
+
+    /// Prepares the optional Android helper used for selected-root-relative
+    /// mutations. Adapters without this capability reject that operation.
+    fn copy_commit_prepare_mutation_helper(
+        &mut self,
+        _stage_root: &str,
+        _helper_path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "selected App Target mutation requires the optional Android no-follow helper",
+        ))
+    }
+
+    /// Applies one reviewed mutation relative to the selected directory.
+    fn copy_commit_apply_selected_root_mutation(
+        &mut self,
+        _selected_root: &str,
+        _destination_binding: &str,
+        _stage_root: &str,
+        _helper_path: &str,
+        _expected_entry: &str,
+        _mutation: &CopyCommitMutation,
+    ) -> Result<(), DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "device adapter does not expose selected-root-relative no-follow mutation",
+        ))
+    }
+
+    /// Removes the temporary one-shot helper from its staging directory.
+    fn copy_commit_cleanup_mutation_helper(
+        &mut self,
+        _helper_path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        Ok(())
+    }
 }
 
 /// Closed ADB permission action accepted by the executor device boundary.
@@ -762,6 +850,144 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         }
     }
 
+    /// Capture the source and selected destination state for each App Target
+    /// directory copy before review. Execution reuses these snapshots and the
+    /// copy adapter rejects source or destination drift before mutation.
+    /// Configuration-only planning has no device adapter, so it does not
+    /// prepare these snapshots itself.
+    #[allow(dead_code)]
+    pub fn prepare_copy_commit_snapshots(
+        &mut self,
+        plan: &mut ExecutionPlan,
+    ) -> Result<(), String> {
+        plan.copy_commit_snapshots.clear();
+        validate_supported_copy_plan(plan)?;
+        self.adapters
+            .device
+            .configure_identity_guard(plan.target_device.as_ref());
+        self.adapters
+            .device
+            .configure_root_authority(reviewed_root_authorized(plan));
+        self.adapters
+            .device
+            .configure_root_shell_route(plan.device_context.root_shell_mode);
+
+        let sandbox = self
+            .adapters
+            .sandbox()
+            .map_err(|error| error.message)?
+            .clone();
+        let state = ExecutionState::from_plan(plan);
+        let mut snapshots = Vec::new();
+
+        for step in plan
+            .steps
+            .iter()
+            .filter(|step| step.type_name == "copy_files")
+        {
+            if has_runtime_output_reference(step) {
+                continue;
+            }
+            let resolved_params =
+                resolve_step_params(&state, &step.params).map_err(|error| error.message)?;
+            let Some(destination_kind) = copy_commit_destination_kind(step, &resolved_params)?
+            else {
+                continue;
+            };
+            let destination = resolved_params
+                .get("dest")
+                .and_then(Value::as_str)
+                .expect("selected directory validation requires a destination");
+            let source =
+                runtime_value_param(&resolved_params, "source").map_err(|error| error.message)?;
+            let source_path = source_path_from_value(&source).map_err(|error| error.message)?;
+            sandbox
+                .ensure_read_allowed(&source_path)
+                .map_err(|error| error.message)?;
+            match destination_kind {
+                CopyCommitDestinationKind::AppTarget => self
+                    .ensure_root_preflight()
+                    .map_err(|error| error.message)?,
+                CopyCommitDestinationKind::SharedDevicePath
+                    if !self.adapters.device.uses_fake_copy_commit_adapter() =>
+                {
+                    self.adapters
+                        .device
+                        .copy_commit_path_binding(destination)
+                        .map_err(|error| error.message)?;
+                }
+                CopyCommitDestinationKind::SharedDevicePath => {}
+            }
+
+            let copy_policy = resolved_params
+                .get("copy_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("merge");
+            let operation = CopyCommitOperation::from_legacy_directory_policy(copy_policy)
+                .map_err(|error| error.to_string())?;
+            let request = if self.adapters.device.uses_fake_copy_commit_adapter() {
+                match destination_kind {
+                    CopyCommitDestinationKind::AppTarget => CopyCommitRequest::reviewed_directory(
+                        &source_path,
+                        &sandbox.fake_device_root,
+                        destination,
+                        operation,
+                    ),
+                    CopyCommitDestinationKind::SharedDevicePath => {
+                        CopyCommitRequest::reviewed_shared_directory(
+                            &source_path,
+                            &sandbox.fake_device_root,
+                            destination,
+                            operation,
+                        )
+                    }
+                }
+            } else {
+                let destination_manifest = self
+                    .adapters
+                    .device
+                    .copy_commit_tree_manifest(destination)
+                    .map_err(|error| error.message)?;
+                let destination_binding = self
+                    .adapters
+                    .device
+                    .copy_commit_path_binding(destination)
+                    .map_err(|error| error.message)?;
+                match destination_kind {
+                    CopyCommitDestinationKind::AppTarget => {
+                        CopyCommitRequest::reviewed_android_directory(
+                            &source_path,
+                            &sandbox.fake_device_root,
+                            destination,
+                            operation,
+                            destination_manifest,
+                            destination_binding,
+                        )
+                    }
+                    CopyCommitDestinationKind::SharedDevicePath => {
+                        CopyCommitRequest::reviewed_android_shared_directory(
+                            &source_path,
+                            &sandbox.fake_device_root,
+                            destination,
+                            operation,
+                            destination_manifest,
+                            destination_binding,
+                        )
+                    }
+                }
+            }
+            .map_err(|error| error.to_string())?;
+            snapshots.push(ExecutionCopyCommitSnapshot::from_request(
+                &step.id,
+                &source_path,
+                &request,
+            ));
+        }
+
+        plan.copy_commit_snapshots = snapshots;
+        Ok(())
+    }
+
     /// Supply release metadata fixtures to exercise the production selection path offline.
     #[cfg(test)]
     pub(crate) fn set_github_release_metadata_fixtures(&mut self, fixtures: Vec<Value>) {
@@ -867,6 +1093,37 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 resolved_artifacts: Vec::new(),
             };
         }
+        let copy_plan_admission = validate_supported_copy_plan(plan)
+            .and_then(|()| validate_copy_commit_snapshot_coverage(plan));
+        if let Err(message) = copy_plan_admission {
+            let steps = plan
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| {
+                    let (status, detail) = if index == 0 {
+                        (
+                            StepRunStatus::Failed,
+                            format!("invalid_execution_plan: {message}"),
+                        )
+                    } else {
+                        (
+                            StepRunStatus::Blocked,
+                            "execution blocked after copy review validation failed".to_string(),
+                        )
+                    };
+                    record(step, status, Some(detail), OrderedMap::new())
+                })
+                .collect();
+            return ExecutionRunResult {
+                success: false,
+                cancelled: false,
+                total_steps,
+                steps,
+                resolved_releases: Vec::new(),
+                resolved_artifacts: Vec::new(),
+            };
+        }
         let step_ids_in_plan = plan
             .steps
             .iter()
@@ -882,6 +1139,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         self.adapters
             .device
             .configure_root_authority(reviewed_root_authorized(plan));
+        self.adapters
+            .device
+            .configure_root_shell_route(plan.device_context.root_shell_mode);
 
         for step in &plan.steps {
             if aborted {
@@ -1985,6 +2245,55 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Ok(outputs)
     }
 
+    fn reviewed_copy_commit_request(
+        &self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
+        source_path: &Path,
+        sandbox: &SandboxRoots,
+        destination: (&str, CopyCommitDestinationKind),
+        operation: CopyCommitOperation,
+    ) -> Result<CopyCommitRequest, StepFailure> {
+        let (destination_identity, destination_kind) = destination;
+        let mut snapshots = plan
+            .copy_commit_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.step_id == step.id);
+        let Some(snapshot) = snapshots.next() else {
+            return Err(StepFailure::new(
+                "reviewed copy snapshot is missing; prepare a fresh review before execution"
+                    .to_string(),
+            ));
+        };
+        if snapshots.next().is_some() {
+            return Err(StepFailure::new(
+                "reviewed copy snapshot is duplicated".to_string(),
+            ));
+        }
+        let request = if self.adapters.device.uses_fake_copy_commit_adapter()
+            && snapshot.destination_binding.is_some()
+        {
+            snapshot.simulation_request_for_execution(
+                &step.id,
+                source_path,
+                &sandbox.fake_device_root,
+                destination_identity,
+                destination_kind,
+                operation,
+            )
+        } else {
+            snapshot.request_for_execution(
+                &step.id,
+                source_path,
+                &sandbox.fake_device_root,
+                destination_identity,
+                destination_kind,
+                operation,
+            )
+        };
+        request.map_err(|error| StepFailure::new(error.to_string()))
+    }
+
     fn execute_copy_files(
         &mut self,
         plan: &ExecutionPlan,
@@ -2011,8 +2320,32 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 "copy_files copy_policy must be merge, replace, or sync, got {copy_policy:?}"
             )));
         }
+        if source.type_name == "path_list" && copy_policy == "sync" {
+            return Err(StepFailure::new(
+                "copy_files unsupported: sync path_list has no single reviewed source boundary"
+                    .to_string(),
+            ));
+        }
         let sandbox = self.adapters.sandbox()?.clone();
         let app_private_dest = root_requirements::is_app_private_path(dest);
+        let destination_kind =
+            copy_commit_destination_kind(step, resolved_params).map_err(StepFailure::new)?;
+        let selected_directory = destination_kind.is_some();
+        if source.type_name == "directory_path"
+            && matches!(copy_policy, "replace" | "sync")
+            && !selected_directory
+        {
+            return Err(StepFailure::new(
+                "copy_files unsupported: destructive directory operations require a reviewed App Target destination"
+                    .to_string(),
+            ));
+        }
+        if source.type_name == "path_list" && copy_policy == "replace" {
+            return Err(StepFailure::new(
+                "copy_files unsupported: replacing a path list would delete the selected destination tree"
+                    .to_string(),
+            ));
+        }
         let app_private_source = source
             .location
             .as_deref()
@@ -2046,30 +2379,109 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         } else if dest_kind == Some("directory") && source.type_name == "file_path" {
             self.adapters.device.mkdir_p(dest)?;
         }
-        let copied_paths = if self.adapters.device.uses_fake_device_filesystem()
+        let (copied_paths, copy_commit_report) = if self
+            .adapters
+            .device
+            .uses_fake_copy_commit_adapter()
+            && selected_directory
+            && source.location.as_deref() == Some("host")
+            && source.type_name == "directory_path"
+        {
+            let source_path = source_path_from_value(&source)?;
+            sandbox.ensure_read_allowed(&source_path)?;
+            let operation = CopyCommitOperation::from_legacy_directory_policy(copy_policy)
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+            let request = self.reviewed_copy_commit_request(
+                plan,
+                step,
+                &source_path,
+                &sandbox,
+                (
+                    dest,
+                    destination_kind.expect("selected directory has a destination kind"),
+                ),
+                operation,
+            )?;
+            let mut adapter = FakeFilesystemCopyCommitAdapter;
+            let report = adapter.commit(&request).map_err(StepFailure::from)?;
+            if !report.succeeded {
+                return Err(copy_commit_report_failure(report));
+            }
+            let copied: Vec<String> = request
+                .source_manifest
+                .iter()
+                .filter(|entry| !entry.relative_path.contains('/'))
+                .map(|entry| join_device_path(dest, &entry.relative_path))
+                .collect();
+            (copied, Some(report))
+        } else if selected_directory
+            && !self.adapters.device.uses_fake_copy_commit_adapter()
+            && source.location.as_deref() == Some("host")
+            && source.type_name == "directory_path"
+        {
+            let source_path = source_path_from_value(&source)?;
+            sandbox.ensure_read_allowed(&source_path)?;
+            let operation = CopyCommitOperation::from_legacy_directory_policy(copy_policy)
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+            let request = self.reviewed_copy_commit_request(
+                plan,
+                step,
+                &source_path,
+                &sandbox,
+                (
+                    dest,
+                    destination_kind.expect("selected directory has a destination kind"),
+                ),
+                operation,
+            )?;
+            let mut adapter = AndroidCopyCommitAdapter::new(&mut self.adapters.device);
+            let report = adapter.commit(&request).map_err(StepFailure::from)?;
+            if !report.succeeded {
+                return Err(copy_commit_report_failure(report));
+            }
+            let copied: Vec<String> = request
+                .source_manifest
+                .iter()
+                .filter(|entry| !entry.relative_path.contains('/'))
+                .map(|entry| join_device_path(dest, &entry.relative_path))
+                .collect();
+            (copied, Some(report))
+        } else if self.adapters.device.uses_fake_device_filesystem()
             && source.location.as_deref() == Some("host")
             && !app_private_dest
         {
-            sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy, dest_kind)?
+            (
+                sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy, dest_kind)?,
+                None,
+            )
         } else if source.location.as_deref() == Some("device") {
-            copy_device_source(&mut self.adapters.device, &source, dest, copy_policy)?
+            (
+                copy_device_source(&mut self.adapters.device, &source, dest, copy_policy)?,
+                None,
+            )
         } else if app_private_dest {
-            copy_host_source_to_app_private(
-                &mut self.adapters.device,
-                &sandbox,
-                step,
-                &source,
-                dest,
-                copy_policy,
-            )?
+            (
+                copy_host_source_to_app_private(
+                    &mut self.adapters.device,
+                    &sandbox,
+                    step,
+                    &source,
+                    dest,
+                    copy_policy,
+                )?,
+                None,
+            )
         } else {
-            copy_host_source(
-                &mut self.adapters.device,
-                &sandbox,
-                &source,
-                dest,
-                copy_policy,
-            )?
+            (
+                copy_host_source(
+                    &mut self.adapters.device,
+                    &sandbox,
+                    &source,
+                    dest,
+                    copy_policy,
+                )?,
+                None,
+            )
         };
         let mut outputs = OrderedMap::new();
         outputs.insert(
@@ -2080,6 +2492,21 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 location: Some("device".to_string()),
             },
         );
+        if let Some(report) = copy_commit_report {
+            let value = serde_json::to_value(report).map_err(|error| {
+                StepFailure::new(format!(
+                    "copy commit report could not be serialized: {error}"
+                ))
+            })?;
+            outputs.insert(
+                "copy_commit_report".to_string(),
+                RuntimeValue {
+                    type_name: "copy_commit_report".to_string(),
+                    value,
+                    location: Some("device".to_string()),
+                },
+            );
+        }
         Ok(outputs)
     }
 
@@ -2287,6 +2714,253 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     }
 }
 
+pub(crate) fn plan_requires_copy_commit_preparation(plan: &ExecutionPlan) -> bool {
+    if validate_supported_copy_plan(plan).is_err() {
+        return true;
+    }
+    let state = ExecutionState::from_plan(plan);
+    plan.steps
+        .iter()
+        .filter(|step| step.type_name == "copy_files")
+        .filter(|step| !has_runtime_output_reference(step))
+        .any(|step| {
+            resolve_step_params(&state, &step.params)
+                .ok()
+                .is_some_and(|params| is_selected_directory_step(step, &params).unwrap_or(false))
+        })
+}
+
+fn has_runtime_output_reference(step: &ExecutionStep) -> bool {
+    step.params.values().any(|param| {
+        matches!(
+            param,
+            crate::planner::ExecutionParamValue::Ref { ref_value }
+                if ref_value.starts_with("steps.")
+        )
+    })
+}
+
+fn has_runtime_source_output_reference(step: &ExecutionStep) -> bool {
+    matches!(
+        step.params.get("source"),
+        Some(crate::planner::ExecutionParamValue::Ref { ref_value })
+            if ref_value.starts_with("steps.")
+    )
+}
+
+fn is_selected_directory_step(
+    step: &ExecutionStep,
+    params: &OrderedMap<Value>,
+) -> Result<bool, String> {
+    Ok(copy_commit_destination_kind(step, params)?.is_some())
+}
+
+fn copy_commit_destination_kind(
+    step: &ExecutionStep,
+    params: &OrderedMap<Value>,
+) -> Result<Option<CopyCommitDestinationKind>, String> {
+    if params
+        .get("dest_kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "directory")
+    {
+        return Ok(None);
+    }
+    let source = match runtime_value_param(params, "source") {
+        Ok(source) => source,
+        Err(_) => return Ok(None),
+    };
+    if source.type_name != "directory_path" || source.location.as_deref() != Some("host") {
+        return Ok(None);
+    }
+    let Some(destination) = params.get("dest").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let destination_kind = if root_requirements::is_app_private_path(destination) {
+        if step.app_id.is_none() {
+            return Err(format!(
+                "copy_files step {} app-private destination requires an authored App Target",
+                step.id
+            ));
+        }
+        CopyCommitDestinationKind::AppTarget
+    } else if is_reviewable_shared_device_path(destination) {
+        CopyCommitDestinationKind::SharedDevicePath
+    } else {
+        return Ok(None);
+    };
+    let source_path = source_path_from_value(&source).map_err(|error| error.message)?;
+    if !source_path.is_dir() {
+        return Err(format!(
+            "copy_files step {} selected destination source must be one existing host directory",
+            step.id
+        ));
+    }
+    Ok(Some(destination_kind))
+}
+
+fn is_reviewable_shared_device_path(destination: &str) -> bool {
+    let path = Path::new(destination);
+    path.is_absolute()
+        && destination != "/"
+        && !destination.contains("//")
+        && !destination.ends_with('/')
+        && !destination.contains(['|', '\n', '\r'])
+        && path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
+/// Validates static copy operands while leaving step output references for the
+/// executor to resolve in dependency order.
+pub(crate) fn validate_supported_copy_plan(plan: &ExecutionPlan) -> Result<(), String> {
+    let state = ExecutionState::from_plan(plan);
+    for step in plan
+        .steps
+        .iter()
+        .filter(|step| step.type_name == "copy_files")
+    {
+        if has_runtime_output_reference(step) {
+            if has_runtime_source_output_reference(step) && step.app_id.is_some() {
+                return Err(format!(
+                    "copy_files step {} is unsupported: App Target sources from runtime step outputs cannot be reviewed before execution",
+                    step.id
+                ));
+            }
+            continue;
+        }
+        let params = resolve_step_params(&state, &step.params).map_err(|error| {
+            format!(
+                "copy_files step {} has invalid static operands ({})",
+                step.id, error.message
+            )
+        })?;
+        let source = runtime_value_param(&params, "source").map_err(|error| {
+            format!(
+                "copy_files step {} has invalid source ({})",
+                step.id, error.message
+            )
+        })?;
+        if source.type_name == "path_list"
+            && params
+                .get("copy_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("merge")
+                == "sync"
+        {
+            return Err(format!(
+                "copy_files step {} is unsupported: sync path_list has no single reviewed source boundary",
+                step.id
+            ));
+        }
+        if is_selected_directory_step(step, &params)? {
+            let copy_policy = params
+                .get("copy_policy")
+                .and_then(Value::as_str)
+                .unwrap_or("merge");
+            CopyCommitOperation::from_legacy_directory_policy(copy_policy)
+                .map_err(|error| error.to_string())?;
+            continue;
+        }
+        if source.type_name == "path" {
+            return Err(format!(
+                "copy_files step {} is unsupported: source type 'path' has no copy policy",
+                step.id
+            ));
+        }
+        if source.type_name == "path_list"
+            && !source
+                .value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string))
+        {
+            return Err(format!(
+                "copy_files step {} is unsupported: path_list source must contain string paths",
+                step.id
+            ));
+        }
+        if source.type_name == "directory_path" && source.location.as_deref() != Some("host") {
+            return Err(format!(
+                "copy_files step {} is unsupported: directory sources must be host paths",
+                step.id
+            ));
+        }
+        if source.type_name == "directory_path"
+            && params.get("dest_kind").and_then(Value::as_str) == Some("file")
+        {
+            return Err(format!(
+                "copy_files step {} is unsupported: a directory source cannot target one file",
+                step.id
+            ));
+        }
+        let copy_policy = params
+            .get("copy_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("merge");
+        if source.type_name == "directory_path" && matches!(copy_policy, "replace" | "sync") {
+            return Err(format!(
+                "copy_files step {} is unsupported: destructive directory policy {copy_policy:?} requires a statically resolved selected App Target directory",
+                step.id,
+            ));
+        }
+        if source.type_name == "path_list" && copy_policy == "replace" {
+            return Err(format!(
+                "copy_files step {} is unsupported: replacing a path list would delete the destination tree",
+                step.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects execution plans that have not bound every copy operation to the
+/// source and destination manifests reviewed before execution.
+pub(crate) fn validate_copy_commit_snapshot_coverage(plan: &ExecutionPlan) -> Result<(), String> {
+    let state = ExecutionState::from_plan(plan);
+    for step in plan
+        .steps
+        .iter()
+        .filter(|step| step.type_name == "copy_files")
+    {
+        if has_runtime_output_reference(step) {
+            continue;
+        }
+        let params = resolve_step_params(&state, &step.params).map_err(|error| error.message)?;
+        if !is_selected_directory_step(step, &params)? {
+            continue;
+        }
+        let matches = plan
+            .copy_commit_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.step_id == step.id)
+            .count();
+        match matches {
+            0 => {
+                return Err(format!(
+                    "copy_files step {} requires a pre-review copy snapshot",
+                    step.id
+                ));
+            }
+            1 => {}
+            _ => {
+                return Err(format!(
+                    "copy_files step {} has duplicate pre-review copy snapshots",
+                    step.id
+                ));
+            }
+        }
+    }
+    if plan.copy_commit_snapshots.iter().any(|snapshot| {
+        !plan
+            .steps
+            .iter()
+            .any(|step| step.type_name == "copy_files" && step.id == snapshot.step_id)
+    }) {
+        return Err("execution plan contains an orphaned copy snapshot".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn reviewed_plan_requires_root(plan: &ExecutionPlan) -> bool {
     plan.steps
         .iter()
@@ -2318,10 +2992,18 @@ fn plan_step_root_requirements(
     step: &ExecutionStep,
 ) -> root_requirements::RootRequirements {
     let operation = root_requirements::root_work_operation(&step.type_name);
-    let (root_shell_constraint, app_data_write_constraint) =
+    let (mut root_shell_constraint, app_data_write_constraint) =
         root_requirements::root_requirement_constraints(
             step.constraints.capabilities.iter().map(String::as_str),
         );
+    if step.type_name == "copy_files" {
+        let state = ExecutionState::from_plan(plan);
+        let shared_destination = resolve_step_params(&state, &step.params)
+            .ok()
+            .and_then(|params| copy_commit_destination_kind(step, &params).ok().flatten())
+            == Some(CopyCommitDestinationKind::SharedDevicePath);
+        root_shell_constraint |= shared_destination;
+    }
     let condition_requires_root = step
         .skip_if
         .iter()
@@ -2980,6 +3662,15 @@ impl FakeDryRunDevice {
 }
 
 impl ExecutorDevice for FakeDryRunDevice {
+    /// Reports an empty on-device tree because the dry-run adapter records
+    /// commands without modeling file contents on the device.
+    fn copy_commit_tree_manifest(
+        &mut self,
+        _root: &str,
+    ) -> Result<Vec<CopyManifestEntry>, DeviceOperationError> {
+        Ok(Vec::new())
+    }
+
     fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
         self.root_preflight_calls = self.root_preflight_calls.saturating_add(1);
         self.commands.push(vec!["root_preflight".to_string()]);
@@ -3108,9 +3799,9 @@ impl ExecutorDevice for FakeDryRunDevice {
 pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError {
     match error {
         adb::AdbCommandError::TimedOut { cleanup, .. } => DeviceOperationError::timed_out(cleanup),
-        adb::AdbCommandError::CommandFailed => DeviceOperationError {
+        adb::AdbCommandError::CommandFailed { .. } => DeviceOperationError {
             kind: DeviceOperationKind::CommandFailed,
-            message: "The device operation failed.".to_string(),
+            message: adb::ADB_COMMAND_FAILURE_MESSAGE.to_string(),
             cleanup: None,
         },
         adb::AdbCommandError::DeviceOffline => {
@@ -3157,7 +3848,7 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
         },
         adb::AdbCommandError::RootAuthorityRevoked => DeviceOperationError {
             kind: DeviceOperationKind::RootAuthorityRevoked,
-            message: "Root authority was revoked during execution.".to_string(),
+            message: adb::ROOT_AUTHORITY_REVOKED_MESSAGE.to_string(),
             cleanup: None,
         },
         adb::AdbCommandError::RootAuthorityUnverified => DeviceOperationError {
@@ -3235,6 +3926,9 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
     fn configure_root_authority(&mut self, reviewed_root_authorized: bool) {
         adb::RealAdbDevice::configure_root_authority(self, reviewed_root_authorized);
     }
+    fn configure_root_shell_route(&mut self, route: Option<crate::planner::RootShellRoute>) {
+        adb::RealAdbDevice::configure_root_shell_route(self, route);
+    }
 
     fn owns_per_command_root_authority(&self) -> bool {
         true
@@ -3292,6 +3986,66 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
 
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
         adb::RealAdbDevice::path_is_dir(self, path).map_err(|message| real_adb_error(self, message))
+    }
+
+    fn copy_commit_tree_manifest(
+        &mut self,
+        root: &str,
+    ) -> Result<Vec<CopyManifestEntry>, DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_tree_manifest(self, root).map_err(map_adb_error)
+    }
+
+    fn copy_commit_path_binding(&mut self, path: &str) -> Result<String, DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_path_binding(self, path).map_err(map_adb_error)
+    }
+
+    fn copy_commit_create_directory(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_create_directory(self, path).map_err(map_adb_error)
+    }
+
+    fn copy_commit_remove_empty_directory(
+        &mut self,
+        path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_remove_empty_directory(self, path).map_err(map_adb_error)
+    }
+
+    fn copy_commit_prepare_mutation_helper(
+        &mut self,
+        stage_root: &str,
+        helper_path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_prepare_mutation_helper(self, stage_root, helper_path)
+            .map_err(map_adb_error)
+    }
+
+    fn copy_commit_apply_selected_root_mutation(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        expected_entry: &str,
+        mutation: &CopyCommitMutation,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_apply_selected_root_mutation(
+            self,
+            selected_root,
+            destination_binding,
+            stage_root,
+            helper_path,
+            expected_entry,
+            mutation,
+        )
+        .map_err(map_adb_error)
+    }
+
+    fn copy_commit_cleanup_mutation_helper(
+        &mut self,
+        helper_path: &str,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_cleanup_mutation_helper(self, helper_path)
+            .map_err(map_adb_error)
     }
 
     fn apply_permission_operation(
@@ -3808,6 +4562,49 @@ impl From<DeviceOperationError> for StepFailure {
             cleanup: error.cleanup,
         }
     }
+}
+
+impl From<CopyCommitError> for StepFailure {
+    fn from(error: CopyCommitError) -> Self {
+        match error {
+            CopyCommitError::DeviceOperation(error) => error.into(),
+            other => Self::new(other.to_string()),
+        }
+    }
+}
+
+fn copy_commit_report_failure(
+    report: crate::executor::copy_commit::CopyCommitReport,
+) -> StepFailure {
+    let message = format!(
+        "copy commit did not complete: {}",
+        report
+            .error
+            .as_deref()
+            .unwrap_or("selected destination state is incomplete or uncertain")
+    );
+    let mut failure = report
+        .internal_device_error
+        .clone()
+        .map(StepFailure::from)
+        .unwrap_or_else(|| StepFailure::new(message.clone()));
+    failure.message = message;
+    let value = serde_json::to_value(&report).unwrap_or_else(|error| {
+        json!({
+            "succeeded": false,
+            "outcome": "uncertain",
+            "error": format!("copy commit report serialization failed: {error}"),
+        })
+    });
+    failure.outputs.insert(
+        "copy_commit_report".to_string(),
+        RuntimeValue {
+            type_name: "copy_commit_report".to_string(),
+            value,
+            location: Some("device".to_string()),
+        },
+    );
+    failure
 }
 
 fn host_staging_cleanup_failure() -> StepFailure {

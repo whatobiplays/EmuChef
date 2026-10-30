@@ -878,7 +878,7 @@ mod tests {
     }
 
     fn granted_root_probe() -> (i32, &'static str, &'static str) {
-        (0, "uid=0(root) gid=0(root)\n", "")
+        (0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "")
     }
 
     fn plain_result(returncode: i32) -> (i32, &'static str, &'static str) {
@@ -1290,6 +1290,7 @@ mod tests {
             Some("prepared-device"),
             fake_executor(&responses),
         ));
+        device.configure_root_shell_route(Some(crate::planner::RootShellRoute::SuCommand));
 
         qualification
             .qualify_filesystem_operations(&mut device, &copied_file, &created_tree)
@@ -1317,7 +1318,7 @@ mod tests {
                 .last()
                 .expect("command call should include a shell payload");
             assert!(
-                command.starts_with("su -c '") && command != "su -c id",
+                command.starts_with("su -c '") && command != "su -c 'id'",
                 "privileged command must be su-wrapped"
             );
         }
@@ -1409,7 +1410,7 @@ mod tests {
         let qualification = qualification_for(RootQualificationGroup::Filesystem);
         let (copied_file, created_tree) = filesystem_paths();
         let mut executor = FakeAdbCommandExecutor::default();
-        executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+        executor.push_completed(0, "uid=0(root) gid=0(root) context=u:r:su:s0\n", "");
         executor.push_timed_out();
         let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
             "adb",

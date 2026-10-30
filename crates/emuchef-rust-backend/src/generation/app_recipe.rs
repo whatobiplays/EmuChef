@@ -2162,6 +2162,7 @@ mod tests {
                 android_version: 13,
                 android_api_level: Some(33),
                 device_tags: Vec::new(),
+                root_shell_mode: None,
             },
             runtime_capabilities: RuntimeCapabilities {
                 adb_available: true,
@@ -2172,6 +2173,7 @@ mod tests {
                 package_remove_for_user: true,
                 root_shell,
                 app_data_write: true,
+                root_shell_route: None,
             },
             catalog_identity: None,
             target_device: None,

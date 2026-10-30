@@ -153,7 +153,7 @@ fn collect_sample<E: AdbCommandExecutor>(
     let getprop =
         match runner.run_identity_command(vec!["shell".to_string(), "getprop".to_string()]) {
             Ok(result) => result,
-            Err(AdbCommandError::CommandFailed) => return Ok(None),
+            Err(AdbCommandError::CommandFailed { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
     let Some(properties) = parse_getprop_sample(&getprop.stdout) else {
@@ -167,7 +167,7 @@ fn collect_sample<E: AdbCommandExecutor>(
         "android_id".to_string(),
     ]) {
         Ok(result) => result,
-        Err(AdbCommandError::CommandFailed) => return Ok(None),
+        Err(AdbCommandError::CommandFailed { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
     let Some(android_id) = parse_android_id_output(&android_id.stdout) else {
@@ -654,6 +654,50 @@ mod tests {
             guard.check(&mut runner, IdentityCheckPhase::PreOperation),
             Err(AdbCommandError::DeviceOffline)
         );
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "", "adb: error: connection reset by peer");
+        let mut runner =
+            AdbCommandRunner::with_executor("adb", Some("serial-a".to_string()), executor);
+        let mut guard = IdentityGuard::default();
+        guard.configure(Some(&target("acme", "Pocket S", 33)));
+        let error = guard
+            .check(&mut runner, IdentityCheckPhase::PreOperation)
+            .expect_err("ADB transport reset must stop identity sampling");
+        assert_eq!(error, AdbCommandError::TransportReset);
+        assert!(!error.to_string().contains("connection reset"));
+        assert_eq!(
+            crate::executor::map_adb_error(error).message,
+            "The device connection was interrupted during execution."
+        );
+    }
+
+    #[test]
+    fn identity_command_failure_maps_to_a_generic_public_message() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "private stdout payload", "private stderr payload");
+        let mut runner =
+            AdbCommandRunner::with_executor("adb", Some("serial-a".to_string()), executor);
+        let mut guard = IdentityGuard::default();
+        guard.configure(Some(&target("acme", "Pocket S", 33)));
+
+        let error = guard
+            .check(&mut runner, IdentityCheckPhase::PreOperation)
+            .expect_err("failed identity sampling must not authorize execution");
+        assert_eq!(
+            error,
+            AdbCommandError::DeviceIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            }
+        );
+        let operation_error = crate::executor::map_adb_error(error);
+        assert_eq!(
+            operation_error.message,
+            "The reviewed device identity could not be confirmed."
+        );
+        assert!(!operation_error.message.contains("serial-a"));
+        assert!(!operation_error.message.contains("private stdout payload"));
+        assert!(!operation_error.message.contains("private stderr payload"));
     }
 
     #[test]

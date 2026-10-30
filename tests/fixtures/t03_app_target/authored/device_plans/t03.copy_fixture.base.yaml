@@ -1,0 +1,12 @@
+schema_version: 1
+kind: device_plan
+id: t03.copy_fixture.base
+name: T03 Synthetic Copy Fixture Plan
+description: Selects the disposable App Target Recipe for copy qualification.
+device_profile_ref: t03.copy_fixture
+recipes:
+  - recipe_ref: t03.copy_app_target
+    selected_by_default: true
+defaults:
+  show_advanced_steps: false
+overrides: {}

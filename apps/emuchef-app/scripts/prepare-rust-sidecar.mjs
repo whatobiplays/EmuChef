@@ -22,7 +22,7 @@ const targetResult = spawnSync("rustc", ["--print", "host-tuple"], { encoding: "
 if (targetResult.status !== 0) throw new Error("rustc could not report its host target");
 const target = validateTargetTriple(targetResult.stdout.trim());
 const args = ["build", "--manifest-path", manifest, "--bin", BINARY_BASENAME];
-if (profile === "release") args.push("--release");
+if (profile === "release") args.push("--release", "--features", "android-copy-commit-helper");
 const build = spawnSync("cargo", args, { stdio: "inherit" });
 if (build.status !== 0) process.exit(build.status ?? 1);
 

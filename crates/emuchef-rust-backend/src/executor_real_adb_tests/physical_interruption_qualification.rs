@@ -2677,6 +2677,7 @@ fn reviewed_plan(
     ExecutionPlan {
         device_plan: None,
         resolved_inputs: Vec::new(),
+        copy_commit_snapshots: Vec::new(),
         id: format!(
             "plan.phase6d6.{}.{}",
             invocation.scenario.as_str(),
@@ -2703,6 +2704,7 @@ fn reviewed_plan(
             android_version: facts.android_version.parse().unwrap_or(0),
             android_api_level: Some(facts.api_level),
             device_tags: vec!["phase6d6".to_string()],
+            root_shell_mode: None,
         },
         runtime_capabilities: RuntimeCapabilities {
             adb_available: true,
@@ -2713,6 +2715,7 @@ fn reviewed_plan(
             package_remove_for_user: false,
             root_shell: facts.root_shell,
             app_data_write: facts.root_shell,
+            root_shell_route: None,
         },
         inputs: Vec::new(),
         artifacts: Vec::new(),
@@ -8822,6 +8825,7 @@ mod tests {
         let plan = ExecutionPlan {
             device_plan: None,
             resolved_inputs: Vec::new(),
+            copy_commit_snapshots: Vec::new(),
             id: "plan.phase6d6.physical-style.host-sleep".to_string(),
             source: ExecutionPlanSource {
                 device_profile_ref: "fixture.phase6d6".to_string(),
@@ -8839,6 +8843,7 @@ mod tests {
                 android_version: 14,
                 android_api_level: Some(34),
                 device_tags: Vec::new(),
+                root_shell_mode: None,
             },
             runtime_capabilities: RuntimeCapabilities {
                 adb_available: true,
@@ -8849,6 +8854,7 @@ mod tests {
                 package_remove_for_user: false,
                 root_shell: false,
                 app_data_write: false,
+                root_shell_route: None,
             },
             inputs: Vec::new(),
             artifacts: Vec::new(),

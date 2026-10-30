@@ -141,6 +141,14 @@ export interface ConfigurationDescription {
   diagnostics: ValidationDiagnostic[];
 }
 
+/** Copy operations a reviewed action plans within a selected device boundary. */
+export interface CopyChanges {
+  selectedBoundary: string;
+  additions: string[];
+  replacements: string[];
+  deletions: string[];
+}
+
 export interface ReviewSummary {
   reviewHandle: string;
   setup: {
@@ -173,6 +181,8 @@ export interface ReviewSummary {
         description?: string;
         requirement: "required" | "conditional";
         deviceLocation?: string;
+        /** Copy changes shown to the user before applying the reviewed action. */
+        copyChanges?: CopyChanges | null;
       }>;
     }>;
   }>;
