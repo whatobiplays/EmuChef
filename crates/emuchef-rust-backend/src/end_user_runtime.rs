@@ -69,57 +69,52 @@ pub(crate) fn list_adb_devices_with_runner(
     }))
 }
 
+/// Messages that `adb devices -l` prints around the device listing and that
+/// never name an attached transport. These messages are fixed, so they match
+/// exactly and a device row with the same text plus more still counts.
+const ADB_INVENTORY_NOISE_LINES: &[&str] = &[
+    "List of devices attached",
+    "* daemon started successfully",
+    "error: more than one device/emulator",
+    "error: no devices/emulators found",
+    "adb: no devices/emulators found",
+];
+
+/// Message stems whose tail varies between adb versions. Only the stem is
+/// fixed, so these match by prefix.
+const ADB_INVENTORY_NOISE_PREFIXES: &[&str] = &[
+    "adb server version (",
+    "* daemon not running",
+    "daemon not running; starting now at tcp:",
+    "adb: failed to check server version:",
+    "adb: insufficient permissions for device:",
+];
+
 /// Iterate over the lines of an `adb devices -l` report that can name an
-/// attached transport. Headers, daemon chatter, and other prose are skipped.
-/// A serial that happens to look like diagnostic text still counts, and a
-/// truncated or unrecognized state remains a row.
-fn adb_inventory_rows(stdout: &str) -> impl Iterator<Item = &str> + '_ {
-    stdout.lines().map(str::trim).filter(|line| {
-        !line.is_empty()
-            && !line.starts_with("List of devices attached")
-            && !line.starts_with('*')
-            && is_adb_device_row(line)
-    })
-}
-
-/// Decide whether one `adb devices -l` line has the shape of a device row.
+/// attached transport.
 ///
-/// A row is a serial token, optionally followed by a state token and
-/// `key:value` properties. `no permissions (...)` is a single adb state and
-/// may carry a parenthesized detail or semicolon suffix. The serial is never
-/// compared with diagnostic text because serials can contain any characters.
-/// Prose after a state is not part of the row grammar, which excludes daemon
-/// messages while keeping truncated rows and unknown states in the count.
-fn is_adb_device_row(line: &str) -> bool {
-    let mut fields = line.split_whitespace();
-    if fields.next().is_none() {
-        return false;
-    }
-    let Some(state) = fields.next() else {
-        return true;
-    };
-    let rest = fields.collect::<Vec<_>>();
-    if state == "no" {
-        if let Some(permissions) = rest.first() {
-            if *permissions == "permissions" {
-                return rest.get(1).is_none_or(|detail| {
-                    detail.starts_with('(') || detail.starts_with(';') || detail.starts_with('[')
-                });
-            }
-            if permissions.starts_with("permissions;") {
-                return true;
-            }
-        }
-    }
-    rest.iter().all(|field| is_adb_device_property(field))
+/// Rows are counted by exclusion. Only the listing header and known daemon
+/// messages are dropped, so a serial that contains a space or looks like
+/// diagnostic text, a row with an unexpected trailing token, and a truncated
+/// row all stay in the count.
+fn adb_inventory_rows(stdout: &str) -> impl Iterator<Item = &str> + '_ {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_adb_listing_noise(line))
 }
 
-/// Whether a field is one of the `key:value` properties that follows a state
-/// in an `adb devices -l` row.
-fn is_adb_device_property(field: &str) -> bool {
-    field
-        .split_once(':')
-        .is_some_and(|(key, value)| !key.is_empty() && !value.is_empty())
+/// Whether a trimmed line is the listing header or a known daemon message
+/// rather than a device row.
+///
+/// Dropping an ambiguous line could hide a second attached device, so only
+/// fixed messages and the recognizable stems of variable messages are skipped.
+fn is_adb_listing_noise(line: &str) -> bool {
+    ADB_INVENTORY_NOISE_LINES.contains(&line)
+        || ADB_INVENTORY_NOISE_PREFIXES
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        || (line.starts_with("error: device '") && line.ends_with("' not found"))
 }
 
 fn inventory_row_count(stdout: &str) -> usize {
@@ -1061,6 +1056,34 @@ truncated
         assert_eq!(runner.calls.borrow().len(), 1);
     }
 
+    #[test]
+    fn qualification_counts_device_rows_outside_the_common_shape() {
+        for extra in [
+            "my phone device transport_id:2",
+            "serial device unexpected",
+            "serial no permissions usb:1-1",
+            "*serial device",
+            "List of devices attached extra",
+            "adb: no devices/emulators found extra",
+            "error: device 'missing'",
+        ] {
+            let runner = FakeRunner {
+                calls: RefCell::new(Vec::new()),
+                output: Ok(CommandOutput {
+                    status_code: Some(0),
+                    stdout: format!("List of devices attached\nselected-device device\n{extra}\n"),
+                    stderr: String::new(),
+                }),
+            };
+
+            let result =
+                qualify_device_with_runner("/managed/adb", "selected-device", &runner).unwrap();
+
+            assert_eq!(result["state"], "multiple_devices", "extra row: {extra}");
+            assert_eq!(runner.calls.borrow().len(), 1, "extra row: {extra}");
+        }
+    }
+
     fn qualification_probe_outputs() -> Vec<CommandOutput> {
         vec![
             CommandOutput {
@@ -1112,7 +1135,7 @@ truncated
     fn qualification_accepts_daemon_chatter_around_one_online_device() {
         let mut outputs = vec![CommandOutput {
             status_code: Some(0),
-            stdout: "List of devices attached\n* daemon started successfully\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: no permissions problem\nerror: device 'missing' not found\nselected-device device\n"
+            stdout: "List of devices attached\n* daemon started successfully\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\nselected-device device\n"
                 .to_string(),
             stderr: String::new(),
         }];
