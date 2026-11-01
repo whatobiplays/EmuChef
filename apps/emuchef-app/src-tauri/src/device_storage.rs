@@ -340,7 +340,7 @@ impl DeviceStorageState {
             )
         });
         if mismatched {
-            self.observations.remove(device);
+            self.retire_observation(device);
             self.selections.remove(device);
             self.notices.remove(device);
         }
@@ -1376,15 +1376,13 @@ pub(crate) fn admit_device_volume_selection_at_sequence(
         .device(&context.device_handle)
         .map_err(|_| unknown_device_error())?
         .clone();
-    if record.session_epoch != context.session_epoch {
-        guard
-            .device_storage_mut()
-            .note_stale_session(&context.device_handle);
-        return Err(stale_device_session_error());
-    }
     let store = guard.device_storage_mut();
     if !store.selection_request_is_current(&context.device_handle, selection_sequence) {
         return Ok(store.project(&record, context, evidence, now));
+    }
+    if record.session_epoch != context.session_epoch {
+        store.note_stale_session(&context.device_handle);
+        return Err(stale_device_session_error());
     }
     match requested_handle {
         None => store.clear_selection(&context.device_handle),
@@ -1858,6 +1856,73 @@ mod tests {
         assert!(late.volumes.is_empty());
         assert_eq!(late.discovery_status, "refreshing");
         assert_eq!(late.evidence, "unavailable");
+    }
+
+    #[test]
+    fn older_epoch_superseded_selection_response_preserves_newer_selection() {
+        let base = Instant::now();
+        let (handles, device) = handles_with_inventory("transport-1");
+        let epoch_one = device_context(&device, 1);
+        let first = observe(&handles, &epoch_one, internal_and_sd(), base);
+        let old_sd = handle_for(&first, "removableSd");
+        let old_token = first.observation_token.clone();
+        let older_sequence =
+            begin_selection_request(&handles, &device).expect("older selection sequence");
+
+        {
+            let mut guard = handles.lock().expect("handles");
+            guard.invalidate_identity_authority(&device);
+            update_inventory(&mut guard, "transport-1");
+        }
+
+        let epoch_two = {
+            let guard = handles.lock().expect("handles");
+            let epoch = guard
+                .device(&device)
+                .expect("redetected device")
+                .session_epoch;
+            device_context(&device, epoch)
+        };
+        let second = observe(&handles, &epoch_two, internal_and_sd(), base);
+        let new_sd = handle_for(&second, "removableSd");
+        let new_token = second.observation_token.clone();
+        let newer_sequence =
+            begin_selection_request(&handles, &device).expect("newer selection sequence");
+        assert!(newer_sequence > older_sequence);
+
+        admit_device_volume_selection_at_sequence(
+            &handles,
+            &epoch_two,
+            Some(&new_sd),
+            Some(&new_token),
+            newer_sequence,
+            "cached",
+            base,
+        )
+        .expect("newer selection commits");
+
+        let preserved = admit_device_volume_selection_at_sequence(
+            &handles,
+            &epoch_one,
+            Some(&old_sd),
+            Some(&old_token),
+            older_sequence,
+            "cached",
+            base,
+        )
+        .expect("older superseded response returns the current projection");
+        assert_eq!(
+            preserved.selected_volume_handle.as_deref(),
+            Some(new_sd.as_str())
+        );
+
+        let current = project_device_volumes(&handles, &epoch_two, "cached", base)
+            .expect("current projection");
+        assert_eq!(
+            current.selected_volume_handle.as_deref(),
+            Some(new_sd.as_str())
+        );
+        assert_eq!(current.observation_token, new_token);
     }
 
     #[test]
@@ -3429,6 +3494,54 @@ public:179,65 {shell_state} {fs_uuid}
                 "runtime_invalidation={invalidate_runtime}, error was {error}"
             );
         }
+    }
+
+    #[test]
+    fn mismatched_observation_retirement_reports_stale_session() {
+        let base = Instant::now();
+        let (handles, device) = handles_with_inventory("transport-1");
+        let first_context = device_context(&device, 1);
+        let first = observe(&handles, &first_context, internal_and_sd(), base);
+        let old_sd = handle_for(&first, "removableSd");
+
+        {
+            let mut guard = handles.lock().expect("handles");
+            assert!(matches!(
+                guard
+                    .device_storage_mut()
+                    .begin_probe(&device, 2, 1, 1, base),
+                ProbeStart::Started(_)
+            ));
+        }
+
+        {
+            let mut guard = handles.lock().expect("handles");
+            guard.invalidate_identity_authority(&device);
+            update_inventory(&mut guard, "transport-1");
+        }
+
+        let renewed_context = {
+            let guard = handles.lock().expect("handles");
+            let epoch = guard
+                .device(&device)
+                .expect("redetected device")
+                .session_epoch;
+            device_context(&device, epoch)
+        };
+        let renewed = observe(&handles, &renewed_context, internal_and_sd(), base);
+        let sequence = begin_selection_request(&handles, &device).expect("selection sequence");
+
+        let error = admit_device_volume_selection_at_sequence(
+            &handles,
+            &renewed_context,
+            Some(&old_sd),
+            Some(&renewed.observation_token),
+            sequence,
+            "cached",
+            base,
+        )
+        .expect_err("a retired handle must be rejected");
+        assert!(error.contains("stale_device_session"), "error was {error}");
     }
 
     #[test]
