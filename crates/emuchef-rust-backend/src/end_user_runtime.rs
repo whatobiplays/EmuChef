@@ -127,13 +127,16 @@ fn is_adb_server_version_mismatch(line: &str) -> bool {
     tail.is_empty() && is_ascii_number(server) && is_ascii_number(client)
 }
 
-/// Match `daemon not running; starting now at tcp:5037`, with or without the
-/// leading `* ` that adb prints.
+/// Match `daemon not running; starting now at tcp:<socket-spec>`, with or
+/// without the leading `* ` that adb prints. The socket spec is one
+/// non-whitespace token.
 fn is_daemon_not_running(line: &str) -> bool {
     line.strip_prefix("* ")
         .unwrap_or(line)
         .strip_prefix("daemon not running; starting now at tcp:")
-        .is_some_and(is_ascii_number)
+        .is_some_and(|socket_spec| {
+            !socket_spec.is_empty() && !socket_spec.chars().any(char::is_whitespace)
+        })
 }
 
 /// Match `error: device 'serial' not found`.
@@ -1098,6 +1101,7 @@ truncated
             "error: device 'missing'",
             "adb server version (41)\tdevice",
             "* daemon not running\tdevice",
+            "daemon not running; starting now at tcp:localhost:5037 device",
         ] {
             let runner = FakeRunner {
                 calls: RefCell::new(Vec::new()),
@@ -1167,7 +1171,7 @@ truncated
     fn qualification_accepts_daemon_chatter_around_one_online_device() {
         let mut outputs = vec![CommandOutput {
             status_code: Some(0),
-            stdout: "List of devices attached\n* daemon started successfully\n* daemon started successfully *\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\nselected-device device\n"
+            stdout: "List of devices attached\n* daemon started successfully\n* daemon started successfully *\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\n* daemon not running; starting now at tcp:localhost:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\nselected-device device\n"
                 .to_string(),
             stderr: String::new(),
         }];
