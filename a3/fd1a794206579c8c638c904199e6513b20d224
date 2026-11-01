@@ -1,0 +1,21 @@
+apps/emuchef-app/src-tauri/src/device_storage.rs
+  s_9f89cb54592ba7::t_ed86017250d34d 559-560,568-569,1014-1020,1388-1407,1458-1464
+  s_9f89cb54592ba7::t_909ca2ce148dc8 1961-2025
+  s_9f89cb54592ba7::t_e001a7dcc98001 1960
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a3fd1a794206579c8c638c904199e6513b20d224",
+  "prompts": {},
+  "sessions": {
+    "s_9f89cb54592ba7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18f32-ceb3-71b2-a8e3-84069c6e8d67",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
