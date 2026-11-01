@@ -3341,7 +3341,7 @@ Primary storage UUID: ADOPTED-B",
             completed(
                 0,
                 &format!(
-                    "List of devices attached\n* daemon started successfully\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\n{SERIAL}\tdevice transport_id:1\n"
+                    "List of devices attached\n* daemon started successfully\n* daemon started successfully *\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\n{SERIAL}\tdevice transport_id:1\n"
                 ),
                 "",
             ),

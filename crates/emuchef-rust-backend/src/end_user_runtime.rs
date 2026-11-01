@@ -75,6 +75,7 @@ pub(crate) fn list_adb_devices_with_runner(
 const ADB_INVENTORY_NOISE_LINES: &[&str] = &[
     "List of devices attached",
     "* daemon started successfully",
+    "* daemon started successfully *",
     "error: more than one device/emulator",
     "error: no devices/emulators found",
     "adb: no devices/emulators found",
@@ -1135,7 +1136,7 @@ truncated
     fn qualification_accepts_daemon_chatter_around_one_online_device() {
         let mut outputs = vec![CommandOutput {
             status_code: Some(0),
-            stdout: "List of devices attached\n* daemon started successfully\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\nselected-device device\n"
+            stdout: "List of devices attached\n* daemon started successfully\n* daemon started successfully *\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\nselected-device device\n"
                 .to_string(),
             stderr: String::new(),
         }];
