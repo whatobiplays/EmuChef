@@ -1341,6 +1341,188 @@ and do not perform readiness validation. The development-only
 through the Tauri CLI and reports real execution as compiled; it does not alter
 Cargo defaults or any build, bundle, release, or packaging command.
 
+## Device storage
+
+Sidecar operation listDeviceVolumes requires only adbPath and serial. Additional
+payload members are ignored, so the protocol remains additive. It runs one
+bounded probe sequence with argv arrays under ProcessOperation::Probe: adb
+devices -l, adb -s <serial> shell dumpsys mount, then adb -s <serial> shell sm
+list-volumes all. The inventory must report exactly one attached device and an
+exact serial match before any device-specific command runs. No shell string is
+constructed. The response carries an observation token over typed volumes:
+identityToken, continuityToken, kind, status, mountState, and fixed reason keys.
+Inventory rows are counted by exclusion. Only a narrow set of complete known
+non-row lines is dropped: the "List of devices attached" header, known daemon
+chatter, known adb error lines, and the "error: device '<serial>' not found"
+line. Each match requires the whole known message, so any additional token
+makes the line a candidate row. Every other non-empty line counts, including a
+serial that contains a space or looks like diagnostic output, a row with an
+unexpected trailing token, and a lone token. The count therefore errs high,
+which fails closed. Rows whose ADB state is unrecognized or missing are
+excluded from the projected device list but remain in the inventory row count.
+Storage discovery and qualification require exactly one reported row and one
+projected device whose serial matches the request, so an attached but unusable
+device fails closed instead of disappearing.
+
+The dumpsys mount report is read by its current AOSP sections. Disks: contains
+DiskInfo records, Volumes: contains VolumeInfo records, Records: contains
+historical VolumeRecord entries, and a top-level Primary storage UUID: line
+follows the records section. Field lines apply only to the record inside their
+owning section. Legacy reports using mDisks, mVolumes, or mPrimaryStorageUuid
+remain accepted for older OEM builds, so both the AOSP primary-storage line and
+the legacy primary-storage field are supported. Records entries never create
+current volumes. Repeated VolumeInfo or DiskInfo records for the same identity
+are merged only while the fields used for classification agree. Repetition that
+differs only in fields EmuChef does not classify by is accepted. A contradictory
+duplicate record whose classification evidence disagrees, conflicting
+primary-storage UUID declarations, or a malformed or truncated report fails
+closed with device_storage_malformed, so none of that report's volumes becomes
+available or selectable.
+
+The sm list-volumes all report prints id, environment state, and an optional
+filesystem UUID. Two-field legacy lines and three-field AOSP lines are accepted;
+lines with more fields are not trusted. The filesystem UUID field is parsed only
+far enough to discard it and never crosses the sidecar boundary.
+
+Volume kinds are internalShared, removableSd, adoptedPrivate, usb, and unknown.
+Statuses are available, unmounted, ambiguous, unsupported, and unknown. Mount
+states are mountedRw, mountedRo, unmounted, and unknown. AOSP prints the
+read-only state as MOUNTED_READ_ONLY and the shell environment state as
+mounted_ro; both map to mountedRo. Mounted means Android reports the volume
+mounted. It does not prove EmuChef can write the volume, that the application can
+use it, or that execution is eligible. A read-only mount stays visible with its
+read-only state and is never selectable as a content destination.
+
+Internal storage classification follows AOSP VolumeInfo type, ID, and state plus
+DiskInfo flags and the reported primary-storage UUID. Emulated volume IDs encode
+the Android user association as emulated;<user>, so classification does not
+require a /storage/emulated/<user> path field to appear in the dump. Normal
+emulated primary, adopted backing or private primary, and physical public/SD
+backed primary remain distinct classifications. A public:<fsUuid> primary
+storage identifier is matched only against PUBLIC volumes. Unmounted volumes and
+volumes positively associated with another Android user are not offered as
+available. A sole emulated volume with no positive user evidence keeps the
+assumed-user compatibility fallback and reports emulated_user_assumed. The
+explicit emulated;0 primary-storage spelling is accepted only when it resolves
+a volume positively associated with user 0; it does not use the assumed-user
+fallback.
+Adopted primary storage is resolved from the private volume to the stacked
+emulated volume by disk identity: a private volume with ID private:<major>,<minor>
+corresponds to an emulated volume with ID emulated:<major>,<minor>;<user>. The
+private volume reports no mount user association, so its mountUserId is not used.
+Multiple matching stacked emulated volumes make the internal storage ambiguous.
+
+Removable SD candidates are only public volumes in mounted or mounted_ro state
+with a non-empty filesystem UUID, corroborated by the current VolumeInfo entry
+of type PUBLIC, a matching filesystem UUID, the exact /storage/<fsUuid> path
+for visible mount evidence, observed mount flags, and a disk carrying FLAG_SD
+without FLAG_USB. /mnt/media_rw/<fsUuid> is recognized as non-visible backing
+evidence and cannot by itself make a card available. A missing mountFlags field
+leaves the card unknown with the fixed missing_mount_flags reason. Distinct
+filesystem UUIDs produce separate candidates. Missing or different mount-path
+evidence is unknown. A duplicate UUID, disagreeing evidence, or missing
+corroboration is ambiguous or unknown and never available. Historical Records
+entries are ignored. Conflicting repeated records fail before classification, so
+they cannot promote a destination. Truncated, oversized, or malformed reports
+fail closed with a fixed message instead of a partial projection.
+
+A public volume selected by primary_physical or public:<fsUuid> becomes the
+logical internal-shared source only when its ordinary public-volume
+classification is available. It must be non-USB, have removable-SD disk and
+filesystem UUID evidence, be visible through its mount flags and path, and have
+matching mounted state in sm list-volumes. A candidate that fails these checks
+stays unsupported, unknown, unmounted, or ambiguous and is not promoted to
+internal storage.
+
+The identity token is a deterministic 128-bit digest over volume kind,
+filesystem UUID, and transport class. The mount path is excluded so alias drift
+does not change identity. The value is correlation evidence for an observed
+volume, not proof of a specific physical card. Raw filesystem UUIDs, paths, disk
+identifiers, and serials stay in the sidecar. React receives opaque handles,
+product labels, fixed detail text, and observation tokens.
+
+A separate sidecar continuity digest covers disk identifier, mount and backing
+paths, mount flags, mount state, and filesystem UUID. It travels in the trusted
+observation, is stored with a retained selection, and must match on
+reconciliation. It never reaches React. A replacement card or the same card
+moved to another disk invalidates the selection only when the continuity
+evidence differs. A card that presents identical continuity evidence is
+indistinguishable from the original, so the selection cannot prove physical
+card identity.
+
+Tauri mints stable opaque volume handles per device handle, device session
+epoch, and identity token. Each projected volume also carries a presentationKey
+used only for list identity. It equals the volume handle when the handle is
+unique in the projection and adds a deterministic ordinal suffix when
+indistinguishable non-selectable volumes share a handle. Selection continues to
+use the volume handle, and a presentation key grants no selection authority.
+
+The observation cache lasts ten seconds and is keyed by device handle, session
+epoch, runtime generation, and Platform-Tools revision; explicit refresh
+bypasses the cache. Cache lookup compares the request-start time with fetched_at.
+A successful probe commits fetched_at at probe completion, so a slow probe
+receives a full fresh lifetime when it returns. Projection and selection
+admission compare their current time with fetched_at and apply the same
+ten-second limit. The projection states whether evidence is live or cached.
+Storage commands run off the main thread. After the sidecar request returns,
+Tauri re-reads the runtime generation, which identifies the sidecar instance,
+and the Platform-Tools revision. Any difference discards the observation, clears
+the selection, and returns a fixed stale-context error. A probe also re-reads
+session state after the device commands finish, and superseded responses never
+commit. The ten-second limit is enforced when a projection is built and when a
+selection is admitted. An expired observation is discarded before a busy probe
+returns, so aged data is neither shown nor selectable.
+
+Runtime or device-identity invalidation clears retained observations,
+selections, in-flight probe markers, and notices before the same opaque handle
+can be redetected. This invalidation does not reset the probe counter or the
+per-device selection-request counter, so a late response from the previous
+authority cannot match a new request.
+
+One selected volume may be retained per device session as user intent.
+Selecting requires the observationToken displayed with the chosen projection.
+During admission Tauri re-locks native state and validates the session epoch, the
+latest per-device selection request sequence, the current trusted observation,
+and the expected observation token. The request sequence rejects a superseded
+older response. The observation token comparison rejects a choice made against
+an earlier report even when the volume handle remains valid, such as the same
+filesystem UUID observed on another disk. A mismatch returns fixed
+stale_observation and never rebinds the older choice to the current card.
+Explicit clearing passes no volume handle and no token; it removes intent
+without accepting any card identity. Selection is discarded when the device
+session epoch, continuity evidence, runtime generation, Platform-Tools revision,
+observed identity, availability, or ambiguity changes, and when any storage
+command fails before or during a probe. Selection is presentation intent only
+and never enters planning, review, or execution authority. Bridge errors use
+fixed codes unknown_device_handle, stale_device_session, stale_context,
+stale_observation, sidecar_unavailable, volume_not_found,
+volume_not_selectable, and session_state_unavailable with user-safe messages.
+
+React renders the Storage options fieldset in the setup step directly after the
+device qualification details. Selectable volumes appear as native radio
+controls whose accessible names are exactly Internal storage or SD card. Mount
+and status details are exposed through aria-describedby and are not part of the
+accessible name. Adopted private and USB volumes appear in a Not offered as a
+destination list with a reason and never become selectable. The same list holds
+mounted read-only volumes, whose detail keeps the read-only mount state. No
+storage option is selected by default. The surface shows cached, fresh, or
+unavailable evidence and offers Refresh storage.
+
+Focus tracking follows actual radio focus, including keyboard focus that occurs
+before selection. A refresh restores focus only to the same option when it
+remains available and the user has not moved focus elsewhere. When a focused
+option disappears, focus moves to Refresh storage only when focus has not moved
+to another control. A failed read uses the panel alert to announce the error and
+does not also announce normal option loss. Successful selection is announced
+through the app shell live region. An invalidation notice is announced by one
+panel status live region, and the shell does not duplicate that notice. A failed
+storage read replaces the projection with an unavailable state containing no
+volumes and no selected handle, so a stale checkmark and live-evidence label
+cannot remain visible. A stale_observation failure keeps the current trusted
+projection and any newer successful selection, shows the panel alert, and asks
+for a fresh read and reselection. No filesystem label, capacity, UUID, path, or
+serial appears in the DOM or in frontend props.
+
 ## Developer commands
 
 The repository root `Makefile` provides the standard developer workflow.

@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ConfigurationDescription,
+  DeviceVolumesProjection,
   ExecutionCapabilities,
   RuntimeStatus,
   SupportSnapshot,
@@ -35,6 +36,8 @@ const mockApi = vi.hoisted(() => ({
   pickPlatformToolsZip: vi.fn(),
   pollDevices: vi.fn(),
   probeDevice: vi.fn(),
+  deviceVolumes: vi.fn(),
+  selectDeviceVolume: vi.fn(),
   removePlatformTools: vi.fn(),
   restartRuntime: vi.fn(),
   supportSnapshot: vi.fn(),
@@ -313,6 +316,26 @@ function resetApi(): void {
   mockApi.listRecentConfigurations.mockResolvedValue([]);
   mockApi.pollDevices.mockResolvedValue([]);
   mockApi.probeDevice.mockResolvedValue(facts);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  });
+  mockApi.selectDeviceVolume.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  });
   mockApi.matchDevice.mockResolvedValue(supportedMatch);
   mockApi.pickInputPath.mockResolvedValue(null);
   mockApi.describeConfiguration.mockResolvedValue({
@@ -361,6 +384,470 @@ async function advanceToInputs(user: ReturnType<typeof userEvent.setup>): Promis
   await screen.findByRole("heading", { name: "Provide required files and options" });
 }
 
+test("a successful storage selection announces once in the shell live region", async () => {
+  const user = userEvent.setup();
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: "11111111111111111111111111111111",
+        volumeHandle: "11111111111111111111111111111111",
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  mockApi.selectDeviceVolume.mockResolvedValue({
+    ...observed,
+    selectedVolumeHandle: sdHandle,
+  });
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  const liveRegions = screen.getByLabelText("Application notifications");
+  const announcements: string[] = [];
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes)) {
+        if (!(node instanceof HTMLElement)) continue;
+        const live = node.getAttribute("aria-live");
+        const text = node.textContent ?? "";
+        if (live && text.includes("selected for this device")) {
+          announcements.push(live + ":" + text);
+        }
+      }
+    }
+  });
+  observer.observe(liveRegions, { childList: true, subtree: true });
+  try {
+    await user.click(sd);
+    await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
+    await waitFor(() => expect(announcements).toEqual([
+      "polite:SD card is selected for this device.",
+    ]));
+    const statuses = within(liveRegions).getAllByRole("status");
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0].textContent).toBe("SD card is selected for this device.");
+    const alerts = within(liveRegions).getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].textContent).toBe("");
+  } finally {
+    observer.disconnect();
+  }
+});
+
+test("a storage selection reports selection-specific busy text", async () => {
+  const user = userEvent.setup();
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: "11111111111111111111111111111111",
+        volumeHandle: "11111111111111111111111111111111",
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  const selection = deferred<DeviceVolumesProjection>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  mockApi.selectDeviceVolume.mockReturnValue(selection.promise);
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(sd);
+
+  expect(await screen.findByRole("button", { name: "Selecting storage…" })).toBeTruthy();
+  expect(screen.queryByText("Refreshing storage options…")).toBeNull();
+
+  await act(async () => {
+    selection.resolve({ ...observed, selectedVolumeHandle: sdHandle });
+  });
+  await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
+});
+
+test("a failed storage refresh clears the chosen volume and live evidence", async () => {
+  const user = userEvent.setup();
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: "11111111111111111111111111111111",
+        volumeHandle: "11111111111111111111111111111111",
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  let failStorageReads = false;
+  mockApi.deviceVolumes.mockImplementation((_deviceHandle: string, refresh: boolean) =>
+    failStorageReads || refresh
+      ? Promise.reject(new Error("storage probe failed"))
+      : Promise.resolve(observed));
+  mockApi.selectDeviceVolume.mockResolvedValue({
+    ...observed,
+    selectedVolumeHandle: sdHandle,
+  });
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(sd);
+  await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
+  expect(mockApi.selectDeviceVolume).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    sdHandle,
+    observed.observationToken,
+  );
+  expect(screen.getByText("Showing a storage report read from the device just now.")).toBeTruthy();
+
+  failStorageReads = true;
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+
+  await waitFor(() => expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull());
+  expect(
+    within(screen.getByRole("group", { name: "Storage options" })).queryByRole("radio", {
+      checked: true,
+    }),
+  ).toBeNull();
+  expect(screen.queryByText("Showing a storage report read from the device just now.")).toBeNull();
+  expect(
+    screen.getAllByText("Storage options could not be read. Refresh storage options to try again.")
+      .length,
+  ).toBeGreaterThan(0);
+});
+
+test("a device poll during a storage selection clears the stale choice and live evidence", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const triggerDevicePoll = captureDevicePollTick();
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: sdHandle,
+    selectionNotice: null,
+  };
+  const fresh = { ...observed, sessionEpoch: 2, selectedVolumeHandle: internalHandle };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  let releaseSelection!: () => void;
+  mockApi.selectDeviceVolume.mockImplementation(() => new Promise((resolve) => {
+    releaseSelection = () => resolve(fresh);
+  }));
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
+
+  await user.click(screen.getByRole("radio", { name: "Internal storage" }));
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
+
+  mockApi.deviceVolumes.mockResolvedValue(fresh);
+  // Trigger one inventory poll directly so the race does not depend on
+  // wall-clock timing.
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await waitFor(() => expect(
+    within(screen.getByRole("group", { name: "Storage options" })).queryByRole("radio", {
+      checked: true,
+    }),
+  ).toBeNull());
+  expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull();
+  expect(screen.queryByText("Showing a storage report read from the device just now.")).toBeNull();
+
+  releaseSelection();
+  await waitFor(() => expect(
+    (screen.getByRole("radio", { name: "Internal storage" }) as HTMLInputElement).checked,
+  ).toBe(true));
+  expect(screen.getByText("Showing a storage report read from the device just now.")).toBeTruthy();
+});
+
+test("a qualification failure after committed inventory discards stale storage state", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: sdHandle,
+    selectionNotice: null,
+  };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  let releaseSelection!: () => void;
+  mockApi.selectDeviceVolume.mockImplementation(() => new Promise((resolve) => {
+    releaseSelection = () => resolve({ ...observed, selectedVolumeHandle: internalHandle });
+  }));
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
+
+  await user.click(screen.getByRole("radio", { name: "Internal storage" }));
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
+
+  mockApi.pollDevices.mockResolvedValue([]);
+  mockApi.deviceQualification.mockRejectedValueOnce(new Error("The device service is unavailable."));
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await waitFor(() => expect(
+    within(screen.getByRole("group", { name: "Storage options" })).queryByRole("radio", {
+      checked: true,
+    }),
+  ).toBeNull());
+  expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull();
+  expect(screen.queryByRole("radio", { name: "Internal storage" })).toBeNull();
+  expect(screen.queryByText("Selecting storage…")).toBeNull();
+  expect(screen.getAllByText(/device service is unavailable/i).length).toBeGreaterThan(0);
+
+  releaseSelection();
+  await waitFor(() => expect(screen.queryByText("Selecting storage…")).toBeNull());
+  expect(screen.queryByRole("radio", { name: "Internal storage" })).toBeNull();
+});
+
+test("a failed device poll clears a fenced storage action's loading state", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  let releaseSelection!: () => void;
+  mockApi.selectDeviceVolume.mockImplementation(() => new Promise((resolve) => {
+    releaseSelection = () => resolve({ ...observed, selectedVolumeHandle: sdHandle });
+  }));
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(false));
+
+  await user.click(sd);
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
+  expect((screen.getByRole("button", { name: "Selecting storage…" }) as HTMLButtonElement).disabled).toBe(true);
+
+  mockApi.pollDevices.mockRejectedValueOnce(new Error("The device service is unavailable."));
+  await act(async () => {
+    triggerDevicePoll();
+  });
+
+  await waitFor(() => expect(screen.queryByText("Selecting storage…")).toBeNull());
+  const refresh = screen.getByRole("button", { name: "Refresh storage" }) as HTMLButtonElement;
+  expect(refresh.disabled).toBe(false);
+
+  releaseSelection();
+  await act(async () => {
+    await flushPendingPromises();
+  });
+  expect((screen.getByRole("radio", { name: "SD card" }) as HTMLInputElement).checked).toBe(false);
+});
+
+test("a stale observation selection keeps the current projection and shows one alert", async () => {
+  const user = userEvent.setup();
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: "11111111111111111111111111111111",
+        volumeHandle: "11111111111111111111111111111111",
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  mockApi.selectDeviceVolume.mockRejectedValue(JSON.stringify({
+    code: "stale_observation",
+    message: "The storage report changed. Refresh storage options and choose again.",
+  }));
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(sd);
+
+  const storageOptions = screen.getByRole("group", { name: "Storage options" });
+  const alert = await within(storageOptions).findByRole("alert");
+  expect(alert.textContent).toContain("storage report changed");
+  expect(screen.getByRole("radio", { name: "SD card" })).toBeTruthy();
+  expect(within(storageOptions).getAllByRole("alert")).toHaveLength(1);
+  expect(screen.queryByText("Storage options could not be read. Refresh storage options to try again.")).toBeNull();
+});
+
 async function openSupportAction(
   user: ReturnType<typeof userEvent.setup>,
   name: string,
@@ -389,7 +876,51 @@ function deferred<T>(): {
   return { promise, reject, resolve };
 }
 
-beforeEach(() => resetApi());
+/**
+ * Let promise continuations and zero-delay timers from an unmounted App settle
+ * before the next test swaps the shared API mock implementations.
+ */
+async function flushPendingPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise<void>((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+}
+
+/**
+ * Capture the App's device-inventory interval so a test can trigger one poll
+ * without depending on wall-clock time.
+ */
+function captureDevicePollTick(): () => void {
+  const realSetInterval = window.setInterval.bind(window) as typeof window.setInterval;
+  let tick: (() => void) | null = null;
+  vi.spyOn(window, "setInterval").mockImplementation(
+    ((handler: TimerHandler, timeout?: number) => {
+      if (timeout === 2500) {
+        tick = handler as () => void;
+        return 0;
+      }
+      return realSetInterval(handler, timeout);
+    }) as unknown as typeof window.setInterval,
+  );
+  return () => {
+    if (!tick) throw new Error("The device poll interval was not registered.");
+    tick();
+  };
+}
+
+beforeEach(async () => {
+  await flushPendingPromises();
+  resetApi();
+});
+
+afterEach(async () => {
+  cleanup();
+  vi.useRealTimers();
+  resetApi();
+  await flushPendingPromises();
+});
 
 describe("Phase 6A execution capability reporting", () => {
   test("shows the backend-provided feature-disabled capability", async () => {
@@ -2101,21 +2632,30 @@ describe("Phase 5F saved setup management", () => {
   });
 });
 test("a superseded runtime re-read cannot restore the lost runtime projection", async () => {
-  const user = userEvent.setup();
   await renderReadyApp();
 
   const pendingRuntimeReads: Array<(status: RuntimeStatus) => void> = [];
   mockApi.runtimeStatus.mockImplementation(() => new Promise<RuntimeStatus>((resolve) => {
     pendingRuntimeReads.push(resolve);
   }));
-  mockApi.pollDevices.mockRejectedValue(JSON.stringify({
-    code: "runtime_session_lost",
-    message: "The execution runtime session is no longer available.",
-  }));
+  // Reject only the poll started by each explicit refresh. Automatic inventory
+  // polls keep succeeding so an unrelated tick cannot add a runtime re-read.
+  let rejectNextPoll = false;
+  mockApi.pollDevices.mockImplementation(() => {
+    if (!rejectNextPoll) return Promise.resolve([]);
+    rejectNextPoll = false;
+    return Promise.reject(JSON.stringify({
+      code: "runtime_session_lost",
+      message: "The execution runtime session is no longer available.",
+    }));
+  });
 
-  await user.click(screen.getByRole("button", { name: "Refresh devices" }));
+  const refreshButton = screen.getByRole("button", { name: "Refresh devices" });
+  rejectNextPoll = true;
+  fireEvent.click(refreshButton);
   await waitFor(() => expect(pendingRuntimeReads).toHaveLength(1));
-  await user.click(screen.getByRole("button", { name: "Refresh devices" }));
+  rejectNextPoll = true;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
   await waitFor(() => expect(pendingRuntimeReads).toHaveLength(2));
 
   // The newest re-read resolves first and reports the lost app service.

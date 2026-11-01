@@ -32,7 +32,7 @@ pub(crate) fn list_adb_devices(adb_path: &str) -> Result<Value, ApiError> {
     list_adb_devices_with_runner(adb_path, &ProcessCommandRunner)
 }
 
-fn list_adb_devices_with_runner(
+pub(crate) fn list_adb_devices_with_runner(
     adb_path: &str,
     runner: &impl CommandRunner,
 ) -> Result<Value, ApiError> {
@@ -55,9 +55,11 @@ fn list_adb_devices_with_runner(
             json!({ "reason": "adb_inventory_failed" }),
         ));
     }
+    let inventory_count = inventory_row_count(&output.stdout);
     let entries = parse_adb_devices(&output.stdout);
     Ok(json!({
         "state": if entries.is_empty() { "no_devices" } else { "devices" },
+        "inventoryCount": inventory_count,
         "devices": entries.into_iter().map(|entry| json!({
             "serial": entry.serial,
             "state": entry.state,
@@ -67,26 +69,103 @@ fn list_adb_devices_with_runner(
     }))
 }
 
-fn parse_adb_devices(stdout: &str) -> Vec<AdbInventoryEntry> {
+/// Messages that `adb devices -l` prints around the device listing and that
+/// never name an attached transport. These messages are printed verbatim, so
+/// they match exactly and a line with any extra token still counts.
+const ADB_INVENTORY_NOISE_LINES: &[&str] = &[
+    "List of devices attached",
+    "* daemon started successfully",
+    "* daemon started successfully *",
+    "error: more than one device/emulator",
+    "error: no devices/emulators found",
+    "adb: no devices/emulators found",
+    "adb: failed to check server version: protocol fault",
+    "adb: failed to check server version: protocol fault (no status)",
+    "adb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?",
+];
+
+/// Iterate over the lines of an `adb devices -l` report that can name an
+/// attached transport.
+///
+/// Rows are counted by exclusion. A narrow set of complete known non-row
+/// messages is dropped: the listing header, known daemon chatter, known adb
+/// errors, and the missing-device error. Any other non-empty line stays in the
+/// count, including a serial that contains a space or looks like diagnostic
+/// text, a row with an unexpected trailing token, and a truncated row.
+fn adb_inventory_rows(stdout: &str) -> impl Iterator<Item = &str> + '_ {
     stdout
         .lines()
         .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with("List of devices attached")
-                && !line.starts_with('*')
+        .filter(|line| !line.is_empty() && !is_adb_listing_noise(line))
+}
+
+/// Whether a trimmed line is a complete known non-row message rather than a
+/// device row.
+///
+/// Variable parts are limited to numbers such as versions and ports, or a
+/// serial in the missing-device error. Any extra token makes the line a
+/// candidate row. Dropping an ambiguous line could hide a second attached
+/// device.
+fn is_adb_listing_noise(line: &str) -> bool {
+    ADB_INVENTORY_NOISE_LINES.contains(&line)
+        || is_adb_server_version_mismatch(line)
+        || is_daemon_not_running(line)
+        || is_missing_device_error(line)
+}
+
+/// Match `adb server version (41) doesn't match this client (40); killing...`.
+fn is_adb_server_version_mismatch(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("adb server version (") else {
+        return false;
+    };
+    let Some((server, rest)) = rest.split_once(") doesn't match this client (") else {
+        return false;
+    };
+    let Some((client, tail)) = rest.split_once("); killing...") else {
+        return false;
+    };
+    tail.is_empty() && is_ascii_number(server) && is_ascii_number(client)
+}
+
+/// Match `daemon not running; starting now at tcp:<socket-spec>`, with or
+/// without the leading `* ` that adb prints. The socket spec is one
+/// non-whitespace token.
+fn is_daemon_not_running(line: &str) -> bool {
+    line.strip_prefix("* ")
+        .unwrap_or(line)
+        .strip_prefix("daemon not running; starting now at tcp:")
+        .is_some_and(|socket_spec| {
+            !socket_spec.is_empty() && !socket_spec.chars().any(char::is_whitespace)
         })
+}
+
+/// Match `error: device 'serial' not found`.
+fn is_missing_device_error(line: &str) -> bool {
+    line.strip_prefix("error: device '")
+        .and_then(|rest| rest.strip_suffix("' not found"))
+        .is_some_and(|serial| !serial.is_empty())
+}
+
+fn is_ascii_number(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn inventory_row_count(stdout: &str) -> usize {
+    adb_inventory_rows(stdout).count()
+}
+
+fn parse_adb_devices(stdout: &str) -> Vec<AdbInventoryEntry> {
+    adb_inventory_rows(stdout)
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let serial = fields.next()?.trim();
-            let raw_state = fields.next()?.trim();
             if serial.is_empty() {
                 return None;
             }
-            let state = match raw_state {
-                "device" => "available",
-                "unauthorized" => "unauthorized",
-                "offline" => "offline",
+            let state = match fields.next().map(str::trim) {
+                Some("device") => "available",
+                Some("unauthorized") => "unauthorized",
+                Some("offline") => "offline",
                 _ => return None,
             };
             let model = fields
@@ -106,6 +185,100 @@ fn parse_adb_devices(stdout: &str) -> Vec<AdbInventoryEntry> {
             })
         })
         .collect()
+}
+
+/// Resolved target for one device-specific passive observation.
+///
+/// A device-specific command may only run after the requested serial resolves
+/// to exactly one connected device in the reported inventory. Callers that
+/// observe one selected device resolve it through this classification so
+/// cardinality, exact-serial matching, and transport state are validated in one
+/// place.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum InventoryTarget {
+    /// The inventory reports no connected devices.
+    NoDevice,
+    /// The inventory reports more than one connected device.
+    MultipleDevices,
+    /// The requested serial is present but is not currently usable.
+    Unavailable { state: &'static str, serial: String },
+    /// The requested serial is present and available.
+    Available { serial: String },
+}
+
+/// Count every reported `adb devices -l` row, including rows whose transport
+/// state is not projected as a device. Storage discovery and qualification use
+/// this count so an unrecognized attached device cannot disappear from their
+/// exactly-one-device precondition.
+fn reported_inventory_count(inventory: &Value, devices: &[Value]) -> usize {
+    inventory
+        .get("inventoryCount")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(devices.len())
+}
+
+/// Resolve one requested serial against an `adb devices -l` projection.
+///
+/// The projection is produced by `list_adb_devices_with_runner`, so this
+/// function only classifies already-decoded inventory and never re-parses raw
+/// ADB output.
+pub(crate) fn classify_inventory_target(
+    inventory: &Value,
+    requested_serial: &str,
+) -> Result<InventoryTarget, ApiError> {
+    let devices = inventory
+        .get("devices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if devices.is_empty() {
+        return Ok(InventoryTarget::NoDevice);
+    }
+    if reported_inventory_count(inventory, &devices) != 1 || devices.len() != 1 {
+        return Ok(InventoryTarget::MultipleDevices);
+    }
+
+    let device = &devices[0];
+    let serial = device
+        .get("serial")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ApiError::command_failed(
+                "ADB device inventory was incomplete.",
+                json!({ "reason": "adb_inventory_invalid" }),
+            )
+        })?;
+    if serial != requested_serial {
+        return Ok(InventoryTarget::NoDevice);
+    }
+    match device.get("state").and_then(Value::as_str) {
+        Some("unauthorized") => Ok(InventoryTarget::Unavailable {
+            state: "unauthorized",
+            serial: serial.to_string(),
+        }),
+        Some("offline") => Ok(InventoryTarget::Unavailable {
+            state: "offline",
+            serial: serial.to_string(),
+        }),
+        Some("available") => Ok(InventoryTarget::Available {
+            serial: serial.to_string(),
+        }),
+        _ => Err(ApiError::command_failed(
+            "ADB device inventory contained an unsupported state.",
+            json!({ "reason": "adb_inventory_invalid" }),
+        )),
+    }
+}
+
+/// Perform one bounded, read-only storage volume observation for the requested
+/// serial.
+///
+/// Exact serials and raw volume evidence remain inside the trusted sidecar
+/// response. The Tauri boundary replaces volume identity tokens with opaque
+/// handles before anything reaches React.
+pub(crate) fn list_device_volumes(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
+    crate::device_storage::list_device_volumes(adb_path, serial)
 }
 
 pub(crate) fn probe_device(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
@@ -158,7 +331,7 @@ fn qualify_device_with_runner(
     if devices.is_empty() {
         return Ok(json!({ "state": "no_device" }));
     }
-    if devices.len() != 1 {
+    if reported_inventory_count(&inventory, &devices) != 1 || devices.len() != 1 {
         return Ok(json!({ "state": "multiple_devices" }));
     }
 
@@ -724,9 +897,100 @@ mod tests {
         assert_eq!(result["devices"][0]["model"], "Pocket S mini");
         assert_eq!(result["devices"][1]["state"], "unauthorized");
         assert_eq!(result["devices"][2]["state"], "offline");
+        assert_eq!(result["inventoryCount"], 3);
         assert_eq!(
             runner.calls.into_inner(),
             vec![vec!["/managed/adb", "devices", "-l"]]
+        );
+    }
+
+    #[test]
+    fn inventory_count_includes_rows_without_a_supported_state() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            output: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\nabc device transport_id:1\ntruncated\njkl no permissions (missing udev rules)\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let result = list_adb_devices_with_runner("/managed/adb", &runner).unwrap();
+
+        assert_eq!(result["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(result["devices"][0]["serial"], "abc");
+        assert_eq!(result["inventoryCount"], 3);
+    }
+
+    #[test]
+    fn inventory_count_ignores_adb_diagnostics() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            output: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached
+* daemon started successfully
+adb: failed to check server version: protocol fault
+one device
+truncated
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let result = list_adb_devices_with_runner("/managed/adb", &runner).unwrap();
+
+        assert_eq!(result["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(result["inventoryCount"], 2);
+    }
+
+    #[test]
+    fn inventory_counts_diagnostic_looking_serials_as_device_rows() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            output: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\ncannot device\nadb:foo device\nerror device\nwarning device\nfailed device\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let result = list_adb_devices_with_runner("/managed/adb", &runner).unwrap();
+
+        assert_eq!(result["inventoryCount"], 5);
+        let devices = result["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 5);
+        for (device, serial) in devices
+            .iter()
+            .zip(["cannot", "adb:foo", "error", "warning", "failed"])
+        {
+            assert_eq!(device["serial"], serial);
+            assert_eq!(device["state"], "available");
+        }
+    }
+
+    #[test]
+    fn inventory_counts_unknown_state_and_state_less_rows() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            output: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\nselected-device device\nserial1 weirdstate\nlone-serial\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let inventory = list_adb_devices_with_runner("/managed/adb", &runner).unwrap();
+
+        assert_eq!(inventory["inventoryCount"], 3);
+        assert_eq!(inventory["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            classify_inventory_target(&inventory, "selected-device").unwrap(),
+            InventoryTarget::MultipleDevices
         );
     }
 
@@ -805,6 +1069,128 @@ mod tests {
             assert_eq!(result["state"], expected);
             assert_eq!(runner.calls.borrow().len(), 1);
         }
+    }
+
+    #[test]
+    fn qualification_counts_unrecognized_inventory_rows() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            output: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\none device\ntwo no permissions (missing udev rules)\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let result = qualify_device_with_runner("/managed/adb", "one", &runner).unwrap();
+
+        assert_eq!(result["state"], "multiple_devices");
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn qualification_counts_device_rows_outside_the_common_shape() {
+        for extra in [
+            "my phone device transport_id:2",
+            "serial device unexpected",
+            "serial no permissions usb:1-1",
+            "*serial device",
+            "List of devices attached extra",
+            "adb: no devices/emulators found extra",
+            "error: device 'missing'",
+            "adb server version (41)\tdevice",
+            "* daemon not running\tdevice",
+            "daemon not running; starting now at tcp:localhost:5037 device",
+        ] {
+            let runner = FakeRunner {
+                calls: RefCell::new(Vec::new()),
+                output: Ok(CommandOutput {
+                    status_code: Some(0),
+                    stdout: format!("List of devices attached\nselected-device device\n{extra}\n"),
+                    stderr: String::new(),
+                }),
+            };
+
+            let result =
+                qualify_device_with_runner("/managed/adb", "selected-device", &runner).unwrap();
+
+            assert_eq!(result["state"], "multiple_devices", "extra row: {extra}");
+            assert_eq!(runner.calls.borrow().len(), 1, "extra row: {extra}");
+        }
+    }
+
+    fn qualification_probe_outputs() -> Vec<CommandOutput> {
+        vec![
+            CommandOutput {
+                status_code: Some(0),
+                stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a,armeabi-v7a]\n"
+                    .to_string(),
+                stderr: String::new(),
+            },
+            CommandOutput {
+                status_code: Some(0),
+                stdout: "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/fuse 52232748 2534032 49551260 5% /storage/emulated\n"
+                    .to_string(),
+                stderr: String::new(),
+            },
+            CommandOutput {
+                status_code: Some(0),
+                stdout: "package:/system/framework/framework-res.apk\n".to_string(),
+                stderr: String::new(),
+            },
+            CommandOutput {
+                status_code: Some(0),
+                stdout: "config\n".to_string(),
+                stderr: String::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn qualification_rejects_a_diagnostic_looking_second_device() {
+        let mut outputs = vec![CommandOutput {
+            status_code: Some(0),
+            stdout: "List of devices attached\nselected-device device\ncannot device\n".to_string(),
+            stderr: String::new(),
+        }];
+        outputs.extend(qualification_probe_outputs());
+        let runner = SequenceRunner {
+            calls: RefCell::new(Vec::new()),
+            outputs: RefCell::new(outputs),
+        };
+
+        let result =
+            qualify_device_with_runner("/managed/adb", "selected-device", &runner).unwrap();
+
+        assert_eq!(result["state"], "multiple_devices");
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn qualification_accepts_daemon_chatter_around_one_online_device() {
+        let mut outputs = vec![CommandOutput {
+            status_code: Some(0),
+            stdout: "List of devices attached\n* daemon started successfully\n* daemon started successfully *\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\n* daemon not running; starting now at tcp:localhost:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?\nerror: device 'missing' not found\nselected-device device\n"
+                .to_string(),
+            stderr: String::new(),
+        }];
+        outputs.extend(qualification_probe_outputs());
+        let runner = SequenceRunner {
+            calls: RefCell::new(Vec::new()),
+            outputs: RefCell::new(outputs),
+        };
+
+        let result =
+            qualify_device_with_runner("/managed/adb", "selected-device", &runner).unwrap();
+
+        assert_eq!(result["state"], "online");
+        assert_eq!(result["serial"], "selected-device");
+        assert_eq!(runner.calls.borrow().len(), 5);
+        assert_eq!(
+            runner.calls.borrow()[1],
+            vec!["/managed/adb", "-s", "selected-device", "shell", "getprop"]
+        );
     }
 
     struct SequenceRunner {

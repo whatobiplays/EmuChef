@@ -16,6 +16,10 @@ import {
 } from "./app-helpers";
 import { ExecutionStep } from "./ExecutionStep";
 import { DeviceQualificationOverlay } from "./DeviceQualificationOverlay";
+import {
+  DeviceStorageChoices,
+  type DeviceStorageLoadingKind,
+} from "./DeviceStorageChoices";
 import { InputsStep } from "./InputsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
@@ -40,6 +44,7 @@ import type {
   CatalogSummary,
   ConfigurationDescription,
   DeviceSummary,
+  DeviceVolumesProjection,
   ExecutionCapabilities,
   DeviceQualificationSnapshot,
   RootQualification,
@@ -213,6 +218,23 @@ interface AppProps {
   dialogController?: AppDialogController;
 }
 
+/** Sanitized projection used after a storage read fails. */
+function unavailableDeviceVolumes(
+  deviceHandle: string,
+  previous: DeviceVolumesProjection | null,
+): DeviceVolumesProjection {
+  return {
+    deviceHandle,
+    sessionEpoch: previous?.deviceHandle === deviceHandle ? previous.sessionEpoch : 0,
+    observationToken: "",
+    discoveryStatus: "unavailable",
+    evidence: "unavailable",
+    volumes: [],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+}
+
 export function App({ dialogController: suppliedDialogController }: AppProps = {}) {
   const ownedDialogControllerRef = useRef<AppDialogController | null>(null);
   if (!ownedDialogControllerRef.current) {
@@ -237,6 +259,29 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
   const [deviceQualification, setDeviceQualification] = useState<DeviceQualificationSnapshot | null>(null);
+  // Trusted storage projection for the selected device's setup step. A storage
+  // selection is presentation intent only; it never enters plan, review, or
+  // execution authority.
+  const [deviceVolumes, setDeviceVolumes] = useState<DeviceVolumesProjection | null>(null);
+  const [deviceVolumesPhase, setDeviceVolumesPhase] = useState<"idle" | "loading" | "failed">("idle");
+  const [deviceVolumesLoadingKind, setDeviceVolumesLoadingKind] =
+    useState<DeviceStorageLoadingKind>("refresh");
+  const [deviceVolumesError, setDeviceVolumesError] = useState<string | null>(null);
+  const deviceVolumesGenerationRef = useRef(0);
+  const deviceVolumesActionRef = useRef(0);
+  // Set when a device poll overlaps an explicit storage action. The action's
+  // response is fenced out, so one read of the current session is queued for
+  // when the action settles.
+  const deviceVolumesPendingRefreshRef = useRef(false);
+  // Drop every storage presentation value and fence any response that is
+  // still in flight. Used when the device session, runtime, or inventory can
+  // no longer prove the same observation.
+  const discardDeviceVolumes = useCallback(() => {
+    deviceVolumesGenerationRef.current += 1;
+    setDeviceVolumes(null);
+    setDeviceVolumesPhase("idle");
+    setDeviceVolumesError(null);
+  }, []);
   // Monotonic revision of successful authoritative inventory commits. Rust
   // closes or invalidates an active qualification attempt during inventory
   // reconciliation, and that transition is invisible in the public device list,
@@ -449,6 +494,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     deviceSelectionGenerationRef.current += 1;
     rootCheckGenerationRef.current += 1;
     supportGenerationRef.current += 1;
+    discardDeviceVolumes();
     setRootCheckPhase("idle");
     if (deviceRefreshTimerRef.current !== null) {
       window.clearTimeout(deviceRefreshTimerRef.current);
@@ -466,7 +512,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       // fire-and-forget recovery as an unhandled rejection.
       setNotice(errorMessage(error));
     });
-  }, [dispatch, initialize]);
+  }, [discardDeviceVolumes, dispatch, initialize]);
 
   const {
     cancelExecution,
@@ -1625,6 +1671,120 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     };
   }, []);
 
+  /**
+   * Read the trusted storage projection for one device.
+   *
+   * Storage discovery is presentation evidence for the setup step only. The
+   * generation fences mirror device polling so a late response cannot replace
+   * a newer device session or a newer explicit refresh.
+   */
+  const loadDeviceVolumes = useCallback(async (
+    deviceHandle: string,
+    refresh: boolean,
+  ): Promise<DeviceVolumesProjection | null> => {
+    const generation = ++deviceVolumesGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const pollGeneration = devicePollGenerationRef.current;
+    setDeviceVolumesLoadingKind("refresh");
+    setDeviceVolumesPhase("loading");
+    try {
+      const projection = await api.deviceVolumes(deviceHandle, refresh);
+      if (
+        deviceVolumesGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+        || devicePollGenerationRef.current !== pollGeneration
+      ) return null;
+      setDeviceVolumes(projection);
+      setDeviceVolumesError(null);
+      setDeviceVolumesPhase("idle");
+      return projection;
+    } catch (error) {
+      if (
+        deviceVolumesGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+        && devicePollGenerationRef.current === pollGeneration
+      ) {
+        setDeviceVolumes((current) => unavailableDeviceVolumes(deviceHandle, current));
+        setDeviceVolumesError(errorMessage(error));
+        setDeviceVolumesPhase("failed");
+      }
+      return null;
+    }
+  }, []);
+
+  // Complete one explicit storage action. A device poll during the action
+  // invalidated its response through the generation fence, so read the
+  // current session again instead of leaving the cleared projection behind.
+  const settleDeviceVolumesAction = useCallback(() => {
+    deviceVolumesActionRef.current -= 1;
+    if (deviceVolumesActionRef.current !== 0 || !deviceVolumesPendingRefreshRef.current) return;
+    deviceVolumesPendingRefreshRef.current = false;
+    const current = workflowRef.current;
+    if (current.step !== "setup" || !current.deviceHandle) return;
+    void loadDeviceVolumes(current.deviceHandle, false);
+  }, [loadDeviceVolumes]);
+
+  const refreshDeviceVolumes = useCallback(async () => {
+    const handle = workflowRef.current.deviceHandle;
+    if (!handle) return;
+    announce("Refreshing storage options.");
+    deviceVolumesActionRef.current += 1;
+    try {
+      await loadDeviceVolumes(handle, true);
+    } finally {
+      settleDeviceVolumesAction();
+    }
+  }, [announce, loadDeviceVolumes, settleDeviceVolumesAction]);
+
+  const selectStorageVolume = useCallback(async (
+    volumeHandle: string,
+    label: string,
+    observationToken: string,
+  ) => {
+    const handle = workflowRef.current.deviceHandle;
+    if (!handle) return;
+    deviceVolumesActionRef.current += 1;
+    const generation = ++deviceVolumesGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const pollGeneration = devicePollGenerationRef.current;
+    setDeviceVolumesLoadingKind("selection");
+    setDeviceVolumesPhase("loading");
+    try {
+      const projection = await api.selectDeviceVolume(handle, volumeHandle, observationToken);
+      if (
+        deviceVolumesGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+        || devicePollGenerationRef.current !== pollGeneration
+      ) return;
+      setDeviceVolumes(projection);
+      setDeviceVolumesError(null);
+      setDeviceVolumesPhase("idle");
+      announce(projection.selectedVolumeHandle === volumeHandle
+        ? label + " is selected for this device."
+        : "That storage option is no longer available. Choose again.");
+    } catch (error) {
+      if (
+        deviceVolumesGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+        && devicePollGenerationRef.current === pollGeneration
+      ) {
+        if (errorCode(error) === "stale_observation") {
+          // Keep the current trusted projection and any newer successful
+          // selection. The panel alert owns this failure announcement and
+          // asks for a fresh read and a new choice.
+          setDeviceVolumesError(errorMessage(error));
+          setDeviceVolumesPhase("idle");
+        } else {
+          setDeviceVolumes((current) => unavailableDeviceVolumes(handle, current));
+          setDeviceVolumesError(errorMessage(error));
+          setDeviceVolumesPhase("failed");
+        }
+      }
+    } finally {
+      settleDeviceVolumesAction();
+    }
+  }, [announce, settleDeviceVolumesAction]);
+
   const pollDevices = useCallback(async (
     manual = false,
     suppressSelectedDeviceLoss = false,
@@ -1632,6 +1792,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   ): Promise<DeviceSummary[] | null> => {
     if (adb?.status !== "ready" || runtime.status !== "ready") return null;
     if (manualDeviceRefreshRef.current) return null;
+  const storageActionInFlight = deviceVolumesActionRef.current > 0;
     const generation = ++devicePollGenerationRef.current;
     const runtimeGeneration = runtimeGenerationRef.current;
     if (manual) {
@@ -1639,8 +1800,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       setDeviceRefresh({ phase: "refreshing", generation, message: null });
       announce("Refreshing connected devices.");
     }
+    let inventoryCommitted = false;
     try {
       const next = await api.pollDevices(expectedSupportGeneration);
+      inventoryCommitted = true;
       // The inventory request above is the authoritative commit in Rust:
       // transitions such as a second available device, a disappeared device,
       // or a new native session epoch for the same handle invalidate and close
@@ -1658,6 +1821,28 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ) return null;
       setDevices(next);
       setDeviceQualification(qualification);
+      const setupDevice = workflowRef.current.step === "setup"
+        && next.length === 1
+        && next[0].state === "available"
+        ? next[0].deviceHandle
+        : null;
+      if (setupDevice && deviceVolumesActionRef.current === 0) {
+        deviceVolumesPendingRefreshRef.current = false;
+        void loadDeviceVolumes(setupDevice, false);
+      } else if (setupDevice) {
+        // This poll invalidated the generation fence of the storage action
+        // that is still running, so the displayed projection can no longer be
+        // treated as current evidence for this session. Drop the choice and
+        // queue one read for after the action settles.
+        deviceVolumesPendingRefreshRef.current = true;
+        setDeviceVolumes((current) => current
+          ? unavailableDeviceVolumes(setupDevice, current)
+          : current);
+        setDeviceVolumesPhase("loading");
+      } else if (devicePollGenerationRef.current === generation) {
+        deviceVolumesPendingRefreshRef.current = false;
+        discardDeviceVolumes();
+      }
       rootCheckGenerationRef.current += 1;
       setRootCheckPhase("idle");
       const current = workflowRef.current;
@@ -1671,6 +1856,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           bindings: portable.bindings,
           requiredReentryBindings: portable.requiredReentryBindings,
         });
+        discardDeviceVolumes();
         setNotice(selected?.state === "unauthorized"
           ? "The selected device needs authorization. Unlock it, accept the USB debugging prompt, and refresh."
           : selected?.state === "offline"
@@ -1709,6 +1895,21 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         if (errorCode(error) === "runtime_session_lost") {
           handleRuntimeSessionLost();
         }
+        if (inventoryCommitted) {
+          // Rust already committed the new inventory, so the displayed
+          // storage projection describes the previous inventory. Drop it
+          // and clear any queued refresh so an overlapping storage action
+          // cannot restore older evidence after it settles.
+          deviceVolumesPendingRefreshRef.current = false;
+          discardDeviceVolumes();
+        } else if (storageActionInFlight) {
+          // The failed poll still advanced the inventory generation, which
+          // fenced the storage action's response. Settle its loading phase
+          // and clear the queued refresh so a persistent service failure
+          // cannot leave storage recovery disabled indefinitely.
+          deviceVolumesPendingRefreshRef.current = false;
+          setDeviceVolumesPhase("idle");
+        }
         setNotice(errorMessage(error));
         if (manual) setDeviceRefresh({ phase: "idle", generation, message: null });
       }
@@ -1720,7 +1921,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         && runtimeGenerationRef.current === runtimeGeneration
       ) manualDeviceRefreshRef.current = false;
     }
-  }, [adb?.status, announce, handleRuntimeSessionLost, runtime.status]);
+  }, [adb?.status, announce, discardDeviceVolumes, handleRuntimeSessionLost, loadDeviceVolumes, runtime.status]);
 
   const checkDeviceRoot = useCallback(async () => {
     const candidate = devices.length === 1 && devices[0].state === "available"
@@ -2809,6 +3010,20 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   qualification={deviceQualification}
                   rootCheckPhase={rootCheckPhase}
                   onCheckRoot={() => void checkDeviceRoot()}
+                />
+                <DeviceStorageChoices
+                  projection={deviceVolumes}
+                  loading={deviceVolumesPhase === "loading"}
+                  loadingKind={deviceVolumesLoadingKind}
+                  error={deviceVolumesError}
+                  onRefresh={() => void refreshDeviceVolumes()}
+                  onSelect={(volumeHandle, observationToken) => {
+                    const label = deviceVolumes?.volumes.find(
+                      (volume) => volume.volumeHandle === volumeHandle,
+                    )?.label ?? "Storage option";
+                    void selectStorageVolume(volumeHandle, label, observationToken);
+                  }}
+                  announce={announce}
                 />
                 {savedPlanUnavailable && (
                   <p className="error">

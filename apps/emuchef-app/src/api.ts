@@ -8,6 +8,7 @@ import type {
   DeviceFacts,
   DeviceMatch,
   DeviceSummary,
+  DeviceVolumesProjection,
   ExecutionCancellation,
   DeviceQualificationSnapshot,
   RootQualificationCheck,
@@ -93,6 +94,18 @@ export const api = {
     invoke<DeviceSummary[]>("poll_devices", { expectedGeneration }),
   probeDevice: (deviceHandle: string) =>
     invoke<DeviceFacts>("probe_device", { deviceHandle }),
+  deviceVolumes: (deviceHandle: string, refresh = false) =>
+    invoke<DeviceVolumesProjection>("get_device_volumes", { deviceHandle, refresh }),
+  selectDeviceVolume: (
+    deviceHandle: string,
+    volumeHandle: string | null,
+    observationToken: string | null,
+  ) =>
+    invoke<DeviceVolumesProjection>("select_device_volume", {
+      deviceHandle,
+      volumeHandle,
+      observationToken,
+    }),
   matchDevice: (deviceHandle: string) =>
     invoke<DeviceMatch>("match_device", { deviceHandle }),
   describeConfiguration: (request: {

@@ -65,6 +65,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
         "qualifyDevice" => handle_qualify_device(object),
+        "listDeviceVolumes" => handle_list_device_volumes(object),
         "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object, None),
@@ -107,6 +108,7 @@ fn handle_validated_sidecar_object(
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
         "qualifyDevice" => handle_qualify_device(object),
+        "listDeviceVolumes" => handle_list_device_volumes(object),
         "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object, Some(sessions)),
@@ -518,6 +520,14 @@ fn handle_qualify_device(object: &Map<String, Value>) -> Result<Value, ApiError>
     )?))
 }
 
+fn handle_list_device_volumes(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let adb_path = required_string(payload, "adbPath")?;
+    let serial = required_string(payload, "serial")?;
+    Ok(envelope::success(
+        crate::end_user_runtime::list_device_volumes(adb_path, serial)?,
+    ))
+}
 fn handle_check_root(object: &Map<String, Value>) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let adb_path = required_string(payload, "adbPath")?;

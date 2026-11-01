@@ -3,6 +3,7 @@ mod catalog;
 mod commands;
 mod device_observation;
 mod device_qualification;
+mod device_storage;
 mod execution;
 mod handles;
 mod menu;
@@ -110,6 +111,8 @@ pub fn run() {
             commands::probe_device,
             device_qualification::check_device_root,
             device_observation::get_device_qualification,
+            device_storage::get_device_volumes,
+            device_storage::select_device_volume,
             commands::match_device,
             qualification_mode::get_device_qualification_mode_status,
             qualification_mode::create_qualification_target_candidate,
