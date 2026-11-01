@@ -1,0 +1,78 @@
+apps/emuchef-app/src/styles.css
+  s_9f89cb54592ba7::t_debae8be9b53f1 199
+crates/emuchef-rust-backend/src/device_storage.rs
+  s_9f89cb54592ba7::t_ea96875006c53e 3244,3259,3274,3290
+  s_9f89cb54592ba7::t_6c78ceba753fec 3301-3315
+  s_9f89cb54592ba7::t_abdd73be26f02b 3284-3289,3291-3300
+apps/emuchef-app/src/App.tsx
+  s_9f89cb54592ba7::t_2c401b3af9ee73 19-22,267-268,3017
+  s_9f89cb54592ba7::t_7a015b514482e5 1688
+  s_9f89cb54592ba7::t_e6a186aa9a96d1 1750
+apps/emuchef-app/src-tauri/src/handles.rs
+  s_9f89cb54592ba7::t_a350ede7103319 495-496,539-541
+  s_9f89cb54592ba7::t_eba7c1dfdc5588 498,543-544
+apps/emuchef-app/tests/DeviceStorageChoices.dom.test.tsx
+  s_9f89cb54592ba7::t_adf4485d8a98ec 210
+  s_9f89cb54592ba7::t_b68d6fa615926a 213-215,217-218,220-221
+  s_9f89cb54592ba7::t_b805a212b3b49f 216,219
+  s_9f89cb54592ba7::t_d2b5c4c512c82c 198-209,211-212
+apps/emuchef-app/tests/App.dom.test.tsx
+  s_9f89cb54592ba7::t_b805a212b3b49f 503,634,707,721,725,780-781,788
+  s_9f89cb54592ba7::t_5b4e08fdb68662 6
+  s_9f89cb54592ba7::t_a3cce6de46dfa7 461-502,504-511
+crates/emuchef-rust-backend/src/end_user_runtime.rs
+  s_9f89cb54592ba7::t_3b8bc3118138f5 72,146
+  s_9f89cb54592ba7::t_a06bf901a078c4 77-80,82-87
+  s_9f89cb54592ba7::t_86176201c56ebc 837,844-845,850,858-860,963-978
+  s_9f89cb54592ba7::t_c7877e8f5adbc6 864-874,876-885,979
+  s_9f89cb54592ba7::t_9e1678ded70ad5 58,62,73-75,88-93,95,147-157,175,271
+  s_9f89cb54592ba7::t_5aafee3ca3ecc5 875
+  s_9f89cb54592ba7::t_475002ac036c81 846-849,851-857,861-863
+  s_9f89cb54592ba7::t_3727c81fc1c497 76,81
+  s_9f89cb54592ba7::t_d1c28989f0ef12 102-105
+  s_9f89cb54592ba7::t_50166f2f3ee3b1 980
+apps/emuchef-app/src/DeviceStorageChoices.tsx
+  s_9f89cb54592ba7::t_22b33a54ee0735 151-152,154-155
+  s_9f89cb54592ba7::t_bcfdc15d258d8b 27
+  s_9f89cb54592ba7::t_208065a565f725 30,41
+  s_9f89cb54592ba7::t_8c9f4167c99375 29,88,148,150,183,201,246,260,270,285,289-291
+  s_9f89cb54592ba7::t_b805a212b3b49f 149,153
+  s_9f89cb54592ba7::t_695e3f09f3e750 42
+CONTEXT.md
+  s_9f89cb54592ba7::t_3503eb62797e89 1350,1354-1358,1470
+  s_9f89cb54592ba7::t_be6cb74e27019c 1353,1410-1414,1469
+  s_9f89cb54592ba7::t_61b531ed02650c 1471-1473
+  s_9f89cb54592ba7::t_c25e62bb26da2a 1474
+apps/emuchef-app/src-tauri/src/device_storage.rs
+  s_9f89cb54592ba7::t_e7de98f7d31e63 237-238,247,3381,3389-3390,3428,3439-3440,3452
+  s_9f89cb54592ba7::t_c9f8393f5169b2 236,239-245,248
+  s_9f89cb54592ba7::t_edeb87feccb311 2338-2340
+  s_9f89cb54592ba7::t_a9c8dedda328a9 877-879
+  s_9f89cb54592ba7::t_a399abf9e36ae2 2330,3383,3391-3427,3429-3438,3441-3451
+  s_9f89cb54592ba7::t_69770dbef40e97 2390
+  s_9f89cb54592ba7::t_e9ece2102780f8 3351-3376,3380,3382,3384-3388,3453
+  s_9f89cb54592ba7::t_87f079b0612b77 2373-2388,2391-2392
+  s_9f89cb54592ba7::t_a9f1df2665d572 246,249-254
+  s_9f89cb54592ba7::t_5016b1da6ae8d6 2331-2337,2341-2372,3377-3379
+  s_9f89cb54592ba7::t_43984d41618f1a 2389
+docs/architecture/runtime-ownership.md
+  s_9f89cb54592ba7::t_243c0c43c28772 173-174
+  s_9f89cb54592ba7::t_67cb521fcf8527 175-188,196,224-225,231-236
+  s_9f89cb54592ba7::t_61b531ed02650c 226-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cee475074ad8d9593865870c4a57f49767eaf21f",
+  "prompts": {},
+  "sessions": {
+    "s_9f89cb54592ba7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18f32-ceb3-71b2-a8e3-84069c6e8d67",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
