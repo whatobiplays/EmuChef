@@ -1,0 +1,22 @@
+crates/emuchef-rust-backend/src/end_user_runtime.rs
+  s_9f89cb54592ba7::t_9279b349f172b3 130-132,1104,1174
+  s_9f89cb54592ba7::t_f3f98b68956de6 137-139
+crates/emuchef-rust-backend/src/device_storage.rs
+  s_9f89cb54592ba7::t_9279b349f172b3 3344,3375
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0c92dc23d972cd22df24156e405e892ecc9edb2c",
+  "prompts": {},
+  "sessions": {
+    "s_9f89cb54592ba7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18f32-ceb3-71b2-a8e3-84069c6e8d67",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
