@@ -1,0 +1,24 @@
+apps/emuchef-app/src-tauri/src/device_storage.rs
+  s_9f89cb54592ba7::t_a6c97a52f61af0 3425-3426
+  s_9f89cb54592ba7::t_8301a3af7344cf 240,249-252
+  s_9f89cb54592ba7::t_75f5006fd9eff6 3397-3424,3427-3433
+  s_9f89cb54592ba7::t_3ffaf35b6b9fe7 3396
+apps/emuchef-app/tests/DeviceStorageChoices.dom.test.tsx
+  s_9f89cb54592ba7::t_8301a3af7344cf 208-210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0d463237c36da5bca05c8bfb80d6fe9a1d85caea",
+  "prompts": {},
+  "sessions": {
+    "s_9f89cb54592ba7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18f32-ceb3-71b2-a8e3-84069c6e8d67",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
