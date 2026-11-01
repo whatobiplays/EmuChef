@@ -173,10 +173,12 @@ Storage discovery is passive. React requests a storage projection for one
 opaque device handle. Tauri validates the retained device session and forwards
 only the ADB path and serial to the sidecar listDeviceVolumes operation. The
 sidecar runs adb devices -l and requires exactly one reported inventory row,
-whose projected device must match the requested serial. A row with an
-unrecognized or missing state still counts toward that precondition, so an
-attached but unusable device cannot be mistaken for an absent one; it is not
-projected into the device list. It then runs dumpsys mount and sm list-volumes
+whose projected device must match the requested serial. Row detection follows
+the adb output grammar: serial text that resembles a diagnostic still counts,
+while headers and daemon chatter are excluded. A row with an unrecognized or
+missing state still counts toward that precondition, so an attached but
+unusable device cannot be mistaken for an absent one; it is not projected into
+the device list. It then runs dumpsys mount and sm list-volumes
 all as argument arrays. It parses the current AOSP Disks:, Volumes:, Records:,
 and Primary storage UUID: sections, retains legacy
 mDisks/mVolumes/mPrimaryStorageUuid compatibility, and accepts both two-field

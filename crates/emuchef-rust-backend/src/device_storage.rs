@@ -3313,4 +3313,50 @@ Primary storage UUID: ADOPTED-B",
         assert_eq!(observation["state"], "multiple_devices");
         assert_eq!(runner.calls().len(), 1);
     }
+
+    #[test]
+    fn diagnostic_looking_serial_prevents_a_single_device_probe() {
+        let runner = ScriptedRunner::new(vec![
+            completed(
+                0,
+                &format!(
+                    "List of devices attached\n{SERIAL}\tdevice transport_id:1\ncannot device\n"
+                ),
+                "",
+            ),
+            completed(0, API33_DUMP, ""),
+            completed(0, API33_LIST, ""),
+        ]);
+
+        let observation =
+            list_device_volumes_with_runner("adb", SERIAL, &runner).expect("inventory outcome");
+
+        assert_eq!(observation["state"], "multiple_devices");
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn daemon_chatter_does_not_prevent_single_device_storage_discovery() {
+        let runner = ScriptedRunner::new(vec![
+            completed(
+                0,
+                &format!(
+                    "List of devices attached\n* daemon started successfully\nadb server version (41) doesn't match this client (40); killing...\ndaemon not running; starting now at tcp:5037\nerror: more than one device/emulator\nadb: no devices/emulators found\nadb: no permissions problem\nerror: device 'missing' not found\n{SERIAL}\tdevice transport_id:1\n"
+                ),
+                "",
+            ),
+            completed(0, API33_DUMP, ""),
+            completed(0, API33_LIST, ""),
+        ]);
+
+        let observation =
+            list_device_volumes_with_runner("adb", SERIAL, &runner).expect("inventory outcome");
+
+        assert_eq!(observation["state"], "observed");
+        assert_eq!(runner.calls().len(), 3);
+        assert_eq!(
+            runner.calls()[1],
+            vec!["adb", "-s", SERIAL, "shell", "dumpsys", "mount"]
+        );
+    }
 }
