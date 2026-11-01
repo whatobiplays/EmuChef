@@ -1,0 +1,32 @@
+CONTEXT.md
+  s_9f89cb54592ba7::t_bece62ceb8f429 1358-1360
+  s_9f89cb54592ba7::t_cfdb4189c22a7d 1354-1357
+crates/emuchef-rust-backend/src/end_user_runtime.rs
+  s_9f89cb54592ba7::t_0ffe8120f60171 938-941,1095
+  s_9f89cb54592ba7::t_5d65df6a09a801 1115
+  s_9f89cb54592ba7::t_7804be4d3dc1e1 921-937,942-968,1064-1094,1096-1114,1116-1135
+  s_9f89cb54592ba7::t_f664989c378771 72-75,81,85-122
+  s_9f89cb54592ba7::t_f673c33f7600bb 1136
+crates/emuchef-rust-backend/src/device_storage.rs
+  s_9f89cb54592ba7::t_5d65df6a09a801 3344
+  s_9f89cb54592ba7::t_7804be4d3dc1e1 3316-3343,3345-3361
+docs/architecture/runtime-ownership.md
+  s_9f89cb54592ba7::t_cfdb4189c22a7d 176-178
+  s_9f89cb54592ba7::t_bece62ceb8f429 179-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b9a1a7adda2f1f2b20463945b98fe986e06bdd93",
+  "prompts": {},
+  "sessions": {
+    "s_9f89cb54592ba7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18f32-ceb3-71b2-a8e3-84069c6e8d67",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
