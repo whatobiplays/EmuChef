@@ -3370,6 +3370,8 @@ Primary storage UUID: ADOPTED-B",
             "List of devices attached extra",
             "adb: no devices/emulators found extra",
             "error: device 'missing'",
+            "adb server version (41)\tdevice",
+            "* daemon not running\tdevice",
         ] {
             let runner = ScriptedRunner::new(vec![
                 completed(

@@ -1351,16 +1351,18 @@ list-volumes all. The inventory must report exactly one attached device and an
 exact serial match before any device-specific command runs. No shell string is
 constructed. The response carries an observation token over typed volumes:
 identityToken, continuityToken, kind, status, mountState, and fixed reason keys.
-Inventory rows are counted by exclusion. Only the "List of devices attached"
-header and known adb daemon messages are dropped; every other non-empty line
-counts as a candidate row, including a serial that contains a space or looks
-like diagnostic output, a row with an unexpected trailing token, and a lone
-token. The count therefore errs high, which fails closed. Rows whose ADB state
-is unrecognized or missing are excluded from the projected device list but
-remain in the inventory row count. Storage discovery and qualification require
-exactly one reported row and one projected device whose serial matches the
-request, so an attached but unusable device fails closed instead of
-disappearing.
+Inventory rows are counted by exclusion. Only a narrow set of complete known
+non-row lines is dropped: the "List of devices attached" header, known daemon
+chatter, known adb error lines, and the "error: device '<serial>' not found"
+line. Each match requires the whole known message, so any additional token
+makes the line a candidate row. Every other non-empty line counts, including a
+serial that contains a space or looks like diagnostic output, a row with an
+unexpected trailing token, and a lone token. The count therefore errs high,
+which fails closed. Rows whose ADB state is unrecognized or missing are
+excluded from the projected device list but remain in the inventory row count.
+Storage discovery and qualification require exactly one reported row and one
+projected device whose serial matches the request, so an attached but unusable
+device fails closed instead of disappearing.
 
 The dumpsys mount report is read by its current AOSP sections. Disks: contains
 DiskInfo records, Volumes: contains VolumeInfo records, Records: contains

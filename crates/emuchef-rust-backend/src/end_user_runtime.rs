@@ -70,8 +70,8 @@ pub(crate) fn list_adb_devices_with_runner(
 }
 
 /// Messages that `adb devices -l` prints around the device listing and that
-/// never name an attached transport. These messages are fixed, so they match
-/// exactly and a device row with the same text plus more still counts.
+/// never name an attached transport. These messages are printed verbatim, so
+/// they match exactly and a line with any extra token still counts.
 const ADB_INVENTORY_NOISE_LINES: &[&str] = &[
     "List of devices attached",
     "* daemon started successfully",
@@ -79,25 +79,19 @@ const ADB_INVENTORY_NOISE_LINES: &[&str] = &[
     "error: more than one device/emulator",
     "error: no devices/emulators found",
     "adb: no devices/emulators found",
-];
-
-/// Message stems whose tail varies between adb versions. Only the stem is
-/// fixed, so these match by prefix.
-const ADB_INVENTORY_NOISE_PREFIXES: &[&str] = &[
-    "adb server version (",
-    "* daemon not running",
-    "daemon not running; starting now at tcp:",
-    "adb: failed to check server version:",
-    "adb: insufficient permissions for device:",
+    "adb: failed to check server version: protocol fault",
+    "adb: failed to check server version: protocol fault (no status)",
+    "adb: insufficient permissions for device: user in plugdev group; are your udev rules wrong?",
 ];
 
 /// Iterate over the lines of an `adb devices -l` report that can name an
 /// attached transport.
 ///
-/// Rows are counted by exclusion. Only the listing header and known daemon
-/// messages are dropped, so a serial that contains a space or looks like
-/// diagnostic text, a row with an unexpected trailing token, and a truncated
-/// row all stay in the count.
+/// Rows are counted by exclusion. A narrow set of complete known non-row
+/// messages is dropped: the listing header, known daemon chatter, known adb
+/// errors, and the missing-device error. Any other non-empty line stays in the
+/// count, including a serial that contains a space or looks like diagnostic
+/// text, a row with an unexpected trailing token, and a truncated row.
 fn adb_inventory_rows(stdout: &str) -> impl Iterator<Item = &str> + '_ {
     stdout
         .lines()
@@ -105,17 +99,52 @@ fn adb_inventory_rows(stdout: &str) -> impl Iterator<Item = &str> + '_ {
         .filter(|line| !line.is_empty() && !is_adb_listing_noise(line))
 }
 
-/// Whether a trimmed line is the listing header or a known daemon message
-/// rather than a device row.
+/// Whether a trimmed line is a complete known non-row message rather than a
+/// device row.
 ///
-/// Dropping an ambiguous line could hide a second attached device, so only
-/// fixed messages and the recognizable stems of variable messages are skipped.
+/// Variable parts are limited to numbers such as versions and ports, or a
+/// serial in the missing-device error. Any extra token makes the line a
+/// candidate row. Dropping an ambiguous line could hide a second attached
+/// device.
 fn is_adb_listing_noise(line: &str) -> bool {
     ADB_INVENTORY_NOISE_LINES.contains(&line)
-        || ADB_INVENTORY_NOISE_PREFIXES
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-        || (line.starts_with("error: device '") && line.ends_with("' not found"))
+        || is_adb_server_version_mismatch(line)
+        || is_daemon_not_running(line)
+        || is_missing_device_error(line)
+}
+
+/// Match `adb server version (41) doesn't match this client (40); killing...`.
+fn is_adb_server_version_mismatch(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("adb server version (") else {
+        return false;
+    };
+    let Some((server, rest)) = rest.split_once(") doesn't match this client (") else {
+        return false;
+    };
+    let Some((client, tail)) = rest.split_once("); killing...") else {
+        return false;
+    };
+    tail.is_empty() && is_ascii_number(server) && is_ascii_number(client)
+}
+
+/// Match `daemon not running; starting now at tcp:5037`, with or without the
+/// leading `* ` that adb prints.
+fn is_daemon_not_running(line: &str) -> bool {
+    line.strip_prefix("* ")
+        .unwrap_or(line)
+        .strip_prefix("daemon not running; starting now at tcp:")
+        .is_some_and(is_ascii_number)
+}
+
+/// Match `error: device 'serial' not found`.
+fn is_missing_device_error(line: &str) -> bool {
+    line.strip_prefix("error: device '")
+        .and_then(|rest| rest.strip_suffix("' not found"))
+        .is_some_and(|serial| !serial.is_empty())
+}
+
+fn is_ascii_number(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn inventory_row_count(stdout: &str) -> usize {
@@ -1067,6 +1096,8 @@ truncated
             "List of devices attached extra",
             "adb: no devices/emulators found extra",
             "error: device 'missing'",
+            "adb server version (41)\tdevice",
+            "* daemon not running\tdevice",
         ] {
             let runner = FakeRunner {
                 calls: RefCell::new(Vec::new()),
