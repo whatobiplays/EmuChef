@@ -170,19 +170,22 @@ Phase 4B implements manual discovery only, not in-place installation.
 ## Device storage boundary
 
 Storage discovery is passive. React requests a storage projection for one
-opaque device handle. Tauri validates the retained device session, confirms the
-ADB inventory contains exactly that serial, and forwards only the ADB path and
-serial to the sidecar listDeviceVolumes operation. The sidecar runs adb devices
--l, dumpsys mount, and sm list-volumes all as argument arrays. It parses the
-current AOSP Disks:, Volumes:, Records:, and Primary storage UUID: sections,
-retains legacy mDisks/mVolumes/mPrimaryStorageUuid compatibility, and accepts
-both two-field legacy and three-field AOSP shell volume lines. Repeated
-VolumeInfo or DiskInfo records are accepted while the fields used for
-classification agree; a repeat that changes only fields EmuChef does not
-classify by stays accepted. Contradictory classification evidence and
-conflicting primary-storage declarations fail closed. Raw filesystem UUIDs,
-mount paths, disk identifiers, and serials remain sidecar-owned. An adopted
-primary volume resolves to its stacked emulated volume
+opaque device handle. Tauri validates the retained device session and forwards
+only the ADB path and serial to the sidecar listDeviceVolumes operation. The
+sidecar runs adb devices -l and requires exactly one reported inventory row,
+whose projected device must match the requested serial. A row with an
+unrecognized or missing state still counts toward that precondition, so an
+attached but unusable device cannot be mistaken for an absent one; it is not
+projected into the device list. It then runs dumpsys mount and sm list-volumes
+all as argument arrays. It parses the current AOSP Disks:, Volumes:, Records:,
+and Primary storage UUID: sections, retains legacy
+mDisks/mVolumes/mPrimaryStorageUuid compatibility, and accepts both two-field
+legacy and three-field AOSP shell volume lines. Repeated VolumeInfo or DiskInfo
+records are accepted while the fields used for classification agree; a repeat
+that changes only fields EmuChef does not classify stays accepted. Contradictory
+classification evidence and conflicting primary-storage declarations fail
+closed. Raw filesystem UUIDs, mount paths, disk identifiers, and serials remain
+sidecar-owned. An adopted primary volume resolves the stacked emulated volume
 through the private volume's disk identity, without relying on the private
 volume's mount user. A sole emulated volume with no positive user evidence uses
 the assumed-user compatibility fallback. A volume positively associated with a
@@ -190,7 +193,7 @@ non-system user, including an explicit emulated;<non-zero> primary declaration,
 is ambiguous and is not offered as internal storage. A public primary volume is
 promoted to internal storage only when its public-volume classification is
 available, which requires supported non-USB media, visible mount evidence, and
-agreement from sm list-volumes. Each volume also carries a sidecar continuity
+agreement with sm list-volumes. Each volume also carries a sidecar continuity
 digest over its disk, mount and backing paths, mount flags, mount state, and
 filesystem UUID.
 
@@ -218,11 +221,19 @@ token and only removes retained intent. Any change of session epoch, inventory
 continuity, runtime generation, Platform-Tools revision, or continuity evidence
 invalidates both the observation and the selection. A failed probe or a context
 failure before the probe also clears the retained selection.
+Runtime or device-identity invalidation also clears retained observations,
+selections, in-flight probe markers, and notices before a same-handle session
+can be redetected. This invalidation does not reset the probe counter or the
+per-device selection-request counter, so a late response from the previous
+authority cannot match a new request.
 
 React renders the projection in the setup step as labelled storage choices
-beside a Not offered as a destination list. It receives product labels, fixed
-detail text, opaque handles, presentation keys, and cached-versus-live evidence
-only. Radio accessible names contain only the option label, and detail text is
+beside a Not offered as a destination list. It receives product labels and
+fixed detail text, opaque device and volume handles, presentation keys, the
+observation token and session epoch, each volume's classification, status, and
+selectable flag, the discovery status, cached-versus-live evidence, the selected
+volume handle, and the fixed selection notice. Radio accessible names contain
+only the option label, and detail text is
 exposed through aria-describedby. Focus restoration applies only to a still
 present option and only while focus remains in the storage surface. A failed
 read leaves error announcement to the panel alert. Invalidation notices use one

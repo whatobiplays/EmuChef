@@ -196,7 +196,7 @@ h4 { margin-bottom: var(--space-2); font-size: 1rem; line-height: 1.35; }
 .plan-options label, .recipe-list label { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-muted); }
 .unavailable { opacity: 0.65; }
 
-.storage-options { margin: var(--space-5) 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-panel); background: var(--color-surface-raised); }
+.storage-options { margin: var(--space-5) 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-raised); }
 .storage-evidence { color: var(--color-text-muted); }
 .storage-option-list { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
 .storage-option-list label { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-muted); }

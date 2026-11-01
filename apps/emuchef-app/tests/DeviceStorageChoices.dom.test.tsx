@@ -195,6 +195,30 @@ test("refresh requests a live observation and disables itself while reading", as
   expect(screen.getByText("Refreshing storage options…")).toBeTruthy();
 });
 
+test("blocks selection during refresh while preserving keyboard focus", async () => {
+  const user = userEvent.setup();
+  const props = choices({ loading: true });
+  render(<DeviceStorageChoices {...props} />);
+  const sd = screen.getByRole("radio", { name: "SD card" }) as HTMLInputElement;
+
+  expect(sd.getAttribute("aria-disabled")).toBe("true");
+  sd.focus();
+  expect(document.activeElement).toBe(sd);
+  await user.click(sd);
+
+  expect(props.onSelect).not.toHaveBeenCalled();
+  expect(sd.checked).toBe(false);
+});
+
+test("uses selection-specific busy text instead of claiming a refresh", () => {
+  render(<DeviceStorageChoices {...choices({ loading: true, loadingKind: "selection" })} />);
+
+  const busy = screen.getByRole("button", { name: "Selecting storage…" }) as HTMLButtonElement;
+  expect(busy.disabled).toBe(true);
+  expect(screen.queryByText("Refreshing storage options…")).toBeNull();
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
+});
+
 test("selects with the keyboard", async () => {
   const user = userEvent.setup();
   const props = choices();

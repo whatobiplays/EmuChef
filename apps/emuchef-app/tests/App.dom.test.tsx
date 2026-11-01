@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ConfigurationDescription,
+  DeviceVolumesProjection,
   ExecutionCapabilities,
   RuntimeStatus,
   SupportSnapshot,
@@ -457,6 +458,57 @@ test("a successful storage selection announces once in the shell live region", a
   }
 });
 
+test("a storage selection reports selection-specific busy text", async () => {
+  const user = userEvent.setup();
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: "11111111111111111111111111111111",
+        volumeHandle: "11111111111111111111111111111111",
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  const selection = deferred<DeviceVolumesProjection>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+  mockApi.selectDeviceVolume.mockReturnValue(selection.promise);
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(sd);
+
+  expect(await screen.findByRole("button", { name: "Selecting storage…" })).toBeTruthy();
+  expect(screen.queryByText("Refreshing storage options…")).toBeNull();
+
+  await act(async () => {
+    selection.resolve({ ...observed, selectedVolumeHandle: sdHandle });
+  });
+  await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
+});
+
 test("a failed storage refresh clears the chosen volume and live evidence", async () => {
   const user = userEvent.setup();
   const sdHandle = "22222222222222222222222222222222";
@@ -579,7 +631,7 @@ test("a device poll during a storage selection clears the stale choice and live 
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
 
   await user.click(screen.getByRole("radio", { name: "Internal storage" }));
-  expect(screen.getByText("Refreshing storage options…")).toBeTruthy();
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
 
   mockApi.deviceVolumes.mockResolvedValue(fresh);
   // Trigger one inventory poll directly so the race does not depend on
@@ -652,7 +704,7 @@ test("a qualification failure after committed inventory discards stale storage s
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
 
   await user.click(screen.getByRole("radio", { name: "Internal storage" }));
-  expect(screen.getByText("Refreshing storage options…")).toBeTruthy();
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
 
   mockApi.pollDevices.mockResolvedValue([]);
   mockApi.deviceQualification.mockRejectedValueOnce(new Error("The device service is unavailable."));
@@ -666,11 +718,11 @@ test("a qualification failure after committed inventory discards stale storage s
   ).toBeNull());
   expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull();
   expect(screen.queryByRole("radio", { name: "Internal storage" })).toBeNull();
-  expect(screen.queryByText("Refreshing storage options…")).toBeNull();
+  expect(screen.queryByText("Selecting storage…")).toBeNull();
   expect(screen.getAllByText(/device service is unavailable/i).length).toBeGreaterThan(0);
 
   releaseSelection();
-  await waitFor(() => expect(screen.queryByText("Refreshing storage options…")).toBeNull());
+  await waitFor(() => expect(screen.queryByText("Selecting storage…")).toBeNull());
   expect(screen.queryByRole("radio", { name: "Internal storage" })).toBeNull();
 });
 
@@ -725,15 +777,15 @@ test("a failed device poll clears a fenced storage action's loading state", asyn
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(false));
 
   await user.click(sd);
-  expect(screen.getByText("Refreshing storage options…")).toBeTruthy();
-  expect((screen.getByRole("button", { name: "Refreshing storage…" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
+  expect((screen.getByRole("button", { name: "Selecting storage…" }) as HTMLButtonElement).disabled).toBe(true);
 
   mockApi.pollDevices.mockRejectedValueOnce(new Error("The device service is unavailable."));
   await act(async () => {
     triggerDevicePoll();
   });
 
-  await waitFor(() => expect(screen.queryByText("Refreshing storage options…")).toBeNull());
+  await waitFor(() => expect(screen.queryByText("Selecting storage…")).toBeNull());
   const refresh = screen.getByRole("button", { name: "Refresh storage" }) as HTMLButtonElement;
   expect(refresh.disabled).toBe(false);
 

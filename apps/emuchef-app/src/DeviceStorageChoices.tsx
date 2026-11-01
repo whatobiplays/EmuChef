@@ -24,8 +24,10 @@ import type {
 export interface DeviceStorageChoicesProps {
   /** Trusted projection, or null before the first observation completes. */
   projection: DeviceVolumesProjection | null;
-  /** True while a fresh observation is in progress. */
+  /** True while a storage read or selection request is in progress. */
   loading: boolean;
+  /** The storage operation currently keeping the panel busy. */
+  loadingKind?: DeviceStorageLoadingKind;
   /** Fixed product error text from the trusted bridge, if any. */
   error: string | null;
   /** Request a fresh observation, bypassing the short-lived cache. */
@@ -35,6 +37,8 @@ export interface DeviceStorageChoicesProps {
   /** Announce a focused-option loss through the app shell live region. */
   announce: (message: string, assertive?: boolean) => void;
 }
+
+export type DeviceStorageLoadingKind = "refresh" | "selection";
 
 function discoveryMessage(status: DeviceVolumeDiscoveryStatus): string | null {
   switch (status) {
@@ -81,6 +85,7 @@ function evidenceText(projection: DeviceVolumesProjection | null): string {
 export function DeviceStorageChoices({
   projection,
   loading,
+  loadingKind = "refresh",
   error,
   onRefresh,
   onSelect,
@@ -140,6 +145,14 @@ export function DeviceStorageChoices({
   const unavailable = projection?.volumes.filter((volume) => !volume.selectable) ?? [];
   const statusMessage = projection ? discoveryMessage(projection.discoveryStatus) : null;
   const observationToken = projection?.observationToken ?? "";
+  const loadingMessage = loadingKind === "selection"
+    ? "Selecting storage…"
+    : "Refreshing storage options…";
+  const refreshButtonText = loading
+    ? loadingKind === "selection"
+      ? "Selecting storage…"
+      : "Refreshing storage…"
+    : "Refresh storage";
   const descriptionIds = describedBy(
     evidenceId,
     loading ? loadingId : undefined,
@@ -167,7 +180,7 @@ export function DeviceStorageChoices({
       )}
       {loading && (
         <p id={loadingId} className="disabled-reason">
-          Refreshing storage options…
+          {loadingMessage}
         </p>
       )}
       {projection?.discoveryStatus === "observed" && selectable.length === 0 && (
@@ -185,6 +198,7 @@ export function DeviceStorageChoices({
                 volume={volume}
                 groupName={groupName}
                 checked={projection?.selectedVolumeHandle === volume.volumeHandle}
+                submissionBlocked={loading}
                 describedBy={describedBy(detailId, notice && !error ? noticeId : undefined)}
                 detailId={detailId}
                 onFocus={() => {
@@ -229,7 +243,7 @@ export function DeviceStorageChoices({
         aria-describedby={loading ? loadingId : undefined}
         onClick={onRefresh}
       >
-        {loading ? "Refreshing storage…" : "Refresh storage"}
+        {refreshButtonText}
       </button>
       <p className="disabled-reason">
         Storage options are read-only evidence. A mount does not prove EmuChef can write to the storage, and a
@@ -243,6 +257,7 @@ function StorageRadio({
   volume,
   groupName,
   checked,
+  submissionBlocked,
   describedBy,
   onSelect,
   onFocus,
@@ -252,6 +267,7 @@ function StorageRadio({
   volume: DeviceVolumeChoice;
   groupName: string;
   checked: boolean;
+  submissionBlocked: boolean;
   describedBy: string | undefined;
   onSelect: () => void;
   onFocus: () => void;
@@ -266,10 +282,13 @@ function StorageRadio({
         name={groupName}
         value={volume.volumeHandle}
         checked={checked}
+        aria-disabled={submissionBlocked || undefined}
         aria-label={volume.label}
         aria-describedby={describedBy}
         onFocus={onFocus}
-        onChange={onSelect}
+        onChange={() => {
+          if (!submissionBlocked) onSelect();
+        }}
       />
       <span>
         <strong>{volume.label}</strong>

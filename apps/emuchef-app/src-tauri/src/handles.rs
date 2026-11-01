@@ -492,9 +492,10 @@ impl SessionHandles {
         self.identity_order.clear();
     }
 
-    /// Clears live device and review authority while retaining only bounded,
-    /// process-local identity continuity for controlled redetection.
+    /// Clears live device, storage, and review authority while retaining only
+    /// bounded, process-local identity continuity for controlled redetection.
     pub fn invalidate_runtime_authority_preserving_identities(&mut self) {
+        self.device_storage.clear_all_after_authority_loss();
         let handles = self.reviews.keys().cloned().collect::<Vec<_>>();
         for handle in handles {
             self.reviews.remove(&handle);
@@ -535,10 +536,12 @@ impl SessionHandles {
         }
     }
 
-    /// Drop all live authority tied to a device identity while retaining the
-    /// existing serial-to-opaque-handle reconciliation map for the next
-    /// inventory refresh.
+    /// Drop all live device, storage, and review authority tied to a device
+    /// identity while retaining the existing serial-to-opaque-handle
+    /// reconciliation map for the next inventory refresh.
     pub fn invalidate_identity_authority(&mut self, device_handle: &str) {
+        self.device_storage
+            .clear_device_after_authority_loss(device_handle);
         self.devices_by_handle.remove(device_handle);
         self.qualification_context_by_handle.remove(device_handle);
         self.invalidate_reviews_for_device(device_handle, "review_stale");

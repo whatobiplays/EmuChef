@@ -233,6 +233,25 @@ enum ProbeOutcome {
 }
 
 impl DeviceStorageState {
+    /// Drop ephemeral storage authority for one device while retaining every
+    /// other device, identity tombstones, and the monotonic probe and selection
+    /// counters that fence late responses.
+    pub(crate) fn clear_device_after_authority_loss(&mut self, device_handle: &str) {
+        self.observations.remove(device_handle);
+        self.selections.remove(device_handle);
+        self.in_flight.remove(device_handle);
+        self.notices.remove(device_handle);
+    }
+
+    /// Drop ephemeral storage authority while retaining identity tombstones and
+    /// the monotonic probe and selection counters that fence late responses.
+    pub(crate) fn clear_all_after_authority_loss(&mut self) {
+        self.observations.clear();
+        self.selections.clear();
+        self.in_flight.clear();
+        self.notices.clear();
+    }
+
     /// Drop observations and selections that no longer match the retained
     /// device sessions. Called from inventory reconciliation, where a session
     /// epoch change is the authoritative continuity signal.
@@ -855,6 +874,9 @@ where
         .unwrap_or(u64::MAX);
     let store = guard.device_storage_mut();
     if current_epoch != context.session_epoch {
+        if store.in_flight.get(&context.device_handle) != Some(&sequence) {
+            return Ok(false);
+        }
         store.note_stale_session(&context.device_handle);
         return Err(stale_device_session_error());
     }
@@ -2306,6 +2328,69 @@ mod tests {
     }
 
     #[test]
+    fn runtime_authority_invalidation_discards_inflight_storage_probe() {
+        let (handles, device) = handles_with_inventory("transport-1");
+        let context = device_context(&device, 1);
+        let now = Instant::now();
+        let sequence = {
+            let mut guard = handles.lock().expect("handles");
+            let store = guard.device_storage_mut();
+            store
+                .notices
+                .insert(DEVICE.to_string(), "old notice".to_string());
+            match store.begin_probe(&context.device_handle, 1, 1, 1, now) {
+                ProbeStart::Started(sequence) => sequence,
+                ProbeStart::Busy => panic!("probe should start"),
+            }
+        };
+
+        handles
+            .lock()
+            .expect("handles")
+            .invalidate_runtime_authority_preserving_identities();
+
+        let mut guard = handles.lock().expect("handles");
+        let store = guard.device_storage_mut();
+        assert!(!store.in_flight.contains_key(DEVICE));
+        assert!(!store.notices.contains_key(DEVICE));
+        assert_eq!(
+            store.commit_probe(
+                &context.device_handle,
+                sequence,
+                1,
+                1,
+                1,
+                DiscoveryStatus::Observed,
+                "bbbbbbbbccccccccddddddddeeeeeeee".to_string(),
+                Vec::new(),
+                now,
+            ),
+            ProbeOutcome::Superseded
+        );
+    }
+
+    #[test]
+    fn late_probe_after_runtime_invalidation_does_not_restore_a_notice() {
+        let (handles, device) = handles_with_inventory("transport-1");
+        let context = device_context(&device, 1);
+        let now = Instant::now();
+        let mut request = |_: &str, _: Value| {
+            handles
+                .lock()
+                .expect("handles")
+                .invalidate_runtime_authority_preserving_identities();
+            Ok(internal_and_sd())
+        };
+
+        let committed = observe_device_volumes(&handles, &context, true, &mut request, now)
+            .expect("a discarded late response is not a user-facing failure");
+
+        assert!(!committed);
+        let mut guard = handles.lock().expect("handles");
+        assert!(!guard.device_storage_mut().notices.contains_key(DEVICE));
+    }
+
+    #[test]
     fn single_flight_probe_does_not_start_a_second_device_probe() {
         let handles = handles_at_epoch(1);
         let context = context(1);
@@ -3262,5 +3347,108 @@ public:179,65 {shell_state} {fs_uuid}
         )
         .expect_err("an ambiguous duplicate cannot be selected");
         assert!(error.contains("volume_not_selectable"), "error was {error}");
+    }
+
+    #[test]
+    fn authority_loss_clears_transient_storage_state() {
+        let mut state = DeviceStorageState::default();
+        state.observations.insert(
+            "device".to_string(),
+            VolumeObservation {
+                session_epoch: 1,
+                runtime_generation: 1,
+                platform_tools_revision: 1,
+                discovery_status: DiscoveryStatus::Observed,
+                observation_token: "observation".to_string(),
+                volumes: Vec::new(),
+                fetched_at: Instant::now(),
+            },
+        );
+        state.selections.insert(
+            "device".to_string(),
+            VolumeSelection {
+                session_epoch: 1,
+                volume_handle: "volume".to_string(),
+                identity_token: "identity".to_string(),
+                continuity_token: "continuity".to_string(),
+            },
+        );
+        state.in_flight.insert("device".to_string(), 1);
+        state
+            .notices
+            .insert("device".to_string(), "notice".to_string());
+        state.selection_requests.insert("device".to_string(), 1);
+        state.sequences.insert("device".to_string(), 7);
+
+        state.clear_all_after_authority_loss();
+
+        assert!(state.observations.is_empty());
+        assert!(state.selections.is_empty());
+        assert!(state.in_flight.is_empty());
+        assert!(state.notices.is_empty());
+        assert_eq!(state.selection_requests.get("device"), Some(&1));
+        assert_eq!(state.sequences.get("device"), Some(&7));
+    }
+
+    #[test]
+    fn per_device_authority_loss_keeps_unrelated_storage_state() {
+        let mut handles = SessionHandles::default();
+        handles.retain_available_device_for_test("device-a", 1);
+        handles.retain_available_device_for_test("device-b", 1);
+        let now = Instant::now();
+        {
+            let store = handles.device_storage_mut();
+            for device in ["device-a", "device-b"] {
+                store.observations.insert(
+                    device.to_string(),
+                    VolumeObservation {
+                        session_epoch: 1,
+                        runtime_generation: 1,
+                        platform_tools_revision: 1,
+                        discovery_status: DiscoveryStatus::Observed,
+                        observation_token: format!("{device}-observation"),
+                        volumes: Vec::new(),
+                        fetched_at: now,
+                    },
+                );
+                store.selections.insert(
+                    device.to_string(),
+                    VolumeSelection {
+                        session_epoch: 1,
+                        volume_handle: format!("{device}-volume"),
+                        identity_token: "identity".to_string(),
+                        continuity_token: "continuity".to_string(),
+                    },
+                );
+                store.in_flight.insert(device.to_string(), 1);
+                store
+                    .notices
+                    .insert(device.to_string(), "notice".to_string());
+                store.selection_requests.insert(device.to_string(), 1);
+                store.sequences.insert(device.to_string(), 1);
+            }
+        }
+
+        handles.invalidate_identity_authority("device-a");
+
+        let store = handles.device_storage_mut();
+        assert!(!store.observations.contains_key("device-a"));
+        assert!(!store.selections.contains_key("device-a"));
+        assert!(!store.in_flight.contains_key("device-a"));
+        assert!(!store.notices.contains_key("device-a"));
+        assert_eq!(store.selection_requests.get("device-a"), Some(&1));
+        assert_eq!(store.sequences.get("device-a"), Some(&1));
+        assert_eq!(
+            store
+                .observations
+                .get("device-b")
+                .map(|observation| observation.observation_token.as_str()),
+            Some("device-b-observation")
+        );
+        assert!(store.selections.contains_key("device-b"));
+        assert!(store.in_flight.contains_key("device-b"));
+        assert!(store.notices.contains_key("device-b"));
+        assert!(store.selection_requests.contains_key("device-b"));
+        assert!(store.sequences.contains_key("device-b"));
     }
 }

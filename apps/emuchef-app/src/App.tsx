@@ -16,7 +16,10 @@ import {
 } from "./app-helpers";
 import { ExecutionStep } from "./ExecutionStep";
 import { DeviceQualificationOverlay } from "./DeviceQualificationOverlay";
-import { DeviceStorageChoices } from "./DeviceStorageChoices";
+import {
+  DeviceStorageChoices,
+  type DeviceStorageLoadingKind,
+} from "./DeviceStorageChoices";
 import { InputsStep } from "./InputsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
@@ -261,6 +264,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   // execution authority.
   const [deviceVolumes, setDeviceVolumes] = useState<DeviceVolumesProjection | null>(null);
   const [deviceVolumesPhase, setDeviceVolumesPhase] = useState<"idle" | "loading" | "failed">("idle");
+  const [deviceVolumesLoadingKind, setDeviceVolumesLoadingKind] =
+    useState<DeviceStorageLoadingKind>("refresh");
   const [deviceVolumesError, setDeviceVolumesError] = useState<string | null>(null);
   const deviceVolumesGenerationRef = useRef(0);
   const deviceVolumesActionRef = useRef(0);
@@ -1680,6 +1685,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const generation = ++deviceVolumesGenerationRef.current;
     const runtimeGeneration = runtimeGenerationRef.current;
     const pollGeneration = devicePollGenerationRef.current;
+    setDeviceVolumesLoadingKind("refresh");
     setDeviceVolumesPhase("loading");
     try {
       const projection = await api.deviceVolumes(deviceHandle, refresh);
@@ -1741,6 +1747,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const generation = ++deviceVolumesGenerationRef.current;
     const runtimeGeneration = runtimeGenerationRef.current;
     const pollGeneration = devicePollGenerationRef.current;
+    setDeviceVolumesLoadingKind("selection");
     setDeviceVolumesPhase("loading");
     try {
       const projection = await api.selectDeviceVolume(handle, volumeHandle, observationToken);
@@ -3007,6 +3014,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 <DeviceStorageChoices
                   projection={deviceVolumes}
                   loading={deviceVolumesPhase === "loading"}
+                  loadingKind={deviceVolumesLoadingKind}
                   error={deviceVolumesError}
                   onRefresh={() => void refreshDeviceVolumes()}
                   onSelect={(volumeHandle, observationToken) => {

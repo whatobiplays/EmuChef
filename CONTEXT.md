@@ -1347,10 +1347,15 @@ Sidecar operation listDeviceVolumes requires only adbPath and serial. Additional
 payload members are ignored, so the protocol remains additive. It runs one
 bounded probe sequence with argv arrays under ProcessOperation::Probe: adb
 devices -l, adb -s <serial> shell dumpsys mount, then adb -s <serial> shell sm
-list-volumes all. The inventory must show exactly one connected device and an
+list-volumes all. The inventory must report exactly one attached device and an
 exact serial match before any device-specific command runs. No shell string is
 constructed. The response carries an observation token over typed volumes:
-identityToken, kind, status, mountState, and fixed reason keys.
+identityToken, continuityToken, kind, status, mountState, and fixed reason keys.
+Inventory rows whose ADB state is unrecognized or missing are excluded from the
+projected device list but remain in the inventory row count. Storage discovery
+and qualification require exactly one reported row and one projected device
+whose serial matches the request, so an attached but unusable device fails
+closed instead of disappearing.
 
 The dumpsys mount report is read by its current AOSP sections. Disks: contains
 DiskInfo records, Volumes: contains VolumeInfo records, Records: contains
@@ -1402,10 +1407,11 @@ Multiple matching stacked emulated volumes make the internal storage ambiguous.
 
 Removable SD candidates are only public volumes in mounted or mounted_ro state
 with a non-empty filesystem UUID, corroborated by the current VolumeInfo entry
-of type PUBLIC, a matching filesystem UUID, the exact /storage/<fsUuid> mount
-path or /mnt/media_rw/<fsUuid> backing path when present, observed mount flags,
-and a disk carrying FLAG_SD without FLAG_USB. A missing mountFlags field leaves
-the card unknown with the fixed missing_mount_flags reason. Distinct
+of type PUBLIC, a matching filesystem UUID, the exact /storage/<fsUuid> path
+for visible mount evidence, observed mount flags, and a disk carrying FLAG_SD
+without FLAG_USB. /mnt/media_rw/<fsUuid> is recognized as non-visible backing
+evidence and cannot by itself make a card available. A missing mountFlags field
+leaves the card unknown with the fixed missing_mount_flags reason. Distinct
 filesystem UUIDs produce separate candidates. Missing or different mount-path
 evidence is unknown. A duplicate UUID, disagreeing evidence, or missing
 corroboration is ambiguous or unknown and never available. Historical Records
@@ -1459,6 +1465,12 @@ session state after the device commands finish, and superseded responses never
 commit. The ten-second limit is enforced when a projection is built and when a
 selection is admitted. An expired observation is discarded before a busy probe
 returns, so aged data is neither shown nor selectable.
+
+Runtime or device-identity invalidation clears retained observations,
+selections, in-flight probe markers, and notices before the same opaque handle
+can be redetected. This invalidation does not reset the probe counter or the
+per-device selection-request counter, so a late response from the previous
+authority cannot match a new request.
 
 One selected volume may be retained per device session as user intent.
 Selecting requires the observationToken displayed with the chosen projection.

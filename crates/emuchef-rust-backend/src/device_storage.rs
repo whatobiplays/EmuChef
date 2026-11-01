@@ -3241,7 +3241,7 @@ Primary storage UUID: ADOPTED-B",
     fn multiple_devices_skip_device_specific_probes() {
         let runner = ScriptedRunner::new(vec![completed(
             0,
-            "List devices attached\nAAA\tdevice transport_id:1\nBBB\tdevice transport_id:2\n",
+            "List of devices attached\nAAA\tdevice transport_id:1\nBBB\tdevice transport_id:2\n",
             "",
         )]);
 
@@ -3256,7 +3256,7 @@ Primary storage UUID: ADOPTED-B",
     fn a_different_connected_serial_reports_no_device_without_probing() {
         let runner = ScriptedRunner::new(vec![completed(
             0,
-            "List devices attached\nOTHER\tdevice transport_id:1\n",
+            "List of devices attached\nOTHER\tdevice transport_id:1\n",
             "",
         )]);
 
@@ -3271,7 +3271,7 @@ Primary storage UUID: ADOPTED-B",
     fn unauthorized_device_reports_unauthorized_without_probing() {
         let runner = ScriptedRunner::new(vec![completed(
             0,
-            &format!("List devices attached\n{SERIAL}\tunauthorized\n"),
+            &format!("List of devices attached\n{SERIAL}\tunauthorized\n"),
             "",
         )]);
 
@@ -3279,6 +3279,38 @@ Primary storage UUID: ADOPTED-B",
             list_device_volumes_with_runner("adb", SERIAL, &runner).expect("inventory outcome");
 
         assert_eq!(observation["state"], "unauthorized");
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn unrecognized_inventory_rows_prevent_a_single_device_probe() {
+        let runner = ScriptedRunner::new(vec![completed(
+            0,
+            &format!(
+                "List of devices attached\n{SERIAL}\tdevice transport_id:1\nOTHER\tno permissions (missing udev rules)\n"
+            ),
+            "",
+        )]);
+
+        let observation =
+            list_device_volumes_with_runner("adb", SERIAL, &runner).expect("inventory outcome");
+
+        assert_eq!(observation["state"], "multiple_devices");
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn state_less_inventory_rows_prevent_a_single_device_probe() {
+        let runner = ScriptedRunner::new(vec![completed(
+            0,
+            &format!("List of devices attached\n{SERIAL}\tdevice transport_id:1\nTRUNCATED\n"),
+            "",
+        )]);
+
+        let observation =
+            list_device_volumes_with_runner("adb", SERIAL, &runner).expect("inventory outcome");
+
+        assert_eq!(observation["state"], "multiple_devices");
         assert_eq!(runner.calls().len(), 1);
     }
 }
