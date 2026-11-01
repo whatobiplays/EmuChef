@@ -26,6 +26,7 @@ mod cli;
 pub mod commands;
 pub(crate) mod device_probe;
 pub(crate) mod device_profile_match;
+pub(crate) mod device_storage;
 pub mod document;
 pub mod dto;
 mod end_user_runtime;

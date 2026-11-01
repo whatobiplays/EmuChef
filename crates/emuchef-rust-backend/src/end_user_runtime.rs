@@ -32,7 +32,7 @@ pub(crate) fn list_adb_devices(adb_path: &str) -> Result<Value, ApiError> {
     list_adb_devices_with_runner(adb_path, &ProcessCommandRunner)
 }
 
-fn list_adb_devices_with_runner(
+pub(crate) fn list_adb_devices_with_runner(
     adb_path: &str,
     runner: &impl CommandRunner,
 ) -> Result<Value, ApiError> {
@@ -106,6 +106,88 @@ fn parse_adb_devices(stdout: &str) -> Vec<AdbInventoryEntry> {
             })
         })
         .collect()
+}
+
+/// Resolved target for one device-specific passive observation.
+///
+/// A device-specific command may only run after the requested serial resolves
+/// to exactly one connected device in the reported inventory. Callers that
+/// observe one selected device resolve it through this classification so
+/// cardinality, exact-serial matching, and transport state are validated in one
+/// place.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum InventoryTarget {
+    /// The inventory reports no connected devices.
+    NoDevice,
+    /// The inventory reports more than one connected device.
+    MultipleDevices,
+    /// The requested serial is present but is not currently usable.
+    Unavailable { state: &'static str, serial: String },
+    /// The requested serial is present and available.
+    Available { serial: String },
+}
+
+/// Resolve one requested serial against an `adb devices -l` projection.
+///
+/// The projection is produced by `list_adb_devices_with_runner`, so this
+/// function only classifies already-decoded inventory and never re-parses raw
+/// ADB output.
+pub(crate) fn classify_inventory_target(
+    inventory: &Value,
+    requested_serial: &str,
+) -> Result<InventoryTarget, ApiError> {
+    let devices = inventory
+        .get("devices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if devices.is_empty() {
+        return Ok(InventoryTarget::NoDevice);
+    }
+    if devices.len() != 1 {
+        return Ok(InventoryTarget::MultipleDevices);
+    }
+
+    let device = &devices[0];
+    let serial = device
+        .get("serial")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ApiError::command_failed(
+                "ADB device inventory was incomplete.",
+                json!({ "reason": "adb_inventory_invalid" }),
+            )
+        })?;
+    if serial != requested_serial {
+        return Ok(InventoryTarget::NoDevice);
+    }
+    match device.get("state").and_then(Value::as_str) {
+        Some("unauthorized") => Ok(InventoryTarget::Unavailable {
+            state: "unauthorized",
+            serial: serial.to_string(),
+        }),
+        Some("offline") => Ok(InventoryTarget::Unavailable {
+            state: "offline",
+            serial: serial.to_string(),
+        }),
+        Some("available") => Ok(InventoryTarget::Available {
+            serial: serial.to_string(),
+        }),
+        _ => Err(ApiError::command_failed(
+            "ADB device inventory contained an unsupported state.",
+            json!({ "reason": "adb_inventory_invalid" }),
+        )),
+    }
+}
+
+/// Perform one bounded, read-only storage volume observation for the requested
+/// serial.
+///
+/// Exact serials and raw volume evidence remain inside the trusted sidecar
+/// response. The Tauri boundary replaces volume identity tokens with opaque
+/// handles before anything reaches React.
+pub(crate) fn list_device_volumes(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
+    crate::device_storage::list_device_volumes(adb_path, serial)
 }
 
 pub(crate) fn probe_device(adb_path: &str, serial: &str) -> Result<Value, ApiError> {

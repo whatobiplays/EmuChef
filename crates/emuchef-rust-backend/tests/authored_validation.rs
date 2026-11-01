@@ -254,6 +254,7 @@ fn capabilities_include_additive_product_runtime_surface() {
             "listAdbDevices",
             "probeDevice",
             "qualifyDevice",
+            "listDeviceVolumes",
             "checkRoot",
             "inspectApk",
             "generateAppRecipeDraft",

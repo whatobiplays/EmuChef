@@ -58,6 +58,67 @@ export interface DeviceFacts {
   firmwareBuild: string | null;
 }
 
+/** Storage classes Rust can distinguish from passive device reports. */
+export type DeviceVolumeKind =
+  | "internalShared"
+  | "removableSd"
+  | "adoptedPrivate"
+  | "usb"
+  | "unknown";
+
+/** Availability of one storage destination as observed by Rust. */
+export type DeviceVolumeStatus =
+  | "available"
+  | "unmounted"
+  | "ambiguous"
+  | "unsupported"
+  | "unknown";
+
+export type DeviceVolumeDiscoveryStatus =
+  | "observed"
+  | "noDevice"
+  | "multipleDevices"
+  | "unauthorized"
+  | "offline"
+  | "refreshing"
+  | "unavailable"
+  | "unknown";
+
+/** Whether the projection came from a probe now, the short-lived cache, or a failed read. */
+export type DeviceVolumeEvidence = "live" | "cached" | "unavailable";
+
+/**
+ * One sanitized storage option. The handle is opaque; it never contains a
+ * filesystem UUID, mount path, disk identifier, or device serial.
+ */
+export interface DeviceVolumeChoice {
+  /** Presentation-only key. Duplicate non-selectable entries remain distinct. */
+  readonly presentationKey: string;
+  readonly volumeHandle: string;
+  readonly kind: DeviceVolumeKind;
+  readonly label: string;
+  readonly status: DeviceVolumeStatus;
+  readonly selectable: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Read-only storage projection authored by Rust.
+ *
+ * A selection is user intent only. It does not grant write access, prove
+ * application-side access, or authorize execution.
+ */
+export interface DeviceVolumesProjection {
+  readonly deviceHandle: string;
+  readonly sessionEpoch: number;
+  readonly observationToken: string;
+  readonly discoveryStatus: DeviceVolumeDiscoveryStatus;
+  readonly evidence: DeviceVolumeEvidence;
+  readonly volumes: DeviceVolumeChoice[];
+  readonly selectedVolumeHandle: string | null;
+  readonly selectionNotice: string | null;
+}
+
 export interface PlanCandidate {
   planId: string;
   name: string;

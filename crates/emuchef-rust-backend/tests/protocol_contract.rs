@@ -167,6 +167,7 @@ fn assert_hello_result(result: &Value) {
             "listAdbDevices",
             "probeDevice",
             "qualifyDevice",
+            "listDeviceVolumes",
             "checkRoot",
             "inspectApk",
             "generateAppRecipeDraft",

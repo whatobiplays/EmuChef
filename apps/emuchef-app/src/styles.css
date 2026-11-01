@@ -196,6 +196,16 @@ h4 { margin-bottom: var(--space-2); font-size: 1rem; line-height: 1.35; }
 .plan-options label, .recipe-list label { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-muted); }
 .unavailable { opacity: 0.65; }
 
+.storage-options { margin: var(--space-5) 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-panel); background: var(--color-surface-raised); }
+.storage-evidence { color: var(--color-text-muted); }
+.storage-option-list { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
+.storage-option-list label { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-muted); }
+.storage-option-list label span { display: grid; gap: var(--space-1); min-width: 0; }
+.storage-unavailable { margin: var(--space-4) 0; }
+.storage-unavailable-heading { margin-bottom: var(--space-2); font-weight: 700; }
+.storage-unavailable ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.storage-unavailable li { display: grid; gap: var(--space-1); }
+
 fieldset { min-width: 0; border: 0; padding: 0; }
 legend { margin-bottom: var(--space-3); font-weight: 800; }
 .empty-state { padding: var(--space-5); border: 1px dashed var(--color-border-strong); border-radius: var(--radius-md); color: var(--color-text-muted); text-align: center; }

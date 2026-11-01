@@ -11,6 +11,7 @@
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
 | End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3E Apple Silicon packaging qualification active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
+| Device storage discovery and selection | Rust sidecar and Tauri | Passive ADB volume observation; selection is intent only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
 | Python runtime | None | Retired; no implementation, package, dependency, or entrypoint is retained |
@@ -165,3 +166,70 @@ application-data state remain outside update authority.
 The prior in-place updater remains rejected because its pinned public API could
 not preserve the required single-response pre-deserialization validation model.
 Phase 4B implements manual discovery only, not in-place installation.
+
+## Device storage boundary
+
+Storage discovery is passive. React requests a storage projection for one
+opaque device handle. Tauri validates the retained device session, confirms the
+ADB inventory contains exactly that serial, and forwards only the ADB path and
+serial to the sidecar listDeviceVolumes operation. The sidecar runs adb devices
+-l, dumpsys mount, and sm list-volumes all as argument arrays. It parses the
+current AOSP Disks:, Volumes:, Records:, and Primary storage UUID: sections,
+retains legacy mDisks/mVolumes/mPrimaryStorageUuid compatibility, and accepts
+both two-field legacy and three-field AOSP shell volume lines. Repeated
+VolumeInfo or DiskInfo records are accepted while the fields used for
+classification agree; a repeat that changes only fields EmuChef does not
+classify by stays accepted. Contradictory classification evidence and
+conflicting primary-storage declarations fail closed. Raw filesystem UUIDs,
+mount paths, disk identifiers, and serials remain sidecar-owned. An adopted
+primary volume resolves to its stacked emulated volume
+through the private volume's disk identity, without relying on the private
+volume's mount user. A sole emulated volume with no positive user evidence uses
+the assumed-user compatibility fallback. A volume positively associated with a
+non-system user, including an explicit emulated;<non-zero> primary declaration,
+is ambiguous and is not offered as internal storage. A public primary volume is
+promoted to internal storage only when its public-volume classification is
+available, which requires supported non-USB media, visible mount evidence, and
+agreement from sm list-volumes. Each volume also carries a sidecar continuity
+digest over its disk, mount and backing paths, mount flags, mount state, and
+filesystem UUID.
+
+Tauri runs the two storage commands off the main thread. It re-reads the device
+session after the device command finishes, discards superseded probe responses,
+and caches one observation for ten seconds keyed by device handle, session
+epoch, runtime generation, and Platform-Tools revision. Cache lookup uses the
+request-start time. A successful probe records its fetched_at at probe
+completion, and projection and admission apply the ten-second limit at their
+current time. After the sidecar request returns, Tauri re-reads the runtime
+generation and Platform-Tools revision. A changed value discards the observation,
+clears the selection, and returns a fixed stale-context error. An expired
+observation is discarded before a busy probe returns. The bridge mints stable
+opaque volume handles per handle, epoch, and identity token, plus a
+presentation-only key for duplicate non-selectable list entries. The continuity
+digest stays in trusted state.
+
+Selection is user intent stored in Tauri only. Admission re-locks state,
+revalidates the captured session epoch, identity, the expected observation token,
+and the latest per-device selection request sequence. A token that no longer
+matches the current trusted observation returns stale_observation and cannot
+rebind an older choice to a replacement card. Admission rejects stale, missing,
+unsupported, or ambiguous choices. Explicit clearing carries no volume handle or
+token and only removes retained intent. Any change of session epoch, inventory
+continuity, runtime generation, Platform-Tools revision, or continuity evidence
+invalidates both the observation and the selection. A failed probe or a context
+failure before the probe also clears the retained selection.
+
+React renders the projection in the setup step as labelled storage choices
+beside a Not offered as a destination list. It receives product labels, fixed
+detail text, opaque handles, presentation keys, and cached-versus-live evidence
+only. Radio accessible names contain only the option label, and detail text is
+exposed through aria-describedby. Focus restoration applies only to a still
+present option and only while focus remains in the storage surface. A failed
+read leaves error announcement to the panel alert. Invalidation notices use one
+panel live region. When a read fails, the projection becomes an unavailable state
+with no volumes and no selected handle, so a stale checkmark and live-evidence
+label cannot remain visible. A stale observation error keeps the current trusted
+projection and any newer selection. A mounted volume does not imply writability,
+application access, or execution eligibility. A read-only mount stays visible in
+the non-destination list with its mount detail. The selection never participates
+in planning, review, execution, or real-device authority.

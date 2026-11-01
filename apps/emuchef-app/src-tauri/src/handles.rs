@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::adb::AdbInstallationIdentity;
 use crate::device_observation::QualificationContextKey;
+use crate::device_storage::DeviceStorageState;
 
 const MAX_REVIEWS: usize = 16;
 const MAX_TOMBSTONES: usize = 64;
@@ -82,9 +83,17 @@ pub struct SessionHandles {
     session_epoch_by_handle: HashMap<String, u64>,
     qualification_context_by_handle: HashMap<String, QualificationContextKey>,
     last_inventory_count: Option<usize>,
+    device_storage: DeviceStorageState,
 }
 
 impl SessionHandles {
+    /// Mutable access to trusted storage observation and selection state.
+    ///
+    /// Callers must never hold this lock while an ADB command runs.
+    pub(crate) fn device_storage_mut(&mut self) -> &mut DeviceStorageState {
+        &mut self.device_storage
+    }
+
     pub fn update_devices(&mut self, inventory: &Value) -> Result<Vec<DeviceDto>, String> {
         let raw = inventory
             .get("devices")
@@ -196,6 +205,11 @@ impl SessionHandles {
                 self.invalidate_reviews_for_device(&handle, "review_stale");
             }
         }
+        let storage_epochs = present
+            .iter()
+            .map(|(handle, record)| (handle.clone(), record.session_epoch))
+            .collect::<HashMap<_, _>>();
+        self.device_storage.reconcile_devices(&storage_epochs);
         self.devices_by_handle = present;
         self.last_inventory_count = Some(inventory_count);
         self.device_generation = self.device_generation.saturating_add(1).max(1);
