@@ -204,8 +204,10 @@ test("blocks selection during refresh while preserving keyboard focus", async ()
   expect(sd.getAttribute("aria-disabled")).toBe("true");
   sd.focus();
   expect(document.activeElement).toBe(sd);
-  await user.click(sd);
 
+  await user.keyboard(" ");
+
+  expect(document.activeElement).toBe(sd);
   expect(props.onSelect).not.toHaveBeenCalled();
   expect(sd.checked).toBe(false);
 });

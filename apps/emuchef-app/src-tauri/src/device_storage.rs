@@ -237,7 +237,7 @@ impl DeviceStorageState {
     /// other device, identity tombstones, and the monotonic probe and selection
     /// counters that fence late responses.
     pub(crate) fn clear_device_after_authority_loss(&mut self, device_handle: &str) {
-        self.observations.remove(device_handle);
+        self.retire_observation(device_handle);
         self.selections.remove(device_handle);
         self.in_flight.remove(device_handle);
         self.notices.remove(device_handle);
@@ -246,7 +246,10 @@ impl DeviceStorageState {
     /// Drop ephemeral storage authority while retaining identity tombstones and
     /// the monotonic probe and selection counters that fence late responses.
     pub(crate) fn clear_all_after_authority_loss(&mut self) {
-        self.observations.clear();
+        let devices = self.observations.keys().cloned().collect::<Vec<_>>();
+        for device in devices {
+            self.retire_observation(&device);
+        }
         self.selections.clear();
         self.in_flight.clear();
         self.notices.clear();
@@ -3388,6 +3391,44 @@ public:179,65 {shell_state} {fs_uuid}
         assert!(state.notices.is_empty());
         assert_eq!(state.selection_requests.get("device"), Some(&1));
         assert_eq!(state.sequences.get("device"), Some(&7));
+    }
+
+    #[test]
+    fn authority_loss_retires_volume_handles_for_stale_session_rejection() {
+        for invalidate_runtime in [true, false] {
+            let base = Instant::now();
+            let (handles, device) = handles_with_inventory("transport-1");
+            let context = device_context(&device, 1);
+            let projection = observe(&handles, &context, internal_and_sd(), base);
+            let sd = handle_for(&projection, "removableSd");
+
+            {
+                let mut guard = handles.lock().expect("handles");
+                if invalidate_runtime {
+                    guard.invalidate_runtime_authority_preserving_identities();
+                } else {
+                    guard.invalidate_identity_authority(&device);
+                }
+                update_inventory(&mut guard, "transport-1");
+            }
+
+            let renewed_context = {
+                let guard = handles.lock().expect("handles");
+                let epoch = guard
+                    .device(&device)
+                    .expect("redetected device")
+                    .session_epoch;
+                device_context(&device, epoch)
+            };
+            observe(&handles, &renewed_context, internal_and_sd(), base);
+
+            let error = admit_device_volume_selection(&handles, &renewed_context, Some(&sd), base)
+                .expect_err("a retired handle must be rejected");
+            assert!(
+                error.contains("stale_device_session"),
+                "runtime_invalidation={invalidate_runtime}, error was {error}"
+            );
+        }
     }
 
     #[test]
