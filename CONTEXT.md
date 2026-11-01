@@ -1351,13 +1351,15 @@ list-volumes all. The inventory must report exactly one attached device and an
 exact serial match before any device-specific command runs. No shell string is
 constructed. The response carries an observation token over typed volumes:
 identityToken, continuityToken, kind, status, mountState, and fixed reason keys.
-Inventory row detection follows the ADB row structure rather than serial text,
-so a serial that resembles diagnostic output still counts while headers and
-daemon chatter are excluded. Inventory rows whose ADB state is unrecognized or
-missing are excluded from the projected device list but remain in the inventory
-row count. Storage discovery and qualification require exactly one reported
-row and one projected device whose serial matches the request, so an attached
-but unusable device fails closed instead of disappearing.
+Inventory rows are detected by token structure: a serial, an optional state,
+and optional key:value properties. A serial that resembles diagnostic output
+therefore counts, and any ambiguous line that fits this shape counts too, so
+the row count stays conservative. Headers and daemon messages that do not fit
+the shape are excluded. Rows whose ADB state is unrecognized or missing are
+excluded from the projected device list but remain in the inventory row count.
+Storage discovery and qualification require exactly one reported row and one
+projected device whose serial matches the request, so an attached but unusable
+device fails closed instead of disappearing.
 
 The dumpsys mount report is read by its current AOSP sections. Disks: contains
 DiskInfo records, Volumes: contains VolumeInfo records, Records: contains
