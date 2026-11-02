@@ -727,10 +727,10 @@ Preview rejection, completed publication, and unresolved recovery are distinct d
 In the accepted architecture, App Definition IDs, App Artifact IDs, and App Target IDs are stable cross-document identities that may be renamed through explicit **catalog refactor** operations. Issue #22 implements that behavior; the detailed rules below define its current contract.
 
 An App Definition ID rename:
-- renames the App Definition ID;
-- renames its canonical authored file;
-- rewrites dependent Recipe `config.app_ref` values and configuration template
-  paths under `authored/apps/<app-id>/` with the canonical file rename.
+- updates the App Definition ID and renames its canonical authored file;
+- updates dependent typed Recipe references, including `config.app_ref`;
+- is rejected when the App Definition owns configuration templates because
+  template-file migration is not implemented transactionally.
 
 Artifact renames update dependent Recipe artifact references. Target renames
 update Recipe step selectors, Recipe configuration targets, and App Definition

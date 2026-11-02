@@ -3,6 +3,68 @@ import test from "node:test";
 
 import type { AppCatalogAppDto, AppCatalogDto, StepSpecDto } from "../src/api/types.js";
 import type { ArtifactDto, InputDto, RefIndexDto } from "../src/api/types.js";
+import type {
+  AppConfigurationManagedPropertyDto,
+  AppDefinitionDocumentDto,
+  AppManagedPropertyValidatorsV1Dto,
+} from "../src/api/types.js";
+
+type TypeEqual<Left, Right> = (<Value>() => Value extends Left ? 1 : 2) extends
+  (<Value>() => Value extends Right ? 1 : 2)
+  ? ((<Value>() => Value extends Right ? 1 : 2) extends
+      (<Value>() => Value extends Left ? 1 : 2)
+      ? true
+      : false)
+  : false;
+type Assert<T extends true> = T;
+
+type AuthoredMinimumRemainsUnknown = Assert<
+  TypeEqual<AppManagedPropertyValidatorsV1Dto["minimum"], unknown>
+>;
+type AuthoredMaximumRemainsUnknown = Assert<
+  TypeEqual<AppManagedPropertyValidatorsV1Dto["maximum"], unknown>
+>;
+type CatalogMinimumRemainsNumeric = Assert<
+  TypeEqual<
+    NonNullable<AppConfigurationManagedPropertyDto["validators"]>["minimum"],
+    number | undefined
+  >
+>;
+type CatalogMaximumRemainsNumeric = Assert<
+  TypeEqual<
+    NonNullable<AppConfigurationManagedPropertyDto["validators"]>["maximum"],
+    number | undefined
+  >
+>;
+
+const authoredDocumentWithMalformedBounds = {
+  appDefinition: {
+    schema_version: 1,
+    kind: "app_definition",
+    id: "example",
+    name: "Example",
+    package_id: "com.example.app",
+    configurations: {
+      main: {
+        format: "key_value/v1",
+        target: "config_file",
+        managed_properties: {
+          minimum: {
+            path: ["minimum"],
+            type: "number",
+            validators: { minimum: "not a number" },
+          },
+          maximum: {
+            path: ["maximum"],
+            type: "number",
+            validators: { maximum: { exclusive: true, value: 5 } },
+          },
+        },
+      },
+    },
+  },
+} satisfies Pick<AppDefinitionDocumentDto, "appDefinition">;
+
 import {
   apkArtifactRefs,
   appContextControl,

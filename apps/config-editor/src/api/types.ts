@@ -222,8 +222,9 @@ export interface AppConfigurationTemplateV1Dto {
 }
 export interface AppManagedPropertyValidatorsV1Dto {
   allowed_values?: unknown[];
-  minimum?: number;
-  maximum?: number;
+  /** The document DTO preserves authored bounds as values. */
+  minimum?: unknown;
+  maximum?: unknown;
   min_length?: number;
   max_length?: number;
 }

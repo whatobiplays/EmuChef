@@ -1071,8 +1071,8 @@ fn validate_dependent_recipe(
             code: field("code").expect("catalog diagnostic code"),
             message: field("message").expect("catalog diagnostic message"),
             file: field("file"),
-            object_kind: field("object_kind"),
-            object_id: field("object_id"),
+            object_kind: field("object_kind").or_else(|| field("objectKind")),
+            object_id: field("object_id").or_else(|| field("objectId")),
             field: field("field"),
         });
     }
@@ -1086,8 +1086,8 @@ fn validate_dependent_recipe(
                 message: string("message")
                     .unwrap_or_else(|| "The affected Recipe is invalid.".into()),
                 file: Some(file.clone()),
-                object_kind: string("object_kind"),
-                object_id: string("object_id"),
+                object_kind: string("object_kind").or_else(|| string("objectKind")),
+                object_id: string("object_id").or_else(|| string("objectId")),
                 field: string("field"),
             });
         }

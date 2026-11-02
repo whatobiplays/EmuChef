@@ -1355,7 +1355,7 @@ fn recipe_configuration_to_yaml(config: &RecipeConfigurationV1) -> YamlValue {
             let mut override_mapping = Mapping::new();
             match operation {
                 RecipeConfigOverrideV1::Value(value) => {
-                    insert(&mut override_mapping, "value", json_to_yaml(value));
+                    insert(&mut override_mapping, "value", json_to_yaml_sorted(value));
                 }
                 RecipeConfigOverrideV1::Clear => {
                     insert(&mut override_mapping, "clear", YamlValue::Bool(true));
@@ -1395,7 +1395,7 @@ fn recipe_configuration_to_yaml(config: &RecipeConfigurationV1) -> YamlValue {
                         unmanaged_template_literal_type_name(literal.type_name).to_string(),
                     ),
                 );
-                insert(&mut item, "value", json_to_yaml(&literal.value));
+                insert(&mut item, "value", json_to_yaml_sorted(&literal.value));
                 YamlValue::Mapping(item)
             })
             .collect();
@@ -1417,10 +1417,6 @@ fn unmanaged_template_literal_type_name(type_name: UnmanagedTemplateLiteralTypeV
         UnmanagedTemplateLiteralTypeV1::Object => "object",
         UnmanagedTemplateLiteralTypeV1::Array => "array",
     }
-}
-
-fn json_to_yaml(value: &JsonValue) -> YamlValue {
-    serde_yaml::to_value(value).expect("JSON values always serialize into YAML values")
 }
 
 fn inputs_to_yaml(inputs: &OrderedMap<InputDeclaration>) -> YamlValue {
@@ -1721,6 +1717,7 @@ fn ordered_json_map_to_yaml_sorted(values: &OrderedMap<JsonValue>) -> YamlValue 
     YamlValue::Mapping(mapping)
 }
 
+/// JSON object keys are sorted recursively so equivalent values emit the same YAML.
 fn json_to_yaml_sorted(value: &JsonValue) -> YamlValue {
     match value {
         JsonValue::Null => YamlValue::Null,
@@ -1941,6 +1938,61 @@ mod tests {
             ));
         }
         source
+    }
+
+    #[test]
+    fn recipe_configuration_json_objects_emit_canonically() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        let make_recipe = |override_value, unmanaged_literal_value| {
+            let mut recipe = load_recipe_from_bytes(source.as_bytes(), Path::new("recipe.yaml"))
+                .expect("Recipe configuration should load");
+            let config = recipe
+                .config
+                .as_mut()
+                .expect("fixture should include configuration");
+            config
+                .properties
+                .get_mut("frame_limit")
+                .expect("fixture should include the frame_limit property")
+                .override_operation = Some(RecipeConfigOverrideV1::Value(override_value));
+            let literal = config
+                .unmanaged_literals
+                .first_mut()
+                .expect("fixture should include an unmanaged literal");
+            literal.type_name = UnmanagedTemplateLiteralTypeV1::Object;
+            literal.value = unmanaged_literal_value;
+            recipe
+        };
+
+        let first = make_recipe(
+            json!({
+                "zeta": {"nested": {"second": 2, "first": true}},
+                "alpha": "user override",
+            }),
+            json!({
+                "zeta": {"nested": {"second": "two", "first": "one"}},
+                "alpha": [true, 3],
+            }),
+        );
+        let second = make_recipe(
+            json!({
+                "alpha": "user override",
+                "zeta": {"nested": {"first": true, "second": 2}},
+            }),
+            json!({
+                "alpha": [true, 3],
+                "zeta": {"nested": {"first": "one", "second": "two"}},
+            }),
+        );
+
+        let first_yaml = emit_recipe_yaml(&first).expect("Recipe should emit canonically");
+        let second_yaml = emit_recipe_yaml(&second).expect("Recipe should emit canonically");
+        assert_eq!(first_yaml, second_yaml);
+
+        let reloaded = load_recipe_from_bytes(first_yaml.as_bytes(), Path::new("recipe.yaml"))
+            .expect("canonical Recipe should reload");
+        assert_eq!(reloaded, first);
+        assert_eq!(reloaded, second);
     }
 
     #[test]

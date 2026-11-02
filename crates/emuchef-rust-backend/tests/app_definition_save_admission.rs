@@ -1062,6 +1062,24 @@ fn app_configuration_edit_revalidates_dependent_recipe_exposure() {
 
     assert!(!admission.can_save());
     assert!(has_diagnostic(&admission, "recipe_config_property_unknown"));
+    let diagnostic = admission
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "recipe_config_property_unknown")
+        .expect("dependent Recipe configuration diagnostic");
+    assert_eq!(diagnostic.object_kind.as_deref(), Some("recipe"));
+    assert_eq!(
+        diagnostic.object_id.as_deref(),
+        Some("recipe.retroarch.config")
+    );
+    assert_eq!(
+        diagnostic.field.as_deref(),
+        Some("config.properties[audio_driver]")
+    );
+    assert_eq!(
+        diagnostic.file.as_deref(),
+        Some("recipes/recipe.retroarch.config.yaml")
+    );
 }
 
 #[test]

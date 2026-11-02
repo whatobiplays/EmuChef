@@ -935,7 +935,10 @@ fn validate_configurations(
                     "app_config_literal_too_large",
                 );
                 if !property.type_name.matches(allowed)
-                    || validators.allowed_values[..index].contains(allowed)
+                    || validators.allowed_values[..index].iter().any(|previous| {
+                        managed_property_values_equal(property.type_name, previous, allowed)
+                            .is_none_or(|equal| equal)
+                    })
                     || !managed_property_value_is_valid(property, allowed)
                 {
                     diagnostics.push(AuthoredModelDiagnostic::new(
@@ -957,13 +960,8 @@ fn validate_configurations(
                         &mut total_literal_bytes,
                         "app_config_literal_too_large",
                     );
-                    let bound_matches_type = match property.type_name {
-                        ConfigValueTypeV1::Integer => bound
-                            .as_number()
-                            .is_some_and(|number| number.is_i64() || number.is_u64()),
-                        ConfigValueTypeV1::Number => bound.is_number(),
-                        _ => false,
-                    };
+                    let bound_matches_type =
+                        managed_numeric_bound_matches_type(property.type_name, bound);
                     if !bound_matches_type {
                         diagnostics.push(AuthoredModelDiagnostic::new(
                             "app_config_validator_invalid",
@@ -976,8 +974,12 @@ fn validate_configurations(
             if let (Some(minimum), Some(maximum)) =
                 (validators.minimum.as_ref(), validators.maximum.as_ref())
             {
-                if compare_managed_numeric_values(property.type_name, minimum, maximum)
-                    .is_some_and(|ordering| ordering == Ordering::Greater)
+                let bounds_match_type =
+                    managed_numeric_bound_matches_type(property.type_name, minimum)
+                        && managed_numeric_bound_matches_type(property.type_name, maximum);
+                if bounds_match_type
+                    && compare_managed_numeric_values(property.type_name, minimum, maximum)
+                        .is_none_or(|ordering| ordering == Ordering::Greater)
                 {
                     diagnostics.push(AuthoredModelDiagnostic::new(
                         "app_config_validator_invalid",
@@ -1071,7 +1073,7 @@ pub fn is_valid_app_configuration_template_path(app_id: &str, path: &str) -> boo
             .all(|part| !part.is_empty() && *part != "." && *part != "..")
 }
 
-/// Validate one managed value against its app-owned type and constraints.
+/// Compare integer JSON numbers without converting them to floating point.
 fn compare_integer_values(left: &Value, right: &Value) -> Option<Ordering> {
     let left = left.as_number()?;
     let right = right.as_number()?;
@@ -1086,6 +1088,101 @@ fn compare_integer_values(left: &Value, right: &Value) -> Option<Ordering> {
     }
 }
 
+/// Compare JSON numbers without converting integers to floating point.
+fn compare_number_values(left: &Value, right: &Value) -> Option<Ordering> {
+    let left_number = left.as_number()?;
+    let right_number = right.as_number()?;
+    let left_is_float = left_number.is_f64();
+    let right_is_float = right_number.is_f64();
+
+    match (left_is_float, right_is_float) {
+        (false, false) => compare_integer_values(left, right),
+        (false, true) => compare_integer_and_float(left_number, right_number),
+        (true, false) => {
+            compare_integer_and_float(right_number, left_number).map(|ordering| ordering.reverse())
+        }
+        (true, true) => left_number.as_f64()?.partial_cmp(&right_number.as_f64()?),
+    }
+}
+
+/// Compare an unsigned integer with a finite, nonnegative `f64` exactly.
+fn compare_unsigned_integer_to_nonnegative_float(integer: u64, float: f64) -> Ordering {
+    let bits = float.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (significand, binary_exponent) = if exponent_bits == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1_u64 << 52), exponent_bits - 1023 - 52)
+    };
+
+    if significand == 0 {
+        return integer.cmp(&0);
+    }
+
+    if binary_exponent >= 0 {
+        let significand_bits = (u64::BITS - significand.leading_zeros()) as i32;
+        if significand_bits + binary_exponent > u64::BITS as i32 {
+            return Ordering::Less;
+        }
+        let float_integer = (significand as u128) << binary_exponent as u32;
+        return integer.cmp(&(float_integer as u64));
+    }
+
+    let fractional_bits = (-binary_exponent) as u32;
+    if fractional_bits >= u64::BITS {
+        return if integer == 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let integral_part = significand >> fractional_bits;
+    match integer.cmp(&integral_part) {
+        Ordering::Equal if significand & ((1_u64 << fractional_bits) - 1) != 0 => Ordering::Less,
+        ordering => ordering,
+    }
+}
+
+fn compare_signed_integer_to_float(integer: i64, float: f64) -> Ordering {
+    if integer < 0 {
+        if float >= 0.0 {
+            Ordering::Less
+        } else {
+            compare_unsigned_integer_to_nonnegative_float(integer.unsigned_abs(), -float).reverse()
+        }
+    } else if float < 0.0 {
+        Ordering::Greater
+    } else {
+        compare_unsigned_integer_to_nonnegative_float(integer as u64, float)
+    }
+}
+
+fn compare_unsigned_integer_to_float(integer: u64, float: f64) -> Ordering {
+    if float < 0.0 {
+        Ordering::Greater
+    } else {
+        compare_unsigned_integer_to_nonnegative_float(integer, float)
+    }
+}
+
+fn compare_integer_and_float(
+    integer: &serde_json::Number,
+    float: &serde_json::Number,
+) -> Option<Ordering> {
+    let float = float.as_f64()?;
+    if !float.is_finite() {
+        return None;
+    }
+
+    if let Some(integer) = integer.as_i64() {
+        Some(compare_signed_integer_to_float(integer, float))
+    } else {
+        Some(compare_unsigned_integer_to_float(integer.as_u64()?, float))
+    }
+}
+
 fn compare_managed_numeric_values(
     type_name: ConfigValueTypeV1,
     left: &Value,
@@ -1093,17 +1190,46 @@ fn compare_managed_numeric_values(
 ) -> Option<Ordering> {
     match type_name {
         ConfigValueTypeV1::Integer => compare_integer_values(left, right),
-        ConfigValueTypeV1::Number => left.as_f64()?.partial_cmp(&right.as_f64()?),
+        ConfigValueTypeV1::Number => compare_number_values(left, right),
         _ => None,
     }
 }
 
+fn managed_numeric_bound_matches_type(type_name: ConfigValueTypeV1, bound: &Value) -> bool {
+    match type_name {
+        ConfigValueTypeV1::Integer => bound
+            .as_number()
+            .is_some_and(|number| number.is_i64() || number.is_u64()),
+        ConfigValueTypeV1::Number => bound.is_number(),
+        _ => false,
+    }
+}
+
+fn managed_property_values_equal(
+    type_name: ConfigValueTypeV1,
+    left: &Value,
+    right: &Value,
+) -> Option<bool> {
+    match type_name {
+        ConfigValueTypeV1::Integer | ConfigValueTypeV1::Number => {
+            compare_managed_numeric_values(type_name, left, right)
+                .map(|ordering| ordering == Ordering::Equal)
+        }
+        _ => Some(left == right),
+    }
+}
+
+/// Check that a managed value matches its declared type and constraints.
 pub fn managed_property_value_is_valid(property: &AppManagedPropertyV1, value: &Value) -> bool {
     if value.is_null() || !property.type_name.matches(value) {
         return false;
     }
     let validators = &property.validators;
-    if !validators.allowed_values.is_empty() && !validators.allowed_values.contains(value) {
+    if !validators.allowed_values.is_empty()
+        && !validators.allowed_values.iter().any(|allowed| {
+            managed_property_values_equal(property.type_name, value, allowed) == Some(true)
+        })
+    {
         return false;
     }
     if let Some(minimum) = &validators.minimum {
@@ -2197,6 +2323,341 @@ mod tests {
         assert!(!managed_property_value_is_valid(
             property,
             &serde_json::json!(9_007_199_254_740_995_i64)
+        ));
+    }
+
+    #[test]
+    fn number_bounds_compare_integer_values_above_f64_precision_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_994_i64));
+
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_994_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_995_i64)
+        ));
+    }
+
+    #[test]
+    fn number_bounds_compare_decimal_and_exact_mixed_representations() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(1.5));
+        property.validators.maximum = Some(serde_json::json!(2.5));
+
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(1.5)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(1)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2.75)
+        ));
+
+        property.validators.minimum = Some(serde_json::json!(1));
+        property.validators.maximum = Some(serde_json::json!(2));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(1.5)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2.0)
+        ));
+
+        property.validators.minimum = Some(serde_json::json!(2.0));
+        property.validators.maximum = Some(serde_json::json!(2));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2)
+        ));
+    }
+
+    #[test]
+    fn number_bounds_compare_mixed_integer_and_float_values_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.allowed_values.clear();
+        let value = serde_json::json!(9_007_199_254_740_993_i64);
+        let lower_bound = serde_json::json!(9_007_199_254_740_992.0);
+
+        property.validators.minimum = Some(lower_bound.clone());
+        property.validators.maximum = None;
+        assert!(managed_property_value_is_valid(property, &value));
+
+        property.validators.minimum = None;
+        property.validators.maximum = Some(lower_bound);
+        assert!(!managed_property_value_is_valid(property, &value));
+
+        property.validators.maximum = None;
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_994.0));
+        assert!(!managed_property_value_is_valid(property, &value));
+    }
+
+    #[test]
+    fn number_mixed_comparisons_cover_signed_unsigned_and_fractional_boundaries() {
+        let cases = [
+            (
+                serde_json::json!(9_007_199_254_740_993_i64),
+                serde_json::json!(9_007_199_254_740_992.0),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(u64::MAX),
+                serde_json::json!(18_446_744_073_709_549_568.0),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(u64::MAX),
+                serde_json::json!(u64::MAX as f64),
+                Ordering::Less,
+            ),
+            (
+                serde_json::json!(i64::MIN),
+                serde_json::json!(i64::MIN as f64),
+                Ordering::Equal,
+            ),
+            (
+                serde_json::json!(i64::MAX),
+                serde_json::json!(i64::MAX as f64),
+                Ordering::Less,
+            ),
+            (serde_json::json!(2), serde_json::json!(2.5), Ordering::Less),
+            (
+                serde_json::json!(-2),
+                serde_json::json!(-2.5),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(-0.5),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(f64::from_bits(1)),
+                Ordering::Less,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(-f64::from_bits(1)),
+                Ordering::Greater,
+            ),
+        ];
+
+        for (left, right, expected) in cases {
+            assert_eq!(compare_number_values(&left, &right), Some(expected));
+            assert_eq!(
+                compare_number_values(&right, &left),
+                Some(expected.reverse())
+            );
+        }
+    }
+
+    #[test]
+    fn number_contradictory_integer_bounds_are_rejected_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_992_i64));
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "app_config_validator_invalid"
+                && diagnostic.field
+                    == "configurations[main].managed_properties[frame_limit].validators"
+                && diagnostic
+                    .message
+                    .contains("Minimum must not exceed maximum")
+        }));
+    }
+
+    #[test]
+    fn number_mixed_contradictory_bounds_are_rejected_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_992.0));
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "app_config_validator_invalid"
+                && diagnostic.field
+                    == "configurations[main].managed_properties[frame_limit].validators"
+                && diagnostic
+                    .message
+                    .contains("Minimum must not exceed maximum")
+        }));
+    }
+
+    #[test]
+    fn number_allowed_values_obey_exact_integer_bounds_above_f64_precision() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_992_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_992_i64));
+        property.validators.allowed_values = vec![
+            serde_json::json!(9_007_199_254_740_992_i64),
+            serde_json::json!(9_007_199_254_740_993_i64),
+        ];
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.field == allowed_value_field("frame_limit", 1)
+                && diagnostic.code == "app_config_validator_invalid"
+                && diagnostic.message.contains("maximum")
+        }));
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| { diagnostic.field != allowed_value_field("frame_limit", 0) }));
+    }
+
+    #[test]
+    fn number_allowed_values_detect_exact_duplicates_without_rounding() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.minimum = None;
+        property.validators.maximum = None;
+        property.validators.allowed_values = vec![
+            serde_json::json!(9_007_199_254_740_992_i64),
+            serde_json::json!(9_007_199_254_740_993_i64),
+            serde_json::json!(2),
+            serde_json::json!(2.0),
+        ];
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.field == allowed_value_field("frame_limit", 3)
+                && diagnostic.code == "app_config_validator_invalid"
+        }));
+        for index in [0, 1, 2] {
+            assert!(diagnostics.iter().all(|diagnostic| {
+                diagnostic.field != allowed_value_field("frame_limit", index)
+            }));
+        }
+    }
+
+    #[test]
+    fn number_allowed_values_use_exact_numeric_equality() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.minimum = None;
+        property.validators.maximum = None;
+        property.validators.allowed_values = vec![serde_json::json!(9_007_199_254_740_992_i64)];
+
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+
+        property.validators.allowed_values = vec![serde_json::json!(2)];
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2.0)
+        ));
+        property.validators.allowed_values = vec![serde_json::json!(2.0)];
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2)
+        ));
+    }
+
+    #[test]
+    fn number_allowed_values_keep_distinct_mixed_large_numbers_distinct() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        {
+            let property = managed_property_mut(&mut app, "frame_limit");
+            property.type_name = ConfigValueTypeV1::Number;
+            property.default = None;
+            property.validators.minimum = None;
+            property.validators.maximum = None;
+            property.validators.allowed_values = vec![
+                serde_json::json!(9_007_199_254_740_992.0),
+                serde_json::json!(9_007_199_254_740_993_i64),
+            ];
+        }
+
+        let diagnostics = validate_app_definition(&app);
+        for index in [0, 1] {
+            assert!(diagnostics.iter().all(|diagnostic| {
+                diagnostic.field != allowed_value_field("frame_limit", index)
+            }));
+        }
+        let property = managed_property_mut(&mut app, "frame_limit");
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992.0)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+    }
+
+    #[test]
+    fn number_type_validation_keeps_integer_and_number_distinct() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.validators.allowed_values.clear();
+        property.type_name = ConfigValueTypeV1::Number;
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(30.5)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!("30")
+        ));
+
+        property.type_name = ConfigValueTypeV1::Integer;
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(30)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(30.5)
         ));
     }
 
