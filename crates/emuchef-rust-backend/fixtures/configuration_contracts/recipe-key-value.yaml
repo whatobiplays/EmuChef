@@ -1,0 +1,38 @@
+schema_version: 1
+kind: recipe
+id: recipe.retroarch.config
+name: Configure RetroArch
+inputs:
+  user_template:
+    type: file
+    role: generic
+    label: User template
+    required: false
+    default: ""
+artifacts: {}
+steps: []
+config:
+  app_ref: retroarch
+  configuration: main
+  target: config_file
+  base:
+    input: user_template
+  properties:
+    audio_driver:
+      label: Audio driver
+    shader_path:
+      label: Shader path
+      override:
+        value: shaders/default.glslp
+    network_enabled:
+      label: Network enabled
+      override:
+        clear: true
+    frame_limit:
+      label: Frame limit
+      override:
+        reset: true
+  unmanaged_literals:
+    - path: [custom_extension]
+      type: string
+      value: retained

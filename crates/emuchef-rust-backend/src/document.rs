@@ -1928,8 +1928,81 @@ fn coerce_allowed_extensions(value: &Value) -> Result<Vec<String>, String> {
 mod catalog_coordination_tests {
     use super::*;
     use crate::catalog_change::{CatalogChangeCoordinator, OperationPhase, OperationRecord};
+    use crate::commands::{OverviewField, OverviewValue, RecipeCommand};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn editor_save_preserves_t07_recipe_configuration_after_an_unrelated_edit() {
+        let root = TempDir::new().expect("temporary catalog root");
+        let apps = root.path().join("apps");
+        let recipes = root.path().join("recipes");
+        fs::create_dir_all(apps.join("retroarch")).expect("App template directory");
+        fs::create_dir_all(&recipes).expect("Recipe directory");
+        fs::write(
+            apps.join("retroarch.yaml"),
+            include_str!("../fixtures/configuration_contracts/app-key-value.yaml"),
+        )
+        .expect("App Definition fixture");
+        fs::write(apps.join("retroarch/default.cfg"), "audio_driver=alsa\n")
+            .expect("external template fixture");
+        let recipe_path = recipes.join("recipe.retroarch.config.yaml");
+        fs::write(
+            &recipe_path,
+            include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml"),
+        )
+        .expect("Recipe fixture");
+
+        let mut document = RecipeDocument::open(&recipe_path, root.path().to_str())
+            .expect("Config Editor should open the typed Recipe");
+        let original_configuration = document
+            .recipe
+            .config
+            .as_ref()
+            .expect("Recipe fixture has a typed configuration")
+            .clone();
+        assert!(document
+            .apply_command(RecipeCommand::SetOverviewField {
+                field: OverviewField::Name,
+                value: OverviewValue::Text("Configure RetroArch safely".to_string()),
+            })
+            .expect("unrelated overview edit"));
+        document
+            .save()
+            .expect("typed Recipe should save through the editor document");
+
+        let saved = fs::read_to_string(&recipe_path).expect("saved Recipe bytes");
+        assert!(saved.contains("configuration: main"));
+        assert!(saved.contains("unmanaged_literals:"));
+        assert!(saved.contains("reset: true"));
+        let saved_mapping: serde_yaml::Mapping =
+            serde_yaml::from_str(&saved).expect("saved YAML remains parseable");
+        let reparsed = crate::yaml::parse_recipe_mapping(&saved_mapping, &recipe_path)
+            .expect("saved configuration fields parse back into the Recipe model");
+        assert_eq!(
+            reparsed.config.as_ref(),
+            Some(&original_configuration),
+            "all typed configuration fields must survive an unrelated editor save"
+        );
+    }
+
+    #[test]
+    fn editor_refuses_unknown_recipe_schema_without_mutating_source_bytes() {
+        let root = TempDir::new().expect("temporary document root");
+        let path = root.path().join("unknown.yaml");
+        let source =
+            include_str!("../fixtures/configuration_contracts/recipe-unknown-config-field.yaml");
+        fs::write(&path, source).expect("unknown schema fixture");
+        let original = fs::read(&path).expect("original bytes");
+
+        let result = RecipeDocument::open(&path, None);
+
+        assert!(
+            result.is_err(),
+            "unknown authored fields must refuse document open"
+        );
+        assert_eq!(fs::read(&path).expect("source remains readable"), original);
+    }
 
     #[test]
     fn save_as_rebinds_a_destination_catalog_and_uses_it_for_later_saves() {

@@ -7,6 +7,8 @@
 use indexmap::IndexMap;
 use serde_json::Value;
 
+use crate::authored_models::UnmanagedTemplateLiteralTypeV1;
+
 pub type OrderedMap<T> = IndexMap<String, T>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,9 +21,55 @@ pub struct Recipe {
     pub recipe_dependencies: Vec<String>,
     pub provides: RecipeProvides,
     pub inputs: OrderedMap<InputDeclaration>,
+    pub config: Option<RecipeConfigurationV1>,
     pub artifacts: OrderedMap<RecipeArtifact>,
     pub artifact_groups: OrderedMap<Vec<String>>,
     pub steps: Vec<Step>,
+}
+
+/// App-specific settings a Recipe exposes from one App Configuration Definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipeConfigurationV1 {
+    pub app_ref: String,
+    pub configuration: String,
+    pub target: String,
+    pub base: RecipeConfigurationBaseV1,
+    pub properties: OrderedMap<RecipeConfigPropertyV1>,
+    pub unmanaged_literals: Vec<UnmanagedTemplateLiteralV1>,
+}
+
+/// Selects an app-owned template or a Recipe file input as the base document.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecipeConfigurationBaseV1 {
+    Template(String),
+    Input(String),
+}
+
+/// Presentation metadata for one app-defined property exposed by a Recipe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipeConfigPropertyV1 {
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub required: bool,
+    pub advanced: bool,
+    /// An explicit operation is separate from property exposure metadata.
+    pub override_operation: Option<RecipeConfigOverrideV1>,
+}
+
+/// One unambiguous operation for a managed property.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecipeConfigOverrideV1 {
+    Value(Value),
+    Clear,
+    Reset,
+}
+
+/// A typed literal admitted into a user-supplied configuration template.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnmanagedTemplateLiteralV1 {
+    pub path: Vec<String>,
+    pub type_name: UnmanagedTemplateLiteralTypeV1,
+    pub value: Value,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -35,6 +35,44 @@ const demoApp: AppCatalogAppDto = {
     { id: "system", kind: "directory", location: "shared_storage", path: "Demo/system" },
     { id: "config_file", kind: "file", location: "external_app_data", path: "files/demo.cfg" },
   ],
+  configurations: [
+    {
+      id: "main",
+      format: "key_value/v1",
+      target: "config_file",
+      templates: [{ id: "default", path: "demo/default.cfg" }],
+      managedProperties: [
+        {
+          id: "audio_driver",
+          path: ["audio_driver"],
+          type: "string",
+          clearable: false,
+          validators: { allowedValues: ["alsa", "sdl"] },
+          default: "alsa",
+        },
+      ],
+    },
+    {
+      id: "nested",
+      format: "json/v1",
+      target: "config_file",
+      templates: [],
+      managedProperties: [
+        {
+          id: "renderer",
+          path: ["graphics", "renderer"],
+          type: "string",
+          clearable: false,
+          default: "auto",
+          validators: {
+            allowedValues: ["auto", "vulkan"],
+            minLength: 3,
+            maxLength: 7,
+          },
+        },
+      ],
+    },
+  ],
   launcherActivity: "com.example.demo.MainActivity",
 };
 
@@ -44,6 +82,7 @@ const secondApp: AppCatalogAppDto = {
   artifacts: [{ id: "apk", kind: "apk", requiresInput: false }],
   permissionSets: [],
   targets: [],
+  configurations: [],
   launcherActivity: null,
 };
 
@@ -92,6 +131,17 @@ test("catalog app lookup resolves by identifier only when ready", () => {
   assert.equal(catalogApp(readyCatalog, "ghost_app"), null);
   assert.equal(catalogApp(invalidCatalog, "demo_app"), null);
   assert.equal(catalogApp(readyCatalog, null), null);
+});
+
+test("configuration catalog transport preserves JSON path segments and minLength", () => {
+  const transported = JSON.parse(JSON.stringify(readyCatalog)) as AppCatalogDto;
+  const configuration = catalogApp(transported, "demo_app")?.configurations.find(
+    (entry) => entry.id === "nested",
+  );
+  const property = configuration?.managedProperties[0];
+
+  assert.deepEqual(property?.path, ["graphics", "renderer"]);
+  assert.equal(property?.validators?.minLength, 3);
 });
 
 test("app ref options keep a retained value that is missing from the catalog", () => {

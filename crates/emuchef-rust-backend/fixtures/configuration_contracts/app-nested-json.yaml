@@ -1,0 +1,29 @@
+schema_version: 1
+kind: app_definition
+id: json-player
+name: JSON Player
+package_id: com.example.jsonplayer
+targets:
+  config_file:
+    kind: file
+    location: app_data
+    path: files/player.json
+configurations:
+  player:
+    format: json/v1
+    target: config_file
+    templates:
+      default:
+        path: json-player/default.json
+    managed_properties:
+      buffer_frames:
+        path: [audio, output, buffer_frames]
+        type: integer
+        default: 256
+        validators:
+          minimum: 16
+          maximum: 4096
+      overlay_path:
+        path: [ui, overlays, primary, path]
+        type: string
+        default: ""

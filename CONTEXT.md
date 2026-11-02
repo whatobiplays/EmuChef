@@ -285,6 +285,71 @@ review and execution do not resolve authored target IDs. Generic copy
 destinations and the user-configured ROM-copy Recipe retain their existing
 literal or input-reference behavior.
 
+### App-owned configuration contracts
+
+An App Definition may declare named `configurations`. Each declaration selects
+`key_value/v1` or `json/v1`, references a same-App `kind: file` App Target, and
+may provide app-scoped template files and managed properties. A managed
+property owns its format-specific path, scalar value type (`string`,
+`integer`, `number`, or `boolean`), optional App Definition default, validators,
+and clearability. Clearability defaults to false. App Definition remains the
+authority for these facts; a Recipe may expose only property IDs declared by
+its referenced App Configuration.
+
+`key_value/v1` paths are single keys. They cannot be empty, contain `=`, `/`,
+backslash, control characters, or leading or trailing whitespace. `json/v1`
+paths are non-empty lists of literal object-member name segments. Each segment
+must be non-empty and contain no control characters. JSON Pointer escaping and
+array-index addressing are unsupported; `/`, `~`, `.`, and `..` are ordinary
+member-name characters and do not navigate the filesystem. Managed paths
+cannot be equal or overlap by segment prefix.
+
+A Recipe's optional `config` names one App Definition, one configuration, the
+matching target, and exactly one base source: an app-owned template ID or a
+Recipe file input. A file-input base must be a single `file` or `path` input
+with `multiple: false`. Its `properties` map records exposure metadata
+separately from optional `override` intent. An omitted override means no
+Recipe operation. An override contains exactly one non-null `value`,
+`clear: true`, or `reset: true`. An empty value remains explicit. `clear` is
+valid only when the App Definition marks the property clearable. App Definition
+owns intrinsic defaults; Recipe exposure has no local default. Values are
+checked without type coercion, and validators must match the declared type.
+
+`reset: true` records a request for T11 to recompute the applicable
+recommendation. It does not require an App Definition default, and T07 does not
+resolve device recommendations. T11 selects the effective source in this
+order: explicit user choice, exact-model recommendation, brand recommendation,
+then device-independent default. Ambiguous matches and invalid choices fail
+without silent fallback.
+
+App Definition saves revalidate Recipes that reference the App against its
+configurations and targets. The save is refused if an edit makes a Recipe
+configuration reference invalid.
+
+`unmanaged_literals` is a separate typed list for literal properties admitted
+from a user-supplied base template. Each entry carries a format-specific path,
+type, and non-null value. A non-empty list requires a Recipe file input as the
+base. An unmanaged path cannot equal or overlap a managed path or another
+unmanaged path. These entries do not authorize an undeclared managed property.
+
+Inline literals are limited to 64 KiB each and 2 MiB in aggregate per authored
+configuration document: each App Definition configuration and each Recipe
+`config` block is bounded independently. String values use UTF-8 byte length;
+other JSON values use compact JSON serialization size. T07 checks authored
+inline bytes only. T08 enforces the limits when it reads external App templates
+and Recipe file inputs before rendering. T09 enforces the bound for existing
+device documents and final per-destination configuration documents. T07
+defines typed contracts and projections; it does not render files, merge
+existing settings, or write to devices.
+
+Authored App Definition and Recipe fields use strict schemas. Unknown fields,
+duplicate YAML keys, null operations, and ambiguous overrides fail closed.
+Config Editor's Rust document layer preserves typed configuration fields on
+canonical save and refuses documents it cannot safely parse before source
+bytes can change. The existing configuration DTO retains safely parsed
+unknown properties in its `properties` map for later T09 composition. No new
+configuration UI is part of this contract.
+
 App-aware `grant_permissions` steps name an App Definition with `app_ref` and
 select exactly one `permission_set`: `baseline` or `elevated`. Their
 `policy.on_failure` is `warn` or `fail`. The planner resolves the selected

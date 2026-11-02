@@ -1451,6 +1451,12 @@ fn recipe_app_reference_ids(recipe: &Recipe) -> HashSet<String> {
             RecipeArtifact::RemoteFile(_) => None,
         })
         .chain(recipe.steps.iter().filter_map(|step| step.app_ref.clone()))
+        .chain(
+            recipe
+                .config
+                .as_ref()
+                .map(|configuration| configuration.app_ref.clone()),
+        )
         .collect()
 }
 
@@ -1558,6 +1564,11 @@ fn prepare_catalog_change(
     if let CatalogChangeIntent::RenameApp { new_id, .. } = &intent {
         if apps.iter().any(|(_, _, app_id, _)| app_id == new_id) {
             return Err(format!("App identity {new_id:?} already exists."));
+        }
+        if app_has_configuration_templates(owner) {
+            return Err(format!(
+                "App identity {owner_id:?} cannot be renamed because its configuration template files are not migrated transactionally."
+            ));
         }
     }
     match &intent {
@@ -2011,6 +2022,27 @@ pub fn rewrite_recipe(
             &mut sites,
         );
     }
+
+    if let Some(configuration) = recipe.config.as_mut() {
+        match intent {
+            CatalogChangeIntent::RenameApp { app_id, new_id }
+                if configuration.app_ref == *app_id =>
+            {
+                configuration.app_ref = new_id.clone();
+                sites.push(site(&path, "config".into(), "app_ref"));
+            }
+            CatalogChangeIntent::RenameTarget {
+                app_id,
+                target_id,
+                new_id,
+            } if configuration.app_ref == *app_id && configuration.target == *target_id => {
+                configuration.target = new_id.clone();
+                sites.push(site(&path, "config".into(), "target"));
+            }
+            _ => {}
+        }
+    }
+
     sites
 }
 
@@ -2019,6 +2051,9 @@ pub fn rewrite_recipe(
 pub fn rewrite_app_definition(app: &mut AppDefinitionV1, intent: &CatalogChangeIntent) -> bool {
     match intent {
         CatalogChangeIntent::RenameApp { app_id, new_id } if app.id == *app_id => {
+            if app_has_configuration_templates(app) {
+                return false;
+            }
             app.id = new_id.clone();
             true
         }
@@ -2031,10 +2066,26 @@ pub fn rewrite_app_definition(app: &mut AppDefinitionV1, intent: &CatalogChangeI
             app_id,
             target_id,
             new_id,
-        } if app.id == *app_id => rename_key(&mut app.targets, target_id, new_id),
+        } if app.id == *app_id => {
+            let renamed = rename_key(&mut app.targets, target_id, new_id);
+            if renamed {
+                for configuration in app.configurations.values_mut() {
+                    if configuration.target == *target_id {
+                        configuration.target = new_id.clone();
+                    }
+                }
+            }
+            renamed
+        }
         CatalogChangeIntent::DeleteApp { app_id } => app.id == *app_id,
         _ => false,
     }
+}
+
+fn app_has_configuration_templates(app: &AppDefinitionV1) -> bool {
+    app.configurations
+        .values()
+        .any(|configuration| !configuration.templates.is_empty())
 }
 
 fn rewrite_target_conditions(
@@ -2099,8 +2150,9 @@ mod tests {
         AppDefinitionV1, OrderedValueMap, APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
     };
     use crate::model::{
-        AppArtifactReference, OrderedMap, ParamValue, RecipeArtifact, RecipeProvides, Step,
-        StepCondition, StepConstraints,
+        AppArtifactReference, OrderedMap, ParamValue, RecipeArtifact, RecipeConfigPropertyV1,
+        RecipeConfigurationBaseV1, RecipeConfigurationV1, RecipeProvides, Step, StepCondition,
+        StepConstraints,
     };
     use serde_json::json;
 
@@ -2119,6 +2171,14 @@ mod tests {
     #[test]
     fn app_rename_changes_only_typed_app_references() {
         let mut recipe = recipe();
+        recipe.config = Some(RecipeConfigurationV1 {
+            app_ref: "old".into(),
+            configuration: "main".into(),
+            target: "config".into(),
+            base: RecipeConfigurationBaseV1::Template("default".into()),
+            properties: OrderedMap::<RecipeConfigPropertyV1>::new(),
+            unmanaged_literals: Vec::new(),
+        });
         let sites = rewrite_recipe(
             &mut recipe,
             PathBuf::from("recipes/example.yaml"),
@@ -2133,7 +2193,73 @@ mod tests {
         assert_eq!(reference.app_ref, "new");
         assert_eq!(recipe.steps[0].app_ref.as_deref(), Some("new"));
         assert_eq!(recipe.steps[0].name, "old");
-        assert_eq!(sites.len(), 2);
+        assert_eq!(recipe.config.as_ref().unwrap().app_ref, "new");
+        assert!(sites
+            .iter()
+            .any(|changed| changed.object == "config" && changed.field == "app_ref"));
+        assert_eq!(sites.len(), 3);
+    }
+
+    #[test]
+    fn app_definition_rename_refuses_template_migration_and_target_rename_updates_configuration() {
+        let mut app = crate::authored_models::parse_app_definition_yaml(include_str!(
+            "../fixtures/configuration_contracts/app-key-value.yaml"
+        ))
+        .expect("App Definition fixture should parse");
+
+        assert!(!rewrite_app_definition(
+            &mut app,
+            &CatalogChangeIntent::RenameApp {
+                app_id: "retroarch".into(),
+                new_id: "renamed".into(),
+            },
+        ));
+        assert_eq!(app.id, "retroarch");
+        assert_eq!(
+            app.configurations["main"].templates["default"].path,
+            "retroarch/default.cfg"
+        );
+
+        assert!(rewrite_app_definition(
+            &mut app,
+            &CatalogChangeIntent::RenameTarget {
+                app_id: "retroarch".into(),
+                target_id: "config_file".into(),
+                new_id: "settings_file".into(),
+            },
+        ));
+        assert_eq!(app.configurations["main"].target, "settings_file");
+    }
+
+    #[test]
+    fn app_rename_with_existing_configuration_template_fails_without_changing_source_files() {
+        let root = tempfile::tempdir().unwrap();
+        let apps = root.path().join("apps");
+        let owner_path = apps.join("retroarch.yaml");
+        let template_path = apps.join("retroarch/default.cfg");
+        let owner_bytes = include_bytes!("../fixtures/configuration_contracts/app-key-value.yaml");
+        let template_bytes = b"audio_driver=alsa\n";
+
+        fs::create_dir_all(template_path.parent().unwrap()).unwrap();
+        fs::create_dir(root.path().join("recipes")).unwrap();
+        fs::write(&owner_path, owner_bytes).unwrap();
+        fs::write(&template_path, template_bytes).unwrap();
+
+        let error = CatalogRefactorSession::default()
+            .preview(
+                root.path(),
+                CatalogChangeIntent::RenameApp {
+                    app_id: "retroarch".into(),
+                    new_id: "renamed".into(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("configuration template files are not migrated transactionally"));
+        assert_eq!(fs::read(&owner_path).unwrap(), owner_bytes);
+        assert_eq!(fs::read(&template_path).unwrap(), template_bytes);
+        assert!(!apps.join("renamed.yaml").exists());
+        assert!(!apps.join("renamed").exists());
     }
 
     #[test]
@@ -2159,6 +2285,14 @@ mod tests {
     #[test]
     fn target_rename_changes_params_and_conditions_only_in_owner_context() {
         let mut recipe = recipe();
+        recipe.config = Some(RecipeConfigurationV1 {
+            app_ref: "old".into(),
+            configuration: "main".into(),
+            target: "config".into(),
+            base: RecipeConfigurationBaseV1::Template("default".into()),
+            properties: OrderedMap::<RecipeConfigPropertyV1>::new(),
+            unmanaged_literals: Vec::new(),
+        });
         recipe.steps.push(Step {
             app_ref: Some("other".into()),
             ..recipe.steps[0].clone()
@@ -2184,7 +2318,11 @@ mod tests {
             recipe.steps[1].params["destination"],
             ParamValue::AppTarget(ref value) if value == "config"
         ));
-        assert_eq!(sites.len(), 3);
+        assert_eq!(recipe.config.as_ref().unwrap().target, "settings");
+        assert!(sites
+            .iter()
+            .any(|changed| changed.object == "config" && changed.field == "target"));
+        assert_eq!(sites.len(), 4);
     }
 
     #[test]
@@ -2707,6 +2845,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -2770,6 +2909,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -2871,6 +3011,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -2980,6 +3121,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3361,6 +3503,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3372,8 +3515,11 @@ steps:
         let recipe_path = root.path().join("recipes/dependent.yaml");
         fs::write(
             &recipe_path,
-            include_str!("../../../authored/recipes/feature.copy_bios.yaml")
-                .replace("retroarch", "old"),
+            format!(
+                "{}\nconfig:\n  app_ref: old\n  configuration: main\n  target: config\n  base:\n    input: base_file\n  properties: {{}}\n  unmanaged_literals: []\n",
+                include_str!("../../../authored/recipes/feature.copy_bios.yaml")
+                    .replace("retroarch", "old")
+            ),
         )
         .unwrap();
         let storage = root.path().join("application-state");
@@ -3388,6 +3534,7 @@ steps:
             .unwrap_err();
         assert!(error.contains("referenced"));
         assert!(error.contains("recipes/dependent.yaml"));
+        assert!(error.contains("config.app_ref"), "{error}");
         assert!(error.contains("steps.copy_bios_dir"), "{error}");
         assert!(error.contains("app_ref"));
         fs::remove_file(&recipe_path).unwrap();
@@ -3508,6 +3655,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3569,6 +3717,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3636,6 +3785,7 @@ steps:
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts,
             artifact_groups: OrderedMap::new(),
             steps: vec![Step {

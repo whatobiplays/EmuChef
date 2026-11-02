@@ -163,6 +163,87 @@ export interface RecipeDto {
   artifacts: Record<string, ArtifactDto>;
   artifactGroups: Record<string, string[]>;
   steps: StepDto[];
+  config?: RecipeConfigurationDto;
+}
+/** App-owned configuration contract exposed by a Recipe. */
+export interface RecipeConfigurationDto {
+  appRef: string;
+  configuration: string;
+  target: string;
+  base: { template: string } | { input: string };
+  properties: Record<string, RecipeConfigPropertyDto>;
+  unmanagedLiterals: UnmanagedTemplateLiteralDto[];
+}
+/** Exposure metadata is separate from an optional configuration operation. */
+export interface RecipeConfigPropertyDto {
+  label?: string;
+  description?: string;
+  required: boolean;
+  advanced: boolean;
+  override?: { value: unknown } | { clear: true } | { reset: true };
+}
+export interface UnmanagedTemplateLiteralDto {
+  /** Literal property-name segments, not a JSON Pointer or filesystem path. */
+  path: string[];
+  type: "string" | "integer" | "number" | "boolean" | "object" | "array";
+  value: unknown;
+}
+export type AppConfigurationFormatDto = "key_value/v1" | "json/v1";
+export interface AppConfigurationManagedPropertyDto {
+  id: string;
+  /** Format-specific literal property-name segments. */
+  path: string[];
+  type: "string" | "integer" | "number" | "boolean";
+  default?: unknown;
+  /** App-owned permission to clear a managed property; defaults to false. */
+  clearable: boolean;
+  validators?: {
+    allowedValues: unknown[];
+    minimum?: number;
+    maximum?: number;
+    minLength?: number;
+    maxLength?: number;
+  };
+}
+export interface AppConfigurationTemplateDto {
+  id: string;
+  path: string;
+}
+export interface AppConfigurationDto {
+  id: string;
+  format: AppConfigurationFormatDto;
+  target: string;
+  templates: AppConfigurationTemplateDto[];
+  managedProperties: AppConfigurationManagedPropertyDto[];
+}
+/** Raw App Definition schema-v1 configuration fields returned by document APIs. */
+export interface AppConfigurationTemplateV1Dto {
+  path: string;
+}
+export interface AppManagedPropertyValidatorsV1Dto {
+  allowed_values?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  min_length?: number;
+  max_length?: number;
+}
+export interface AppManagedPropertyV1Dto {
+  path: string[];
+  type: "string" | "integer" | "number" | "boolean";
+  default?: unknown;
+  clearable?: boolean;
+  validators?: AppManagedPropertyValidatorsV1Dto;
+}
+export interface AppConfigurationV1Dto {
+  format: AppConfigurationFormatDto;
+  target: string;
+  templates?: Record<string, AppConfigurationTemplateV1Dto>;
+  managed_properties?: Record<string, AppManagedPropertyV1Dto>;
+}
+/** Safely parsed existing config properties retained for later composition. */
+export interface ExistingConfigurationDocumentDto {
+  format: AppConfigurationFormatDto;
+  properties: Record<string, unknown>;
 }
 
 /**
@@ -201,6 +282,7 @@ export interface AppCatalogAppDto {
   /** Defined permission set names, for example `baseline`. */
   permissionSets: string[];
   targets: AppCatalogTargetDto[];
+  configurations: AppConfigurationDto[];
   /** Canonical launcher activity, or null when the App Definition has none. */
   launcherActivity: string | null;
 }
@@ -898,6 +980,7 @@ export interface AppDefinitionV1Dto {
   artifacts?: Record<string, AppArtifactV1Dto>;
   permission_sets?: AppPermissionSetsDto;
   targets?: Record<string, AppTargetV1Dto>;
+  configurations?: Record<string, AppConfigurationV1Dto>;
   launcher_activity?: string;
   metadata?: Record<string, unknown>;
 }

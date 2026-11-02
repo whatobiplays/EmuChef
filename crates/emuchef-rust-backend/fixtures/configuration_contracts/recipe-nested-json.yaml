@@ -1,0 +1,17 @@
+schema_version: 1
+kind: recipe
+id: recipe.json-player.config
+name: Configure JSON Player
+artifacts: {}
+steps: []
+config:
+  app_ref: json-player
+  configuration: player
+  target: config_file
+  base:
+    template: default
+  properties:
+    buffer_frames:
+      label: Buffer frames
+      override:
+        value: 512
