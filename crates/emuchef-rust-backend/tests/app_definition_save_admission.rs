@@ -6,7 +6,10 @@
 use emuchef_rust_backend::catalog_change::{
     CatalogChangeCoordinator, OperationPhase, OperationRecord,
 };
-use emuchef_rust_backend::{app_definition_admission, app_definition_persistence, authored_models};
+use emuchef_rust_backend::{
+    app_definition_admission, app_definition_document::AppDefinitionDocument,
+    app_definition_persistence, authored_models,
+};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +25,7 @@ use authored_models::{
     AppTargetLocation, AppTargetV1, OrderedValueMap, APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
 };
 use indexmap::IndexMap;
+use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
@@ -38,6 +42,7 @@ fn app(id: &str, package_id: &str) -> AppDefinitionV1 {
         artifacts: IndexMap::new(),
         permission_sets: None,
         targets: IndexMap::new(),
+        configurations: IndexMap::new(),
         launcher_activity: None,
         metadata: OrderedValueMap::new(),
     }
@@ -92,6 +97,13 @@ fn write_app(path: &Path, value: &AppDefinitionV1) {
 fn write_recipe(root: &Path, name: &str, source: &str) -> PathBuf {
     let path = root.join("recipes").join(name);
     fs::write(&path, source).unwrap();
+    path
+}
+
+fn write_retroarch_configuration_template(root: &Path) -> PathBuf {
+    let path = root.join("apps/retroarch/default.cfg");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"audio_driver = \"alsa\"\n").unwrap();
     path
 }
 
@@ -1016,4 +1028,217 @@ fn symlinked_catalog_directory_is_rejected() {
         assert!(!admission.can_save());
         assert!(has_diagnostic(&admission, "app_catalog_path_invalid"));
     }
+}
+
+#[test]
+fn app_configuration_edit_revalidates_dependent_recipe_exposure() {
+    let root = catalog();
+    let mut opened = authored_models::parse_app_definition_yaml(include_str!(
+        "../fixtures/configuration_contracts/app-key-value.yaml"
+    ))
+    .expect("App Definition fixture should parse");
+    let original = opened.clone();
+    let path = root.path().join("apps/retroarch.yaml");
+    write_app(&path, &opened);
+    write_retroarch_configuration_template(root.path());
+    write_recipe(
+        root.path(),
+        "recipe.retroarch.config.yaml",
+        include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml"),
+    );
+    let unchanged_admission =
+        admit_app_definition_save(&original, &catalog_context(root.path(), &path, &original));
+    assert!(unchanged_admission.can_save());
+    assert!(unchanged_admission.has_dependent_target_reference("config_file"));
+
+    opened
+        .configurations
+        .get_mut("main")
+        .expect("fixture declares main configuration")
+        .managed_properties
+        .shift_remove("audio_driver");
+    let admission =
+        admit_app_definition_save(&opened, &catalog_context(root.path(), &path, &original));
+
+    assert!(!admission.can_save());
+    assert!(has_diagnostic(&admission, "recipe_config_property_unknown"));
+    let diagnostic = admission
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "recipe_config_property_unknown")
+        .expect("dependent Recipe configuration diagnostic");
+    assert_eq!(diagnostic.object_kind.as_deref(), Some("recipe"));
+    assert_eq!(
+        diagnostic.object_id.as_deref(),
+        Some("recipe.retroarch.config")
+    );
+    assert_eq!(
+        diagnostic.field.as_deref(),
+        Some("config.properties[audio_driver]")
+    );
+    assert_eq!(
+        diagnostic.file.as_deref(),
+        Some("recipes/recipe.retroarch.config.yaml")
+    );
+}
+
+#[test]
+fn app_configuration_template_missing_before_save_refuses_without_changing_source() {
+    let root = catalog();
+    let opened = authored_models::parse_app_definition_yaml(include_str!(
+        "../fixtures/configuration_contracts/app-key-value.yaml"
+    ))
+    .expect("App Definition fixture should parse");
+    let path = root.path().join("apps/retroarch.yaml");
+    write_app(&path, &opened);
+    let template = write_retroarch_configuration_template(root.path());
+    let context = catalog_context(root.path(), &path, &opened);
+    let source_bytes = fs::read(&path).unwrap();
+    let mut edited = opened.clone();
+    edited.name = "RetroArch edited".to_string();
+
+    fs::remove_file(template).expect("remove template after opening App Definition");
+    let admission = admit_app_definition_save(&edited, &context);
+
+    assert!(!admission.can_save(), "{:?}", admission.diagnostics);
+    assert!(has_diagnostic(
+        &admission,
+        "app_configuration_template_missing"
+    ));
+    assert_eq!(fs::read(&path).unwrap(), source_bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn app_configuration_template_symlink_before_save_refuses_without_changing_source() {
+    use std::os::unix::fs::symlink;
+
+    let root = catalog();
+    let opened = authored_models::parse_app_definition_yaml(include_str!(
+        "../fixtures/configuration_contracts/app-key-value.yaml"
+    ))
+    .expect("App Definition fixture should parse");
+    let path = root.path().join("apps/retroarch.yaml");
+    write_app(&path, &opened);
+    let template = write_retroarch_configuration_template(root.path());
+    let context = catalog_context(root.path(), &path, &opened);
+    let source_bytes = fs::read(&path).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let external_template = external.path().join("external.cfg");
+    fs::write(&external_template, b"audio_driver = \"unsafe\"\n").unwrap();
+    let mut edited = opened.clone();
+    edited.name = "RetroArch edited".to_string();
+
+    fs::remove_file(&template).expect("replace template after opening App Definition");
+    symlink(&external_template, &template).expect("install symlinked template");
+    let admission = admit_app_definition_save(&edited, &context);
+
+    assert!(!admission.can_save(), "{:?}", admission.diagnostics);
+    assert!(has_diagnostic(
+        &admission,
+        "app_configuration_template_path_unsafe"
+    ));
+    assert_eq!(fs::read(&path).unwrap(), source_bytes);
+}
+
+#[test]
+fn app_definition_save_with_existing_configuration_template_succeeds() {
+    let root = catalog();
+    let opened = authored_models::parse_app_definition_yaml(include_str!(
+        "../fixtures/configuration_contracts/app-key-value.yaml"
+    ))
+    .expect("App Definition fixture should parse");
+    let path = root.path().join("apps/retroarch.yaml");
+    write_app(&path, &opened);
+    let template = write_retroarch_configuration_template(root.path());
+    let template_bytes = fs::read(&template).unwrap();
+    let mut edited = opened.clone();
+    edited.name = "RetroArch edited".to_string();
+    let admission =
+        admit_app_definition_save(&edited, &catalog_context(root.path(), &path, &opened));
+
+    assert!(admission.can_save(), "{:?}", admission.diagnostics);
+    persist_app_definition(&edited, &admission).expect("save App Definition with real template");
+
+    let saved = authored_models::parse_app_definition_yaml(
+        &fs::read_to_string(&path).expect("saved App Definition"),
+    )
+    .expect("saved App Definition should parse");
+    assert_eq!(saved.name, "RetroArch edited");
+    assert_eq!(saved.configurations, opened.configurations);
+    assert_eq!(fs::read(template).unwrap(), template_bytes);
+}
+
+#[test]
+fn editor_session_save_preserves_app_configuration_contracts() {
+    let temp = TempDir::new().expect("temporary editor session directory");
+    let path = temp.path().join("retroarch.yaml");
+    let source = include_bytes!("../fixtures/configuration_contracts/app-key-value.yaml");
+    fs::write(&path, source).expect("App Definition fixture");
+    let original = authored_models::parse_app_definition_yaml(
+        std::str::from_utf8(source).expect("fixture is UTF-8"),
+    )
+    .expect("fixture should parse");
+
+    let mut document = AppDefinitionDocument::open(&path, None).expect("open editor session");
+    assert!(document
+        .apply_command(&json!({"type": "SetName", "name": "RetroArch edited"}))
+        .expect("apply unrelated editor change"));
+    let edited = document.app_definition().clone();
+    let admission = admit_app_definition_save(&edited, &opened_context(&path));
+    assert!(admission.can_save());
+
+    persist_app_definition(&edited, &admission).expect("save editor session");
+    let saved = authored_models::parse_app_definition_yaml(
+        &fs::read_to_string(&path).expect("saved App Definition"),
+    )
+    .expect("saved App Definition should parse");
+    assert_eq!(saved.name, "RetroArch edited");
+    assert_eq!(saved.configurations, original.configurations);
+}
+
+#[test]
+fn opening_app_definition_with_duplicate_metadata_key_preserves_source_bytes() {
+    let root = catalog();
+    let path = root.path().join("apps/retroarch.yaml");
+    let mut source =
+        include_str!("../fixtures/configuration_contracts/app-key-value.yaml").to_owned();
+    source.push_str("\nmetadata:\n  duplicate: first\n  duplicate: second\n");
+    let source = source.into_bytes();
+    fs::write(&path, &source).expect("write duplicate-key App Definition");
+
+    let opened = AppDefinitionDocument::open(&path, None);
+
+    assert!(
+        opened.is_err(),
+        "editor must refuse an App Definition with duplicate mapping keys"
+    );
+    assert_eq!(
+        fs::read(&path).expect("read original App Definition bytes"),
+        source,
+        "refusing to open must preserve the original source bytes"
+    );
+}
+
+#[test]
+fn opening_app_definition_with_unknown_schema_field_preserves_source_bytes() {
+    let root = catalog();
+    let path = root.path().join("apps/retroarch.yaml");
+    let mut source =
+        include_str!("../fixtures/configuration_contracts/app-key-value.yaml").to_owned();
+    source.push_str("\nunsupported_app_field: preserve-me\n");
+    let source = source.into_bytes();
+    fs::write(&path, &source).expect("write unknown-field App Definition");
+
+    let opened = AppDefinitionDocument::open(&path, None);
+
+    assert!(
+        opened.is_err(),
+        "editor must refuse an App Definition with an unknown authored schema field"
+    );
+    assert_eq!(
+        fs::read(&path).expect("read original App Definition bytes"),
+        source,
+        "refusing to open must preserve the original source bytes"
+    );
 }

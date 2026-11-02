@@ -818,6 +818,7 @@ fn proposed_app(
         artifacts,
         permission_sets: None,
         targets: IndexMap::new(),
+        configurations: IndexMap::new(),
         launcher_activity: None,
         metadata: OrderedValueMap::new(),
     }
@@ -1245,6 +1246,7 @@ fn build_recipe(
             features: vec![ids.feature_id],
         },
         inputs,
+        config: None,
         artifacts,
         artifact_groups: OrderedMap::new(),
         steps,
@@ -1754,6 +1756,7 @@ mod tests {
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: Some("com.example.remote.MainActivity".to_string()),
             metadata: OrderedValueMap::new(),
         };

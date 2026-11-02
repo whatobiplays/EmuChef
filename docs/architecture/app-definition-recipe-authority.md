@@ -245,6 +245,47 @@ Target `kind` is operational:
 - a single-file source may target a directory or exact file target;
 - `copy_policy: sync` is valid only for directory destinations.
 
+### App-owned configuration documents
+
+An App Definition may declare named configuration documents with a supported
+format, a same-App file Target, optional app-scoped templates, and managed
+properties. App Definitions own each property's path, scalar type, default,
+validators, and clearability. Managed types are `string`, `integer`, `number`,
+and `boolean`; `clearable` defaults to false. A Recipe references one App
+Configuration and exposes a subset of its managed-property IDs; it does not
+restate their intrinsic types or constraints.
+
+String properties support `min_length` and `max_length`. A `key_value/v1` path
+contains one key segment and rejects empty keys, delimiters, control characters,
+and surrounding whitespace. A `json/v1` path is a non-empty list of literal
+object-member name segments. Empty segments and control characters are
+rejected; JSON Pointer escapes and array-index addressing are unsupported.
+Path collisions use segment equality and prefix overlap.
+
+Recipe exposure metadata is separate from an optional override operation.
+Omitted override means no explicit Recipe operation. A present override must
+contain exactly one typed non-null `value`, `clear: true`, or `reset: true`.
+Recipe exposure has no local default; the App Definition owns intrinsic
+defaults. `clear` is allowed only when the App Definition marks the property
+clearable. `reset` records intent for T11 to recompute the applicable
+recommendation. T07 does not require an App Definition default or resolve
+device recommendations. Effective provenance is explicit user choice,
+exact-model recommendation, brand recommendation, then device-independent
+default. T11 resolves applicability and ambiguity without silent fallback. A
+separate `unmanaged_literals` list admits typed values for a user-supplied
+template. Those paths cannot overlap managed properties.
+
+Inline literals are limited to 64 KiB each and 2 MiB in aggregate per authored
+configuration document. Each App Definition configuration and each Recipe
+`config` block is bounded independently. T07 checks inline authored bytes; T08
+checks external templates and Recipe file inputs when it reads them; T09 checks
+existing-device and final per-destination documents.
+
+T07 provides schema validation, canonical serialization, catalog projection,
+and editor preservation or refusal. It does not render configuration bytes,
+merge existing device files, or write to devices. T08 owns rendering and T09
+owns existing-file parsing and composition.
+
 ## 5. Launcher identity
 
 An App Definition may contain one optional canonical `launcher_activity`.
@@ -686,11 +727,15 @@ Preview rejection, completed publication, and unresolved recovery are distinct d
 In the accepted architecture, App Definition IDs, App Artifact IDs, and App Target IDs are stable cross-document identities that may be renamed through explicit **catalog refactor** operations. Issue #22 implements that behavior; the detailed rules below define its current contract.
 
 An App Definition ID rename:
-- renames the App Definition ID;
-- renames its canonical authored file;
-- rewrites all dependent authored app references atomically.
+- updates the App Definition ID and renames its canonical authored file;
+- updates dependent typed Recipe references, including `config.app_ref`;
+- is rejected when the App Definition owns configuration templates because
+  template-file migration is not implemented transactionally.
 
-Artifact/target renames rewrite all dependent references atomically.
+Artifact renames update dependent Recipe artifact references. Target renames
+update Recipe step selectors, Recipe configuration targets, and App Definition
+configuration targets. App deletion checks Recipe configuration app references
+and refuses while any dependent reference remains.
 
 Refactors:
 - are explicit operations, not ordinary field edits;

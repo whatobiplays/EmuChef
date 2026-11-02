@@ -1202,10 +1202,29 @@ fn validate_staged_catalog_overlay(
 ) -> Result<(), String> {
     let apps_directory = prepared.authored_root.join("apps");
     let recipes_directory = prepared.authored_root.join("recipes");
-    let mut catalog_files = prepared
+    let original_catalog_files = prepared
         .observed_files
         .iter()
         .map(|(path, snapshot)| (path.clone(), snapshot.bytes.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut catalog_files = original_catalog_files.clone();
+    let original_app_definitions =
+        app_definitions_from_catalog_files(&original_catalog_files, &apps_directory);
+    let original_configuration_diagnostics = original_catalog_files
+        .iter()
+        .filter(|(path, _)| path.parent() == Some(recipes_directory.as_path()))
+        .filter_map(|(path, bytes)| {
+            let recipe = parse_recipe_snapshot(bytes, path).ok()?;
+            let file = authored_relative_path(&prepared.authored_root, path);
+            Some((
+                path.clone(),
+                crate::catalog::validate_recipe_configuration(
+                    &file.to_string_lossy(),
+                    &recipe,
+                    &original_app_definitions,
+                ),
+            ))
+        })
         .collect::<BTreeMap<_, _>>();
     if let Some((path, _)) = &prepared.delete_source {
         catalog_files.remove(path);
@@ -1298,6 +1317,8 @@ fn validate_staged_catalog_overlay(
         }
     }
 
+    let staged_app_definitions =
+        app_definitions_from_catalog_files(&catalog_files, &apps_directory);
     for (path, bytes) in catalog_files
         .iter()
         .filter(|(path, _)| path.parent() == Some(recipes_directory.as_path()))
@@ -1415,6 +1436,27 @@ fn validate_staged_catalog_overlay(
             })
             .map(|error| format!("{}: {}", error.code, error.message))
             .collect::<Vec<_>>();
+        let file = relative_path.to_string_lossy();
+        let baseline_diagnostics = original_configuration_diagnostics
+            .get(path)
+            .cloned()
+            .unwrap_or_default();
+        errors.extend(
+            crate::catalog::validate_recipe_configuration(&file, &recipe, &staged_app_definitions)
+                .into_iter()
+                .filter(|diagnostic| !baseline_diagnostics.contains(diagnostic))
+                .map(|diagnostic| {
+                    format!(
+                        "{}: {}",
+                        diagnostic["code"]
+                            .as_str()
+                            .unwrap_or("recipe_config_invalid"),
+                        diagnostic["message"]
+                            .as_str()
+                            .unwrap_or("Recipe configuration is invalid.")
+                    )
+                }),
+        );
         for step in recipe.steps.iter().filter(|step| {
             step.type_name == "grant_permissions" && affected_steps.contains(&step.id)
         }) {
@@ -1451,6 +1493,26 @@ fn recipe_app_reference_ids(recipe: &Recipe) -> HashSet<String> {
             RecipeArtifact::RemoteFile(_) => None,
         })
         .chain(recipe.steps.iter().filter_map(|step| step.app_ref.clone()))
+        .chain(
+            recipe
+                .config
+                .as_ref()
+                .map(|configuration| configuration.app_ref.clone()),
+        )
+        .collect()
+}
+
+fn app_definitions_from_catalog_files(
+    catalog_files: &BTreeMap<PathBuf, Vec<u8>>,
+    apps_directory: &Path,
+) -> Vec<crate::authored_models::AppDefinitionV1> {
+    catalog_files
+        .iter()
+        .filter(|(path, _)| path.parent() == Some(apps_directory))
+        .filter_map(|(_, bytes)| {
+            let source = std::str::from_utf8(bytes).ok()?;
+            crate::authored_models::parse_app_definition_yaml(source).ok()
+        })
         .collect()
 }
 
@@ -1558,6 +1620,11 @@ fn prepare_catalog_change(
     if let CatalogChangeIntent::RenameApp { new_id, .. } = &intent {
         if apps.iter().any(|(_, _, app_id, _)| app_id == new_id) {
             return Err(format!("App identity {new_id:?} already exists."));
+        }
+        if app_has_configuration_templates(owner) {
+            return Err(format!(
+                "App identity {owner_id:?} cannot be renamed because its configuration template files are not migrated transactionally."
+            ));
         }
     }
     match &intent {
@@ -2011,6 +2078,27 @@ pub fn rewrite_recipe(
             &mut sites,
         );
     }
+
+    if let Some(configuration) = recipe.config.as_mut() {
+        match intent {
+            CatalogChangeIntent::RenameApp { app_id, new_id }
+                if configuration.app_ref == *app_id =>
+            {
+                configuration.app_ref = new_id.clone();
+                sites.push(site(&path, "config".into(), "app_ref"));
+            }
+            CatalogChangeIntent::RenameTarget {
+                app_id,
+                target_id,
+                new_id,
+            } if configuration.app_ref == *app_id && configuration.target == *target_id => {
+                configuration.target = new_id.clone();
+                sites.push(site(&path, "config".into(), "target"));
+            }
+            _ => {}
+        }
+    }
+
     sites
 }
 
@@ -2019,6 +2107,9 @@ pub fn rewrite_recipe(
 pub fn rewrite_app_definition(app: &mut AppDefinitionV1, intent: &CatalogChangeIntent) -> bool {
     match intent {
         CatalogChangeIntent::RenameApp { app_id, new_id } if app.id == *app_id => {
+            if app_has_configuration_templates(app) {
+                return false;
+            }
             app.id = new_id.clone();
             true
         }
@@ -2031,10 +2122,26 @@ pub fn rewrite_app_definition(app: &mut AppDefinitionV1, intent: &CatalogChangeI
             app_id,
             target_id,
             new_id,
-        } if app.id == *app_id => rename_key(&mut app.targets, target_id, new_id),
+        } if app.id == *app_id => {
+            let renamed = rename_key(&mut app.targets, target_id, new_id);
+            if renamed {
+                for configuration in app.configurations.values_mut() {
+                    if configuration.target == *target_id {
+                        configuration.target = new_id.clone();
+                    }
+                }
+            }
+            renamed
+        }
         CatalogChangeIntent::DeleteApp { app_id } => app.id == *app_id,
         _ => false,
     }
+}
+
+fn app_has_configuration_templates(app: &AppDefinitionV1) -> bool {
+    app.configurations
+        .values()
+        .any(|configuration| !configuration.templates.is_empty())
 }
 
 fn rewrite_target_conditions(
@@ -2099,8 +2206,9 @@ mod tests {
         AppDefinitionV1, OrderedValueMap, APP_DEFINITION_KIND, SCHEMA_VERSION_V1,
     };
     use crate::model::{
-        AppArtifactReference, OrderedMap, ParamValue, RecipeArtifact, RecipeProvides, Step,
-        StepCondition, StepConstraints,
+        AppArtifactReference, OrderedMap, ParamValue, RecipeArtifact, RecipeConfigOverrideV1,
+        RecipeConfigPropertyV1, RecipeConfigurationBaseV1, RecipeConfigurationV1, RecipeProvides,
+        Step, StepCondition, StepConstraints,
     };
     use serde_json::json;
 
@@ -2119,6 +2227,14 @@ mod tests {
     #[test]
     fn app_rename_changes_only_typed_app_references() {
         let mut recipe = recipe();
+        recipe.config = Some(RecipeConfigurationV1 {
+            app_ref: "old".into(),
+            configuration: "main".into(),
+            target: "config".into(),
+            base: RecipeConfigurationBaseV1::Template("default".into()),
+            properties: OrderedMap::<RecipeConfigPropertyV1>::new(),
+            unmanaged_literals: Vec::new(),
+        });
         let sites = rewrite_recipe(
             &mut recipe,
             PathBuf::from("recipes/example.yaml"),
@@ -2133,7 +2249,73 @@ mod tests {
         assert_eq!(reference.app_ref, "new");
         assert_eq!(recipe.steps[0].app_ref.as_deref(), Some("new"));
         assert_eq!(recipe.steps[0].name, "old");
-        assert_eq!(sites.len(), 2);
+        assert_eq!(recipe.config.as_ref().unwrap().app_ref, "new");
+        assert!(sites
+            .iter()
+            .any(|changed| changed.object == "config" && changed.field == "app_ref"));
+        assert_eq!(sites.len(), 3);
+    }
+
+    #[test]
+    fn app_definition_rename_refuses_template_migration_and_target_rename_updates_configuration() {
+        let mut app = crate::authored_models::parse_app_definition_yaml(include_str!(
+            "../fixtures/configuration_contracts/app-key-value.yaml"
+        ))
+        .expect("App Definition fixture should parse");
+
+        assert!(!rewrite_app_definition(
+            &mut app,
+            &CatalogChangeIntent::RenameApp {
+                app_id: "retroarch".into(),
+                new_id: "renamed".into(),
+            },
+        ));
+        assert_eq!(app.id, "retroarch");
+        assert_eq!(
+            app.configurations["main"].templates["default"].path,
+            "retroarch/default.cfg"
+        );
+
+        assert!(rewrite_app_definition(
+            &mut app,
+            &CatalogChangeIntent::RenameTarget {
+                app_id: "retroarch".into(),
+                target_id: "config_file".into(),
+                new_id: "settings_file".into(),
+            },
+        ));
+        assert_eq!(app.configurations["main"].target, "settings_file");
+    }
+
+    #[test]
+    fn app_rename_with_existing_configuration_template_fails_without_changing_source_files() {
+        let root = tempfile::tempdir().unwrap();
+        let apps = root.path().join("apps");
+        let owner_path = apps.join("retroarch.yaml");
+        let template_path = apps.join("retroarch/default.cfg");
+        let owner_bytes = include_bytes!("../fixtures/configuration_contracts/app-key-value.yaml");
+        let template_bytes = b"audio_driver=alsa\n";
+
+        fs::create_dir_all(template_path.parent().unwrap()).unwrap();
+        fs::create_dir(root.path().join("recipes")).unwrap();
+        fs::write(&owner_path, owner_bytes).unwrap();
+        fs::write(&template_path, template_bytes).unwrap();
+
+        let error = CatalogRefactorSession::default()
+            .preview(
+                root.path(),
+                CatalogChangeIntent::RenameApp {
+                    app_id: "retroarch".into(),
+                    new_id: "renamed".into(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("configuration template files are not migrated transactionally"));
+        assert_eq!(fs::read(&owner_path).unwrap(), owner_bytes);
+        assert_eq!(fs::read(&template_path).unwrap(), template_bytes);
+        assert!(!apps.join("renamed.yaml").exists());
+        assert!(!apps.join("renamed").exists());
     }
 
     #[test]
@@ -2159,6 +2341,14 @@ mod tests {
     #[test]
     fn target_rename_changes_params_and_conditions_only_in_owner_context() {
         let mut recipe = recipe();
+        recipe.config = Some(RecipeConfigurationV1 {
+            app_ref: "old".into(),
+            configuration: "main".into(),
+            target: "config".into(),
+            base: RecipeConfigurationBaseV1::Template("default".into()),
+            properties: OrderedMap::<RecipeConfigPropertyV1>::new(),
+            unmanaged_literals: Vec::new(),
+        });
         recipe.steps.push(Step {
             app_ref: Some("other".into()),
             ..recipe.steps[0].clone()
@@ -2184,7 +2374,11 @@ mod tests {
             recipe.steps[1].params["destination"],
             ParamValue::AppTarget(ref value) if value == "config"
         ));
-        assert_eq!(sites.len(), 3);
+        assert_eq!(recipe.config.as_ref().unwrap().target, "settings");
+        assert!(sites
+            .iter()
+            .any(|changed| changed.object == "config" && changed.field == "target"));
+        assert_eq!(sites.len(), 4);
     }
 
     #[test]
@@ -2294,11 +2488,15 @@ mod tests {
             apps.join("demo_app.yaml"),
         )
         .unwrap();
+        let app_path = apps.join("demo_app.yaml");
         fs::write(
             recipes.join("dependent.yaml"),
             "schema_version: 1\nkind: recipe\nid: dependent\nname: Dependent\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts: {}\nartifact_groups: {}\nsteps:\n  - id: launch\n    type: launch_app\n    name: Launch\n    user_toggleable: false\n    app_ref: demo_app\n    dependencies: []\n    constraints:\n      capabilities: []\n      conflicts_with: []\n    skip_if:\n      - type: unknown_condition\n        params:\n          path:\n            app_target: config_file\n    params: {}\n    verify: []\n",
         )
         .unwrap();
+        let recipe_path = recipes.join("dependent.yaml");
+        let original_app = fs::read(&app_path).unwrap();
+        let original_recipe = fs::read(&recipe_path).unwrap();
         let mut session = CatalogRefactorSession::with_storage(root.path().join("state"));
         let preview = session
             .preview(
@@ -2320,8 +2518,8 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.contains("app_target_inapplicable"));
-        let app = fs::read_to_string(apps.join("demo_app.yaml")).unwrap();
-        assert!(app.contains("config_file:"));
+        assert_eq!(fs::read(app_path).unwrap(), original_app);
+        assert_eq!(fs::read(recipe_path).unwrap(), original_recipe);
     }
 
     #[test]
@@ -2407,6 +2605,192 @@ steps:
         assert!(fs::read_to_string(recipes.join("dependent.yaml"))
             .unwrap()
             .contains("app_target: config_file_new"));
+    }
+
+    #[test]
+    fn staged_overlay_rejects_new_config_only_app_reference_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let (app_path, recipe_path) = write_config_only_catalog(root.path(), 60);
+        let original_app = fs::read(&app_path).unwrap();
+        let original_recipe = fs::read(&recipe_path).unwrap();
+        let mut session = CatalogRefactorSession::with_storage(root.path().join("state"));
+        let preview = session
+            .preview(
+                root.path(),
+                CatalogChangeIntent::RenameTarget {
+                    app_id: "retroarch".into(),
+                    target_id: "config_file".into(),
+                    new_id: "config_file_new".into(),
+                },
+            )
+            .unwrap();
+
+        let prepared = session.previews.get(&preview.preview_token).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let recipe_relative_path = recipe_path
+            .canonicalize()
+            .unwrap()
+            .strip_prefix(&canonical_root)
+            .unwrap()
+            .to_path_buf();
+        let mut staged_recipe_found = false;
+        let staged_files = prepared
+            .files
+            .iter()
+            .map(|file| {
+                let mut bytes = file.bytes.clone();
+                let file_relative_path = file
+                    .path
+                    .canonicalize()
+                    .unwrap()
+                    .strip_prefix(&canonical_root)
+                    .unwrap()
+                    .to_path_buf();
+                if file_relative_path == recipe_relative_path {
+                    staged_recipe_found = true;
+                    let mut recipe = parse_recipe_snapshot(&bytes, &file.path).unwrap();
+                    recipe.config.as_mut().unwrap().app_ref = "missing_app".into();
+                    bytes = yaml::emit_recipe_yaml(&recipe).unwrap().into_bytes();
+                }
+                (file.path.clone(), bytes)
+            })
+            .collect::<Vec<_>>();
+        assert!(staged_recipe_found, "the config-only Recipe must be staged");
+
+        let error = validate_staged_catalog_overlay(prepared, &staged_files).unwrap_err();
+
+        assert!(error.contains("recipe_config_app_unknown"), "{error}");
+        assert_eq!(fs::read(app_path).unwrap(), original_app);
+        assert_eq!(fs::read(recipe_path).unwrap(), original_recipe);
+    }
+
+    #[test]
+    fn staged_overlay_ignores_unchanged_configuration_errors_from_another_app() {
+        let root = tempfile::tempdir().unwrap();
+        let (app_path, recipe_path) = write_config_only_catalog(root.path(), 999);
+        let apps = root.path().join("apps");
+        let mut retroarch = crate::authored_models::parse_app_definition_yaml(
+            std::str::from_utf8(include_bytes!(
+                "../fixtures/configuration_contracts/app-key-value.yaml"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        retroarch.launcher_activity = Some("org.libretro.retroarch.MainActivity".into());
+        fs::write(&app_path, emit_app_definition_yaml(&retroarch).unwrap()).unwrap();
+        let mut other_app = crate::authored_models::parse_app_definition_yaml(
+            std::str::from_utf8(include_bytes!(
+                "../fixtures/configuration_contracts/app-key-value.yaml"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        other_app.id = "other_app".into();
+        other_app.package_id = "org.libretro.other".into();
+        other_app.configurations["main"].templates["default"].path = "other_app/default.cfg".into();
+        fs::write(
+            apps.join("other_app.yaml"),
+            emit_app_definition_yaml(&other_app).unwrap(),
+        )
+        .unwrap();
+
+        let mut dependent = recipe();
+        dependent.artifacts.clear();
+        dependent.steps[0].type_name = "launch_app".into();
+        dependent.steps[0].app_ref = Some("retroarch".into());
+        dependent.steps[0].params.clear();
+        let step = &mut dependent.steps[0];
+        for condition in step.skip_if.iter_mut().chain(step.verify.iter_mut()) {
+            condition
+                .params
+                .insert("path".into(), json!({ "app_target": "config_file" }));
+        }
+        let mut configuration = config_only_recipe(999).config.unwrap();
+        configuration.app_ref = "other_app".into();
+        dependent.config = Some(configuration);
+        fs::write(&recipe_path, yaml::emit_recipe_yaml(&dependent).unwrap()).unwrap();
+        let original_other_app = fs::read(apps.join("other_app.yaml")).unwrap();
+
+        let mut session = CatalogRefactorSession::with_storage(root.path().join("state"));
+        let preview = session
+            .preview(
+                root.path(),
+                CatalogChangeIntent::RenameTarget {
+                    app_id: "retroarch".into(),
+                    target_id: "config_file".into(),
+                    new_id: "config_file_new".into(),
+                },
+            )
+            .unwrap();
+
+        let status = session
+            .apply(
+                &preview.operation_id,
+                &preview.preview_token,
+                &[],
+                &[],
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(status.state, CatalogChangeState::Completed);
+        assert_eq!(
+            fs::read(apps.join("other_app.yaml")).unwrap(),
+            original_other_app
+        );
+        let updated_recipe =
+            parse_recipe_snapshot(&fs::read(&recipe_path).unwrap(), &recipe_path).unwrap();
+        let updated_retroarch = crate::authored_models::parse_app_definition_yaml(
+            std::str::from_utf8(&fs::read(root.path().join("apps/retroarch.yaml")).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(updated_retroarch.targets.contains_key("config_file_new"));
+        assert_eq!(updated_recipe.config.as_ref().unwrap().app_ref, "other_app");
+        let diagnostics = crate::catalog::validate_recipe_configuration(
+            "recipes/config-only.yaml",
+            &updated_recipe,
+            &[updated_retroarch, other_app],
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "recipe_config_override_invalid"));
+    }
+
+    #[test]
+    fn staged_overlay_accepts_valid_config_only_recipe_refactor() {
+        let root = tempfile::tempdir().unwrap();
+        let (app_path, recipe_path) = write_config_only_catalog(root.path(), 60);
+        let mut session = CatalogRefactorSession::with_storage(root.path().join("state"));
+        let preview = session
+            .preview(
+                root.path(),
+                CatalogChangeIntent::RenameTarget {
+                    app_id: "retroarch".into(),
+                    target_id: "config_file".into(),
+                    new_id: "config_file_new".into(),
+                },
+            )
+            .unwrap();
+
+        let status = session
+            .apply(
+                &preview.operation_id,
+                &preview.preview_token,
+                &[],
+                &[],
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(status.state, CatalogChangeState::Completed);
+        let app = crate::authored_models::parse_app_definition_yaml(
+            &fs::read_to_string(app_path).unwrap(),
+        )
+        .unwrap();
+        let recipe = parse_recipe_snapshot(&fs::read(&recipe_path).unwrap(), &recipe_path).unwrap();
+        assert_eq!(app.configurations["main"].target, "config_file_new");
+        assert_eq!(recipe.config.as_ref().unwrap().target, "config_file_new");
     }
 
     #[test]
@@ -2707,6 +3091,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -2770,6 +3155,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -2871,6 +3257,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -2980,6 +3367,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3361,6 +3749,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3372,8 +3761,11 @@ steps:
         let recipe_path = root.path().join("recipes/dependent.yaml");
         fs::write(
             &recipe_path,
-            include_str!("../../../authored/recipes/feature.copy_bios.yaml")
-                .replace("retroarch", "old"),
+            format!(
+                "{}\nconfig:\n  app_ref: old\n  configuration: main\n  target: config\n  base:\n    input: base_file\n  properties: {{}}\n  unmanaged_literals: []\n",
+                include_str!("../../../authored/recipes/feature.copy_bios.yaml")
+                    .replace("retroarch", "old")
+            ),
         )
         .unwrap();
         let storage = root.path().join("application-state");
@@ -3388,6 +3780,7 @@ steps:
             .unwrap_err();
         assert!(error.contains("referenced"));
         assert!(error.contains("recipes/dependent.yaml"));
+        assert!(error.contains("config.app_ref"), "{error}");
         assert!(error.contains("steps.copy_bios_dir"), "{error}");
         assert!(error.contains("app_ref"));
         fs::remove_file(&recipe_path).unwrap();
@@ -3508,6 +3901,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3569,6 +3963,7 @@ steps:
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         };
@@ -3608,6 +4003,48 @@ steps:
         );
     }
 
+    fn write_config_only_catalog(root: &Path, frame_limit: i64) -> (PathBuf, PathBuf) {
+        let apps = root.join("apps");
+        let recipes = root.join("recipes");
+        fs::create_dir(&apps).unwrap();
+        fs::create_dir(&recipes).unwrap();
+        let app_path = apps.join("retroarch.yaml");
+        fs::write(
+            &app_path,
+            include_bytes!("../fixtures/configuration_contracts/app-key-value.yaml"),
+        )
+        .unwrap();
+
+        let recipe_path = recipes.join("config-only.yaml");
+        let recipe = config_only_recipe(frame_limit);
+        fs::write(&recipe_path, yaml::emit_recipe_yaml(&recipe).unwrap()).unwrap();
+        (app_path, recipe_path)
+    }
+
+    fn config_only_recipe(frame_limit: i64) -> Recipe {
+        let mut recipe = recipe();
+        recipe.artifacts.clear();
+        recipe.steps.clear();
+        recipe.config = Some(RecipeConfigurationV1 {
+            app_ref: "retroarch".into(),
+            configuration: "main".into(),
+            target: "config_file".into(),
+            base: RecipeConfigurationBaseV1::Template("default".into()),
+            properties: OrderedMap::from([(
+                "frame_limit".into(),
+                RecipeConfigPropertyV1 {
+                    label: None,
+                    description: None,
+                    required: false,
+                    advanced: false,
+                    override_operation: Some(RecipeConfigOverrideV1::Value(json!(frame_limit))),
+                },
+            )]),
+            unmanaged_literals: Vec::new(),
+        });
+        recipe
+    }
+
     fn recipe() -> Recipe {
         let mut artifacts = OrderedMap::new();
         artifacts.insert(
@@ -3636,6 +4073,7 @@ steps:
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts,
             artifact_groups: OrderedMap::new(),
             steps: vec![Step {

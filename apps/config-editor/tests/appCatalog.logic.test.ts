@@ -3,6 +3,68 @@ import test from "node:test";
 
 import type { AppCatalogAppDto, AppCatalogDto, StepSpecDto } from "../src/api/types.js";
 import type { ArtifactDto, InputDto, RefIndexDto } from "../src/api/types.js";
+import type {
+  AppConfigurationManagedPropertyDto,
+  AppDefinitionDocumentDto,
+  AppManagedPropertyValidatorsV1Dto,
+} from "../src/api/types.js";
+
+type TypeEqual<Left, Right> = (<Value>() => Value extends Left ? 1 : 2) extends
+  (<Value>() => Value extends Right ? 1 : 2)
+  ? ((<Value>() => Value extends Right ? 1 : 2) extends
+      (<Value>() => Value extends Left ? 1 : 2)
+      ? true
+      : false)
+  : false;
+type Assert<T extends true> = T;
+
+type AuthoredMinimumRemainsUnknown = Assert<
+  TypeEqual<AppManagedPropertyValidatorsV1Dto["minimum"], unknown>
+>;
+type AuthoredMaximumRemainsUnknown = Assert<
+  TypeEqual<AppManagedPropertyValidatorsV1Dto["maximum"], unknown>
+>;
+type CatalogMinimumRemainsNumeric = Assert<
+  TypeEqual<
+    NonNullable<AppConfigurationManagedPropertyDto["validators"]>["minimum"],
+    number | undefined
+  >
+>;
+type CatalogMaximumRemainsNumeric = Assert<
+  TypeEqual<
+    NonNullable<AppConfigurationManagedPropertyDto["validators"]>["maximum"],
+    number | undefined
+  >
+>;
+
+const authoredDocumentWithMalformedBounds = {
+  appDefinition: {
+    schema_version: 1,
+    kind: "app_definition",
+    id: "example",
+    name: "Example",
+    package_id: "com.example.app",
+    configurations: {
+      main: {
+        format: "key_value/v1",
+        target: "config_file",
+        managed_properties: {
+          minimum: {
+            path: ["minimum"],
+            type: "number",
+            validators: { minimum: "not a number" },
+          },
+          maximum: {
+            path: ["maximum"],
+            type: "number",
+            validators: { maximum: { exclusive: true, value: 5 } },
+          },
+        },
+      },
+    },
+  },
+} satisfies Pick<AppDefinitionDocumentDto, "appDefinition">;
+
 import {
   apkArtifactRefs,
   appContextControl,
@@ -35,6 +97,44 @@ const demoApp: AppCatalogAppDto = {
     { id: "system", kind: "directory", location: "shared_storage", path: "Demo/system" },
     { id: "config_file", kind: "file", location: "external_app_data", path: "files/demo.cfg" },
   ],
+  configurations: [
+    {
+      id: "main",
+      format: "key_value/v1",
+      target: "config_file",
+      templates: [{ id: "default", path: "demo/default.cfg" }],
+      managedProperties: [
+        {
+          id: "audio_driver",
+          path: ["audio_driver"],
+          type: "string",
+          clearable: false,
+          validators: { allowedValues: ["alsa", "sdl"] },
+          default: "alsa",
+        },
+      ],
+    },
+    {
+      id: "nested",
+      format: "json/v1",
+      target: "config_file",
+      templates: [],
+      managedProperties: [
+        {
+          id: "renderer",
+          path: ["graphics", "renderer"],
+          type: "string",
+          clearable: false,
+          default: "auto",
+          validators: {
+            allowedValues: ["auto", "vulkan"],
+            minLength: 3,
+            maxLength: 7,
+          },
+        },
+      ],
+    },
+  ],
   launcherActivity: "com.example.demo.MainActivity",
 };
 
@@ -44,6 +144,7 @@ const secondApp: AppCatalogAppDto = {
   artifacts: [{ id: "apk", kind: "apk", requiresInput: false }],
   permissionSets: [],
   targets: [],
+  configurations: [],
   launcherActivity: null,
 };
 
@@ -92,6 +193,17 @@ test("catalog app lookup resolves by identifier only when ready", () => {
   assert.equal(catalogApp(readyCatalog, "ghost_app"), null);
   assert.equal(catalogApp(invalidCatalog, "demo_app"), null);
   assert.equal(catalogApp(readyCatalog, null), null);
+});
+
+test("configuration catalog transport preserves JSON path segments and minLength", () => {
+  const transported = JSON.parse(JSON.stringify(readyCatalog)) as AppCatalogDto;
+  const configuration = catalogApp(transported, "demo_app")?.configurations.find(
+    (entry) => entry.id === "nested",
+  );
+  const property = configuration?.managedProperties[0];
+
+  assert.deepEqual(property?.path, ["graphics", "renderer"]);
+  assert.equal(property?.validators?.minLength, 3);
 });
 
 test("app ref options keep a retained value that is missing from the catalog", () => {

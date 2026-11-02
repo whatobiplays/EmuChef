@@ -1,0 +1,15 @@
+schema_version: 1
+kind: recipe
+id: recipe.unknown.config
+name: Unknown config field
+artifacts: {}
+steps: []
+config:
+  app_ref: retroarch
+  configuration: main
+  target: config_file
+  base:
+    template: default
+  properties: {}
+  renderer_plugin:
+    name: unrecognized

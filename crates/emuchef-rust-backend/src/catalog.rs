@@ -48,6 +48,10 @@ fn recipe_references_app(recipe: &Recipe, app_id: &str) -> bool {
         .steps
         .iter()
         .any(|step| step.app_ref.as_deref() == Some(app_id))
+        || recipe
+            .config
+            .as_ref()
+            .is_some_and(|config| config.app_ref == app_id)
 }
 
 pub(crate) fn recipe_references_any_app(recipe: &Recipe) -> bool {
@@ -55,6 +59,7 @@ pub(crate) fn recipe_references_any_app(recipe: &Recipe) -> bool {
         .artifacts
         .values()
         .any(|artifact| matches!(artifact, crate::model::RecipeArtifact::AppArtifact(_)))
+        || recipe.config.is_some()
         || recipe.steps.iter().any(|step| {
             step.app_ref.is_some()
                 || step.params.values().any(|value| match value {
@@ -153,7 +158,33 @@ pub struct ProjectedAppDefinition {
     pub artifacts: Vec<ProjectedAppArtifact>,
     pub permission_sets: Vec<String>,
     pub targets: Vec<ProjectedAppTarget>,
+    pub configurations: Vec<ProjectedAppConfiguration>,
     pub launcher_activity: Option<String>,
+}
+/// One App Configuration Definition exposed through the catalog projection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedAppConfiguration {
+    pub id: String,
+    pub format: String,
+    pub target: String,
+    pub templates: Vec<ProjectedAppConfigurationTemplate>,
+    pub managed_properties: Vec<ProjectedAppManagedProperty>,
+}
+/// One template pointer owned by an App Configuration Definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedAppConfigurationTemplate {
+    pub id: String,
+    pub path: String,
+}
+/// One typed property and its App Definition constraints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectedAppManagedProperty {
+    pub id: String,
+    pub path: Vec<String>,
+    pub type_name: String,
+    pub default: Option<Value>,
+    pub clearable: bool,
+    pub validators: authored_models::AppManagedPropertyValidatorsV1,
 }
 
 /// One App Definition artifact choice.
@@ -209,6 +240,11 @@ impl AppCatalogProjection {
                                 })
                             })
                             .collect::<Vec<_>>(),
+                "configurations": app
+                    .configurations
+                    .iter()
+                    .map(projected_configuration_to_dto)
+                    .collect::<Vec<_>>(),
                         "launcherActivity": app.launcher_activity,
                     })
                 })
@@ -216,6 +252,52 @@ impl AppCatalogProjection {
             "diagnostics": self.diagnostics,
         })
     }
+}
+
+fn projected_configuration_to_dto(configuration: &ProjectedAppConfiguration) -> Value {
+    let mut dto = json!({
+        "id": configuration.id,
+        "format": configuration.format,
+        "target": configuration.target,
+        "templates": configuration.templates.iter().map(|template| json!({
+            "id": template.id,
+            "path": template.path,
+        })).collect::<Vec<_>>(),
+    });
+    let properties = configuration
+        .managed_properties
+        .iter()
+        .map(|property| {
+            let mut validators = json!({
+                "allowedValues": property.validators.allowed_values,
+            });
+            if let Some(minimum) = &property.validators.minimum {
+                validators["minimum"] = minimum.clone();
+            }
+            if let Some(maximum) = &property.validators.maximum {
+                validators["maximum"] = maximum.clone();
+            }
+            if let Some(min_length) = property.validators.min_length {
+                validators["minLength"] = json!(min_length);
+            }
+            if let Some(max_length) = property.validators.max_length {
+                validators["maxLength"] = json!(max_length);
+            }
+            let mut projected = json!({
+                "id": property.id,
+                "path": property.path,
+                "type": property.type_name,
+            "clearable": property.clearable,
+                "validators": validators,
+            });
+            if let Some(default) = &property.default {
+                projected["default"] = default.clone();
+            }
+            projected
+        })
+        .collect::<Vec<_>>();
+    dto["managedProperties"] = json!(properties);
+    dto
 }
 
 /// Project the catalog bound to one document session.
@@ -285,6 +367,35 @@ fn project_app_definition(app: &AppDefinitionV1) -> ProjectedAppDefinition {
                 kind: serialized_enum_name(target.kind),
                 location: serialized_enum_name(target.location),
                 path: target.path.clone(),
+            })
+            .collect(),
+        configurations: app
+            .configurations
+            .iter()
+            .map(|(id, configuration)| ProjectedAppConfiguration {
+                id: id.clone(),
+                format: configuration.format.as_str().to_string(),
+                target: configuration.target.clone(),
+                templates: configuration
+                    .templates
+                    .iter()
+                    .map(|(id, template)| ProjectedAppConfigurationTemplate {
+                        id: id.clone(),
+                        path: template.path.clone(),
+                    })
+                    .collect(),
+                managed_properties: configuration
+                    .managed_properties
+                    .iter()
+                    .map(|(id, property)| ProjectedAppManagedProperty {
+                        id: id.clone(),
+                        path: property.path.clone(),
+                        type_name: property.type_name.as_str().to_string(),
+                        default: property.default.clone(),
+                        clearable: property.clearable,
+                        validators: property.validators.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
         launcher_activity: app.launcher_activity.clone(),
@@ -362,6 +473,11 @@ fn load_app_definition_catalog_from_paths(
             Some(&value.id),
             authored_models::validate_app_definition(&value),
         ));
+        diagnostics.extend(app_configuration_template_diagnostics(
+            authored_root,
+            path,
+            &value,
+        ));
         if let Some(first_file) = ids.get(&value.id) {
             diagnostics.push(diagnostic(
                 "error",
@@ -415,6 +531,99 @@ fn load_app_definition_catalog_from_paths(
         entries,
         diagnostics,
     }
+}
+
+pub(crate) struct AppConfigurationTemplateIssue {
+    pub code: &'static str,
+    pub message: &'static str,
+    pub field: String,
+}
+
+pub(crate) fn app_configuration_template_issues(
+    authored_root: &Path,
+    app: &AppDefinitionV1,
+) -> Vec<AppConfigurationTemplateIssue> {
+    let mut issues = Vec::new();
+    let apps_root = authored_root.join("apps");
+    let app_directory = apps_root.join(&app.id);
+    for (configuration_id, configuration) in &app.configurations {
+        for (template_id, template) in &configuration.templates {
+            if !authored_models::is_valid_app_configuration_template_path(&app.id, &template.path) {
+                continue;
+            }
+            let mut current = apps_root.clone();
+            let mut unsafe_path = false;
+            let mut missing_path = false;
+            for component in template.path.split('/') {
+                current.push(component);
+                match fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        unsafe_path = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing_path = true;
+                        break;
+                    }
+                    Err(_) => {
+                        unsafe_path = true;
+                        break;
+                    }
+                }
+            }
+            let canonical_app = fs::canonicalize(&app_directory).ok();
+            let canonical_template = fs::canonicalize(&current).ok();
+            let contained = canonical_app
+                .as_ref()
+                .zip(canonical_template.as_ref())
+                .is_some_and(|(app_path, template_path)| template_path.starts_with(app_path));
+            let is_file = fs::metadata(&current).is_ok_and(|metadata| metadata.is_file());
+            if unsafe_path || !contained || !is_file {
+                let code = if missing_path {
+                    "app_configuration_template_missing"
+                } else {
+                    "app_configuration_template_path_unsafe"
+                };
+                let message = if missing_path {
+                    "The App Configuration template file does not exist."
+                } else {
+                    "The App Configuration template must be a regular file inside the owning app directory and may not traverse a symlink."
+                };
+                issues.push(AppConfigurationTemplateIssue {
+                    code,
+                    message,
+                    field: format!(
+                        "configurations[{configuration_id}].templates[{template_id}].path"
+                    ),
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn app_configuration_template_diagnostics(
+    authored_root: &Path,
+    app_file: &Path,
+    app: &AppDefinitionV1,
+) -> Vec<Value> {
+    let relative_file = authored_relative_path(authored_root, app_file);
+    let diagnostics = app_configuration_template_issues(authored_root, app)
+        .into_iter()
+        .map(|issue| {
+            diagnostic(
+                "error",
+                issue.code,
+                issue.message,
+                &relative_file,
+                Some("app_definition"),
+                Some(&app.id),
+                Some(&issue.field),
+            )
+        })
+        .collect();
+    diagnostics
 }
 
 /// Validate every top-level schema-v1 app definition, device profile, and Device Plan.
@@ -793,6 +1002,11 @@ impl ValidationCatalog {
                 .iter()
                 .map(|message| app_authority_diagnostic(&current_file, current_recipe, message)),
             );
+            errors.extend(validate_recipe_configuration(
+                &current_file,
+                current_recipe,
+                &self.app_definitions,
+            ));
             errors.extend(permission_selection_diagnostics(
                 &current_file,
                 current_recipe,
@@ -884,6 +1098,278 @@ fn app_authority_diagnostic(
 /// the catalog by identifier, so a step whose app reference does not resolve
 /// keeps its existing app authority diagnostics. Invalid App Definitions are
 /// reported once by the app authority check and skipped here.
+pub(crate) fn validate_recipe_configuration(
+    file: &str,
+    recipe: &Recipe,
+    app_definitions: &[AppDefinitionV1],
+) -> Vec<Value> {
+    let Some(config) = recipe.config.as_ref() else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    let Some(app) = app_definitions.iter().find(|app| app.id == config.app_ref) else {
+        errors.push(recipe_configuration_diagnostic(
+            file,
+            recipe,
+            "config.app_ref",
+            "recipe_config_app_unknown",
+            "Recipe configuration references an App Definition that is not in the catalog.",
+        ));
+        return errors;
+    };
+
+    if !authored_models::validate_app_definition(app).is_empty() {
+        return errors;
+    }
+    let Some(configuration) = app.configurations.get(&config.configuration) else {
+        let exists_elsewhere = app_definitions.iter().any(|other| {
+            other.id != app.id && other.configurations.contains_key(&config.configuration)
+        });
+        errors.push(recipe_configuration_diagnostic(
+            file,
+            recipe,
+            "config.configuration",
+            if exists_elsewhere {
+                "recipe_config_cross_app_reference"
+            } else {
+                "recipe_config_document_unknown"
+            },
+            if exists_elsewhere {
+                "Recipe configuration references a document owned by another App Definition."
+            } else {
+                "Recipe configuration references an undeclared App Configuration document."
+            },
+        ));
+        return errors;
+    };
+    if config.target != configuration.target {
+        let target_is_other_app = app_definitions
+            .iter()
+            .any(|other| other.id != app.id && other.targets.contains_key(&config.target));
+        errors.push(recipe_configuration_diagnostic(
+            file,
+            recipe,
+            "config.target",
+            if target_is_other_app {
+                "recipe_config_cross_app_reference"
+            } else {
+                "recipe_config_target_mismatch"
+            },
+            if target_is_other_app {
+                "Recipe configuration references an App Target owned by another App Definition."
+            } else {
+                "Recipe configuration target must match the App Configuration document target."
+            },
+        ));
+    }
+
+    match &config.base {
+        crate::model::RecipeConfigurationBaseV1::Template(template_id) => {
+            if !configuration.templates.contains_key(template_id) {
+                let exists_elsewhere = app_definitions.iter().any(|other| {
+                    other.id != app.id
+                        && other.configurations.values().any(|other_configuration| {
+                            other_configuration.templates.contains_key(template_id)
+                        })
+                });
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    "config.base.template",
+                    if exists_elsewhere {
+                        "recipe_config_cross_app_reference"
+                    } else {
+                        "recipe_config_template_unknown"
+                    },
+                    if exists_elsewhere {
+                        "Recipe base template is owned by another App Definition."
+                    } else {
+                        "Recipe base template is not declared by its App Configuration document."
+                    },
+                ));
+            }
+        }
+        crate::model::RecipeConfigurationBaseV1::Input(input_id) => {
+            match recipe.inputs.get(input_id) {
+                Some(input)
+                    if matches!(input.type_name.as_str(), "file" | "path") && input.multiple =>
+                {
+                    errors.push(recipe_configuration_diagnostic(
+                        file,
+                        recipe,
+                        "config.base.input",
+                        "recipe_config_base_input_multiple_invalid",
+                        "Recipe configuration base input must select one file or path.",
+                    ));
+                }
+                Some(input) if matches!(input.type_name.as_str(), "file" | "path") => {}
+                Some(_) => errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    "config.base.input",
+                    "recipe_config_base_input_type_invalid",
+                    "Recipe configuration base input must have type file or path.",
+                )),
+                None => errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    "config.base.input",
+                    "recipe_config_base_input_unknown",
+                    "Recipe configuration base input is not declared by the Recipe.",
+                )),
+            }
+        }
+    }
+
+    for (property_id, exposure) in &config.properties {
+        let property_field = format!("config.properties[{property_id}]");
+        let Some(property) = configuration.managed_properties.get(property_id) else {
+            let exists_elsewhere = app_definitions.iter().any(|other| {
+                other.id != app.id
+                    && other.configurations.values().any(|other_configuration| {
+                        other_configuration
+                            .managed_properties
+                            .contains_key(property_id)
+                    })
+            });
+            errors.push(recipe_configuration_diagnostic(
+                file,
+                recipe,
+                &property_field,
+                if exists_elsewhere {
+                    "recipe_config_cross_app_reference"
+                } else {
+                    "recipe_config_property_unknown"
+                },
+                if exists_elsewhere {
+                    "Recipe exposed property is owned by another App Definition."
+                } else {
+                    "Recipe exposes a property that is not declared by its App Configuration document."
+                },
+            ));
+            continue;
+        };
+        match &exposure.override_operation {
+            Some(crate::model::RecipeConfigOverrideV1::Value(value))
+                if !authored_models::managed_property_value_is_valid(property, value) =>
+            {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &format!("{property_field}.override.value"),
+                    "recipe_config_override_invalid",
+                    "Recipe override must match the App Definition type and validators.",
+                ));
+            }
+            Some(crate::model::RecipeConfigOverrideV1::Clear) if !property.clearable => {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &format!("{property_field}.override.clear"),
+                    "recipe_config_override_invalid",
+                    "App Definition does not permit clearing this managed property.",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if !config.unmanaged_literals.is_empty()
+        && !matches!(
+            &config.base,
+            crate::model::RecipeConfigurationBaseV1::Input(_)
+        )
+    {
+        errors.push(recipe_configuration_diagnostic(
+            file,
+            recipe,
+            "config.unmanaged_literals",
+            "recipe_config_unmanaged_requires_input_base",
+            "Unmanaged template literals require a user-supplied base input.",
+        ));
+    }
+    let mut unmanaged_paths: Vec<Vec<String>> = Vec::new();
+    for (index, literal) in config.unmanaged_literals.iter().enumerate() {
+        let literal_field = format!("config.unmanaged_literals[{index}].path");
+        if !literal.type_name.matches(&literal.value) {
+            errors.push(recipe_configuration_diagnostic(
+                file,
+                recipe,
+                &format!("config.unmanaged_literals[{index}].value"),
+                "recipe_config_unmanaged_value_invalid",
+                "Unmanaged template literal value must match its declared type.",
+            ));
+        }
+        let Some(tokens) = authored_models::configuration_property_path_tokens(
+            configuration.format,
+            &literal.path,
+        ) else {
+            errors.push(recipe_configuration_diagnostic(
+                file,
+                recipe,
+                &literal_field,
+                "recipe_config_unmanaged_path_invalid",
+                "Unmanaged template literal path is invalid for the App Configuration format.",
+            ));
+            continue;
+        };
+        for (managed_id, managed) in &configuration.managed_properties {
+            if authored_models::configuration_paths_overlap(
+                configuration.format,
+                &literal.path,
+                &managed.path,
+            ) {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &literal_field,
+                    "recipe_config_unmanaged_path_collision",
+                    &format!(
+                        "Unmanaged template literal overlaps managed property {managed_id:?}."
+                    ),
+                ));
+            }
+        }
+        if unmanaged_paths
+            .iter()
+            .any(|previous| path_token_sets_overlap(previous, &tokens))
+        {
+            errors.push(recipe_configuration_diagnostic(
+                file,
+                recipe,
+                &literal_field,
+                "recipe_config_unmanaged_path_overlap",
+                "Unmanaged template literal paths may not duplicate or contain one another.",
+            ));
+        }
+        unmanaged_paths.push(tokens);
+    }
+    errors
+}
+
+fn recipe_configuration_diagnostic(
+    file: &str,
+    recipe: &Recipe,
+    field: &str,
+    code: &str,
+    message: &str,
+) -> Value {
+    diagnostic(
+        "error",
+        code,
+        message,
+        file,
+        Some("recipe"),
+        Some(&recipe.id),
+        Some(field),
+    )
+}
+
+fn path_token_sets_overlap(left: &[String], right: &[String]) -> bool {
+    let common = left.len().min(right.len());
+    left[..common] == right[..common]
+}
+
 fn permission_selection_diagnostics(
     file: &str,
     recipe: &Recipe,
@@ -1108,7 +1594,10 @@ fn single_quote(value: &str) -> String {
 #[cfg(test)]
 mod specification_regression_tests {
     use super::*;
-    use crate::model::{OrderedMap, RecipeProvides, Step, StepCondition, StepConstraints};
+    use crate::model::{
+        OrderedMap, RecipeConfigOverrideV1, RecipeConfigPropertyV1, RecipeConfigurationBaseV1,
+        RecipeProvides, Step, StepCondition, StepConstraints, UnmanagedTemplateLiteralV1,
+    };
     use std::{fs, path::Path};
     use tempfile::TempDir;
 
@@ -1148,12 +1637,294 @@ mod specification_regression_tests {
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts: OrderedMap::new(),
             artifact_groups: OrderedMap::new(),
             steps: vec![step],
         }
     }
 
+    fn configuration_app() -> AppDefinitionV1 {
+        authored_models::parse_app_definition_yaml(include_str!(
+            "../fixtures/configuration_contracts/app-key-value.yaml"
+        ))
+        .expect("configuration fixture should parse")
+    }
+    fn configuration_recipe() -> Recipe {
+        yaml::load_recipe_from_bytes(
+            include_bytes!("../fixtures/configuration_contracts/recipe-key-value.yaml"),
+            Path::new("recipes/configuration.yaml"),
+        )
+        .expect("Recipe configuration fixture should parse")
+    }
+    fn configuration_diagnostic_codes(recipe: &Recipe, apps: &[AppDefinitionV1]) -> Vec<String> {
+        validate_recipe_configuration("recipes/configuration.yaml", recipe, apps)
+            .iter()
+            .filter_map(|diagnostic| diagnostic.get("code")?.as_str().map(str::to_string))
+            .collect()
+    }
+    fn write_configuration_catalog(root: &Path) -> (PathBuf, PathBuf) {
+        let apps = root.join("apps");
+        let recipes = root.join("recipes");
+        fs::create_dir_all(apps.join("retroarch")).expect("App template directory");
+        fs::create_dir_all(&recipes).expect("Recipe directory");
+        fs::write(
+            apps.join("retroarch.yaml"),
+            include_bytes!("../fixtures/configuration_contracts/app-key-value.yaml"),
+        )
+        .expect("App Definition fixture");
+        fs::write(apps.join("retroarch/default.cfg"), "audio_driver=alsa\n")
+            .expect("template fixture");
+        let recipe_path = recipes.join("recipe.retroarch.config.yaml");
+        fs::write(
+            &recipe_path,
+            include_bytes!("../fixtures/configuration_contracts/recipe-key-value.yaml"),
+        )
+        .expect("Recipe fixture");
+        (apps, recipe_path)
+    }
+    #[test]
+    fn configuration_catalog_validation_and_projection_keep_typed_contracts() {
+        let root = TempDir::new().expect("temporary authored root");
+        let (_, recipe_path) = write_configuration_catalog(root.path());
+        let recipe = configuration_recipe();
+        let diagnostics = validate_recipe_with_catalog(
+            "recipes/recipe.retroarch.config.yaml",
+            &recipe,
+            &recipe_path,
+            root.path(),
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "valid contract diagnostics: {diagnostics:?}"
+        );
+
+        let projection = project_app_catalog(Some(root.path()));
+        let projected = projection.to_dto();
+        assert_eq!(projected["status"], "ready");
+        assert!(projected["apps"][0]["configurations"].is_array());
+        assert!(projected["apps"][0]["configurations"][0]["templates"].is_array());
+        assert!(projected["apps"][0]["configurations"][0]["managedProperties"].is_array());
+        assert_eq!(
+            projected["apps"][0]["configurations"][0]["format"],
+            "key_value/v1"
+        );
+        assert_eq!(
+            projected["apps"][0]["configurations"][0]["managedProperties"][0]["path"],
+            json!(["audio_driver"])
+        );
+        assert_eq!(
+            projected["apps"][0]["configurations"][0]["managedProperties"][1]["validators"]
+                ["minLength"],
+            1
+        );
+        assert_eq!(
+            projected["apps"][0]["configurations"][0]["managedProperties"][2]["clearable"],
+            true
+        );
+    }
+
+    #[test]
+    fn recipe_configuration_base_rejects_multiple_file_inputs() {
+        let app = configuration_app();
+        let mut recipe = configuration_recipe();
+        recipe
+            .inputs
+            .get_mut("user_template")
+            .expect("fixture declares base input")
+            .multiple = true;
+
+        let diagnostics =
+            validate_recipe_configuration("recipes/configuration.yaml", &recipe, &[app]);
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic["code"] == "recipe_config_base_input_multiple_invalid"
+        }));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configuration_catalog_rejects_symlinked_template_files() {
+        let root = TempDir::new().expect("temporary authored root");
+        let (apps, _) = write_configuration_catalog(root.path());
+        let template = apps.join("retroarch/default.cfg");
+        fs::remove_file(&template).expect("remove regular template");
+        let external = root.path().join("external.cfg");
+        fs::write(&external, "audio_driver=alsa\n").expect("external template target");
+        std::os::unix::fs::symlink(&external, &template).expect("symlink template path");
+        let projection = project_app_catalog(Some(root.path()));
+        assert_eq!(projection.to_dto()["status"], "invalid");
+        assert!(projection.to_dto()["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "app_configuration_template_path_unsafe"));
+    }
+    #[test]
+    fn recipe_configuration_accepts_valid_app_owned_exposure_without_override() {
+        let app = configuration_app();
+        let recipe = configuration_recipe();
+        assert!(configuration_diagnostic_codes(&recipe, &[app]).is_empty());
+        assert!(recipe.config.as_ref().unwrap().properties["audio_driver"]
+            .override_operation
+            .is_none());
+    }
+    #[test]
+    fn recipe_configuration_rejects_cross_app_documents_templates_and_properties() {
+        let app = configuration_app();
+        let mut other_app = app.clone();
+        other_app.id = "other_app".to_string();
+        for configuration in other_app.configurations.values_mut() {
+            for template in configuration.templates.values_mut() {
+                template.path = template.path.replacen("retroarch/", "other_app/", 1);
+            }
+        }
+        let mut foreign_configuration = other_app.configurations["main"].clone();
+        foreign_configuration.templates.insert(
+            "foreign_template".to_string(),
+            authored_models::AppConfigurationTemplateV1 {
+                path: "other_app/foreign.cfg".to_string(),
+            },
+        );
+        let mut foreign_property = foreign_configuration.managed_properties["audio_driver"].clone();
+        foreign_property.path = vec!["foreign_only".to_string()];
+        foreign_configuration
+            .managed_properties
+            .insert("foreign_only".to_string(), foreign_property);
+        other_app
+            .configurations
+            .insert("foreign_document".to_string(), foreign_configuration);
+
+        let mut recipe = configuration_recipe();
+        recipe.config.as_mut().unwrap().configuration = "foreign_document".to_string();
+        assert!(
+            configuration_diagnostic_codes(&recipe, &[app.clone(), other_app.clone()])
+                .contains(&"recipe_config_cross_app_reference".to_string())
+        );
+
+        let mut recipe = configuration_recipe();
+        recipe.config.as_mut().unwrap().base =
+            RecipeConfigurationBaseV1::Template("foreign_template".to_string());
+        assert!(
+            configuration_diagnostic_codes(&recipe, &[app.clone(), other_app.clone()])
+                .contains(&"recipe_config_cross_app_reference".to_string())
+        );
+
+        let mut recipe = configuration_recipe();
+        recipe.config.as_mut().unwrap().properties.insert(
+            "foreign_only".to_string(),
+            RecipeConfigPropertyV1 {
+                label: None,
+                description: None,
+                required: false,
+                advanced: false,
+                override_operation: None,
+            },
+        );
+        assert!(configuration_diagnostic_codes(&recipe, &[app, other_app])
+            .contains(&"recipe_config_cross_app_reference".to_string()));
+    }
+    #[test]
+    fn recipe_configuration_preserves_coercion_rejection_and_reset_intent_without_app_default() {
+        let app = configuration_app();
+        let mut recipe = configuration_recipe();
+        recipe
+            .config
+            .as_mut()
+            .unwrap()
+            .properties
+            .get_mut("audio_driver")
+            .unwrap()
+            .override_operation = Some(RecipeConfigOverrideV1::Value(json!(42)));
+        assert!(
+            configuration_diagnostic_codes(&recipe, std::slice::from_ref(&app))
+                .contains(&"recipe_config_override_invalid".to_string())
+        );
+
+        let mut app_without_default = app;
+        app_without_default
+            .configurations
+            .get_mut("main")
+            .unwrap()
+            .managed_properties
+            .get_mut("frame_limit")
+            .unwrap()
+            .default = None;
+        let recipe = configuration_recipe();
+        assert!(configuration_diagnostic_codes(&recipe, &[app_without_default]).is_empty());
+        assert!(matches!(
+            recipe.config.as_ref().unwrap().properties["frame_limit"].override_operation,
+            Some(RecipeConfigOverrideV1::Reset)
+        ));
+    }
+
+    #[test]
+    fn recipe_clear_requires_app_owned_clearability() {
+        let app = configuration_app();
+        let recipe = configuration_recipe();
+        assert!(configuration_diagnostic_codes(&recipe, std::slice::from_ref(&app)).is_empty());
+
+        let mut forbidden = recipe;
+        forbidden
+            .config
+            .as_mut()
+            .unwrap()
+            .properties
+            .get_mut("audio_driver")
+            .unwrap()
+            .override_operation = Some(RecipeConfigOverrideV1::Clear);
+        assert!(configuration_diagnostic_codes(&forbidden, &[app])
+            .contains(&"recipe_config_override_invalid".to_string()));
+    }
+    #[test]
+    fn unmanaged_literals_reject_managed_collisions_and_unsafe_paths() {
+        let app = configuration_app();
+        let mut recipe = configuration_recipe();
+        recipe
+            .config
+            .as_mut()
+            .unwrap()
+            .unmanaged_literals
+            .push(UnmanagedTemplateLiteralV1 {
+                path: vec!["audio_driver".to_string()],
+                type_name: authored_models::UnmanagedTemplateLiteralTypeV1::String,
+                value: json!("manual"),
+            });
+        assert!(
+            configuration_diagnostic_codes(&recipe, std::slice::from_ref(&app))
+                .contains(&"recipe_config_unmanaged_path_collision".to_string())
+        );
+
+        let mut recipe = configuration_recipe();
+        recipe.config.as_mut().unwrap().unmanaged_literals[0].path = vec!["bad=key".to_string()];
+        assert!(configuration_diagnostic_codes(&recipe, &[app])
+            .contains(&"recipe_config_unmanaged_path_invalid".to_string()));
+    }
+    #[test]
+    fn json_unmanaged_literal_collision_uses_literal_path_segments() {
+        let app = authored_models::parse_app_definition_yaml(include_str!(
+            "../fixtures/configuration_contracts/app-nested-json.yaml"
+        ))
+        .expect("nested JSON App Definition fixture");
+        let mut recipe = yaml::load_recipe_from_bytes(
+            include_bytes!("../fixtures/configuration_contracts/recipe-nested-json.yaml"),
+            Path::new("recipes/json-configuration.yaml"),
+        )
+        .expect("nested JSON Recipe fixture");
+        let config = recipe.config.as_mut().unwrap();
+        config.base = RecipeConfigurationBaseV1::Input("user_template".to_string());
+        config.unmanaged_literals.push(UnmanagedTemplateLiteralV1 {
+            path: vec![
+                "ui".to_string(),
+                "overlays".to_string(),
+                "primary".to_string(),
+                "path".to_string(),
+            ],
+            type_name: authored_models::UnmanagedTemplateLiteralTypeV1::String,
+            value: json!("manual"),
+        });
+        assert!(configuration_diagnostic_codes(&recipe, &[app])
+            .contains(&"recipe_config_unmanaged_path_collision".to_string()));
+    }
     fn condition(type_name: &str, path: Value) -> StepCondition {
         let mut params = OrderedMap::new();
         params.insert("path".to_string(), path);

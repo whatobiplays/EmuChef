@@ -5200,6 +5200,7 @@ fn artifact_selection_input(
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts: artifact_defs
                 .into_iter()
                 .map(|(id, url)| {
@@ -5278,6 +5279,7 @@ fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts: vec![(
                 "app_apk".to_string(),
                 RecipeArtifact::RemoteFile(RemoteFileArtifact {
@@ -5381,6 +5383,7 @@ fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts: OrderedMap::new(),
             artifact_groups: OrderedMap::new(),
             steps,
@@ -5488,6 +5491,7 @@ fn recipe_expansion_recipe(id: &str, recipe_dependencies: Vec<&str>) -> Recipe {
             features: Vec::new(),
         },
         inputs: OrderedMap::new(),
+        config: None,
         artifacts: OrderedMap::new(),
         artifact_groups: OrderedMap::new(),
         steps: vec![recipe_expansion_wait_step()],
@@ -5558,6 +5562,7 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
                 features: Vec::new(),
             },
             inputs: OrderedMap::new(),
+            config: None,
             artifacts: vec![
                 (
                     "app_apk".to_string(),
@@ -5630,6 +5635,7 @@ fn param_contract_app_definition() -> crate::authored_models::AppDefinitionV1 {
             elevated: None,
         }),
         targets: Default::default(),
+        configurations: Default::default(),
         launcher_activity: None,
         metadata: Default::default(),
     }
@@ -7955,6 +7961,7 @@ fn review_snapshot_recipe() -> Recipe {
             features: Vec::new(),
         },
         inputs,
+        config: None,
         artifacts: OrderedMap::new(),
         artifact_groups: OrderedMap::new(),
         steps: vec![recipe_expansion_wait_step()],

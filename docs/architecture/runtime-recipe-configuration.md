@@ -522,8 +522,77 @@ The runtime falls back to step name, humanized step type, then step id. Only
 representative checked-in recipes need authored notes; deterministic fallback
 keeps the rest of the catalog usable without a bulk migration.
 
-## Proposed future schema work — not current behavior
+## 14. App-owned configuration contracts
+
+App Definitions own the format and managed-property contract for each named
+configuration document. Schema v1 supports `key_value/v1` and `json/v1`. Each
+document references a same-App file Target and may name template files below
+`authored/apps/<app-id>/`. The catalog checks template paths lexically, rejects
+symlinks, and requires each declared template to resolve to a regular file
+inside the owning App directory. It does not read template contents during
+T07 authoring.
+
+Managed property IDs are App-scoped. Each property declares a format-specific
+path, one scalar value type (`string`, `integer`, `number`, or `boolean`), an
+optional App Definition default, compatible validators, and an App-owned
+`clearable` flag that defaults to false. Numeric bounds apply to numeric
+properties. `min_length` and `max_length` apply to strings, and allowed values
+must have the declared type. Defaults, Recipe values, and validators reject
+null and type coercion. Integer bounds are compared as integers. Equal or
+prefix-overlap paths are invalid.
+
+For `key_value/v1`, a property path is one non-empty key without `=`, `/`, a
+backslash, control characters, or surrounding whitespace. For `json/v1`, a
+property path is a non-empty list of literal object-member name segments. Each
+segment must be non-empty and contain no control characters. JSON Pointer
+escaping and array-index addressing are unsupported. `/`, `~`, `.`, and `..`
+are ordinary member-name characters and do not navigate the filesystem. Path
+collisions are checked by comparing segment lists, including nested prefixes.
+
+A Recipe's optional `config` section references one App Definition, one of its
+configuration IDs, and its matching Target. `base` contains exactly one
+template ID or Recipe file-input ID. A file-input base must refer to one
+`file` or `path` input with `multiple: false`. The `properties` map defines
+which App-managed properties the Recipe exposes and may carry presentation
+metadata. Exposure does not modify a value. Recipe properties have no local
+default; the App Definition owns intrinsic defaults. An exposed property may
+omit `override`. When present, `override` contains exactly one operation: a
+non-null typed `value`, `clear: true`, or `reset: true`. An empty value remains
+explicit. `clear` is valid only when the App Definition marks the property
+clearable. `reset` records intent for T11 to recompute the applicable
+recommendation; T07 neither requires an App Definition default nor resolves
+device recommendations.
+
+Setting provenance is explicit user choice, exact-model recommendation, brand
+recommendation, then device-independent default. T11 resolves applicability
+and ambiguity in that order. An invalid choice or ambiguous match is an error,
+not a silent fallback.
+
+Before saving an App Definition, Rust checks each dependent Recipe against its
+configuration and target declarations. It refuses the save if an edit makes a
+Recipe configuration reference invalid.
+
+`unmanaged_literals` admits explicit user-template literals separately from
+managed property overrides. Each entry has a format-specific path, declared
+type, and non-null value. The list requires a Recipe file input as its base.
+Paths that equal or overlap managed properties or other unmanaged entries
+fail validation. Unknown fields in authored schemas fail closed, and the
+Config Editor refuses a document it cannot parse without preserving its
+source bytes.
+
+Inline literals are limited to 64 KiB each and 2 MiB in aggregate per authored
+configuration document. Each App Definition configuration and each Recipe
+`config` block is bounded independently. String sizes use UTF-8 bytes; other
+JSON values use compact JSON serialization size. T07 checks only inline bytes
+available during authoring. T08 enforces the limits when it reads external App
+templates and Recipe file inputs before rendering. T09 enforces the bound for
+existing-device documents and final per-destination configuration documents,
+while preserving safely parsed untouched properties. T07 defines no renderer,
+merge behavior, or device-write path. The typed existing-configuration DTO
+retains unknown properties for the T09 boundary.
+
+## Future runtime work
 Normative future intent also includes device-profile OEM runner capability, typed privileged-action parity, per-stage reviewed effective backup mode, and separate immutable per-invocation start/result evidence. See [EmuChef requirements](../product/emuchef-requirements.md) and [ADR 0011](../adr/0011-oem-assisted-privileged-execution.md). Existing schema and persisted saved configurations do not yet express that authority.
 
 
-The [EmuChef product realignment proposal](../product/emuchef-product-realignment-proposal.md) assigns T05/T05b portable logical Setup Locations, T07 App Definition-owned config semantics and app Recipe `config` exposure, T08 template rendering, and T09 per-destination composition. Current schema-v1 persisted documents, directly bound `<recipe-id>/<input-id>` values, and input precedence described above remain the **implemented** contract until an explicitly approved and tested breaking pre-1.0 cutover occurs. Existing saved test configurations may be rejected after that cutover; new fields must not be silently dropped by Config Editor load/save, CLI, protocol, or catalog tooling.
+The [EmuChef product realignment proposal](../product/emuchef-product-realignment-proposal.md) assigns T05/T05b portable logical Setup Locations, T08 template rendering, and T09 per-destination composition. App-owned configuration schemas and Recipe exposure are part of the current authored contract. The user-configuration documents and input precedence described above remain the implemented runtime configuration contract until an explicitly approved and tested breaking pre-1.0 cutover occurs. Config Editor, CLI, protocol, and catalog tools must preserve fields they understand or refuse before changing source bytes.

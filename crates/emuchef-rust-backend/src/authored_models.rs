@@ -5,6 +5,7 @@
 //! Fixed schema objects reject unknown fields. Deliberately extensible mappings
 //! retain JSON-compatible nested values and insertion order.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -19,9 +20,25 @@ use serde_json::Value;
 pub const APP_DEFINITION_KIND: &str = "app_definition";
 pub const DEVICE_PROFILE_KIND: &str = "device_profile";
 pub const SCHEMA_VERSION_V1: i64 = 1;
+pub const MAX_INLINE_CONFIG_LITERAL_BYTES: usize = 64 * 1024;
+pub const MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT: usize = 2 * 1024 * 1024;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// An insertion-ordered, string-keyed mapping of nested JSON-compatible data.
 pub type OrderedValueMap = IndexMap<String, Value>;
+
+fn deserialize_non_null_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| de::Error::custom("field must be omitted instead of set to null"))
+}
 
 /// One deterministic semantic-validation diagnostic for an authored model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -136,6 +153,12 @@ pub struct AppDefinitionV1 {
         deserialize_with = "deserialize_named_registry"
     )]
     pub targets: IndexMap<String, AppTargetV1>,
+    #[serde(
+        default,
+        skip_serializing_if = "IndexMap::is_empty",
+        deserialize_with = "deserialize_named_registry"
+    )]
+    pub configurations: IndexMap<String, AppConfigurationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher_activity: Option<String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
@@ -448,6 +471,186 @@ pub enum AppTargetLocation {
     AbsoluteDevicePath,
 }
 
+/// A supported format for one app-owned configuration document.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AppConfigurationFormatV1 {
+    #[serde(rename = "key_value/v1")]
+    KeyValueV1,
+    #[serde(rename = "json/v1")]
+    JsonV1,
+}
+
+impl AppConfigurationFormatV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KeyValueV1 => "key_value/v1",
+            Self::JsonV1 => "json/v1",
+        }
+    }
+}
+
+/// Value kinds accepted by managed properties and unmanaged template literals.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigValueTypeV1 {
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+
+impl ConfigValueTypeV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+        }
+    }
+
+    pub fn matches(self, value: &Value) -> bool {
+        match self {
+            Self::String => value.is_string(),
+            Self::Integer => value
+                .as_number()
+                .is_some_and(|number| number.is_i64() || number.is_u64()),
+            Self::Number => value.is_number(),
+            Self::Boolean => value.is_boolean(),
+        }
+    }
+}
+
+/// Scalar and structured value types permitted for explicit unmanaged literals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnmanagedTemplateLiteralTypeV1 {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    Object,
+    Array,
+}
+
+impl UnmanagedTemplateLiteralTypeV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Object => "object",
+            Self::Array => "array",
+        }
+    }
+
+    pub fn matches(self, value: &Value) -> bool {
+        match self {
+            Self::String => value.is_string(),
+            Self::Integer => value
+                .as_number()
+                .is_some_and(|number| number.is_i64() || number.is_u64()),
+            Self::Number => value.is_number(),
+            Self::Boolean => value.is_boolean(),
+            Self::Object => value.is_object(),
+            Self::Array => value.is_array(),
+        }
+    }
+}
+
+/// One configuration document owned by an App Definition.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfigurationV1 {
+    pub format: AppConfigurationFormatV1,
+    pub target: String,
+    #[serde(
+        default,
+        skip_serializing_if = "IndexMap::is_empty",
+        deserialize_with = "deserialize_named_registry"
+    )]
+    pub templates: IndexMap<String, AppConfigurationTemplateV1>,
+    #[serde(
+        default,
+        skip_serializing_if = "IndexMap::is_empty",
+        deserialize_with = "deserialize_named_registry"
+    )]
+    pub managed_properties: IndexMap<String, AppManagedPropertyV1>,
+}
+
+/// A reusable configuration file scoped to its owning App Definition.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfigurationTemplateV1 {
+    /// Path relative to `authored/apps`, under the directory named by the app ID.
+    pub path: String,
+}
+
+/// App-owned identity, location, type and constraints for one managed setting.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppManagedPropertyV1 {
+    /// Format-specific sequence of literal property-name segments.
+    pub path: Vec<String>,
+    #[serde(rename = "type")]
+    pub type_name: ConfigValueTypeV1,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clearable: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_non_null_option"
+    )]
+    pub default: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "AppManagedPropertyValidatorsV1::is_empty"
+    )]
+    pub validators: AppManagedPropertyValidatorsV1,
+}
+
+/// Constraints applied to defaults and Recipe values for a managed property.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AppManagedPropertyValidatorsV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_values: Vec<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_non_null_option"
+    )]
+    pub minimum: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_non_null_option"
+    )]
+    pub maximum: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_non_null_option"
+    )]
+    pub min_length: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_non_null_option"
+    )]
+    pub max_length: Option<usize>,
+}
+
+impl AppManagedPropertyValidatorsV1 {
+    fn is_empty(&self) -> bool {
+        self.allowed_values.is_empty()
+            && self.minimum.is_none()
+            && self.maximum.is_none()
+            && self.min_length.is_none()
+            && self.max_length.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceProfileV1 {
@@ -512,11 +715,42 @@ pub fn load_app_definition(path: impl AsRef<Path>) -> Result<AppDefinitionV1, Au
 }
 
 pub fn parse_app_definition_yaml(source: &str) -> Result<AppDefinitionV1, AuthoredModelError> {
-    serde_yaml::from_str(source).map_err(|_| {
+    let invalid_yaml = || {
         AuthoredModelError::new(
             "app_definition_yaml_invalid",
             "The app definition is not valid schema-v1 YAML.",
         )
+    };
+    crate::yaml::validate_unique_yaml_keys(source).map_err(|_| invalid_yaml())?;
+    let value: serde_yaml::Value = serde_yaml::from_str(source).map_err(|_| invalid_yaml())?;
+    if !app_configuration_paths_have_string_segments(&value) {
+        return Err(invalid_yaml());
+    }
+    serde_yaml::from_value(value).map_err(|_| invalid_yaml())
+}
+
+// Check raw YAML node types before serde can coerce scalar values into strings.
+fn app_configuration_paths_have_string_segments(value: &serde_yaml::Value) -> bool {
+    let Some(configurations) = value
+        .get("configurations")
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return true;
+    };
+    configurations.values().all(|configuration| {
+        let Some(properties) = configuration
+            .get("managed_properties")
+            .and_then(serde_yaml::Value::as_mapping)
+        else {
+            return true;
+        };
+        properties.values().all(|property| {
+            let Some(path) = property.get("path") else {
+                return true;
+            };
+            path.as_sequence()
+                .is_some_and(|segments| segments.iter().all(serde_yaml::Value::is_string))
+        })
     })
 }
 
@@ -595,9 +829,470 @@ pub fn validate_app_definition(value: &AppDefinitionV1) -> Vec<AuthoredModelDiag
     validate_artifacts(&mut diagnostics, &value.artifacts);
     validate_permission_sets(&mut diagnostics, value.permission_sets.as_ref());
     validate_targets(&mut diagnostics, &value.targets);
+    validate_configurations(
+        &mut diagnostics,
+        &value.id,
+        &value.targets,
+        &value.configurations,
+    );
     validate_launcher_activity(&mut diagnostics, value.launcher_activity.as_deref());
     validate_metadata(&mut diagnostics, &value.metadata);
     diagnostics
+}
+
+fn validate_configurations(
+    diagnostics: &mut Vec<AuthoredModelDiagnostic>,
+    app_id: &str,
+    targets: &IndexMap<String, AppTargetV1>,
+    configurations: &IndexMap<String, AppConfigurationV1>,
+) {
+    for (configuration_id, configuration) in configurations {
+        let mut total_literal_bytes = 0usize;
+        let field = format!("configurations[{configuration_id}]");
+        if !is_valid_identifier(configuration_id) {
+            diagnostics.push(AuthoredModelDiagnostic::new(
+                "app_configuration_id_invalid",
+                "Configuration IDs must contain lowercase alphanumeric segments separated by '.', '_', or '-'.",
+                &field,
+            ));
+        }
+        match targets.get(&configuration.target) {
+            Some(target) if target.kind == AppTargetKind::File => {}
+            _ => diagnostics.push(AuthoredModelDiagnostic::new(
+                "app_configuration_target_invalid",
+                "A configuration document must reference a declared file App Target.",
+                format!("{field}.target"),
+            )),
+        }
+
+        for (template_id, template) in &configuration.templates {
+            let template_field = format!("{field}.templates[{template_id}]");
+            if !is_valid_identifier(template_id)
+                || !is_valid_app_configuration_template_path(app_id, &template.path)
+            {
+                diagnostics.push(AuthoredModelDiagnostic::new(
+                    "app_configuration_template_path_invalid",
+                    "Template paths must be relative slash-separated files under the owning app ID directory in authored/apps.",
+                    format!("{template_field}.path"),
+                ));
+            }
+        }
+
+        let mut paths: Vec<(String, Vec<String>)> = Vec::new();
+        for (property_id, property) in &configuration.managed_properties {
+            let property_field = format!("{field}.managed_properties[{property_id}]");
+            if !is_valid_identifier(property_id) {
+                diagnostics.push(AuthoredModelDiagnostic::new(
+                    "app_config_property_id_invalid",
+                    "Managed property IDs must contain lowercase alphanumeric segments separated by '.', '_', or '-'.",
+                    &property_field,
+                ));
+            }
+            match configuration_property_path_tokens(configuration.format, &property.path) {
+                Some(tokens) => {
+                    for (previous_id, previous_tokens) in &paths {
+                        if path_tokens_overlap(previous_tokens, &tokens) {
+                            diagnostics.push(AuthoredModelDiagnostic::new(
+                                "app_config_property_path_overlap",
+                                format!("Managed property path overlaps property {previous_id:?}."),
+                                format!("{property_field}.path"),
+                            ));
+                        }
+                    }
+                    paths.push((property_id.clone(), tokens));
+                }
+                None => diagnostics.push(AuthoredModelDiagnostic::new(
+                    "app_config_property_path_invalid",
+                    "Managed property path is invalid for the declared configuration format.",
+                    format!("{property_field}.path"),
+                )),
+            }
+
+            if let Some(default) = &property.default {
+                record_config_literal(
+                    diagnostics,
+                    &format!("{property_field}.default"),
+                    default,
+                    &mut total_literal_bytes,
+                    "app_config_literal_too_large",
+                );
+                if !managed_property_value_is_valid(property, default) {
+                    diagnostics.push(AuthoredModelDiagnostic::new(
+                        "app_config_default_invalid",
+                        "Managed property default must match its declared type and validators.",
+                        format!("{property_field}.default"),
+                    ));
+                }
+            }
+
+            let validators = &property.validators;
+            for (index, allowed) in validators.allowed_values.iter().enumerate() {
+                record_config_literal(
+                    diagnostics,
+                    &format!("{property_field}.validators.allowed_values[{index}]"),
+                    allowed,
+                    &mut total_literal_bytes,
+                    "app_config_literal_too_large",
+                );
+                if !property.type_name.matches(allowed)
+                    || validators.allowed_values[..index].iter().any(|previous| {
+                        managed_property_values_equal(property.type_name, previous, allowed)
+                            .is_none_or(|equal| equal)
+                    })
+                    || !managed_property_value_is_valid(property, allowed)
+                {
+                    diagnostics.push(AuthoredModelDiagnostic::new(
+                        "app_config_validator_invalid",
+                    "Each allowed value must be unique, non-null, match the managed property type, and satisfy its minimum, maximum, min_length, and max_length constraints.",
+                        format!("{property_field}.validators.allowed_values[{index}]"),
+                    ));
+                }
+            }
+            for (bound_name, bound) in [
+                ("minimum", validators.minimum.as_ref()),
+                ("maximum", validators.maximum.as_ref()),
+            ] {
+                if let Some(bound) = bound {
+                    record_config_literal(
+                        diagnostics,
+                        &format!("{property_field}.validators.{bound_name}"),
+                        bound,
+                        &mut total_literal_bytes,
+                        "app_config_literal_too_large",
+                    );
+                    let bound_matches_type =
+                        managed_numeric_bound_matches_type(property.type_name, bound);
+                    if !bound_matches_type {
+                        diagnostics.push(AuthoredModelDiagnostic::new(
+                            "app_config_validator_invalid",
+                            "Numeric bounds require a numeric managed property and numeric values.",
+                            format!("{property_field}.validators.{bound_name}"),
+                        ));
+                    }
+                }
+            }
+            if let (Some(minimum), Some(maximum)) =
+                (validators.minimum.as_ref(), validators.maximum.as_ref())
+            {
+                let bounds_match_type =
+                    managed_numeric_bound_matches_type(property.type_name, minimum)
+                        && managed_numeric_bound_matches_type(property.type_name, maximum);
+                if bounds_match_type
+                    && compare_managed_numeric_values(property.type_name, minimum, maximum)
+                        .is_none_or(|ordering| ordering == Ordering::Greater)
+                {
+                    diagnostics.push(AuthoredModelDiagnostic::new(
+                        "app_config_validator_invalid",
+                        "Minimum must not exceed maximum.",
+                        format!("{property_field}.validators"),
+                    ));
+                }
+            }
+            if validators.min_length.is_some() || validators.max_length.is_some() {
+                if property.type_name != ConfigValueTypeV1::String {
+                    diagnostics.push(AuthoredModelDiagnostic::new(
+                        "app_config_validator_invalid",
+                        "min_length and max_length are supported only for string properties.",
+                        format!("{property_field}.validators"),
+                    ));
+                }
+                if matches!((validators.min_length, validators.max_length),
+                    (Some(minimum), Some(maximum)) if minimum > maximum)
+                {
+                    diagnostics.push(AuthoredModelDiagnostic::new(
+                        "app_config_validator_invalid",
+                        "min_length must not exceed max_length.",
+                        format!("{property_field}.validators"),
+                    ));
+                }
+            }
+        }
+        if total_literal_bytes > MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT {
+            diagnostics.push(AuthoredModelDiagnostic::new(
+                "app_config_literal_budget_exceeded",
+                "Inline configuration literals in one configuration document must total no more than 2 MiB.",
+                &field,
+            ));
+        }
+    }
+}
+
+/// Return path tokens for one supported configuration format.
+pub fn configuration_property_path_tokens(
+    format: AppConfigurationFormatV1,
+    path: &[String],
+) -> Option<Vec<String>> {
+    if path.is_empty()
+        || path
+            .iter()
+            .any(|segment| segment.is_empty() || segment.chars().any(char::is_control))
+    {
+        return None;
+    }
+    match format {
+        AppConfigurationFormatV1::KeyValueV1 => {
+            let [key] = path else {
+                return None;
+            };
+            if key.trim() != key
+                || key
+                    .chars()
+                    .any(|character| matches!(character, '=' | '/' | '\\'))
+            {
+                return None;
+            }
+            Some(path.to_vec())
+        }
+        // JSON paths identify object members by literal key segments. Array
+        // indexing and pointer escape decoding are outside this schema.
+        AppConfigurationFormatV1::JsonV1 => Some(path.to_vec()),
+    }
+}
+
+/// Check whether two format-specific property paths are equal or nested.
+pub fn configuration_paths_overlap(
+    format: AppConfigurationFormatV1,
+    left: &[String],
+    right: &[String],
+) -> bool {
+    configuration_property_path_tokens(format, left)
+        .zip(configuration_property_path_tokens(format, right))
+        .is_some_and(|(left, right)| path_tokens_overlap(&left, &right))
+}
+
+/// Check the lexical ownership boundary for an App Definition template pointer.
+pub fn is_valid_app_configuration_template_path(app_id: &str, path: &str) -> bool {
+    if path.contains('\\') || path.contains(':') || path.chars().any(char::is_control) {
+        return false;
+    }
+    let components = path.split('/').collect::<Vec<_>>();
+    components.len() >= 2
+        && components.first() == Some(&app_id)
+        && components
+            .iter()
+            .all(|part| !part.is_empty() && *part != "." && *part != "..")
+}
+
+/// Compare integer JSON numbers without converting them to floating point.
+fn compare_integer_values(left: &Value, right: &Value) -> Option<Ordering> {
+    let left = left.as_number()?;
+    let right = right.as_number()?;
+    match (left.as_i64(), left.as_u64(), right.as_i64(), right.as_u64()) {
+        (Some(left), _, Some(right), _) => Some(left.cmp(&right)),
+        (Some(left), _, None, Some(right)) if left >= 0 => Some((left as u64).cmp(&right)),
+        (Some(_), _, None, Some(_)) => Some(Ordering::Less),
+        (None, Some(left), Some(right), _) if right >= 0 => Some(left.cmp(&(right as u64))),
+        (None, Some(_), Some(_), _) => Some(Ordering::Greater),
+        (None, Some(left), None, Some(right)) => Some(left.cmp(&right)),
+        _ => None,
+    }
+}
+
+/// Compare JSON numbers without converting integers to floating point.
+fn compare_number_values(left: &Value, right: &Value) -> Option<Ordering> {
+    let left_number = left.as_number()?;
+    let right_number = right.as_number()?;
+    let left_is_float = left_number.is_f64();
+    let right_is_float = right_number.is_f64();
+
+    match (left_is_float, right_is_float) {
+        (false, false) => compare_integer_values(left, right),
+        (false, true) => compare_integer_and_float(left_number, right_number),
+        (true, false) => {
+            compare_integer_and_float(right_number, left_number).map(|ordering| ordering.reverse())
+        }
+        (true, true) => left_number.as_f64()?.partial_cmp(&right_number.as_f64()?),
+    }
+}
+
+/// Compare an unsigned integer with a finite, nonnegative `f64` exactly.
+fn compare_unsigned_integer_to_nonnegative_float(integer: u64, float: f64) -> Ordering {
+    let bits = float.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (significand, binary_exponent) = if exponent_bits == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1_u64 << 52), exponent_bits - 1023 - 52)
+    };
+
+    if significand == 0 {
+        return integer.cmp(&0);
+    }
+
+    if binary_exponent >= 0 {
+        let significand_bits = (u64::BITS - significand.leading_zeros()) as i32;
+        if significand_bits + binary_exponent > u64::BITS as i32 {
+            return Ordering::Less;
+        }
+        let float_integer = (significand as u128) << binary_exponent as u32;
+        return integer.cmp(&(float_integer as u64));
+    }
+
+    let fractional_bits = (-binary_exponent) as u32;
+    if fractional_bits >= u64::BITS {
+        return if integer == 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let integral_part = significand >> fractional_bits;
+    match integer.cmp(&integral_part) {
+        Ordering::Equal if significand & ((1_u64 << fractional_bits) - 1) != 0 => Ordering::Less,
+        ordering => ordering,
+    }
+}
+
+fn compare_signed_integer_to_float(integer: i64, float: f64) -> Ordering {
+    if integer < 0 {
+        if float >= 0.0 {
+            Ordering::Less
+        } else {
+            compare_unsigned_integer_to_nonnegative_float(integer.unsigned_abs(), -float).reverse()
+        }
+    } else if float < 0.0 {
+        Ordering::Greater
+    } else {
+        compare_unsigned_integer_to_nonnegative_float(integer as u64, float)
+    }
+}
+
+fn compare_unsigned_integer_to_float(integer: u64, float: f64) -> Ordering {
+    if float < 0.0 {
+        Ordering::Greater
+    } else {
+        compare_unsigned_integer_to_nonnegative_float(integer, float)
+    }
+}
+
+fn compare_integer_and_float(
+    integer: &serde_json::Number,
+    float: &serde_json::Number,
+) -> Option<Ordering> {
+    let float = float.as_f64()?;
+    if !float.is_finite() {
+        return None;
+    }
+
+    if let Some(integer) = integer.as_i64() {
+        Some(compare_signed_integer_to_float(integer, float))
+    } else {
+        Some(compare_unsigned_integer_to_float(integer.as_u64()?, float))
+    }
+}
+
+fn compare_managed_numeric_values(
+    type_name: ConfigValueTypeV1,
+    left: &Value,
+    right: &Value,
+) -> Option<Ordering> {
+    match type_name {
+        ConfigValueTypeV1::Integer => compare_integer_values(left, right),
+        ConfigValueTypeV1::Number => compare_number_values(left, right),
+        _ => None,
+    }
+}
+
+fn managed_numeric_bound_matches_type(type_name: ConfigValueTypeV1, bound: &Value) -> bool {
+    match type_name {
+        ConfigValueTypeV1::Integer => bound
+            .as_number()
+            .is_some_and(|number| number.is_i64() || number.is_u64()),
+        ConfigValueTypeV1::Number => bound.is_number(),
+        _ => false,
+    }
+}
+
+fn managed_property_values_equal(
+    type_name: ConfigValueTypeV1,
+    left: &Value,
+    right: &Value,
+) -> Option<bool> {
+    match type_name {
+        ConfigValueTypeV1::Integer | ConfigValueTypeV1::Number => {
+            compare_managed_numeric_values(type_name, left, right)
+                .map(|ordering| ordering == Ordering::Equal)
+        }
+        _ => Some(left == right),
+    }
+}
+
+/// Check that a managed value matches its declared type and constraints.
+pub fn managed_property_value_is_valid(property: &AppManagedPropertyV1, value: &Value) -> bool {
+    if value.is_null() || !property.type_name.matches(value) {
+        return false;
+    }
+    let validators = &property.validators;
+    if !validators.allowed_values.is_empty()
+        && !validators.allowed_values.iter().any(|allowed| {
+            managed_property_values_equal(property.type_name, value, allowed) == Some(true)
+        })
+    {
+        return false;
+    }
+    if let Some(minimum) = &validators.minimum {
+        if compare_managed_numeric_values(property.type_name, value, minimum)
+            .is_none_or(|ordering| ordering == Ordering::Less)
+        {
+            return false;
+        }
+    }
+    if let Some(maximum) = &validators.maximum {
+        if compare_managed_numeric_values(property.type_name, value, maximum)
+            .is_none_or(|ordering| ordering == Ordering::Greater)
+        {
+            return false;
+        }
+    }
+    if let Some(min_length) = validators.min_length {
+        if value
+            .as_str()
+            .map_or(true, |value| value.chars().count() < min_length)
+        {
+            return false;
+        }
+    }
+    if let Some(max_length) = validators.max_length {
+        if value
+            .as_str()
+            .map_or(true, |value| value.chars().count() > max_length)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn inline_config_literal_size(value: &Value) -> usize {
+    value.as_str().map_or_else(
+        || serde_json::to_vec(value).map_or(usize::MAX, |encoded| encoded.len()),
+        str::len,
+    )
+}
+
+fn record_config_literal(
+    diagnostics: &mut Vec<AuthoredModelDiagnostic>,
+    field: &str,
+    value: &Value,
+    total_bytes: &mut usize,
+    code: &str,
+) {
+    let size = inline_config_literal_size(value);
+    *total_bytes = total_bytes.saturating_add(size);
+    if size > MAX_INLINE_CONFIG_LITERAL_BYTES {
+        diagnostics.push(AuthoredModelDiagnostic::new(
+            code,
+            "Each inline configuration literal must be no larger than 64 KiB.",
+            field,
+        ));
+    }
+}
+
+fn path_tokens_overlap(left: &[String], right: &[String]) -> bool {
+    let common = left.len().min(right.len());
+    left[..common] == right[..common]
 }
 
 /// Metadata keys that may not appear as direct keys because they would shadow
@@ -613,6 +1308,7 @@ const RESERVED_METADATA_KEYS: &[&str] = &[
     "artifacts",
     "permission_sets",
     "targets",
+    "configurations",
     "launcher_activity",
     "metadata",
     "apk_inspection",
@@ -1323,7 +2019,742 @@ mod tests {
     const APP_SOURCE: &str = include_str!("../../../authored/apps/retroarch.yaml");
     const PROFILE_SOURCE: &str =
         include_str!("../../../authored/device_profiles/ayaneo.pocket_s2.yaml");
+    const APP_CONFIG_SOURCE: &str =
+        include_str!("../fixtures/configuration_contracts/app-key-value.yaml");
+    const JSON_CONFIG_SOURCE: &str =
+        include_str!("../fixtures/configuration_contracts/app-nested-json.yaml");
     const APP_HEADER: &str = "schema_version: 1\nkind: app_definition\nid: example\nname: Example\npackage_id: com.example.app\n";
+
+    fn app_source_with_literal_defaults(count: usize, value: &str) -> String {
+        let mut source = String::from(
+            "schema_version: 1\nkind: app_definition\nid: example\nname: Example\npackage_id: com.example.app\ntargets:\n  config_file:\n    kind: file\n    location: app_data\n    path: files/config.cfg\nconfigurations:\n  main:\n    format: key_value/v1\n    target: config_file\n    managed_properties:\n",
+        );
+        let serialized = serde_json::to_string(value).expect("test literal should serialize");
+        for index in 0..count {
+            source.push_str(&format!(
+                "      property_{index}:\n        path: [property_{index}]\n        type: string\n        default: {serialized}\n"
+            ));
+        }
+        source
+    }
+
+    fn managed_property_mut<'a>(
+        app: &'a mut AppDefinitionV1,
+        property_id: &str,
+    ) -> &'a mut AppManagedPropertyV1 {
+        app.configurations
+            .get_mut("main")
+            .expect("main configuration exists")
+            .managed_properties
+            .get_mut(property_id)
+            .expect("managed property exists")
+    }
+
+    fn allowed_value_field(property_id: &str, index: usize) -> String {
+        format!("configurations[main].managed_properties[{property_id}].validators.allowed_values[{index}]")
+    }
+
+    #[test]
+    fn app_definition_yaml_rejects_duplicate_configuration_and_property_keys() {
+        let unique_configuration = app_source_with_literal_defaults(1, "value");
+        assert!(parse_app_definition_yaml(&unique_configuration).is_ok());
+
+        let duplicate_configuration = unique_configuration.replacen(
+            "  main:\n    format: key_value/v1\n    target: config_file\n",
+            "  main:\n    format: key_value/v1\n    target: config_file\n  main:\n    format: key_value/v1\n    target: config_file\n",
+            1,
+        );
+        assert_ne!(duplicate_configuration, unique_configuration);
+        assert!(parse_app_definition_yaml(&duplicate_configuration).is_err());
+
+        let unique_properties = app_source_with_literal_defaults(2, "value");
+        let duplicate_property =
+            unique_properties.replacen("      property_1:", "      property_0:", 1);
+        assert_ne!(duplicate_property, unique_properties);
+        assert!(parse_app_definition_yaml(&duplicate_property).is_err());
+    }
+
+    #[test]
+    fn configuration_documents_for_key_value_and_nested_json_round_trip() {
+        for source in [APP_CONFIG_SOURCE, JSON_CONFIG_SOURCE] {
+            let parsed = parse_app_definition_yaml(source).expect("typed configuration schema");
+            assert!(validate_app_definition(&parsed).is_empty());
+
+            let canonical = emit_app_definition_yaml(&parsed).expect("canonical App Definition");
+            let reloaded = parse_app_definition_yaml(&canonical).expect("canonical schema reloads");
+            assert_eq!(reloaded, parsed);
+        }
+    }
+
+    #[test]
+    fn nested_json_managed_paths_must_not_overlap() {
+        let source = JSON_CONFIG_SOURCE.replace(
+            "      overlay_path:\n",
+            "      overlay_parent:\n        path: [ui, overlays]\n        type: string\n      overlay_path:\n",
+        );
+        let parsed = parse_app_definition_yaml(&source).expect("schema shape parses");
+        let diagnostics = validate_app_definition(&parsed);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "app_config_property_path_overlap"),
+            "overlapping JSON segment paths need an actionable diagnostic: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn json_v1_property_paths_use_nonempty_object_member_segments() {
+        let literal_segments = vec!["ui".to_string(), "a/b".to_string(), "~name".to_string()];
+        assert_eq!(
+            configuration_property_path_tokens(AppConfigurationFormatV1::JsonV1, &literal_segments),
+            Some(literal_segments.clone())
+        );
+        assert!(
+            configuration_property_path_tokens(AppConfigurationFormatV1::JsonV1, &[]).is_none()
+        );
+        assert!(configuration_property_path_tokens(
+            AppConfigurationFormatV1::JsonV1,
+            &["ui".to_string(), "".to_string()]
+        )
+        .is_none());
+        assert!(configuration_property_path_tokens(
+            AppConfigurationFormatV1::JsonV1,
+            &["ui".to_string(), "bad\nkey".to_string()]
+        )
+        .is_none());
+        assert!(configuration_paths_overlap(
+            AppConfigurationFormatV1::JsonV1,
+            &["ui".to_string(), "a/b".to_string()],
+            &["ui".to_string(), "a/b".to_string(), "child".to_string()]
+        ));
+        assert!(!configuration_paths_overlap(
+            AppConfigurationFormatV1::JsonV1,
+            &["ui".to_string(), "a/b".to_string()],
+            &["ui".to_string(), "a".to_string(), "b".to_string()]
+        ));
+    }
+
+    #[test]
+    fn app_configuration_paths_are_segment_lists() {
+        let parsed = parse_app_definition_yaml(JSON_CONFIG_SOURCE)
+            .expect("JSON paths should accept explicit member-name segments");
+        assert!(validate_app_definition(&parsed).is_empty());
+
+        let scalar_pointer_paths = JSON_CONFIG_SOURCE
+            .replace(
+                "path: [audio, output, buffer_frames]",
+                "path: /audio/output/buffer_frames",
+            )
+            .replace(
+                "path: [ui, overlays, primary, path]",
+                "path: /ui/overlays/primary/path",
+            );
+        assert_ne!(scalar_pointer_paths, JSON_CONFIG_SOURCE);
+        assert!(scalar_pointer_paths.contains("path: /audio/output/buffer_frames"));
+        assert!(scalar_pointer_paths.contains("path: /ui/overlays/primary/path"));
+        assert!(
+            parse_app_definition_yaml(&scalar_pointer_paths).is_err(),
+            "scalar JSON Pointer paths must be rejected"
+        );
+    }
+
+    #[test]
+    fn app_configuration_path_segments_must_be_yaml_strings() {
+        for path in ["[1]", "[true]", "[[nested]]", "[{nested: value}]"] {
+            let source =
+                APP_CONFIG_SOURCE.replace("path: [audio_driver]", &format!("path: {path}"));
+            assert_ne!(
+                source, APP_CONFIG_SOURCE,
+                "test path must alter the fixture"
+            );
+            assert!(
+                parse_app_definition_yaml(&source).is_err(),
+                "non-string managed path segments must be rejected: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_managed_clearability_is_authored_and_object_types_are_rejected() {
+        let parsed = parse_app_definition_yaml(APP_CONFIG_SOURCE)
+            .expect("App Definition clearability should parse");
+        let properties = &parsed.configurations["main"].managed_properties;
+        assert!(properties["network_enabled"].clearable);
+        assert!(!properties["audio_driver"].clearable);
+
+        let object_managed_property = APP_CONFIG_SOURCE.replacen("type: string", "type: object", 1);
+        assert!(parse_app_definition_yaml(&object_managed_property).is_err());
+    }
+
+    #[test]
+    fn string_min_length_is_validated_and_applies_to_defaults() {
+        let source = APP_CONFIG_SOURCE.replacen("min_length: 1", "min_length: 6", 1);
+        let app = parse_app_definition_yaml(&source).expect("min_length should parse");
+        assert!(validate_app_definition(&app)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_default_invalid"));
+
+        let incompatible =
+            APP_CONFIG_SOURCE.replace("maximum: 240", "maximum: 240\n          min_length: 1");
+        let app = parse_app_definition_yaml(&incompatible).expect("validator should parse");
+        assert!(validate_app_definition(&app)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_validator_invalid"));
+    }
+
+    #[test]
+    fn allowed_string_values_shorter_than_min_length_are_rejected() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "shader_path");
+        property.validators.min_length = Some(3);
+        property.validators.allowed_values = vec![serde_json::json!("xy")];
+
+        let diagnostics = validate_app_definition(&app);
+        let field = allowed_value_field("shader_path", 0);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.field == field)
+            .expect("an allowed value shorter than min_length must be rejected");
+        assert_eq!(diagnostic.code, "app_config_validator_invalid");
+        assert!(diagnostic.message.contains("min_length"));
+    }
+
+    #[test]
+    fn allowed_string_values_longer_than_max_length_are_rejected() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "shader_path");
+        property.default = Some(serde_json::json!("ok"));
+        property.validators.max_length = Some(4);
+        property.validators.allowed_values = vec![serde_json::json!("longer")];
+
+        let diagnostics = validate_app_definition(&app);
+        let field = allowed_value_field("shader_path", 0);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.field == field)
+            .expect("an allowed value longer than max_length must be rejected");
+        assert_eq!(diagnostic.code, "app_config_validator_invalid");
+        assert!(diagnostic.message.contains("max_length"));
+    }
+
+    #[test]
+    fn allowed_integer_values_outside_minimum_and_maximum_are_rejected() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.validators.allowed_values = vec![
+            serde_json::json!(29),
+            serde_json::json!(30),
+            serde_json::json!(240),
+            serde_json::json!(241),
+        ];
+
+        let diagnostics = validate_app_definition(&app);
+        for (index, bound) in [(0, "minimum"), (3, "maximum")] {
+            let field = allowed_value_field("frame_limit", index);
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.field == field)
+                .unwrap_or_else(|| panic!("allowed value outside {bound} must be rejected"));
+            assert_eq!(diagnostic.code, "app_config_validator_invalid");
+            assert!(diagnostic.message.contains(bound));
+        }
+        for index in [1, 2] {
+            let field = allowed_value_field("frame_limit", index);
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.field != field),
+                "an allowed value on a numeric bound must remain valid"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_allowed_values_validate_each_entry_and_preserve_valid_values() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "shader_path");
+        property.validators.min_length = Some(3);
+        property.validators.max_length = Some(5);
+        property.validators.allowed_values =
+            vec![serde_json::json!("valid"), serde_json::json!("no")];
+
+        let diagnostics = validate_app_definition(&app);
+        let allowed_value_fields: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.field.contains(".validators.allowed_values["))
+            .map(|diagnostic| diagnostic.field.as_str())
+            .collect();
+        assert_eq!(
+            allowed_value_fields,
+            vec![
+                "configurations[main].managed_properties[shader_path].validators.allowed_values[1]"
+            ]
+        );
+        assert!(diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.field == allowed_value_field("shader_path", 1))
+            .is_some_and(|diagnostic| diagnostic.message.contains("min_length")));
+    }
+
+    #[test]
+    fn integer_bounds_compare_exact_values_above_f64_integer_precision() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = app
+            .configurations
+            .get_mut("main")
+            .expect("configuration exists")
+            .managed_properties
+            .get_mut("frame_limit")
+            .expect("integer property exists");
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_994_i64));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_994_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_995_i64)
+        ));
+    }
+
+    #[test]
+    fn number_bounds_compare_integer_values_above_f64_precision_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_994_i64));
+
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_994_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_995_i64)
+        ));
+    }
+
+    #[test]
+    fn number_bounds_compare_decimal_and_exact_mixed_representations() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(1.5));
+        property.validators.maximum = Some(serde_json::json!(2.5));
+
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(1.5)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(1)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2.75)
+        ));
+
+        property.validators.minimum = Some(serde_json::json!(1));
+        property.validators.maximum = Some(serde_json::json!(2));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(1.5)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2.0)
+        ));
+
+        property.validators.minimum = Some(serde_json::json!(2.0));
+        property.validators.maximum = Some(serde_json::json!(2));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2)
+        ));
+    }
+
+    #[test]
+    fn number_bounds_compare_mixed_integer_and_float_values_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.allowed_values.clear();
+        let value = serde_json::json!(9_007_199_254_740_993_i64);
+        let lower_bound = serde_json::json!(9_007_199_254_740_992.0);
+
+        property.validators.minimum = Some(lower_bound.clone());
+        property.validators.maximum = None;
+        assert!(managed_property_value_is_valid(property, &value));
+
+        property.validators.minimum = None;
+        property.validators.maximum = Some(lower_bound);
+        assert!(!managed_property_value_is_valid(property, &value));
+
+        property.validators.maximum = None;
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_994.0));
+        assert!(!managed_property_value_is_valid(property, &value));
+    }
+
+    #[test]
+    fn number_mixed_comparisons_cover_signed_unsigned_and_fractional_boundaries() {
+        let cases = [
+            (
+                serde_json::json!(9_007_199_254_740_993_i64),
+                serde_json::json!(9_007_199_254_740_992.0),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(u64::MAX),
+                serde_json::json!(18_446_744_073_709_549_568.0),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(u64::MAX),
+                serde_json::json!(u64::MAX as f64),
+                Ordering::Less,
+            ),
+            (
+                serde_json::json!(i64::MIN),
+                serde_json::json!(i64::MIN as f64),
+                Ordering::Equal,
+            ),
+            (
+                serde_json::json!(i64::MAX),
+                serde_json::json!(i64::MAX as f64),
+                Ordering::Less,
+            ),
+            (serde_json::json!(2), serde_json::json!(2.5), Ordering::Less),
+            (
+                serde_json::json!(-2),
+                serde_json::json!(-2.5),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(-0.5),
+                Ordering::Greater,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(f64::from_bits(1)),
+                Ordering::Less,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(-f64::from_bits(1)),
+                Ordering::Greater,
+            ),
+        ];
+
+        for (left, right, expected) in cases {
+            assert_eq!(compare_number_values(&left, &right), Some(expected));
+            assert_eq!(
+                compare_number_values(&right, &left),
+                Some(expected.reverse())
+            );
+        }
+    }
+
+    #[test]
+    fn number_contradictory_integer_bounds_are_rejected_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_992_i64));
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "app_config_validator_invalid"
+                && diagnostic.field
+                    == "configurations[main].managed_properties[frame_limit].validators"
+                && diagnostic
+                    .message
+                    .contains("Minimum must not exceed maximum")
+        }));
+    }
+
+    #[test]
+    fn number_mixed_contradictory_bounds_are_rejected_exactly() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.allowed_values.clear();
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_993_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_992.0));
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "app_config_validator_invalid"
+                && diagnostic.field
+                    == "configurations[main].managed_properties[frame_limit].validators"
+                && diagnostic
+                    .message
+                    .contains("Minimum must not exceed maximum")
+        }));
+    }
+
+    #[test]
+    fn number_allowed_values_obey_exact_integer_bounds_above_f64_precision() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.minimum = Some(serde_json::json!(9_007_199_254_740_992_i64));
+        property.validators.maximum = Some(serde_json::json!(9_007_199_254_740_992_i64));
+        property.validators.allowed_values = vec![
+            serde_json::json!(9_007_199_254_740_992_i64),
+            serde_json::json!(9_007_199_254_740_993_i64),
+        ];
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.field == allowed_value_field("frame_limit", 1)
+                && diagnostic.code == "app_config_validator_invalid"
+                && diagnostic.message.contains("maximum")
+        }));
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| { diagnostic.field != allowed_value_field("frame_limit", 0) }));
+    }
+
+    #[test]
+    fn number_allowed_values_detect_exact_duplicates_without_rounding() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.default = None;
+        property.validators.minimum = None;
+        property.validators.maximum = None;
+        property.validators.allowed_values = vec![
+            serde_json::json!(9_007_199_254_740_992_i64),
+            serde_json::json!(9_007_199_254_740_993_i64),
+            serde_json::json!(2),
+            serde_json::json!(2.0),
+        ];
+
+        let diagnostics = validate_app_definition(&app);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.field == allowed_value_field("frame_limit", 3)
+                && diagnostic.code == "app_config_validator_invalid"
+        }));
+        for index in [0, 1, 2] {
+            assert!(diagnostics.iter().all(|diagnostic| {
+                diagnostic.field != allowed_value_field("frame_limit", index)
+            }));
+        }
+    }
+
+    #[test]
+    fn number_allowed_values_use_exact_numeric_equality() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.type_name = ConfigValueTypeV1::Number;
+        property.validators.minimum = None;
+        property.validators.maximum = None;
+        property.validators.allowed_values = vec![serde_json::json!(9_007_199_254_740_992_i64)];
+
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992_i64)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+
+        property.validators.allowed_values = vec![serde_json::json!(2)];
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2.0)
+        ));
+        property.validators.allowed_values = vec![serde_json::json!(2.0)];
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(2)
+        ));
+    }
+
+    #[test]
+    fn number_allowed_values_keep_distinct_mixed_large_numbers_distinct() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        {
+            let property = managed_property_mut(&mut app, "frame_limit");
+            property.type_name = ConfigValueTypeV1::Number;
+            property.default = None;
+            property.validators.minimum = None;
+            property.validators.maximum = None;
+            property.validators.allowed_values = vec![
+                serde_json::json!(9_007_199_254_740_992.0),
+                serde_json::json!(9_007_199_254_740_993_i64),
+            ];
+        }
+
+        let diagnostics = validate_app_definition(&app);
+        for index in [0, 1] {
+            assert!(diagnostics.iter().all(|diagnostic| {
+                diagnostic.field != allowed_value_field("frame_limit", index)
+            }));
+        }
+        let property = managed_property_mut(&mut app, "frame_limit");
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_992.0)
+        ));
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(9_007_199_254_740_993_i64)
+        ));
+    }
+
+    #[test]
+    fn number_type_validation_keeps_integer_and_number_distinct() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let property = managed_property_mut(&mut app, "frame_limit");
+        property.validators.allowed_values.clear();
+        property.type_name = ConfigValueTypeV1::Number;
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(30.5)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!("30")
+        ));
+
+        property.type_name = ConfigValueTypeV1::Integer;
+        assert!(managed_property_value_is_valid(
+            property,
+            &serde_json::json!(30)
+        ));
+        assert!(!managed_property_value_is_valid(
+            property,
+            &serde_json::json!(30.5)
+        ));
+    }
+
+    #[test]
+    fn aggregate_inline_literal_budget_is_per_configuration_document() {
+        let mut app = parse_app_definition_yaml(APP_CONFIG_SOURCE).expect("fixture should parse");
+        let large_default = serde_json::json!("x".repeat(1_100_000));
+        let mut second = app.configurations["main"].clone();
+        app.configurations
+            .get_mut("main")
+            .expect("main configuration exists")
+            .managed_properties
+            .get_mut("shader_path")
+            .expect("string property exists")
+            .default = Some(large_default.clone());
+        second
+            .managed_properties
+            .get_mut("shader_path")
+            .expect("string property exists")
+            .default = Some(large_default);
+        app.configurations.insert("alternate".to_string(), second);
+
+        assert!(!validate_app_definition(&app)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_literal_budget_exceeded"));
+    }
+    #[test]
+    fn app_configuration_rejects_duplicate_ids_paths_and_incompatible_validators() {
+        let duplicate_id = APP_CONFIG_SOURCE.replace("      shader_path:", "      audio_driver:");
+        assert!(parse_app_definition_yaml(&duplicate_id).is_err());
+        let duplicate_path =
+            APP_CONFIG_SOURCE.replace("path: [shader_path]", "path: [audio_driver]");
+        let parsed = parse_app_definition_yaml(&duplicate_path)
+            .expect("duplicate paths are semantic errors");
+        assert!(validate_app_definition(&parsed)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_property_path_overlap"));
+        let incompatible_default = APP_CONFIG_SOURCE.replace("default: alsa", "default: 42");
+        let parsed = parse_app_definition_yaml(&incompatible_default)
+            .expect("typed default parses structurally");
+        assert!(validate_app_definition(&parsed)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_default_invalid"));
+        let incompatible_allowed_value =
+            APP_CONFIG_SOURCE.replace("allowed_values: [alsa, \"\"]", "allowed_values: [7]");
+        let parsed = parse_app_definition_yaml(&incompatible_allowed_value)
+            .expect("typed validator parses structurally");
+        assert!(validate_app_definition(&parsed)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_validator_invalid"));
+    }
+    #[test]
+    fn app_configuration_rejects_null_values_and_unsafe_template_paths() {
+        let null_default = APP_CONFIG_SOURCE.replace("default: alsa", "default: null");
+        assert!(parse_app_definition_yaml(&null_default).is_err());
+        let unsafe_template = APP_CONFIG_SOURCE.replace("retroarch/default.cfg", "../outside.cfg");
+        let parsed = parse_app_definition_yaml(&unsafe_template)
+            .expect("template path is validated semantically");
+        assert!(validate_app_definition(&parsed)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_configuration_template_path_invalid"));
+    }
+    #[test]
+    fn configuration_schema_unknown_fields_are_rejected() {
+        let source = APP_CONFIG_SOURCE.replace(
+            "    target: config_file\n",
+            "    target: config_file\n    formatter_plugin: custom\n",
+        );
+        assert!(parse_app_definition_yaml(&source).is_err());
+    }
+
+    #[test]
+    fn inline_configuration_literals_obey_inclusive_byte_limits() {
+        let exact_value = "x".repeat(64 * 1024);
+        let parsed = parse_app_definition_yaml(&app_source_with_literal_defaults(1, &exact_value))
+            .expect("64 KiB inline literal should load");
+        assert!(validate_app_definition(&parsed).is_empty());
+
+        let oversized = "x".repeat(64 * 1024 + 1);
+        let parsed = parse_app_definition_yaml(&app_source_with_literal_defaults(1, &oversized))
+            .expect("oversized values remain structurally parseable");
+        assert!(validate_app_definition(&parsed)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_literal_too_large"));
+
+        let aggregate_exact =
+            parse_app_definition_yaml(&app_source_with_literal_defaults(32, &exact_value))
+                .expect("exact aggregate fixture should load");
+        assert!(validate_app_definition(&aggregate_exact).is_empty());
+
+        let aggregate_over =
+            parse_app_definition_yaml(&app_source_with_literal_defaults(33, &exact_value))
+                .expect("aggregate fixture should load structurally");
+        assert!(validate_app_definition(&aggregate_over)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "app_config_literal_budget_exceeded"));
+    }
 
     fn base_app() -> AppDefinitionV1 {
         AppDefinitionV1 {
@@ -1337,6 +2768,7 @@ mod tests {
             artifacts: IndexMap::new(),
             permission_sets: None,
             targets: IndexMap::new(),
+            configurations: IndexMap::new(),
             launcher_activity: None,
             metadata: OrderedValueMap::new(),
         }

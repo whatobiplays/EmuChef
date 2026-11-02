@@ -3,17 +3,25 @@
 //! This module owns the recipe load and emit behavior shared by the Rust
 //! runtime and editor protocol.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
+use crate::authored_models::{
+    self, UnmanagedTemplateLiteralTypeV1, MAX_INLINE_CONFIG_LITERAL_BYTES,
+    MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT,
+};
 use crate::model::{
     AppArtifactInputBinding, AppArtifactReference, InputDeclaration, InputOption, InputValidation,
-    OrderedMap, ParamValue, Recipe, RecipeArtifact, RecipeProvides, RemoteFileArtifact, Step,
-    StepCondition, StepConstraints,
+    OrderedMap, ParamValue, Recipe, RecipeArtifact, RecipeConfigOverrideV1, RecipeConfigPropertyV1,
+    RecipeConfigurationBaseV1, RecipeConfigurationV1, RecipeProvides, RemoteFileArtifact, Step,
+    StepCondition, StepConstraints, UnmanagedTemplateLiteralV1,
 };
 use crate::step_specs;
 
@@ -123,7 +131,104 @@ pub(crate) fn declared_recipe_id(raw: &Mapping) -> Option<String> {
     get_scalar_string(raw, "id")
 }
 
+struct UniqueYamlKeys;
+
+impl<'de> Deserialize<'de> for UniqueYamlKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct UniqueKeyVisitor;
+
+        impl<'de> Visitor<'de> for UniqueKeyVisitor {
+            type Value = UniqueYamlKeys;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a YAML value with unique mapping keys")
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_bytes<E>(self, _: &[u8]) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_byte_buf<E>(self, _: Vec<u8>) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                UniqueYamlKeys::deserialize(deserializer)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<UniqueYamlKeys>()?.is_some() {}
+                Ok(UniqueYamlKeys)
+            }
+
+            fn visit_map<A>(self, mut mapping: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = HashSet::new();
+                while let Some(key) = mapping.next_key::<YamlValue>()? {
+                    if !keys.insert(key) {
+                        return Err(de::Error::custom("YAML mapping contains a duplicate key"));
+                    }
+                    mapping.next_value::<UniqueYamlKeys>()?;
+                }
+                Ok(UniqueYamlKeys)
+            }
+        }
+
+        deserializer.deserialize_any(UniqueKeyVisitor)
+    }
+}
+
+/// Checks every YAML mapping for duplicate keys before typed deserialization.
+pub(crate) fn validate_unique_yaml_keys(text: &str) -> Result<(), serde_yaml::Error> {
+    serde_yaml::from_str::<UniqueYamlKeys>(text).map(|_| ())
+}
+
 fn parse_yaml_mapping(text: &str, path: &Path) -> Result<Mapping, RecipeLoadError> {
+    validate_unique_yaml_keys(text)
+        .map_err(|error| RecipeLoadError::yaml_parse(error.to_string()))?;
     let value = serde_yaml::from_str::<YamlValue>(text)
         .map_err(|error| RecipeLoadError::yaml_parse(error.to_string()))?;
     match value {
@@ -256,9 +361,28 @@ fn absolute_path(path: &Path) -> PathBuf {
 }
 
 fn parse_recipe_shape(raw: &Mapping, path: &Path) -> Result<Recipe, String> {
+    reject_unknown_fields(
+        raw,
+        &[
+            "schema_version",
+            "kind",
+            "id",
+            "name",
+            "description",
+            "recipe_dependencies",
+            "provides",
+            "inputs",
+            "config",
+            "artifacts",
+            "artifact_groups",
+            "steps",
+        ],
+        "recipe",
+    )?;
     let id = required_scalar_string(raw, "id")?;
     let name = required_scalar_string(raw, "name")?;
     let inputs = parse_inputs(get_yaml(raw, "inputs"))?;
+    let config = parse_recipe_configuration(get_yaml(raw, "config"))?;
     let artifacts = parse_artifacts(get_yaml(raw, "artifacts"))?;
     let artifact_groups = parse_artifact_groups(get_yaml(raw, "artifact_groups"))?;
     Ok(Recipe {
@@ -268,8 +392,9 @@ fn parse_recipe_shape(raw: &Mapping, path: &Path) -> Result<Recipe, String> {
         name,
         description: optional_string(get_yaml(raw, "description")),
         recipe_dependencies: parse_string_vec(get_yaml(raw, "recipe_dependencies"))?,
-        provides: parse_provides(get_yaml(raw, "provides")),
+        provides: parse_provides(get_yaml(raw, "provides"))?,
         inputs,
+        config,
         artifacts,
         artifact_groups,
         steps: parse_steps(get_yaml(raw, "steps"), path)?,
@@ -295,6 +420,24 @@ fn parse_inputs(value: Option<&YamlValue>) -> Result<OrderedMap<InputDeclaration
                 single_quote(&input_id)
             ));
         };
+        reject_unknown_fields(
+            input_map,
+            &[
+                "type",
+                "role",
+                "label",
+                "description",
+                "required",
+                "multiple",
+                "validation",
+                "default",
+                "options",
+                "sensitive",
+                "advanced",
+                "metadata",
+            ],
+            "input",
+        )?;
         let input = InputDeclaration {
             type_name: required_scalar_string(input_map, "type")?,
             role: get_scalar_string(input_map, "role").unwrap_or_else(|| "generic".to_string()),
@@ -321,6 +464,18 @@ fn parse_input_validation(value: Option<&YamlValue>) -> Result<InputValidation, 
         Some(YamlValue::Mapping(mapping)) => Some(mapping),
         Some(_) => return Err("input validation must be a mapping".to_string()),
     };
+    if let Some(mapping) = mapping {
+        reject_unknown_fields(
+            mapping,
+            &[
+                "must_exist",
+                "allowed_extensions",
+                "path_kind",
+                "allowed_prefixes",
+            ],
+            "input validation",
+        )?;
+    }
     Ok(InputValidation {
         must_exist: mapping
             .map(|mapping| optional_strict_bool(mapping, "must_exist", false))
@@ -354,6 +509,7 @@ fn parse_input_options(value: Option<&YamlValue>) -> Result<Vec<InputOption>, St
             let YamlValue::Mapping(mapping) = item else {
                 return Err("input option must be a mapping".to_string());
             };
+            reject_unknown_fields(mapping, &["value", "label"], "input option")?;
             let value = get_yaml(mapping, "value")
                 .map(yaml_to_json)
                 .ok_or_else(|| "input option requires 'value'".to_string())?;
@@ -484,11 +640,18 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RecipeArtifac
         };
         let type_name = required_scalar_string(artifact_map, "type")?;
         let artifact = match type_name.as_str() {
-            "remote_file" => RecipeArtifact::RemoteFile(RemoteFileArtifact {
-                url: required_scalar_string(artifact_map, "url")?,
-                cache: get_scalar_string(artifact_map, "cache")
-                    .unwrap_or_else(|| "default".to_string()),
-            }),
+            "remote_file" => {
+                reject_unknown_fields(
+                    artifact_map,
+                    &["type", "url", "cache"],
+                    "remote_file artifact",
+                )?;
+                RecipeArtifact::RemoteFile(RemoteFileArtifact {
+                    url: required_scalar_string(artifact_map, "url")?,
+                    cache: get_scalar_string(artifact_map, "cache")
+                        .unwrap_or_else(|| "default".to_string()),
+                })
+            }
             "app_artifact" => {
                 reject_unknown_artifact_fields(
                     artifact_map,
@@ -557,21 +720,33 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RecipeArtifac
     Ok(artifacts)
 }
 
-fn reject_unknown_artifact_fields(
+fn reject_unknown_fields(
     mapping: &Mapping,
     allowed_fields: &[&str],
-    artifact_type: &str,
+    context: &str,
 ) -> Result<(), String> {
     for key in mapping.keys() {
         let key = yaml_key_to_string(key);
         if !allowed_fields.contains(&key.as_str()) {
             return Err(format!(
-                "{artifact_type} artifact field '{}' is not supported",
+                "{context} field '{}' is not supported",
                 single_quote(&key)
             ));
         }
     }
     Ok(())
+}
+
+fn reject_unknown_artifact_fields(
+    mapping: &Mapping,
+    allowed_fields: &[&str],
+    artifact_type: &str,
+) -> Result<(), String> {
+    reject_unknown_fields(
+        mapping,
+        allowed_fields,
+        &format!("{artifact_type} artifact"),
+    )
 }
 
 fn parse_artifact_groups(value: Option<&YamlValue>) -> Result<OrderedMap<Vec<String>>, String> {
@@ -591,12 +766,267 @@ fn parse_artifact_groups(value: Option<&YamlValue>) -> Result<OrderedMap<Vec<Str
     Ok(groups)
 }
 
-fn parse_provides(value: Option<&YamlValue>) -> RecipeProvides {
-    let features = value
-        .and_then(YamlValue::as_mapping)
-        .and_then(|mapping| parse_string_vec(get_yaml(mapping, "features")).ok())
-        .unwrap_or_default();
-    RecipeProvides { features }
+fn parse_provides(value: Option<&YamlValue>) -> Result<RecipeProvides, String> {
+    let Some(value) = value else {
+        return Ok(RecipeProvides {
+            features: Vec::new(),
+        });
+    };
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("recipe provides must be a mapping".to_string());
+    };
+    reject_unknown_fields(mapping, &["features"], "recipe provides")?;
+    Ok(RecipeProvides {
+        features: parse_string_vec(get_yaml(mapping, "features"))?,
+    })
+}
+
+fn parse_recipe_configuration(
+    value: Option<&YamlValue>,
+) -> Result<Option<RecipeConfigurationV1>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("recipe config must be a mapping and may not be null".to_string());
+    };
+    reject_unknown_fields(
+        mapping,
+        &[
+            "app_ref",
+            "configuration",
+            "target",
+            "base",
+            "properties",
+            "unmanaged_literals",
+        ],
+        "recipe config",
+    )?;
+    let app_ref = required_yaml_string(mapping, "app_ref")?;
+    let configuration = required_yaml_string(mapping, "configuration")?;
+    let target = required_yaml_string(mapping, "target")?;
+    for (field, value) in [
+        ("app_ref", app_ref.as_str()),
+        ("configuration", configuration.as_str()),
+        ("target", target.as_str()),
+    ] {
+        if !authored_models::is_valid_identifier(value) {
+            return Err(format!(
+                "recipe config {field} must be an authored identifier"
+            ));
+        }
+    }
+    let base = parse_recipe_configuration_base(get_yaml(mapping, "base"))?;
+    let properties = parse_recipe_config_properties(get_yaml(mapping, "properties"))?;
+    let unmanaged_literals = parse_unmanaged_literals(get_yaml(mapping, "unmanaged_literals"))?;
+
+    let mut total_literal_bytes = 0usize;
+    for property in properties.values() {
+        if let Some(RecipeConfigOverrideV1::Value(value)) = &property.override_operation {
+            validate_recipe_literal_size(value, &mut total_literal_bytes)?;
+        }
+    }
+    for literal in &unmanaged_literals {
+        validate_recipe_literal_size(&literal.value, &mut total_literal_bytes)?;
+    }
+    if total_literal_bytes > MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT {
+        return Err(
+            "inline Recipe configuration literals exceed the 2 MiB per-document limit".into(),
+        );
+    }
+    if !unmanaged_literals.is_empty() && !matches!(base, RecipeConfigurationBaseV1::Input(_)) {
+        return Err(
+            "unmanaged template literals require a user-supplied base.input template".into(),
+        );
+    }
+
+    Ok(Some(RecipeConfigurationV1 {
+        app_ref,
+        configuration,
+        target,
+        base,
+        properties,
+        unmanaged_literals,
+    }))
+}
+
+fn parse_recipe_configuration_base(
+    value: Option<&YamlValue>,
+) -> Result<RecipeConfigurationBaseV1, String> {
+    let Some(YamlValue::Mapping(mapping)) = value else {
+        return Err("recipe config base must name exactly one template or input".to_string());
+    };
+    if mapping.len() != 1 {
+        return Err("recipe config base must name exactly one template or input".to_string());
+    }
+    let Some((key, value)) = mapping.iter().next() else {
+        return Err("recipe config base must name exactly one template or input".to_string());
+    };
+    let YamlValue::String(key) = key else {
+        return Err("recipe config base selector must be a string".to_string());
+    };
+    let YamlValue::String(value) = value else {
+        return Err("recipe config base selector must be a string".to_string());
+    };
+    if !authored_models::is_valid_identifier(value) {
+        return Err("recipe config base selector must be an authored identifier".to_string());
+    }
+    match key.as_str() {
+        "template" => Ok(RecipeConfigurationBaseV1::Template(value.clone())),
+        "input" => Ok(RecipeConfigurationBaseV1::Input(value.clone())),
+        _ => Err("recipe config base supports only template or input".to_string()),
+    }
+}
+
+fn parse_recipe_config_properties(
+    value: Option<&YamlValue>,
+) -> Result<OrderedMap<RecipeConfigPropertyV1>, String> {
+    let mut properties = OrderedMap::new();
+    let Some(value) = value else {
+        return Ok(properties);
+    };
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("recipe config properties must be a mapping and may not be null".to_string());
+    };
+    for (key, value) in mapping {
+        let YamlValue::String(property_id) = key else {
+            return Err("recipe config property IDs must be strings".to_string());
+        };
+        if !authored_models::is_valid_identifier(property_id) {
+            return Err(format!(
+                "recipe config property {property_id:?} is not a valid ID"
+            ));
+        }
+        let YamlValue::Mapping(property) = value else {
+            return Err(format!(
+                "recipe config property {property_id:?} must be a mapping"
+            ));
+        };
+        reject_unknown_fields(
+            property,
+            &["label", "description", "required", "advanced", "override"],
+            "recipe config property",
+        )?;
+        let override_operation = match get_yaml(property, "override") {
+            None => None,
+            Some(value) => Some(parse_recipe_config_override(value)?),
+        };
+        let metadata = RecipeConfigPropertyV1 {
+            label: optional_non_null_yaml_string(property, "label")?,
+            description: optional_non_null_yaml_string(property, "description")?,
+            required: optional_strict_bool(property, "required", false)?,
+            advanced: optional_strict_bool(property, "advanced", false)?,
+            override_operation,
+        };
+        if metadata
+            .label
+            .as_ref()
+            .is_some_and(|label| label.trim().is_empty())
+            || metadata
+                .description
+                .as_ref()
+                .is_some_and(|description| description.trim().is_empty())
+        {
+            return Err(format!(
+                "recipe config property {property_id:?} presentation text must not be empty"
+            ));
+        }
+        properties.insert(property_id.clone(), metadata);
+    }
+    Ok(properties)
+}
+
+fn parse_recipe_config_override(value: &YamlValue) -> Result<RecipeConfigOverrideV1, String> {
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("recipe config override must be a one-operation mapping, not null".to_string());
+    };
+    if mapping.len() != 1 {
+        return Err("recipe config override must contain exactly one operation".to_string());
+    }
+    let Some((key, value)) = mapping.iter().next() else {
+        return Err("recipe config override must contain exactly one operation".to_string());
+    };
+    let YamlValue::String(key) = key else {
+        return Err("recipe config override operation must be a string".to_string());
+    };
+    match key.as_str() {
+        "value" if !value.is_null() => Ok(RecipeConfigOverrideV1::Value(yaml_to_json(value))),
+        "value" => Err("recipe config override value must not be null".to_string()),
+        "clear" if value == &YamlValue::Bool(true) => Ok(RecipeConfigOverrideV1::Clear),
+        "reset" if value == &YamlValue::Bool(true) => Ok(RecipeConfigOverrideV1::Reset),
+        "clear" | "reset" => Err("recipe config clear and reset operations must be true".into()),
+        _ => Err("recipe config override supports only value, clear: true, or reset: true".into()),
+    }
+}
+
+fn parse_unmanaged_literals(
+    value: Option<&YamlValue>,
+) -> Result<Vec<UnmanagedTemplateLiteralV1>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let YamlValue::Sequence(items) = value else {
+        return Err("unmanaged_literals must be a list and may not be null".to_string());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let YamlValue::Mapping(mapping) = item else {
+                return Err("unmanaged template literal must be a mapping".to_string());
+            };
+            reject_unknown_fields(mapping, &["path", "type", "value"], "unmanaged template literal")?;
+            let path = parse_configuration_path_segments(get_yaml(mapping, "path"))?;
+            if path.is_empty()
+                || path
+                    .iter()
+                    .any(|segment| segment.is_empty() || segment.chars().any(char::is_control))
+            {
+                return Err("unmanaged template literal path must have non-empty segments without control characters".into());
+            }
+            let type_name = match required_yaml_string(mapping, "type")?.as_str() {
+                "string" => UnmanagedTemplateLiteralTypeV1::String,
+                "integer" => UnmanagedTemplateLiteralTypeV1::Integer,
+                "number" => UnmanagedTemplateLiteralTypeV1::Number,
+                "boolean" => UnmanagedTemplateLiteralTypeV1::Boolean,
+                "object" => UnmanagedTemplateLiteralTypeV1::Object,
+                "array" => UnmanagedTemplateLiteralTypeV1::Array,
+                _ => return Err("unmanaged template literal has an unsupported value type".into()),
+            };
+            let value = match get_yaml(mapping, "value") {
+                None | Some(YamlValue::Null) => {
+                    return Err("unmanaged template literal value must be present and non-null".into())
+                }
+                Some(value) => yaml_to_json(value),
+            };
+            if !type_name.matches(&value) {
+                return Err("unmanaged template literal value does not match its declared type".into());
+            }
+            Ok(UnmanagedTemplateLiteralV1 {
+                path,
+                type_name,
+                value,
+            })
+        })
+        .collect()
+}
+
+fn validate_recipe_literal_size(value: &JsonValue, total_bytes: &mut usize) -> Result<(), String> {
+    let size = authored_models::inline_config_literal_size(value);
+    if size > MAX_INLINE_CONFIG_LITERAL_BYTES {
+        return Err(
+            "each inline Recipe configuration literal must be no larger than 64 KiB".into(),
+        );
+    }
+    *total_bytes = total_bytes.saturating_add(size);
+    Ok(())
+}
+
+fn optional_non_null_yaml_string(mapping: &Mapping, key: &str) -> Result<Option<String>, String> {
+    match get_yaml(mapping, key) {
+        None => Ok(None),
+        Some(YamlValue::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!("'{key}' must be an omitted or non-null string")),
+    }
 }
 
 fn parse_steps(value: Option<&YamlValue>, _path: &Path) -> Result<Vec<Step>, String> {
@@ -617,6 +1047,24 @@ fn parse_step(value: &YamlValue) -> Result<Step, String> {
     let YamlValue::Mapping(mapping) = value else {
         return Err("step must be a mapping".to_string());
     };
+    reject_unknown_fields(
+        mapping,
+        &[
+            "id",
+            "type",
+            "name",
+            "description",
+            "progress_note",
+            "user_toggleable",
+            "app_ref",
+            "dependencies",
+            "constraints",
+            "skip_if",
+            "params",
+            "verify",
+        ],
+        "step",
+    )?;
     Ok(Step {
         id: required_scalar_string(mapping, "id")?,
         type_name: required_scalar_string(mapping, "type")?,
@@ -650,6 +1098,11 @@ fn parse_constraints(value: Option<&YamlValue>) -> Result<StepConstraints, Strin
     let YamlValue::Mapping(mapping) = value else {
         return Err("step constraints must be a mapping".to_string());
     };
+    reject_unknown_fields(
+        mapping,
+        &["capabilities", "conflicts_with"],
+        "step constraints",
+    )?;
     Ok(StepConstraints {
         capabilities: parse_string_vec(get_yaml(mapping, "capabilities"))?,
         conflicts_with: parse_string_vec(get_yaml(mapping, "conflicts_with"))?,
@@ -672,6 +1125,7 @@ fn parse_conditions(value: Option<&YamlValue>) -> Result<Vec<StepCondition>, Str
             let YamlValue::Mapping(mapping) = item else {
                 return Err("step condition must be a mapping".to_string());
             };
+            reject_unknown_fields(mapping, &["type", "params"], "step condition")?;
             if contains_yaml_key(mapping, "app_ref") {
                 return Err("step conditions inherit app_ref from their enclosing step".to_string());
             }
@@ -778,6 +1232,27 @@ fn parse_string_vec(value: Option<&YamlValue>) -> Result<Vec<String>, String> {
     Ok(items.iter().map(yaml_value_to_string).collect())
 }
 
+fn parse_configuration_path_segments(value: Option<&YamlValue>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let YamlValue::Sequence(items) = value else {
+        return Err("configuration path must be a list".to_string());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let YamlValue::String(segment) = item else {
+                return Err("configuration path segments must be strings".to_string());
+            };
+            Ok(segment.clone())
+        })
+        .collect()
+}
+
 fn recipe_to_yaml_mapping(recipe: &Recipe) -> Mapping {
     let mut mapping = Mapping::new();
     insert(
@@ -808,6 +1283,9 @@ fn recipe_to_yaml_mapping(recipe: &Recipe) -> Mapping {
     );
     insert(&mut mapping, "provides", YamlValue::Mapping(provides));
     insert(&mut mapping, "inputs", inputs_to_yaml(&recipe.inputs));
+    if let Some(config) = &recipe.config {
+        insert(&mut mapping, "config", recipe_configuration_to_yaml(config));
+    }
     insert(
         &mut mapping,
         "artifacts",
@@ -824,6 +1302,121 @@ fn recipe_to_yaml_mapping(recipe: &Recipe) -> Mapping {
         YamlValue::Sequence(recipe.steps.iter().map(step_to_yaml).collect()),
     );
     mapping
+}
+
+fn recipe_configuration_to_yaml(config: &RecipeConfigurationV1) -> YamlValue {
+    let mut mapping = Mapping::new();
+    insert(
+        &mut mapping,
+        "app_ref",
+        YamlValue::String(config.app_ref.clone()),
+    );
+    insert(
+        &mut mapping,
+        "configuration",
+        YamlValue::String(config.configuration.clone()),
+    );
+    insert(
+        &mut mapping,
+        "target",
+        YamlValue::String(config.target.clone()),
+    );
+    let mut base = Mapping::new();
+    match &config.base {
+        RecipeConfigurationBaseV1::Template(template) => {
+            insert(&mut base, "template", YamlValue::String(template.clone()));
+        }
+        RecipeConfigurationBaseV1::Input(input) => {
+            insert(&mut base, "input", YamlValue::String(input.clone()));
+        }
+    }
+    insert(&mut mapping, "base", YamlValue::Mapping(base));
+
+    let mut properties = Mapping::new();
+    for (property_id, property) in &config.properties {
+        let mut item = Mapping::new();
+        if let Some(label) = &property.label {
+            insert(&mut item, "label", YamlValue::String(label.clone()));
+        }
+        if let Some(description) = &property.description {
+            insert(
+                &mut item,
+                "description",
+                YamlValue::String(description.clone()),
+            );
+        }
+        if property.required {
+            insert(&mut item, "required", YamlValue::Bool(true));
+        }
+        if property.advanced {
+            insert(&mut item, "advanced", YamlValue::Bool(true));
+        }
+        if let Some(operation) = &property.override_operation {
+            let mut override_mapping = Mapping::new();
+            match operation {
+                RecipeConfigOverrideV1::Value(value) => {
+                    insert(&mut override_mapping, "value", json_to_yaml_sorted(value));
+                }
+                RecipeConfigOverrideV1::Clear => {
+                    insert(&mut override_mapping, "clear", YamlValue::Bool(true));
+                }
+                RecipeConfigOverrideV1::Reset => {
+                    insert(&mut override_mapping, "reset", YamlValue::Bool(true));
+                }
+            }
+            insert(&mut item, "override", YamlValue::Mapping(override_mapping));
+        }
+        insert(&mut properties, property_id, YamlValue::Mapping(item));
+    }
+    insert(&mut mapping, "properties", YamlValue::Mapping(properties));
+
+    if !config.unmanaged_literals.is_empty() {
+        let literals = config
+            .unmanaged_literals
+            .iter()
+            .map(|literal| {
+                let mut item = Mapping::new();
+                insert(
+                    &mut item,
+                    "path",
+                    YamlValue::Sequence(
+                        literal
+                            .path
+                            .iter()
+                            .cloned()
+                            .map(YamlValue::String)
+                            .collect(),
+                    ),
+                );
+                insert(
+                    &mut item,
+                    "type",
+                    YamlValue::String(
+                        unmanaged_template_literal_type_name(literal.type_name).to_string(),
+                    ),
+                );
+                insert(&mut item, "value", json_to_yaml_sorted(&literal.value));
+                YamlValue::Mapping(item)
+            })
+            .collect();
+        insert(
+            &mut mapping,
+            "unmanaged_literals",
+            YamlValue::Sequence(literals),
+        );
+    }
+    YamlValue::Mapping(mapping)
+}
+
+fn unmanaged_template_literal_type_name(type_name: UnmanagedTemplateLiteralTypeV1) -> &'static str {
+    match type_name {
+        UnmanagedTemplateLiteralTypeV1::String => "string",
+        UnmanagedTemplateLiteralTypeV1::Integer => "integer",
+        UnmanagedTemplateLiteralTypeV1::Number => "number",
+        UnmanagedTemplateLiteralTypeV1::Boolean => "boolean",
+        UnmanagedTemplateLiteralTypeV1::Object => "object",
+        UnmanagedTemplateLiteralTypeV1::Array => "array",
+    }
 }
 
 fn inputs_to_yaml(inputs: &OrderedMap<InputDeclaration>) -> YamlValue {
@@ -1124,6 +1717,7 @@ fn ordered_json_map_to_yaml_sorted(values: &OrderedMap<JsonValue>) -> YamlValue 
     YamlValue::Mapping(mapping)
 }
 
+/// JSON object keys are sorted recursively so equivalent values emit the same YAML.
 fn json_to_yaml_sorted(value: &JsonValue) -> YamlValue {
     match value {
         JsonValue::Null => YamlValue::Null,
@@ -1331,6 +1925,304 @@ mod tests {
             raw.as_mapping().expect("recipe YAML should be a mapping"),
             Path::new("test.recipe.yaml"),
         )
+    }
+
+    fn recipe_with_unmanaged_literals(count: usize, value: &str) -> String {
+        let mut source = String::from(
+            "schema_version: 1\nkind: recipe\nid: recipe.config.bounds\nname: Config bounds\ninputs:\n  user_template:\n    type: file\n    role: generic\n    label: User template\n    required: false\n    default: \"\"\nartifacts: {}\nsteps: []\nconfig:\n  app_ref: retroarch\n  configuration: main\n  target: config_file\n  base:\n    input: user_template\n  properties: {}\n  unmanaged_literals:\n",
+        );
+        let serialized = serde_json::to_string(value).expect("test literal should serialize");
+        for index in 0..count {
+            source.push_str(&format!(
+                "    - path: [custom_{index}]\n      type: string\n      value: {serialized}\n"
+            ));
+        }
+        source
+    }
+
+    #[test]
+    fn recipe_configuration_json_objects_emit_canonically() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        let make_recipe = |override_value, unmanaged_literal_value| {
+            let mut recipe = load_recipe_from_bytes(source.as_bytes(), Path::new("recipe.yaml"))
+                .expect("Recipe configuration should load");
+            let config = recipe
+                .config
+                .as_mut()
+                .expect("fixture should include configuration");
+            config
+                .properties
+                .get_mut("frame_limit")
+                .expect("fixture should include the frame_limit property")
+                .override_operation = Some(RecipeConfigOverrideV1::Value(override_value));
+            let literal = config
+                .unmanaged_literals
+                .first_mut()
+                .expect("fixture should include an unmanaged literal");
+            literal.type_name = UnmanagedTemplateLiteralTypeV1::Object;
+            literal.value = unmanaged_literal_value;
+            recipe
+        };
+
+        let first = make_recipe(
+            json!({
+                "zeta": {"nested": {"second": 2, "first": true}},
+                "alpha": "user override",
+            }),
+            json!({
+                "zeta": {"nested": {"second": "two", "first": "one"}},
+                "alpha": [true, 3],
+            }),
+        );
+        let second = make_recipe(
+            json!({
+                "alpha": "user override",
+                "zeta": {"nested": {"first": true, "second": 2}},
+            }),
+            json!({
+                "alpha": [true, 3],
+                "zeta": {"nested": {"first": "one", "second": "two"}},
+            }),
+        );
+
+        let first_yaml = emit_recipe_yaml(&first).expect("Recipe should emit canonically");
+        let second_yaml = emit_recipe_yaml(&second).expect("Recipe should emit canonically");
+        assert_eq!(first_yaml, second_yaml);
+
+        let reloaded = load_recipe_from_bytes(first_yaml.as_bytes(), Path::new("recipe.yaml"))
+            .expect("canonical Recipe should reload");
+        assert_eq!(reloaded, first);
+        assert_eq!(reloaded, second);
+    }
+
+    #[test]
+    fn recipe_configuration_preserves_exposure_and_override_presence() {
+        for source in [
+            include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml"),
+            include_str!("../fixtures/configuration_contracts/recipe-nested-json.yaml"),
+        ] {
+            let recipe = load_recipe_from_bytes(source.as_bytes(), Path::new("recipe.yaml"))
+                .expect("typed Recipe configuration should load");
+            let canonical = emit_recipe_yaml(&recipe).expect("Recipe should emit canonically");
+            let reloaded = load_recipe_from_bytes(canonical.as_bytes(), Path::new("recipe.yaml"))
+                .expect("canonical Recipe should reload");
+            assert_eq!(reloaded, recipe);
+            assert!(canonical.contains("config:"));
+        }
+
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        let recipe = load_recipe_from_bytes(source.as_bytes(), Path::new("recipe.yaml"))
+            .expect("Recipe configuration should load");
+        let canonical = emit_recipe_yaml(&recipe).expect("Recipe should emit");
+        let canonical_value = yaml_value(&canonical);
+        let audio_override = get_yaml(
+            get_yaml(
+                get_yaml(canonical_value.as_mapping().unwrap(), "config")
+                    .unwrap()
+                    .as_mapping()
+                    .unwrap(),
+                "properties",
+            )
+            .unwrap()
+            .as_mapping()
+            .unwrap(),
+            "audio_driver",
+        )
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+        assert!(get_yaml(audio_override, "override").is_none());
+
+        let explicit_empty_source = source.replace(
+            "    audio_driver:\n      label: Audio driver\n",
+            "    audio_driver:\n      label: Audio driver\n      override:\n        value: \"\"\n",
+        );
+        assert_ne!(explicit_empty_source, source);
+        let explicit_empty =
+            load_recipe_from_bytes(explicit_empty_source.as_bytes(), Path::new("recipe.yaml"))
+                .expect("an explicit empty value should parse");
+        assert!(matches!(
+            &explicit_empty
+                .config
+                .as_ref()
+                .unwrap()
+                .properties["audio_driver"]
+                .override_operation,
+            Some(crate::model::RecipeConfigOverrideV1::Value(
+                serde_json::Value::String(value)
+            )) if value.is_empty()
+        ));
+        let explicit_empty_canonical =
+            emit_recipe_yaml(&explicit_empty).expect("empty override should emit");
+        let explicit_empty_reloaded = load_recipe_from_bytes(
+            explicit_empty_canonical.as_bytes(),
+            Path::new("recipe.yaml"),
+        )
+        .expect("empty override should reload");
+        assert_eq!(explicit_empty_reloaded, explicit_empty);
+
+        let recipe_local_default_source = source.replace(
+            "    audio_driver:\n      label: Audio driver\n",
+            "    audio_driver:\n      label: Audio driver\n      default: alsa\n",
+        );
+        assert_ne!(recipe_local_default_source, source);
+        assert!(load_recipe_from_bytes(
+            recipe_local_default_source.as_bytes(),
+            Path::new("recipe.yaml"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unmanaged_template_literal_paths_require_yaml_string_segments() {
+        let source = recipe_with_unmanaged_literals(1, "literal");
+        for path in ["[1]", "[true]", "[[nested]]", "[{nested: value}]"] {
+            let invalid_source = source.replace("path: [custom_0]", &format!("path: {path}"));
+            assert_ne!(invalid_source, source, "test path must alter the fixture");
+            assert!(
+                load_recipe_from_bytes(invalid_source.as_bytes(), Path::new("recipe.yaml"))
+                    .is_err(),
+                "non-string unmanaged path segments must be rejected: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmanaged_template_literal_paths_preserve_literal_json_string_segments() {
+        let source = recipe_with_unmanaged_literals(1, "literal")
+            .replace("path: [custom_0]", "path: [\"a/b\", \"~name\"]");
+        let recipe = load_recipe_from_bytes(source.as_bytes(), Path::new("recipe.yaml"))
+            .expect("string path segments should load");
+        let path = &recipe
+            .config
+            .as_ref()
+            .expect("recipe configuration should load")
+            .unmanaged_literals[0]
+            .path;
+        assert_eq!(path, &["a/b".to_string(), "~name".to_string()]);
+    }
+
+    #[test]
+    fn recipe_configuration_rejects_recipe_owned_exposure_defaults() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        let with_default = source.replace(
+            "label: Shader path\n",
+            "label: Shader path\n      default: \"\"\n",
+        );
+        assert_ne!(with_default, source);
+        assert!(load_recipe_from_bytes(with_default.as_bytes(), Path::new("recipe.yaml")).is_err());
+    }
+
+    #[test]
+    fn recipe_configuration_rejects_null_ambiguous_and_unknown_operations() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        let invalid_sources = [
+            source.replace(
+                "      override:\n        value: shaders/default.glslp",
+                "      override: null",
+            ),
+            source.replace(
+                "      override:\n        value: shaders/default.glslp",
+                "      override:\n        value: \"\"\n        reset: true",
+            ),
+            source.replace(
+                "      override:\n        value: shaders/default.glslp",
+                "      override:\n        clear: false",
+            ),
+            source.replace(
+                "  properties:\n",
+                "  properties:\n    unknown_property:\n      label: Unknown\n      accidental_field: true\n",
+            ),
+            include_str!("../fixtures/configuration_contracts/recipe-unknown-config-field.yaml")
+                .to_string(),
+        ];
+        for invalid in invalid_sources {
+            assert_ne!(invalid, source, "negative test must alter the fixture");
+            assert!(
+                load_recipe_from_bytes(invalid.as_bytes(), Path::new("recipe.yaml")).is_err(),
+                "unsafe Recipe configuration must fail closed"
+            );
+        }
+    }
+    #[test]
+    fn recipe_config_override_operations_reject_null_values() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        for replacement in [
+            "      override:\n        value: null",
+            "      override:\n        clear: null",
+            "      override:\n        reset: null",
+        ] {
+            let invalid = source.replace(
+                "      override:\n        value: shaders/default.glslp",
+                replacement,
+            );
+            assert_ne!(invalid, source, "test mutation must alter the fixture");
+            assert!(
+                load_recipe_from_bytes(invalid.as_bytes(), Path::new("recipe.yaml")).is_err(),
+                "null operation must fail: {replacement:?}"
+            );
+        }
+        assert!(load_recipe_from_bytes(
+            b"schema_version: 1\nkind: recipe\nid: example\nname: Example\nconfig: null\n",
+            Path::new("recipe.yaml")
+        )
+        .is_err());
+    }
+    #[test]
+    fn unmanaged_literals_are_explicit_typed_and_require_a_user_template() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml");
+        let parsed = load_recipe_from_bytes(source.as_bytes(), Path::new("recipe.yaml"))
+            .expect("explicit unmanaged literal contract loads");
+        assert_eq!(parsed.config.as_ref().unwrap().unmanaged_literals.len(), 1);
+
+        let without_literals = source.replace(
+            "  unmanaged_literals:\n    - path: [custom_extension]\n      type: string\n      value: retained\n",
+"",
+);
+        let parsed = load_recipe_from_bytes(without_literals.as_bytes(), Path::new("recipe.yaml"))
+            .expect("user input base does not imply unmanaged literal admission");
+        assert!(parsed
+            .config
+            .as_ref()
+            .unwrap()
+            .unmanaged_literals
+            .is_empty());
+
+        let mismatched_type = source.replace(
+            "type: string\n      value: retained",
+            "type: boolean\n      value: retained",
+        );
+        assert!(
+            load_recipe_from_bytes(mismatched_type.as_bytes(), Path::new("recipe.yaml")).is_err()
+        );
+
+        let null_literal = source.replace("value: retained", "value: null");
+        assert!(load_recipe_from_bytes(null_literal.as_bytes(), Path::new("recipe.yaml")).is_err());
+
+        let template_base = source.replace("    input: user_template", "    template: default");
+        assert!(
+            load_recipe_from_bytes(template_base.as_bytes(), Path::new("recipe.yaml")).is_err()
+        );
+    }
+    #[test]
+    fn inline_recipe_literals_obey_inclusive_byte_limits() {
+        let exact_value = "x".repeat(64 * 1024);
+        let exact = recipe_with_unmanaged_literals(1, &exact_value);
+        assert!(load_recipe_from_bytes(exact.as_bytes(), Path::new("recipe.yaml")).is_ok());
+
+        let oversized_value = "x".repeat(64 * 1024 + 1);
+        let oversized = recipe_with_unmanaged_literals(1, &oversized_value);
+        assert!(load_recipe_from_bytes(oversized.as_bytes(), Path::new("recipe.yaml")).is_err());
+
+        let aggregate_exact = recipe_with_unmanaged_literals(32, &exact_value);
+        assert!(
+            load_recipe_from_bytes(aggregate_exact.as_bytes(), Path::new("recipe.yaml")).is_ok()
+        );
+
+        let aggregate_over = recipe_with_unmanaged_literals(33, &exact_value);
+        assert!(
+            load_recipe_from_bytes(aggregate_over.as_bytes(), Path::new("recipe.yaml")).is_err()
+        );
     }
 
     #[test]

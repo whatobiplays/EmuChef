@@ -124,7 +124,8 @@ impl AppDefinitionSaveAdmission {
     }
 
     /// Return whether a captured Recipe references this candidate App Target,
-    /// including typed target operands in skip and verification conditions.
+    /// including `config.target` and typed operands in skip and verification
+    /// conditions.
     ///
     /// The target's owner is the enclosing step's App context. As with artifact
     /// queries, a caller must reject an absent classification snapshot.
@@ -268,6 +269,16 @@ fn prepare_save_snapshot(
                 return None;
             }
         };
+        for issue in crate::catalog::app_configuration_template_issues(&root, value) {
+            diagnostics.push(diagnostic(
+                issue.code,
+                issue.message,
+                Some(&context.opened_file.path),
+                Some("app_definition"),
+                Some(&value.id),
+                Some(&issue.field),
+            ));
+        }
         let apps = match capture_catalog_directory(&root.join("apps"), &root) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -743,6 +754,8 @@ pub(crate) fn classify_affected_recipes(
         let app_surfaces_changed = previously_opened_app.is_none_or(|before| {
             before.artifacts != app.artifacts
                 || before.permission_sets != app.permission_sets
+                || before.targets != app.targets
+                || before.configurations != app.configurations
                 || before.launcher_activity != app.launcher_activity
         });
         let status = if has_errors {
@@ -936,6 +949,13 @@ fn capture_dependent_references(
             }
         }
     }
+    if let Some(configuration) = recipe
+        .config
+        .as_ref()
+        .filter(|configuration| configuration.app_ref == app_id)
+    {
+        references.targets.insert(configuration.target.clone());
+    }
     for step in recipe
         .steps
         .iter()
@@ -972,7 +992,10 @@ fn recipe_references_app(
     let mut affected = recipe.artifacts.values().any(|artifact| match artifact {
         RecipeArtifact::AppArtifact(reference) => reference.app_ref == app_id,
         RecipeArtifact::RemoteFile(_) => false,
-    });
+    }) || recipe
+        .config
+        .as_ref()
+        .is_some_and(|configuration| configuration.app_ref == app_id);
 
     for step in &recipe.steps {
         if step.type_name == "copy_files" && copy_source_app_refs(recipe, step).contains(app_id) {
@@ -1041,6 +1064,18 @@ fn validate_dependent_recipe(
     diagnostics: &mut Vec<AppDefinitionSaveDiagnostic>,
 ) {
     let file = relative_path(root, path);
+    for value in crate::catalog::validate_recipe_configuration(&file, recipe, apps) {
+        let field = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+        diagnostics.push(AppDefinitionSaveDiagnostic {
+            severity: field("severity").expect("catalog diagnostic severity"),
+            code: field("code").expect("catalog diagnostic code"),
+            message: field("message").expect("catalog diagnostic message"),
+            file: field("file"),
+            object_kind: field("object_kind").or_else(|| field("objectKind")),
+            object_id: field("object_id").or_else(|| field("objectId")),
+            field: field("field"),
+        });
+    }
     let result = crate::validation::validate_loaded_recipe_result(recipe, path, None);
     if let Some(values) = result.get("diagnostics").and_then(Value::as_array) {
         for value in values.iter().filter(|value| value["severity"] == "error") {
@@ -1051,8 +1086,8 @@ fn validate_dependent_recipe(
                 message: string("message")
                     .unwrap_or_else(|| "The affected Recipe is invalid.".into()),
                 file: Some(file.clone()),
-                object_kind: string("object_kind"),
-                object_id: string("object_id"),
+                object_kind: string("object_kind").or_else(|| string("objectKind")),
+                object_id: string("object_id").or_else(|| string("objectId")),
                 field: string("field"),
             });
         }

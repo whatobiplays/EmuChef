@@ -1,0 +1,42 @@
+schema_version: 1
+kind: app_definition
+id: retroarch
+name: RetroArch
+package_id: org.libretro.retroarch
+targets:
+  config_file:
+    kind: file
+    location: app_data
+    path: files/retroarch.cfg
+configurations:
+  main:
+    format: key_value/v1
+    target: config_file
+    templates:
+      default:
+        path: retroarch/default.cfg
+    managed_properties:
+      audio_driver:
+        path: [audio_driver]
+        type: string
+        default: alsa
+        validators:
+          allowed_values: [alsa, ""]
+      shader_path:
+        path: [shader_path]
+        type: string
+        default: small
+        validators:
+          min_length: 1
+      network_enabled:
+        path: [network_enabled]
+        type: boolean
+        clearable: true
+        default: true
+      frame_limit:
+        path: [frame_limit]
+        type: integer
+        default: 60
+        validators:
+          minimum: 30
+          maximum: 240

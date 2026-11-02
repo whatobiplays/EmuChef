@@ -4,12 +4,28 @@
 //! fields. App Definition diagnostics use camel-case object locations expected
 //! by the Config Editor without changing Recipe diagnostic compatibility.
 
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::app_definition_document::AppDefinitionDocument;
+use crate::authored_models::AppConfigurationFormatV1;
 use crate::document::RecipeDocument;
-use crate::model::{InputDeclaration, ParamValue, Recipe, RecipeArtifact, Step, StepCondition};
+use crate::model::{
+    InputDeclaration, ParamValue, Recipe, RecipeArtifact, RecipeConfigOverrideV1,
+    RecipeConfigurationBaseV1, RecipeConfigurationV1, Step, StepCondition,
+};
 use crate::ref_index;
+
+/// Typed DTO boundary for a safely parsed configuration document.
+///
+/// `properties` retains unknown keys so later existing-file handling can leave
+/// unmanaged device settings intact. This type does not parse or merge files.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ExistingConfigurationDocumentDto {
+    pub format: AppConfigurationFormatV1,
+    pub properties: IndexMap<String, Value>,
+}
 
 pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
     json!({
@@ -81,7 +97,7 @@ pub fn app_definition_document_to_dto(
 }
 
 pub(crate) fn recipe_to_dto(recipe: &Recipe) -> Value {
-    json!({
+    let mut dto = json!({
         "schemaVersion": recipe.schema_version,
         "kind": recipe.kind,
         "id": recipe.id,
@@ -90,9 +106,60 @@ pub(crate) fn recipe_to_dto(recipe: &Recipe) -> Value {
         "recipeDependencies": recipe.recipe_dependencies,
         "provides": {"features": recipe.provides.features},
         "inputs": map_values(recipe.inputs.iter().map(|(id, input)| (id, input_to_dto(&recipe.id, id, input)))),
+        "config": Value::Null,
         "artifacts": map_values(recipe.artifacts.iter().map(|(id, artifact)| (id, artifact_to_dto(id, artifact)))),
         "artifactGroups": map_values(recipe.artifact_groups.iter().map(|(id, members)| (id, json!(members)))),
         "steps": recipe.steps.iter().map(step_to_dto).collect::<Vec<_>>(),
+    });
+    if let Some(config) = &recipe.config {
+        dto["config"] = recipe_configuration_to_dto(config);
+    } else if let Some(object) = dto.as_object_mut() {
+        object.remove("config");
+    }
+    dto
+}
+
+fn recipe_configuration_to_dto(config: &RecipeConfigurationV1) -> Value {
+    let base = match &config.base {
+        RecipeConfigurationBaseV1::Template(template) => json!({"template": template}),
+        RecipeConfigurationBaseV1::Input(input) => json!({"input": input}),
+    };
+    let properties = config
+        .properties
+        .iter()
+        .map(|(id, property)| {
+            let mut dto = json!({
+                "required": property.required,
+                "advanced": property.advanced,
+            });
+            if let Some(label) = &property.label {
+                dto["label"] = json!(label);
+            }
+            if let Some(description) = &property.description {
+                dto["description"] = json!(description);
+            }
+            if let Some(operation) = &property.override_operation {
+                dto["override"] = match operation {
+                    RecipeConfigOverrideV1::Value(value) => json!({"value": value}),
+                    RecipeConfigOverrideV1::Clear => json!({"clear": true}),
+                    RecipeConfigOverrideV1::Reset => json!({"reset": true}),
+                };
+            }
+            (id, dto)
+        })
+        .map(|(id, value)| (id, value))
+        .collect::<Vec<_>>();
+    json!({
+        "appRef": config.app_ref,
+        "configuration": config.configuration,
+        "target": config.target,
+        "base": base,
+        "properties": map_values(properties.into_iter().map(|(id, value)| (id, value))),
+        "unmanagedLiterals": config.unmanaged_literals.iter().map(|literal| json!({
+            "path": literal.path,
+    "type": literal.type_name.as_str(),
+            "value": literal.value,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -194,7 +261,9 @@ fn map_values<'a>(values: impl IntoIterator<Item = (&'a String, Value)>) -> Valu
 
 #[cfg(test)]
 mod tests {
-    use super::{app_diagnostics_to_dto, step_to_dto};
+    use super::{
+        app_diagnostics_to_dto, recipe_to_dto, step_to_dto, ExistingConfigurationDocumentDto,
+    };
     use crate::model::{OrderedMap, Step, StepConstraints};
     use serde_json::json;
 
@@ -243,5 +312,56 @@ mod tests {
         assert!(projected[0].get("object_id").is_none());
         assert_eq!(raw["object_kind"], "step");
         assert_eq!(raw["object_id"], "install");
+    }
+
+    #[test]
+    fn existing_configuration_dto_retains_unknown_nested_properties() {
+        let configuration = ExistingConfigurationDocumentDto {
+            format: crate::authored_models::AppConfigurationFormatV1::JsonV1,
+            properties: [("vendor_extension".to_string(), json!({"nested": [1, true]}))]
+                .into_iter()
+                .collect(),
+        };
+        let encoded = serde_json::to_value(&configuration).unwrap();
+        let decoded: ExistingConfigurationDocumentDto = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.properties["vendor_extension"],
+            json!({"nested": [1, true]})
+        );
+    }
+    #[test]
+    fn recipe_dto_keeps_exposure_separate_from_override_intent() {
+        let recipe = crate::yaml::load_recipe_from_bytes(
+            include_bytes!("../fixtures/configuration_contracts/recipe-key-value.yaml"),
+            std::path::Path::new("recipe.yaml"),
+        )
+        .expect("configuration fixture should parse");
+        let dto = recipe_to_dto(&recipe);
+        assert_eq!(
+            dto["config"]["properties"]["audio_driver"]["label"],
+            "Audio driver"
+        );
+        assert!(dto["config"]["properties"]["audio_driver"]
+            .get("override")
+            .is_none());
+        assert!(dto["config"]["properties"]["shader_path"]
+            .get("default")
+            .is_none());
+        assert_eq!(
+            dto["config"]["properties"]["shader_path"]["override"]["value"],
+            "shaders/default.glslp"
+        );
+        assert_eq!(
+            dto["config"]["properties"]["network_enabled"]["override"]["clear"],
+            true
+        );
+        assert_eq!(
+            dto["config"]["properties"]["frame_limit"]["override"]["reset"],
+            true
+        );
+        assert_eq!(
+            dto["config"]["unmanagedLiterals"][0]["path"],
+            json!(["custom_extension"])
+        );
     }
 }

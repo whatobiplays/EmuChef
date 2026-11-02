@@ -790,6 +790,7 @@ fn proposed_app(facts: &ApkInspectionFacts, artifact_id: &str) -> AppDefinitionV
         artifacts,
         permission_sets: None,
         targets: IndexMap::new(),
+        configurations: IndexMap::new(),
         launcher_activity: None,
         metadata: OrderedValueMap::new(),
     }
@@ -1273,6 +1274,7 @@ fn build_recipe(
             features: vec![ids.feature_id],
         },
         inputs,
+        config: None,
         artifacts,
         artifact_groups: OrderedMap::new(),
         steps,
