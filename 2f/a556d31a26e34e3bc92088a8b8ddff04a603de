@@ -1,0 +1,42 @@
+docs/product/qualification-obligations.md
+  s_84c4be5e854653::t_4440b91c37b142 9-10
+  s_84c4be5e854653::t_3307254f837295 23,30
+  s_84c4be5e854653::t_fb41a4d9600333 13,19,21-22
+  s_84c4be5e854653::t_2be9b54c806d6d 3,5-8,11,14-18,24-29,34-38,40
+  s_84c4be5e854653::t_b9b1d853bc2e26 20
+docs/qualification/inherited-evidence-disposition.md
+  s_84c4be5e854653::t_7693f252c095fa 3
+  s_84c4be5e854653::t_227606047f2ea3 119-122
+  s_84c4be5e854653::t_7527c973daa7ea 124,131,133
+  s_84c4be5e854653::t_1a3547968cf9f9 127
+  s_84c4be5e854653::t_70bbae3302f0ca 108
+  s_84c4be5e854653::t_c41e8214365627 23,117
+  s_84c4be5e854653::t_b666c849b41408 104
+  s_84c4be5e854653::t_a8c525fb0be3a6 116
+  s_84c4be5e854653::t_3afc8f006e1bde 64-81,83,85,92-99,101-103,105-107,109
+  s_84c4be5e854653::t_38d0dc9789d820 100
+  s_84c4be5e854653::t_374c1b1130213d 25-26
+  s_84c4be5e854653::t_9314407497cc7a 118,126
+  s_84c4be5e854653::t_51609f16fb314b 82,86-91
+  s_84c4be5e854653::t_c20018afd11a4e 137,141
+  s_84c4be5e854653::t_2be9b54c806d6d 1-2,4-22,28-33,35-63,110-115,123,128-130,132,134-136,138-140,142-145
+  s_84c4be5e854653::t_95d6d10b71bfef 27,34
+  s_84c4be5e854653::t_442a64c3b95458 24,125
+  s_84c4be5e854653::t_5f27997b0bba2b 84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2fa556d31a26e34e3bc92088a8b8ddff04a603de",
+  "prompts": {},
+  "sessions": {
+    "s_84c4be5e854653": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19c05-ce29-77e3-ae84-0280153874b2",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
