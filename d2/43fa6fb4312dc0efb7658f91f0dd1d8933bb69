@@ -1,0 +1,22 @@
+docs/qualification/inherited-evidence-disposition.md
+  s_84c4be5e854653::t_e200bb89ff71b4 99
+  s_84c4be5e854653::t_8336d89e74e2b0 24
+docs/product/qualification-obligations.md
+  s_84c4be5e854653::t_e200bb89ff71b4 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d243fa6fb4312dc0efb7658f91f0dd1d8933bb69",
+  "prompts": {},
+  "sessions": {
+    "s_84c4be5e854653": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19c05-ce29-77e3-ae84-0280153874b2",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
