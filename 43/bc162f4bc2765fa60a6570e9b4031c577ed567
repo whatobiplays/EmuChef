@@ -1,0 +1,25 @@
+docs/product/qualification-obligations.md
+  s_84c4be5e854653::t_2d38d25585b4e5 13
+  s_84c4be5e854653::t_99ed88c941b0af 20
+docs/qualification/inherited-evidence-disposition.md
+  s_84c4be5e854653::t_20bac2233af204 82,100
+  s_84c4be5e854653::t_d0e8408fefeafd 104
+  s_84c4be5e854653::t_5517d5a093dd86 99
+  s_84c4be5e854653::t_348ecd9f9ff634 24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "43bc162f4bc2765fa60a6570e9b4031c577ed567",
+  "prompts": {},
+  "sessions": {
+    "s_84c4be5e854653": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19c05-ce29-77e3-ae84-0280153874b2",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
