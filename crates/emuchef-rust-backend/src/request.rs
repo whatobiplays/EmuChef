@@ -284,9 +284,21 @@ fn handle_prepare_execution_review(
         }
     };
     let target = optional_target_device(payload, "targetDevice")?;
+    let storage_targets = match payload.get("storageTargets") {
+        Some(value) => serde_json::from_value::<Vec<crate::storage_targets::StorageTargetBinding>>(
+            value.clone(),
+        )
+        .map_err(|_| {
+            ApiError::invalid_request_with_details(
+                "Request field 'storageTargets' is invalid.",
+                json!({ "field": "storageTargets" }),
+            )
+        })?,
+        None => Vec::new(),
+    };
     let plan = sessions
         .executions()
-        .prepare_review_plan(plan, mode, target)?;
+        .prepare_review_plan_with_storage_targets(plan, mode, target, storage_targets)?;
     let plan_digest = crate::plan_digest::execution_plan_digest(&plan).map_err(|error| {
         ApiError::new(
             crate::errors::ApiErrorCode::InvalidExecutionPlan,
@@ -297,6 +309,9 @@ fn handle_prepare_execution_review(
         )
     })?;
     let review = crate::review_projection::project_review(&plan, &[]);
+    let review =
+        serde_json::to_value(review).map_err(|_| setup_location_review_projection_error())?;
+    let review = sanitize_copy_destination_review(&plan, review)?;
     let plan = serde_json::to_value(plan).map_err(|error| {
         ApiError::new(
             crate::errors::ApiErrorCode::InternalError,
@@ -311,10 +326,342 @@ fn handle_prepare_execution_review(
     })))
 }
 
+/// Replace the physical Setup Location boundary in each copy action with the
+/// logical choice and any reviewed directory-creation effect.
+fn sanitize_copy_destination_review(
+    plan: &crate::planner::ExecutionPlan,
+    mut review: Value,
+) -> Result<Value, ApiError> {
+    use crate::executor::copy_commit::CopyCommitDestinationKind;
+
+    let protected_snapshot_count = plan
+        .copy_commit_snapshots
+        .iter()
+        .filter(|snapshot| {
+            matches!(
+                snapshot.destination_kind,
+                CopyCommitDestinationKind::SetupLocation
+                    | CopyCommitDestinationKind::SharedDevicePath
+            )
+        })
+        .count();
+    if protected_snapshot_count == 0 {
+        return Ok(review);
+    }
+
+    let features = review
+        .get_mut("features")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(setup_location_review_projection_error)?;
+    if features.len() != plan.source.expanded_recipe_refs.len() {
+        return Err(setup_location_review_projection_error());
+    }
+
+    let mut sanitized_count = 0;
+    for (recipe_id, feature) in plan.source.expanded_recipe_refs.iter().zip(features) {
+        let snapshots = plan
+            .steps
+            .iter()
+            .filter(|step| step.recipe_ref == *recipe_id)
+            .filter_map(|step| {
+                plan.copy_commit_snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.step_id == step.id)
+            })
+            .collect::<Vec<_>>();
+        let sections = feature
+            .get_mut("sections")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(setup_location_review_projection_error)?;
+        let mut actions = Vec::new();
+        for section in sections {
+            if section.get("kind").and_then(Value::as_str) != Some("copies") {
+                continue;
+            }
+            let Some(section_actions) = section.get_mut("actions").and_then(Value::as_array_mut)
+            else {
+                return Err(setup_location_review_projection_error());
+            };
+            actions.extend(
+                section_actions
+                    .iter_mut()
+                    .filter(|action| action.get("copyChanges").is_some_and(Value::is_object)),
+            );
+        }
+        if actions.len() != snapshots.len() {
+            return Err(setup_location_review_projection_error());
+        }
+
+        for (action, snapshot) in actions.into_iter().zip(snapshots) {
+            match snapshot.destination_kind {
+                CopyCommitDestinationKind::SetupLocation => {
+                    let binding = snapshot
+                        .setup_location_binding
+                        .as_ref()
+                        .ok_or_else(setup_location_review_projection_error)?;
+                    let precondition = snapshot
+                        .setup_destination_precondition
+                        .as_ref()
+                        .ok_or_else(setup_location_review_projection_error)?;
+                    let destination = binding
+                        .destination_path()
+                        .map_err(|_| setup_location_review_projection_error())?;
+                    if snapshot.destination_identity != destination.to_string_lossy() {
+                        return Err(setup_location_review_projection_error());
+                    }
+                    sanitize_setup_location_copy_action(action, binding, precondition)?;
+                    sanitized_count += 1;
+                }
+                CopyCommitDestinationKind::SharedDevicePath => {
+                    sanitize_shared_device_copy_action(
+                        action,
+                        &snapshot.destination_identity,
+                        snapshot.destination_binding.as_deref(),
+                    )?;
+                    sanitized_count += 1;
+                }
+                CopyCommitDestinationKind::AppTarget => {}
+            }
+        }
+    }
+
+    if sanitized_count != protected_snapshot_count {
+        return Err(setup_location_review_projection_error());
+    }
+    Ok(review)
+}
+
+fn sanitize_setup_location_copy_action(
+    action: &mut Value,
+    binding: &crate::storage_targets::StorageTargetBinding,
+    precondition: &crate::storage_targets::SetupDestinationPrecondition,
+) -> Result<(), ApiError> {
+    use crate::storage_targets::StorageTargetVolumeKind;
+
+    binding
+        .validate()
+        .map_err(|_| setup_location_review_projection_error())?;
+    let components = binding.relative_path.split('/').collect::<Vec<_>>();
+    if precondition.missing_components.len() > components.len() {
+        return Err(setup_location_review_projection_error());
+    }
+    let existing_count = components.len() - precondition.missing_components.len();
+    let expected_anchor = components[..existing_count].iter().fold(
+        std::path::PathBuf::from(&binding.mount_root),
+        |mut path, component| {
+            path.push(component);
+            path
+        },
+    );
+    if expected_anchor.to_string_lossy() != precondition.existing_anchor_path
+        || components[existing_count..]
+            != precondition
+                .missing_components
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+    {
+        return Err(setup_location_review_projection_error());
+    }
+
+    let destination = binding
+        .destination_path()
+        .map_err(|_| setup_location_review_projection_error())?;
+    let selected_boundary = action
+        .pointer("/copyChanges/selectedBoundary")
+        .and_then(Value::as_str)
+        .ok_or_else(setup_location_review_projection_error)?;
+    if selected_boundary != destination.to_string_lossy() {
+        return Err(setup_location_review_projection_error());
+    }
+
+    let volume_label = match binding.volume_kind {
+        StorageTargetVolumeKind::InternalShared => "Internal storage",
+        StorageTargetVolumeKind::RemovableSd => "SD card",
+    };
+    let creation_effect = if precondition.missing_components.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; create missing directories: {}",
+            precondition.missing_components.join("/")
+        )
+    };
+    let public_boundary = format!(
+        "{} ({volume_label}) /{}{creation_effect}",
+        binding.name, binding.relative_path
+    );
+    let copy_changes = action
+        .get_mut("copyChanges")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(setup_location_review_projection_error)?;
+    copy_changes.insert(
+        "selectedBoundary".to_string(),
+        Value::String(public_boundary),
+    );
+    if let Some(object) = action.as_object_mut() {
+        object.remove("deviceLocation");
+    }
+
+    let serialized =
+        serde_json::to_string(action).map_err(|_| setup_location_review_projection_error())?;
+    let private_values = [
+        binding.id.as_str(),
+        binding.device_plan.as_str(),
+        binding.volume_handle.as_str(),
+        binding.mount_root.as_str(),
+        binding.volume_identity.as_str(),
+        binding.volume_continuity.as_str(),
+        binding.observation_token.as_str(),
+        precondition.canonical_scope.as_str(),
+        precondition.existing_anchor_path.as_str(),
+        precondition.existing_anchor_binding.as_str(),
+    ];
+    if private_values
+        .iter()
+        .any(|value| !value.is_empty() && serialized.contains(value))
+    {
+        return Err(setup_location_review_projection_error());
+    }
+    Ok(())
+}
+
+fn sanitize_shared_device_copy_action(
+    action: &mut Value,
+    destination_identity: &str,
+    destination_binding: Option<&str>,
+) -> Result<(), ApiError> {
+    let selected_boundary = action
+        .pointer("/copyChanges/selectedBoundary")
+        .and_then(Value::as_str)
+        .ok_or_else(setup_location_review_projection_error)?;
+    if selected_boundary != destination_identity {
+        return Err(setup_location_review_projection_error());
+    }
+
+    let (public_boundary, mut scope_private_roots) =
+        sanitized_shared_destination_boundary(destination_identity);
+    let canonical_scope = match destination_binding {
+        Some(binding) => crate::executor::canonical_path_from_binding(binding)
+            .map_err(|_| setup_location_review_projection_error())?,
+        None => crate::executor::canonical_shared_destination(destination_identity)
+            .map_err(|_| setup_location_review_projection_error())?,
+    };
+    let canonical_scope_text = canonical_scope.to_string_lossy().into_owned();
+    scope_private_roots.extend(sanitized_shared_destination_boundary(&canonical_scope_text).1);
+    let copy_changes = action
+        .get_mut("copyChanges")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(setup_location_review_projection_error)?;
+    copy_changes.insert(
+        "selectedBoundary".to_string(),
+        Value::String(public_boundary),
+    );
+    if let Some(object) = action.as_object_mut() {
+        object.remove("deviceLocation");
+    }
+
+    let serialized =
+        serde_json::to_string(action).map_err(|_| setup_location_review_projection_error())?;
+    let mut private_values = vec![destination_identity.to_string(), canonical_scope_text];
+    private_values.extend(scope_private_roots);
+    if let Some(binding) = destination_binding {
+        private_values.extend(crate::executor::path_binding_private_values(binding));
+    }
+    if private_values
+        .iter()
+        .any(|value| !value.is_empty() && serialized.contains(value))
+    {
+        return Err(setup_location_review_projection_error());
+    }
+    Ok(())
+}
+
+fn sanitized_shared_destination_boundary(destination: &str) -> (String, Vec<String>) {
+    for (root, label) in [
+        ("/storage/emulated/0", "Internal shared storage"),
+        ("/storage/self/primary", "Internal shared storage"),
+        ("/sdcard", "Internal shared storage"),
+    ] {
+        if destination == root {
+            return (label.to_string(), vec![root.to_string()]);
+        }
+        if let Some(suffix) = destination
+            .strip_prefix(root)
+            .filter(|suffix| suffix.starts_with('/'))
+        {
+            return (
+                format!("{label} /{}", suffix.trim_start_matches('/')),
+                vec![root.to_string()],
+            );
+        }
+    }
+
+    if let Some(remainder) = destination.strip_prefix("/storage/") {
+        let (volume_component, suffix) = remainder.split_once('/').unwrap_or((remainder, ""));
+        if safe_shared_path_component(volume_component)
+            && !matches!(volume_component, "emulated" | "self")
+        {
+            let root = format!("/storage/{volume_component}");
+            return (
+                append_shared_destination_suffix("Shared device storage", suffix),
+                vec![root],
+            );
+        }
+    }
+
+    if let Some(remainder) = destination.strip_prefix("/mnt/media_rw/") {
+        let (volume_component, suffix) = remainder.split_once('/').unwrap_or((remainder, ""));
+        if safe_shared_path_component(volume_component) {
+            let root = format!("/mnt/media_rw/{volume_component}");
+            return (
+                append_shared_destination_suffix("Shared device storage", suffix),
+                vec![root],
+            );
+        }
+    }
+
+    if let Some(suffix) = destination.strip_prefix("/mnt/media/") {
+        return (
+            append_shared_destination_suffix("Shared device storage", suffix),
+            vec!["/mnt/media".to_string()],
+        );
+    }
+
+    ("Shared device storage destination".to_string(), Vec::new())
+}
+
+fn safe_shared_path_component(component: &str) -> bool {
+    !component.is_empty()
+        && component
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn append_shared_destination_suffix(label: &str, suffix: &str) -> String {
+    let suffix = suffix.trim_start_matches('/');
+    if suffix.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} /{suffix}")
+    }
+}
+
+fn setup_location_review_projection_error() -> ApiError {
+    ApiError::new(
+        crate::errors::ApiErrorCode::InvalidExecutionPlan,
+        "Setup Location review could not be safely projected.",
+        json!({ "field": "review" }),
+    )
+}
+
 fn validate_prepare_execution_review_payload(object: &Map<String, Value>) -> Result<(), ApiError> {
     let payload = payload_object(object)?;
     for field in payload.keys() {
-        if !matches!(field.as_str(), "plan" | "mode" | "targetDevice") {
+        if !matches!(
+            field.as_str(),
+            "plan" | "mode" | "targetDevice" | "storageTargets"
+        ) {
             return Err(ApiError::invalid_request_with_details(
                 format!("Request field '{field}' is not supported for review preparation."),
                 json!({ "field": field }),
@@ -2255,6 +2602,293 @@ steps:
             assert!(
                 parse_app_recipe_collision_request(invalid_payload.as_object().unwrap()).is_err()
             );
+        }
+    }
+
+    #[test]
+    fn setup_location_review_action_hides_physical_binding_and_shows_creation_effect() {
+        let binding = crate::storage_targets::StorageTargetBinding {
+            id: "location-id".to_string(),
+            device_plan: "device-plan".to_string(),
+            session_epoch: 7,
+            name: "ROM Library".to_string(),
+            relative_path: "roms/library".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: crate::storage_targets::StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/AB12-CD34".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let precondition = crate::storage_targets::SetupDestinationPrecondition {
+            canonical_scope: "/mnt/media_rw/AB12-CD34/roms/library".to_string(),
+            existing_anchor_path: "/storage/AB12-CD34/roms".to_string(),
+            existing_anchor_binding: "/mnt/media_rw/AB12-CD34/roms|parent:1|selected:2".to_string(),
+            missing_components: vec!["library".to_string()],
+        };
+        let mut action = json!({
+            "deviceLocation": "/storage/AB12-CD34/roms/library",
+            "copyChanges": {
+                "selectedBoundary": "/storage/AB12-CD34/roms/library",
+                "additions": ["game.rom"],
+                "replacements": [],
+                "deletions": []
+            }
+        });
+
+        sanitize_setup_location_copy_action(&mut action, &binding, &precondition).unwrap();
+
+        assert_eq!(
+            action
+                .pointer("/copyChanges/selectedBoundary")
+                .and_then(Value::as_str),
+            Some("ROM Library (SD card) /roms/library; create missing directories: library")
+        );
+        assert!(action.get("deviceLocation").is_none());
+        let serialized = serde_json::to_string(&action).unwrap();
+        for private in [
+            binding.id.as_str(),
+            binding.device_plan.as_str(),
+            binding.volume_handle.as_str(),
+            binding.mount_root.as_str(),
+            binding.volume_identity.as_str(),
+            binding.volume_continuity.as_str(),
+            binding.observation_token.as_str(),
+            precondition.canonical_scope.as_str(),
+            precondition.existing_anchor_path.as_str(),
+            precondition.existing_anchor_binding.as_str(),
+        ] {
+            assert!(!serialized.contains(private), "review exposed {private}");
+        }
+    }
+
+    #[test]
+    fn setup_location_review_action_rejects_an_unmatched_destination() {
+        let binding = crate::storage_targets::StorageTargetBinding {
+            id: "location-id".to_string(),
+            device_plan: "device-plan".to_string(),
+            session_epoch: 1,
+            name: "Internal ROMs".to_string(),
+            relative_path: "roms".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: crate::storage_targets::StorageTargetVolumeKind::InternalShared,
+            mount_root: "/storage/emulated/0".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let precondition = crate::storage_targets::SetupDestinationPrecondition {
+            canonical_scope: "/mnt/user/0/primary/roms".to_string(),
+            existing_anchor_path: "/storage/emulated/0".to_string(),
+            existing_anchor_binding: "/mnt/user/0/primary|parent:1|selected:2".to_string(),
+            missing_components: vec!["roms".to_string()],
+        };
+        let mut action = json!({
+            "copyChanges": { "selectedBoundary": "/storage/other/roms" }
+        });
+
+        assert!(sanitize_setup_location_copy_action(&mut action, &binding, &precondition).is_err());
+        assert_eq!(
+            action
+                .pointer("/copyChanges/selectedBoundary")
+                .and_then(Value::as_str),
+            Some("/storage/other/roms")
+        );
+    }
+
+    #[test]
+    fn copy_review_sanitizes_setup_and_legacy_shared_destinations() {
+        use crate::executor::copy_commit::{
+            CopyCommitDestinationKind, CopyCommitOperation, CopyCommitRequest,
+            ExecutionCopyCommitSnapshot,
+        };
+        use crate::planner::{
+            DeviceContext, ExecutionDevicePlanSnapshot, ExecutionPlan, ExecutionPlanSource,
+            ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepConstraints, RuntimeCapabilities,
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let fake_root = temporary.path().join("fake-device");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&fake_root).unwrap();
+        let binding = crate::storage_targets::StorageTargetBinding {
+            id: "location-id".to_string(),
+            device_plan: "device-plan".to_string(),
+            session_epoch: 7,
+            name: "ROM Library".to_string(),
+            relative_path: "roms/library".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: crate::storage_targets::StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/AB12-CD34".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let precondition = crate::storage_targets::SetupDestinationPrecondition {
+            canonical_scope: "/mnt/media_rw/AB12-CD34/roms/library".to_string(),
+            existing_anchor_path: "/storage/AB12-CD34/roms".to_string(),
+            existing_anchor_binding: "/mnt/media_rw/AB12-CD34/roms|parent:1|selected:2".to_string(),
+            missing_components: vec!["library".to_string()],
+        };
+        let request = CopyCommitRequest::reviewed_setup_directory(
+            &source,
+            &fake_root,
+            binding,
+            precondition,
+            CopyCommitOperation::AddUpdate,
+            Vec::new(),
+        )
+        .unwrap();
+        let snapshot = ExecutionCopyCommitSnapshot::from_request("copy", &source, &request);
+        let step = ExecutionStep {
+            id: "copy".to_string(),
+            recipe_ref: "recipe".to_string(),
+            app_id: None,
+            type_name: "copy_files".to_string(),
+            name: "Copy ROMs".to_string(),
+            note: String::new(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            permission_plan: None,
+            params: crate::model::OrderedMap::new(),
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        let mut plan = ExecutionPlan {
+            id: "plan".to_string(),
+            source: ExecutionPlanSource {
+                device_profile_ref: "profile".to_string(),
+                device_plan_ref: "device-plan".to_string(),
+                selected_recipe_refs: vec!["recipe".to_string()],
+                expanded_recipe_refs: vec!["recipe".to_string()],
+                catalog: None,
+            },
+            device_plan: Some(ExecutionDevicePlanSnapshot {
+                id: "device-plan".to_string(),
+                name: None,
+                description: None,
+            }),
+            recipes: vec![ExecutionRecipeSnapshot {
+                id: "recipe".to_string(),
+                name: "ROM setup".to_string(),
+                description: None,
+            }],
+            apps: Vec::new(),
+            resolved_inputs: Vec::new(),
+            copy_commit_snapshots: vec![snapshot],
+            target_device: None,
+            device_context: DeviceContext {
+                manufacturer: "Example".to_string(),
+                model: "Device".to_string(),
+                android_version: 1,
+                android_api_level: None,
+                device_tags: Vec::new(),
+                root_shell_mode: None,
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: false,
+                shared_storage_write: true,
+                app_launch: false,
+                shell_command: false,
+                package_remove_for_user: false,
+                root_shell: false,
+                app_data_write: false,
+                root_shell_route: None,
+            },
+            inputs: Vec::new(),
+            artifacts: Vec::new(),
+            steps: vec![step],
+            schema_version: 1,
+            kind: "execution_plan",
+        };
+        let review = json!({
+            "features": [{
+                "sections": [{
+                    "kind": "copies",
+                    "actions": [{
+                        "deviceLocation": "/storage/AB12-CD34/roms/library",
+                        "copyChanges": {
+                            "selectedBoundary": "/storage/AB12-CD34/roms/library",
+                            "additions": [],
+                            "replacements": [],
+                            "deletions": []
+                        }
+                    }]
+                }]
+            }]
+        });
+
+        let sanitized = sanitize_copy_destination_review(&plan, review).unwrap();
+
+        let action = &sanitized["features"][0]["sections"][0]["actions"][0];
+        assert_eq!(
+            action
+                .pointer("/copyChanges/selectedBoundary")
+                .and_then(Value::as_str),
+            Some("ROM Library (SD card) /roms/library; create missing directories: library")
+        );
+        assert!(action.get("deviceLocation").is_none());
+        let serialized = serde_json::to_string(action).unwrap();
+        assert!(!serialized.contains("/storage/AB12-CD34"));
+        assert!(!serialized.contains("volume_identity"));
+        assert!(!serialized.contains("continuity"));
+
+        let legacy_snapshot = &mut plan.copy_commit_snapshots[0];
+        legacy_snapshot.destination_kind = CopyCommitDestinationKind::SharedDevicePath;
+        legacy_snapshot.destination_identity = "/storage/AB12-CD34/roms/library".to_string();
+        legacy_snapshot.destination_binding = Some(
+            json!({
+                "canonicalPath": "/mnt/media_rw/AB12-CD34/roms/library",
+                "parentIdentity": "parent:1",
+                "selectedIdentity": "selected:2",
+            })
+            .to_string(),
+        );
+        legacy_snapshot.setup_location_binding = None;
+        legacy_snapshot.setup_destination_precondition = None;
+        let legacy_review = json!({
+            "features": [{
+                "sections": [{
+                    "kind": "copies",
+                    "actions": [{
+                        "deviceLocation": "/storage/AB12-CD34/roms/library",
+                        "copyChanges": {
+                            "selectedBoundary": "/storage/AB12-CD34/roms/library",
+                            "additions": [],
+                            "replacements": [],
+                            "deletions": []
+                        }
+                    }]
+                }]
+            }]
+        });
+        let mut leaking_legacy_review = legacy_review.clone();
+        leaking_legacy_review["features"][0]["sections"][0]["actions"][0]["privateIdentity"] =
+            Value::String("selected:2".to_string());
+        assert!(sanitize_copy_destination_review(&plan, leaking_legacy_review).is_err());
+
+        let sanitized_legacy = sanitize_copy_destination_review(&plan, legacy_review).unwrap();
+        let legacy_action = &sanitized_legacy["features"][0]["sections"][0]["actions"][0];
+        assert_eq!(
+            legacy_action
+                .pointer("/copyChanges/selectedBoundary")
+                .and_then(Value::as_str),
+            Some("Shared device storage /roms/library")
+        );
+        assert!(legacy_action.get("deviceLocation").is_none());
+        let serialized_legacy = serde_json::to_string(legacy_action).unwrap();
+        for private_value in [
+            "/storage/AB12-CD34",
+            "/mnt/media_rw/AB12-CD34",
+            "AB12-CD34",
+            "parent:1",
+        ] {
+            assert!(!serialized_legacy.contains(private_value));
         }
     }
 }

@@ -171,6 +171,10 @@ pub(crate) struct DeviceVolume {
     pub(crate) kind: VolumeKind,
     pub(crate) status: VolumeStatus,
     pub(crate) mount_state: VolumeMountState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_location_kind: Option<VolumeKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mount_root: Option<String>,
     pub(crate) reasons: Vec<String>,
 }
 
@@ -1305,6 +1309,7 @@ fn internal_volume(volume: &MountVolume, reasons: &[&str]) -> DeviceVolume {
         .map(|value| (*value).to_string())
         .collect::<Vec<_>>();
     reasons.push(mount_reason(mount_state));
+    let (setup_location_kind, mount_root) = setup_location_root(volume, mount_state, &reasons);
     DeviceVolume {
         identity_token: identity_token(
             VolumeKind::InternalShared,
@@ -1314,6 +1319,8 @@ fn internal_volume(volume: &MountVolume, reasons: &[&str]) -> DeviceVolume {
         kind: VolumeKind::InternalShared,
         status,
         mount_state,
+        setup_location_kind,
+        mount_root,
         reasons,
     }
 }
@@ -1325,6 +1332,8 @@ fn unavailable_internal(reason: &str) -> DeviceVolume {
         kind: VolumeKind::InternalShared,
         status: VolumeStatus::Unknown,
         mount_state: VolumeMountState::Unknown,
+        setup_location_kind: None,
+        mount_root: None,
         reasons: vec![reason.to_string(), mount_reason(VolumeMountState::Unknown)],
     }
 }
@@ -1336,6 +1345,8 @@ fn ambiguous_internal(reason: &str) -> DeviceVolume {
         kind: VolumeKind::InternalShared,
         status: VolumeStatus::Ambiguous,
         mount_state: VolumeMountState::Unknown,
+        setup_location_kind: None,
+        mount_root: None,
         reasons: vec![reason.to_string()],
     }
 }
@@ -1548,12 +1559,29 @@ fn classified_public(
     mount_state: VolumeMountState,
     reasons: Vec<String>,
 ) -> DeviceVolume {
+    let mount_root = if kind == VolumeKind::RemovableSd
+        && status == VolumeStatus::Available
+        && mount_state == VolumeMountState::MountedRw
+    {
+        volume
+            .normalized_fs_uuid()
+            .filter(|uuid| is_safe_volume_component(uuid))
+            .filter(|uuid| {
+                public_volume_path_form(volume.path.as_deref(), uuid)
+                    == Some(PublicVolumePath::Visible)
+            })
+            .and_then(|_| volume.path.clone())
+    } else {
+        None
+    };
     DeviceVolume {
         identity_token,
         continuity_token: continuity_token(volume),
         kind,
         status,
         mount_state,
+        setup_location_kind: mount_root.as_ref().map(|_| VolumeKind::RemovableSd),
+        mount_root,
         reasons,
     }
 }
@@ -1566,6 +1594,8 @@ fn unsupported_volume(volume: &MountVolume, kind: VolumeKind, reason: &str) -> D
         kind,
         status: VolumeStatus::Unsupported,
         mount_state,
+        setup_location_kind: None,
+        mount_root: None,
         reasons: vec![reason.to_string(), mount_reason(mount_state)],
     }
 }
@@ -1578,8 +1608,60 @@ fn unknown_volume(volume: &MountVolume) -> DeviceVolume {
         kind: VolumeKind::Unknown,
         status: VolumeStatus::Unknown,
         mount_state,
+        setup_location_kind: None,
+        mount_root: None,
         reasons: vec!["volume_type_unknown".to_string(), mount_reason(mount_state)],
     }
+}
+
+fn setup_location_root(
+    volume: &MountVolume,
+    mount_state: VolumeMountState,
+    reasons: &[String],
+) -> (Option<VolumeKind>, Option<String>) {
+    if mount_state != VolumeMountState::MountedRw {
+        return (None, None);
+    }
+    if reasons
+        .iter()
+        .any(|reason| reason == "primary_storage_physical")
+    {
+        let fs_uuid = volume.normalized_fs_uuid();
+        let root = volume.path.as_deref().filter(|path| {
+            fs_uuid.as_deref().is_some_and(|uuid| {
+                is_safe_volume_component(uuid)
+                    && public_volume_path_form(Some(path), uuid) == Some(PublicVolumePath::Visible)
+            })
+        });
+        return root.map_or((None, None), |path| {
+            (Some(VolumeKind::RemovableSd), Some(path.to_string()))
+        });
+    }
+    let associated_system_user = reasons
+        .iter()
+        .any(|reason| reason == "emulated_user_associated");
+    let adopted_primary = reasons
+        .iter()
+        .any(|reason| reason == "primary_storage_adopted");
+    if associated_system_user
+        && !adopted_primary
+        && volume.path.as_deref() == Some("/storage/emulated/0")
+    {
+        return (
+            Some(VolumeKind::InternalShared),
+            Some("/storage/emulated/0".to_string()),
+        );
+    }
+    (None, None)
+}
+
+fn is_safe_volume_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1667,12 +1749,17 @@ fn observation_token(volumes: &[DeviceVolume]) -> String {
     let mut parts = Vec::with_capacity(volumes.len());
     for volume in volumes {
         parts.push(format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             volume.identity_token,
             volume.continuity_token,
             volume.kind.token_name(),
             volume.status.token_name(),
-            volume.mount_state.token_name()
+            volume.mount_state.token_name(),
+            volume
+                .setup_location_kind
+                .map(VolumeKind::token_name)
+                .unwrap_or("none"),
+            volume.mount_root.as_deref().unwrap_or("none")
         ));
     }
     parts.sort();
@@ -1698,6 +1785,83 @@ fn digest128(domain: &str, parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_root_requires_corroborated_system_user_internal_and_visible_sd_roots() {
+        let mut internal = MountVolume::new("emulated;0".to_string());
+        internal.volume_type = MountVolumeType::Emulated;
+        internal.state = "mounted".to_string();
+        internal.mount_user_id = Some(0);
+        internal.path = Some("/storage/emulated/0".to_string());
+        let accepted = internal_volume(&internal, &["emulated_user_associated"]);
+        assert_eq!(
+            accepted.setup_location_kind,
+            Some(VolumeKind::InternalShared)
+        );
+        assert_eq!(accepted.mount_root.as_deref(), Some("/storage/emulated/0"));
+
+        for (path, reasons, state) in [
+            (
+                Some("/storage/emulated/0"),
+                &["emulated_user_assumed"][..],
+                "mounted",
+            ),
+            (None, &["emulated_user_associated"][..], "mounted"),
+            (
+                Some("/storage/emulated/0"),
+                &["emulated_user_associated", "primary_storage_adopted"][..],
+                "mounted",
+            ),
+            (
+                Some("/storage/emulated/0"),
+                &["emulated_user_associated"][..],
+                "mounted_ro",
+            ),
+        ] {
+            let mut volume = internal.clone();
+            volume.path = path.map(ToString::to_string);
+            volume.state = state.to_string();
+            let observed = internal_volume(&volume, reasons);
+            assert!(
+                observed.mount_root.is_none(),
+                "{path:?} {reasons:?} {state}"
+            );
+        }
+
+        let mut sd = MountVolume::new("public:179,1".to_string());
+        sd.volume_type = MountVolumeType::Public;
+        sd.state = "mounted".to_string();
+        sd.fs_uuid = Some("1234-ABCD".to_string());
+        sd.path = Some("/storage/1234-ABCD".to_string());
+        let visible_sd = classified_public(
+            &sd,
+            "identity".to_string(),
+            VolumeKind::RemovableSd,
+            VolumeStatus::Available,
+            VolumeMountState::MountedRw,
+            vec!["disk_removable_sd".to_string()],
+        );
+        assert_eq!(visible_sd.mount_root.as_deref(), Some("/storage/1234-ABCD"));
+
+        for (uuid, path) in [
+            ("1234-ABCD", "/mnt/media_rw/1234-ABCD"),
+            ("../escape", "/storage/../escape"),
+            ("1234-ABCD", "/storage/other-card"),
+        ] {
+            let mut volume = sd.clone();
+            volume.fs_uuid = Some(uuid.to_string());
+            volume.path = Some(path.to_string());
+            let observed = classified_public(
+                &volume,
+                "identity".to_string(),
+                VolumeKind::RemovableSd,
+                VolumeStatus::Available,
+                VolumeMountState::MountedRw,
+                vec!["disk_removable_sd".to_string()],
+            );
+            assert!(observed.mount_root.is_none(), "{uuid} {path}");
+        }
+    }
     use crate::device_probe::CommandOutput;
     use std::cell::RefCell;
 
@@ -2206,16 +2370,25 @@ public:1A2B-3C4D mounted
     }
 
     #[test]
-    fn shell_filesystem_uuid_is_accepted_but_not_forwarded() {
+    fn shell_filesystem_uuid_is_used_only_for_verified_visible_setup_root() {
         let observation =
             list_device_volumes_with_runner("adb", SERIAL, &runner_with(API33_DUMP, API33_LIST))
                 .expect("observation");
         assert_eq!(volume(&observation, "removableSd")["status"], "available");
+        assert_eq!(
+            volume(&observation, "removableSd")["mountRoot"],
+            "/storage/8C4B-1A2F"
+        );
+        assert_ne!(
+            volume(&observation, "removableSd")["identityToken"],
+            "8C4B-1A2F",
+            "the raw filesystem UUID must not be used as the volume identity"
+        );
         let serialized = serde_json::to_string(&observation).expect("serialized observation");
-        for forbidden in ["8C4B-1A2F", "/storage/", "mmcblk0", "DEAD-BEEF"] {
+        for forbidden in ["/mnt/media_rw/", "mmcblk0", "DEAD-BEEF", "SDCARD"] {
             assert!(
                 !serialized.contains(forbidden),
-                "observation must not contain raw device evidence"
+                "trusted observation must omit unrelated raw device evidence"
             );
         }
     }

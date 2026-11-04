@@ -1117,6 +1117,12 @@ fn plan_execution_with_app_definitions_inner(
         return error_result(dependency_errors);
     }
 
+    let setup_location_consumer_errors =
+        validate_setup_location_input_consumers(&recipes, &expanded_recipe_refs);
+    if !setup_location_consumer_errors.is_empty() {
+        return error_result(setup_location_consumer_errors);
+    }
+
     let binding_resolution = resolve_runtime_bindings(
         &recipes,
         &expanded_recipe_refs,
@@ -3029,6 +3035,10 @@ fn validate_ref_param_contract(
     let Some(value_type) = value_type else {
         return Vec::new();
     };
+    if value_type == "setup_location_ref" && step.type_name == "copy_files" && param_name == "dest"
+    {
+        return Vec::new();
+    }
     if spec
         .accepted_value_types
         .iter()
@@ -3048,6 +3058,109 @@ fn validate_ref_param_contract(
         json!(spec.accepted_value_types),
         json!({ "ref": ref_value, "valueType": value_type }),
     )]
+}
+
+fn validate_setup_location_input_consumers(
+    recipes: &HashMap<String, Recipe>,
+    expanded_recipe_refs: &[String],
+) -> Vec<PlannerMessage> {
+    fn is_setup_input(recipe: &Recipe, input_id: &str) -> bool {
+        recipe
+            .inputs
+            .get(input_id)
+            .is_some_and(|input| input.type_name == "setup_location_ref")
+    }
+
+    fn references_setup_input(recipe: &Recipe, value: &str) -> bool {
+        matches!(parse_reference(value), Ok(RuntimeRef::Input { target_id }) if is_setup_input(recipe, &target_id))
+    }
+
+    fn json_references_setup_input(recipe: &Recipe, value: &Value) -> bool {
+        match value {
+            Value::Object(object) => {
+                object
+                    .get("ref")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reference| references_setup_input(recipe, reference))
+                    || object
+                        .values()
+                        .any(|value| json_references_setup_input(recipe, value))
+            }
+            Value::Array(values) => values
+                .iter()
+                .any(|value| json_references_setup_input(recipe, value)),
+            _ => false,
+        }
+    }
+
+    let mut errors = Vec::new();
+    for recipe_id in expanded_recipe_refs {
+        let Some(recipe) = recipes.get(recipe_id) else {
+            continue;
+        };
+        if matches!(
+            recipe.config.as_ref().map(|config| &config.base),
+            Some(crate::model::RecipeConfigurationBaseV1::Input(input_id))
+                if is_setup_input(recipe, input_id)
+        ) {
+            errors.push(setup_location_consumer_error(
+                recipe_id,
+                "recipe configuration base",
+            ));
+        }
+        for artifact in recipe.artifacts.values() {
+            if let RecipeArtifact::AppArtifact(reference) = artifact {
+                if reference
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| is_setup_input(recipe, &input.input_id))
+                {
+                    errors.push(setup_location_consumer_error(
+                        recipe_id,
+                        "App Artifact input",
+                    ));
+                }
+            }
+        }
+        for step in &recipe.steps {
+            for (parameter, value) in &step.params {
+                let ParamValue::Ref(reference) = value else {
+                    continue;
+                };
+                if references_setup_input(recipe, reference)
+                    && !(step.type_name == "copy_files" && parameter == "dest")
+                {
+                    errors.push(setup_location_consumer_error(
+                        recipe_id,
+                        &format!("step '{}' parameter '{parameter}'", step.id),
+                    ));
+                }
+            }
+            for condition in step.skip_if.iter().chain(&step.verify) {
+                if condition
+                    .params
+                    .values()
+                    .any(|value| json_references_setup_input(recipe, value))
+                {
+                    errors.push(setup_location_consumer_error(
+                        recipe_id,
+                        &format!("step '{}' condition", step.id),
+                    ));
+                }
+            }
+        }
+    }
+    errors
+}
+
+fn setup_location_consumer_error(recipe_id: &str, consumer: &str) -> PlannerMessage {
+    PlannerMessage {
+        code: "unsupported_setup_location_consumer".to_string(),
+        message: format!(
+            "Setup Location references are supported only as copy_files destinations; {consumer} is unsupported."
+        ),
+        details: json!({ "recipe_ref": recipe_id, "consumer": consumer }),
+    }
 }
 
 /// Return the declared runtime type of a reference in its Recipe. The same

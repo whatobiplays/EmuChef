@@ -4,6 +4,7 @@ import { diagnosticIsBlocking, groupedInputs } from "./app-helpers";
 import type {
   ConfigurationDescription,
   InputDescriptor,
+  SetupLocationProjection,
   ValidationDiagnostic,
 } from "./types";
 import { inputDiagnosticsForDisplay, pageDiagnosticsForDisplay } from "./workflow";
@@ -26,6 +27,7 @@ function valueSourceLabel(source: NonNullable<InputDescriptor["valueSource"]>): 
 
 interface InputsStepProps {
   description: ConfigurationDescription;
+  setupLocations: SetupLocationProjection[];
   bindings: Record<string, unknown>;
   busy: boolean;
   touchedInputKeys: Set<string>;
@@ -47,6 +49,7 @@ interface InputsStepProps {
 
 export function InputsStep({
   description,
+  setupLocations,
   bindings,
   busy,
   touchedInputKeys,
@@ -158,6 +161,36 @@ export function InputsStep({
                     onChange={(event) => onBindingChange(input.key, event.target.checked)}
                     type="checkbox"
                   />
+                ) : input.type === "setup_location_ref" ? (
+                  <>
+                    <select
+                      aria-describedby={describedBy(
+                        input.description && descriptionId,
+                        input.valueSource && sourceId,
+                        ...diagnosticIds,
+                      )}
+                      aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
+                      id={inputId}
+                      onChange={(event) => onBindingChange(input.key, event.target.value)}
+                      value={String(bindings[input.key] ?? input.value ?? "")}
+                    >
+                      <option value="">Choose a Setup Location…</option>
+                      {typeof currentValue === "string"
+                        && currentValue
+                        && !setupLocations.some((location) => location.id === currentValue) && (
+                          <option disabled value={currentValue}>Unavailable Setup Location</option>
+                        )}
+                      {setupLocations.map((location) => (
+                        <option disabled={!location.ready} key={location.id} value={location.id}>
+                          {location.name} · {location.relativePath} · {location.volumeLabel}
+                          {!location.ready ? ` · ${location.detail}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {setupLocations.length === 0 && (
+                      <small>No named Setup Locations are available for this device plan. Define one in device setup.</small>
+                    )}
+                  </>
                 ) : input.options?.length ? (
                   <select
                     aria-describedby={describedBy(

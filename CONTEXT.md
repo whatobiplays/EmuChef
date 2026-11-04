@@ -748,15 +748,23 @@ value types. Authored recipe refs remain recipe-local (`inputs.<id>`,
 `artifacts.<id>.<field>`, and `steps.<id>[.outputs.<name>]`). Validation rejects
 literal or ref namespaces that a parameter does not accept and rejects refs
 whose declared runtime type is incompatible. `copy_files.dest` accepts a
-literal device path, compatible input ref, or typed App Target;
-`copy_files.copy_policy` accepts a literal or compatible input ref, while
+literal device path, compatible input ref, typed App Target, or typed
+`setup_location_ref`; the latter is supported only for the directory-copy
+writers defined below. `copy_files.copy_policy` accepts a literal or compatible
+input ref, while
 `copy_files.source` remains limited to compatible input, artifact, and step
 output refs. Canonical recipe YAML continues emitting direct literal values and
 single-field `{ ref: ... }` and `{ app_target: ... }` mappings.
 
 Recipe input declarations support `string`, `integer`, `boolean`, `enum`,
 `file`, `directory`, `path`, `device_path`, `string_list`, `path_list`, and
-`object`. Each declaration carries semantic label, description, and role
+`object`, plus typed `setup_location_ref` values for native-issued Setup
+Location identities. This reference is valid only as `copy_files.dest`; use by
+any other operation or parameter fails closed. Supported writers copy a host
+directory to a device directory with `merge` (Add or Update), `replace`, or
+directory-style `sync` (Mirror). Existing Recipe parsing, validation, App
+Target behavior, and legacy device-path destinations retain their existing
+semantics. Each declaration carries semantic label, description, and role
 metadata; required and multiple flags; a JSON-compatible default; structured
 enum options; sensitive and advanced presentation flags; extensible metadata;
 and validation for existence, extensions, path kind, and allowed device-path
@@ -1446,8 +1454,12 @@ available or selectable.
 
 The sm list-volumes all report prints id, environment state, and an optional
 filesystem UUID. Two-field legacy lines and three-field AOSP lines are accepted;
-lines with more fields are not trusted. The filesystem UUID field is parsed only
-far enough to discard it and never crosses the sidecar boundary.
+lines with more fields are not trusted. Rust uses the UUID as private evidence
+for volume identity and visible-root validation. The sidecar returns only an
+opaque identity/continuity digest and, for eligible Setup Location volumes, the
+verified mount root over its private Rust-to-Tauri interface. Tauri retains that
+root in native state; the volume and Setup Location projections to React omit
+physical paths and device evidence.
 
 Volume kinds are internalShared, removableSd, adoptedPrivate, usb, and unknown.
 Statuses are available, unmounted, ambiguous, unsupported, and unknown. Mount
@@ -1587,6 +1599,53 @@ cannot remain visible. A stale_observation failure keeps the current trusted
 projection and any newer successful selection, shows the panel alert, and asks
 for a fresh read and reselection. No filesystem label, capacity, UUID, path, or
 serial appears in the DOM or in frontend props.
+
+### Setup Locations
+
+Tauri retains each named Setup Location independently for the current device
+session and setup plan. A location binds its name and relative directory to an
+independently chosen opaque volume handle plus trusted root, identity,
+continuity, and current observation evidence. Multiple locations can reference
+different volumes at once; this state does not use T04's one selected-volume
+slot. React receives only the location ID, name, volume category, relative
+path, readiness, and fixed detail text. Volume roots, serials, UUIDs, and
+identity or continuity tokens remain in Rust/Tauri.
+
+Rust obtains the root from the current `VolumeInfo.path` and validates it
+against classification evidence: internal shared storage requires positive
+system-user association and exact `/storage/emulated/0`; removable SD requires
+the exact visible `/storage/<safe-volume-id>` path, mounted read-write state,
+and corroborating public-volume, disk, UUID, and `sm list-volumes all`
+evidence. `internalPath` is never a destination root. The executor separately
+checks actual path access. A public physical-primary volume keeps its T04
+classification but binds as a removable-SD Setup Location. Refresh preserves
+readiness only when the same volume kind, root, identity, continuity, device
+session, runtime generation, and Platform-Tools revision are still evidenced.
+Changed, unavailable, read-only, stale, or failed observations make the location
+unresolved; session or device-authority invalidation clears its authority.
+
+Only Setup Locations referenced by selected `copy_files.dest` writers enter
+planning and review. The immutable plan digest covers each active trusted
+binding, including volume evidence, root, and relative path. The retained review
+binds canonical destination scopes, manifests, preconditions, and reviewed
+effects, including any required directory creation. Active Setup Location and
+legacy shared-path writers are compared by canonical scope and reviewed effect.
+Conflicting writes, destructive overlaps, and shared directory creations that
+would invalidate another writer's reviewed missing-path precondition are
+rejected before execution. Idempotent directory effects may coexist when those
+directories already exist at review time and no other effect conflicts. Unused
+named locations do not participate and may have overlapping paths.
+
+The T04 ten-second observation lifetime applies to location resolution and
+refresh, not to immutable review validity. Before mutation, execution requires
+fresh matching volume identity and continuity, current access, canonical
+confinement, and unchanged destination preconditions. A missing destination
+suffix is reviewable only below an existing verified directory, with each
+created component included as an explicit effect. The executor revalidates the
+anchor and exact missing suffix, then creates components individually through
+the no-follow directory helper. Missing guards or safe creation support fail
+closed before destination mutation. T03 staging, cleanup, and partial outcomes
+remain reported separately and truthfully.
 
 ## Developer commands
 
@@ -2809,3 +2868,16 @@ file paths; the simulation does not copy real-device file bytes into its fake
 tree. The fake destination is seeded only from the retained review snapshot and
 must match that path and kind baseline before mutation. The backend advertises
 `prepareExecutionReview` as a required protocol capability.
+
+For Setup Location writers, the immutable plan digest binds the active volume
+evidence, root, and relative path. The retained review binds canonical
+destination scope, reviewed manifest, and missing directory creation effects.
+The public review shows the location name, volume category, relative path, and
+reviewed effects; it omits physical mount roots,
+device identity, UUIDs, and continuity evidence. Expiry of T04's ten-second
+observation cache does not change a retained review or its digest. Before any
+selected-destination mutation, the executor requires a fresh matching T04
+observation and revalidates continuity, access, confinement, and destination
+preconditions. A failure before the first destination mutation leaves the
+selected destination untouched; staging and cleanup are reported separately.
+After an authorized mutation, failures retain T03's truthful partial outcome.

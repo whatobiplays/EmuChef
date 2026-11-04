@@ -25,7 +25,7 @@ use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::executor::copy_commit::{
     AndroidCopyCommitAdapter, CopyCommitAdapter, CopyCommitDestinationKind, CopyCommitError,
-    CopyCommitMutation, CopyCommitOperation, CopyCommitRequest, CopyManifestEntry,
+    CopyCommitMutation, CopyCommitOperation, CopyCommitRequest, CopyEntryKind, CopyManifestEntry,
     ExecutionCopyCommitSnapshot, FakeFilesystemCopyCommitAdapter,
 };
 use crate::model::OrderedMap;
@@ -37,6 +37,9 @@ use crate::planner::{
 };
 use crate::remote_release_resolver::{
     resolve_remote_latest, RemoteReleaseOptions, ResolvedRemoteRelease,
+};
+use crate::storage_targets::{
+    writer_effects_conflict, SetupDestinationPrecondition, StorageTargetBinding, WriterEffect,
 };
 
 /// Materialization details resolved from one planned artifact source.
@@ -652,6 +655,24 @@ pub trait ExecutorDevice: std::fmt::Debug {
         ))
     }
 
+    /// Check a path for a symbolic link without following it.
+    fn copy_commit_path_is_symlink(&mut self, _path: &str) -> Result<bool, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter cannot verify selected-path symbolic-link state",
+        ))
+    }
+
+    /// Re-observe the T04 volume and verify the Setup Location still has
+    /// matching identity, continuity, visible root, mount state, and write access.
+    fn copy_commit_verify_setup_location(
+        &mut self,
+        _binding: &StorageTargetBinding,
+    ) -> Result<(), DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter cannot revalidate Setup Location volume continuity and access",
+        ))
+    }
+
     /// Create exactly one new directory, failing if the path already exists.
     fn copy_commit_create_directory(&mut self, _path: &str) -> Result<(), DeviceOperationError> {
         Err(DeviceOperationError::other(
@@ -860,6 +881,16 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         &mut self,
         plan: &mut ExecutionPlan,
     ) -> Result<(), String> {
+        self.prepare_copy_commit_snapshots_with_storage_targets(plan, &[])
+    }
+
+    /// Prepare copy snapshots with trusted bindings for active Setup Location
+    /// destination references.
+    pub fn prepare_copy_commit_snapshots_with_storage_targets(
+        &mut self,
+        plan: &mut ExecutionPlan,
+        storage_targets: &[StorageTargetBinding],
+    ) -> Result<(), String> {
         plan.copy_commit_snapshots.clear();
         validate_supported_copy_plan(plan)?;
         self.adapters
@@ -894,16 +925,39 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             else {
                 continue;
             };
-            let destination = resolved_params
-                .get("dest")
-                .and_then(Value::as_str)
-                .expect("selected directory validation requires a destination");
+            let destination_value = resolved_params.get("dest");
+            let setup_destination_value = if destination_kind
+                == CopyCommitDestinationKind::SetupLocation
+            {
+                Some(runtime_value_param(&resolved_params, "dest").map_err(|error| error.message)?)
+            } else {
+                None
+            };
+            let destination = if let Some(runtime) = &setup_destination_value {
+                runtime
+                    .value
+                    .as_str()
+                    .ok_or_else(|| "Setup Location reference must resolve to an ID".to_string())?
+            } else {
+                destination_value.and_then(Value::as_str).ok_or_else(|| {
+                    "selected directory validation requires a destination".to_string()
+                })?
+            };
             let source =
                 runtime_value_param(&resolved_params, "source").map_err(|error| error.message)?;
             let source_path = source_path_from_value(&source).map_err(|error| error.message)?;
             sandbox
                 .ensure_read_allowed(&source_path)
                 .map_err(|error| error.message)?;
+            let setup_binding = if destination_kind == CopyCommitDestinationKind::SetupLocation {
+                Some(active_setup_location_binding(
+                    storage_targets,
+                    destination,
+                    plan,
+                )?)
+            } else {
+                None
+            };
             match destination_kind {
                 CopyCommitDestinationKind::AppTarget => self
                     .ensure_root_preflight()
@@ -917,6 +971,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         .map_err(|error| error.message)?;
                 }
                 CopyCommitDestinationKind::SharedDevicePath => {}
+                CopyCommitDestinationKind::SetupLocation => {}
             }
 
             let copy_policy = resolved_params
@@ -941,38 +996,65 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             operation,
                         )
                     }
-                }
-            } else {
-                let destination_manifest = self
-                    .adapters
-                    .device
-                    .copy_commit_tree_manifest(destination)
-                    .map_err(|error| error.message)?;
-                let destination_binding = self
-                    .adapters
-                    .device
-                    .copy_commit_path_binding(destination)
-                    .map_err(|error| error.message)?;
-                match destination_kind {
-                    CopyCommitDestinationKind::AppTarget => {
-                        CopyCommitRequest::reviewed_android_directory(
+                    CopyCommitDestinationKind::SetupLocation => {
+                        CopyCommitRequest::reviewed_fake_setup_directory(
                             &source_path,
                             &sandbox.fake_device_root,
-                            destination,
+                            setup_binding.clone().expect(
+                                "Setup Location binding is resolved before request creation",
+                            ),
                             operation,
-                            destination_manifest,
-                            destination_binding,
                         )
                     }
-                    CopyCommitDestinationKind::SharedDevicePath => {
-                        CopyCommitRequest::reviewed_android_shared_directory(
+                }
+            } else {
+                match destination_kind {
+                    CopyCommitDestinationKind::SetupLocation => {
+                        let binding = setup_binding
+                            .clone()
+                            .expect("Setup Location binding is resolved before request creation");
+                        let (precondition, destination_manifest) =
+                            inspect_android_setup_destination(&mut self.adapters.device, &binding)?;
+                        CopyCommitRequest::reviewed_setup_directory(
                             &source_path,
                             &sandbox.fake_device_root,
-                            destination,
+                            binding,
+                            precondition,
                             operation,
                             destination_manifest,
-                            destination_binding,
                         )
+                    }
+                    CopyCommitDestinationKind::AppTarget
+                    | CopyCommitDestinationKind::SharedDevicePath => {
+                        let destination_manifest = self
+                            .adapters
+                            .device
+                            .copy_commit_tree_manifest(destination)
+                            .map_err(|error| error.message)?;
+                        let destination_binding = self
+                            .adapters
+                            .device
+                            .copy_commit_path_binding(destination)
+                            .map_err(|error| error.message)?;
+                        if destination_kind == CopyCommitDestinationKind::AppTarget {
+                            CopyCommitRequest::reviewed_android_directory(
+                                &source_path,
+                                &sandbox.fake_device_root,
+                                destination,
+                                operation,
+                                destination_manifest,
+                                destination_binding,
+                            )
+                        } else {
+                            CopyCommitRequest::reviewed_android_shared_directory(
+                                &source_path,
+                                &sandbox.fake_device_root,
+                                destination,
+                                operation,
+                                destination_manifest,
+                                destination_binding,
+                            )
+                        }
                     }
                 }
             }
@@ -984,6 +1066,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             ));
         }
 
+        validate_active_copy_writer_collisions(&snapshots)?;
         plan.copy_commit_snapshots = snapshots;
         Ok(())
     }
@@ -2271,7 +2354,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             ));
         }
         let request = if self.adapters.device.uses_fake_copy_commit_adapter()
-            && snapshot.destination_binding.is_some()
+            && (snapshot.destination_binding.is_some()
+                || destination_kind == CopyCommitDestinationKind::SetupLocation)
         {
             snapshot.simulation_request_for_execution(
                 &step.id,
@@ -2301,10 +2385,19 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
         let source = runtime_value_param(resolved_params, "source")?;
-        let dest = resolved_params
-            .get("dest")
-            .and_then(Value::as_str)
-            .ok_or_else(|| StepFailure::new("copy_files dest must be a string".to_string()))?;
+        let setup_destination = runtime_value_param(resolved_params, "dest")
+            .ok()
+            .filter(|runtime| runtime.type_name == "setup_location_ref");
+        let dest = if let Some(runtime) = &setup_destination {
+            runtime.value.as_str().ok_or_else(|| {
+                StepFailure::new("copy_files Setup Location reference must be an ID".to_string())
+            })?
+        } else {
+            resolved_params
+                .get("dest")
+                .and_then(Value::as_str)
+                .ok_or_else(|| StepFailure::new("copy_files dest must be a string".to_string()))?
+        };
         let copy_policy = resolved_params
             .get("copy_policy")
             .and_then(Value::as_str)
@@ -2759,6 +2852,60 @@ fn copy_commit_destination_kind(
     step: &ExecutionStep,
     params: &OrderedMap<Value>,
 ) -> Result<Option<CopyCommitDestinationKind>, String> {
+    let setup_destination = runtime_value_param(params, "dest")
+        .ok()
+        .filter(|runtime| runtime.type_name == "setup_location_ref");
+    if let Some(setup_destination) = setup_destination {
+        if params
+            .get("dest_kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind != "directory")
+        {
+            return Err(format!(
+                "copy_files step {} Setup Location destination must be a directory",
+                step.id
+            ));
+        }
+        let source = runtime_value_param(params, "source").map_err(|error| {
+            format!(
+                "copy_files step {} has an invalid Setup Location source: {}",
+                step.id, error.message
+            )
+        })?;
+        if source.type_name != "directory_path" || source.location.as_deref() != Some("host") {
+            return Err(format!(
+                "copy_files step {} Setup Location requires one host directory source",
+                step.id
+            ));
+        }
+        let source_path = source_path_from_value(&source).map_err(|error| error.message)?;
+        let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
+            format!(
+                "copy_files step {} host directory source is unavailable: {error}",
+                step.id
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "copy_files step {} Setup Location source must be one non-symlink host directory",
+                step.id
+            ));
+        }
+        let copy_policy = params
+            .get("copy_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("merge");
+        CopyCommitOperation::from_legacy_directory_policy(copy_policy)
+            .map_err(|error| error.to_string())?;
+        if setup_destination.value.as_str().is_none_or(str::is_empty) {
+            return Err(format!(
+                "copy_files step {} Setup Location reference must resolve to a non-empty ID",
+                step.id
+            ));
+        }
+        return Ok(Some(CopyCommitDestinationKind::SetupLocation));
+    }
+
     if params
         .get("dest_kind")
         .and_then(Value::as_str)
@@ -2797,6 +2944,479 @@ fn copy_commit_destination_kind(
         ));
     }
     Ok(Some(destination_kind))
+}
+
+fn active_setup_location_binding(
+    storage_targets: &[StorageTargetBinding],
+    location_id: &str,
+    plan: &ExecutionPlan,
+) -> Result<StorageTargetBinding, String> {
+    let mut matches = storage_targets
+        .iter()
+        .filter(|binding| binding.id == location_id);
+    let binding = matches
+        .next()
+        .ok_or_else(|| "active Setup Location binding is missing".to_string())?;
+    if matches.next().is_some() {
+        return Err("active Setup Location binding is duplicated".to_string());
+    }
+    binding.validate()?;
+    if plan
+        .device_plan
+        .as_ref()
+        .is_none_or(|device_plan| device_plan.id != binding.device_plan)
+    {
+        return Err("active Setup Location belongs to another Device Plan".to_string());
+    }
+    Ok(binding.clone())
+}
+
+/// Structured internal identity keeps valid path characters separate from device metadata.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CopyCommitPathBinding {
+    canonical_path: String,
+    parent_identity: String,
+    selected_identity: String,
+}
+
+pub(crate) fn canonical_path_from_binding(value: &str) -> Result<PathBuf, String> {
+    let canonical = match serde_json::from_str::<CopyCommitPathBinding>(value) {
+        Ok(binding) => {
+            if binding.parent_identity.is_empty() || binding.selected_identity.is_empty() {
+                return Err("selected path has incomplete identity".to_string());
+            }
+            binding.canonical_path
+        }
+        Err(_) => legacy_canonical_path(value)?,
+    };
+    canonical_path_from_scope(&canonical)
+}
+
+fn legacy_canonical_path(value: &str) -> Result<String, String> {
+    let Some((canonical, identity_fields)) = value.split_once("|parent:") else {
+        return Ok(value.to_string());
+    };
+    let Some((parent_identity, selected_identity)) = identity_fields.split_once("|selected:")
+    else {
+        return Err("selected path has incomplete identity".to_string());
+    };
+    if canonical.is_empty()
+        || parent_identity.is_empty()
+        || selected_identity.is_empty()
+        || selected_identity.contains('|')
+    {
+        return Err("selected path has incomplete identity".to_string());
+    }
+    Ok(canonical.to_string())
+}
+
+pub(crate) fn canonical_path_from_scope(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err("selected path canonical identity is not absolute".to_string());
+    }
+    Ok(path)
+}
+
+pub(crate) fn path_binding_private_values(value: &str) -> Vec<String> {
+    let mut private_values = vec![value.to_string()];
+    match serde_json::from_str::<CopyCommitPathBinding>(value) {
+        Ok(binding) => private_values.extend([
+            binding.canonical_path,
+            binding.parent_identity,
+            binding.selected_identity,
+        ]),
+        Err(_) => private_values.extend(value.split('|').map(ToString::to_string)),
+    }
+    private_values
+}
+
+#[cfg(test)]
+mod canonical_path_from_binding_tests {
+    use super::canonical_path_from_binding;
+    use std::path::PathBuf;
+
+    #[test]
+    fn canonical_path_binding_preserves_pipe_characters_in_the_path() {
+        let canonical_path = "/storage/ABCD-1234/Games|Retro";
+        let binding = serde_json::json!({
+            "canonicalPath": canonical_path,
+            "parentIdentity": "253:102",
+            "selectedIdentity": "253:103",
+        })
+        .to_string();
+
+        assert_eq!(
+            canonical_path_from_binding(&binding).unwrap(),
+            PathBuf::from(canonical_path),
+        );
+    }
+}
+
+fn verify_setup_destination_precondition_with_device<D: ExecutorDevice>(
+    device: &mut D,
+    binding: &StorageTargetBinding,
+    precondition: &SetupDestinationPrecondition,
+) -> Result<(), String> {
+    device
+        .copy_commit_verify_setup_location(binding)
+        .map_err(|error| error.message)?;
+    let components = binding.relative_path.split('/').collect::<Vec<_>>();
+    if precondition.missing_components.len() > components.len() {
+        return Err("Setup Location creation precondition is inconsistent".to_string());
+    }
+    let existing_count = components.len() - precondition.missing_components.len();
+    if components[existing_count..]
+        .iter()
+        .copied()
+        .ne(precondition.missing_components.iter().map(String::as_str))
+    {
+        return Err(
+            "Setup Location missing components do not match the reviewed destination".to_string(),
+        );
+    }
+    let expected_anchor = components[..existing_count].iter().fold(
+        PathBuf::from(&binding.mount_root),
+        |mut path, component| {
+            path.push(component);
+            path
+        },
+    );
+    if expected_anchor.to_string_lossy() != precondition.existing_anchor_path
+        || !device
+            .path_is_dir(&precondition.existing_anchor_path)
+            .map_err(|error| error.message)?
+    {
+        return Err("Setup Location creation anchor changed after review".to_string());
+    }
+    if precondition.existing_anchor_path != binding.mount_root
+        && device
+            .copy_commit_path_is_symlink(&precondition.existing_anchor_path)
+            .map_err(|error| error.message)?
+    {
+        return Err("Setup Location creation anchor is a symbolic link".to_string());
+    }
+    if device
+        .copy_commit_path_binding(&precondition.existing_anchor_path)
+        .map_err(|error| error.message)?
+        != precondition.existing_anchor_binding
+    {
+        return Err("Setup Location creation anchor identity changed after review".to_string());
+    }
+    let canonical_root = canonical_path_from_binding(
+        &device
+            .copy_commit_path_binding(&binding.mount_root)
+            .map_err(|error| error.message)?,
+    )?;
+    let canonical_scope = components
+        .iter()
+        .fold(canonical_root, |mut path, component| {
+            path.push(component);
+            path
+        });
+    if canonical_scope.to_string_lossy() != precondition.canonical_scope {
+        return Err("Setup Location canonical destination changed after review".to_string());
+    }
+    let mut missing_path = PathBuf::from(&precondition.existing_anchor_path);
+    for component in &precondition.missing_components {
+        missing_path.push(component);
+        let path = missing_path.to_string_lossy();
+        if device.path_exists(&path).map_err(|error| error.message)?
+            || device
+                .copy_commit_path_is_symlink(&path)
+                .map_err(|error| error.message)?
+        {
+            return Err("Setup Location creation precondition changed after review".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn inspect_android_setup_destination<D: ExecutorDevice>(
+    device: &mut D,
+    binding: &StorageTargetBinding,
+) -> Result<(SetupDestinationPrecondition, Vec<CopyManifestEntry>), String> {
+    binding.validate()?;
+    device
+        .copy_commit_verify_setup_location(binding)
+        .map_err(|error| error.message)?;
+    let root_binding = device
+        .copy_commit_path_binding(&binding.mount_root)
+        .map_err(|error| error.message)?;
+    let canonical_root = canonical_path_from_binding(&root_binding)?;
+    if !device
+        .path_is_dir(&binding.mount_root)
+        .map_err(|error| error.message)?
+    {
+        return Err("Setup Location volume root is not an accessible directory".to_string());
+    }
+
+    let components = binding.relative_path.split('/').collect::<Vec<_>>();
+    let mut lexical_path = PathBuf::from(&binding.mount_root);
+    let mut canonical_path = canonical_root;
+    let mut existing_anchor_path = binding.mount_root.clone();
+    let mut existing_anchor_binding = root_binding;
+    let mut missing_components = Vec::new();
+    let mut found_missing = false;
+    for (index, component) in components.iter().enumerate() {
+        lexical_path.push(component);
+        canonical_path.push(component);
+        let path = lexical_path.to_string_lossy();
+        let is_symlink = device
+            .copy_commit_path_is_symlink(&path)
+            .map_err(|error| error.message)?;
+        let exists = device.path_exists(&path).map_err(|error| error.message)?;
+        if is_symlink {
+            return Err("Setup Location destination contains a symbolic link".to_string());
+        }
+        if found_missing || !exists {
+            if exists {
+                return Err("Setup Location destination is discontinuous".to_string());
+            }
+            found_missing = true;
+            missing_components.push((*component).to_string());
+            continue;
+        }
+        if !device.path_is_dir(&path).map_err(|error| error.message)? {
+            return Err(
+                "Setup Location destination contains a non-directory component".to_string(),
+            );
+        }
+        let path_binding = device
+            .copy_commit_path_binding(&path)
+            .map_err(|error| error.message)?;
+        if canonical_path_from_binding(&path_binding)? != canonical_path {
+            return Err("Setup Location destination escaped its reviewed volume".to_string());
+        }
+        existing_anchor_path = path.into_owned();
+        existing_anchor_binding = path_binding;
+        if index + 1 == components.len() {
+            found_missing = false;
+        }
+    }
+    let precondition = SetupDestinationPrecondition {
+        canonical_scope: canonical_path.to_string_lossy().into_owned(),
+        existing_anchor_path,
+        existing_anchor_binding,
+        missing_components,
+    };
+    verify_setup_destination_precondition_with_device(device, binding, &precondition)?;
+    let destination_manifest = if precondition.missing_components.is_empty() {
+        let destination = binding
+            .destination_path()
+            .map_err(|_| "Setup Location destination path is invalid".to_string())?;
+        device
+            .copy_commit_tree_manifest(&destination.to_string_lossy())
+            .map_err(|error| error.message)?
+    } else {
+        Vec::new()
+    };
+    Ok((precondition, destination_manifest))
+}
+
+fn validate_active_copy_writer_collisions(
+    snapshots: &[ExecutionCopyCommitSnapshot],
+) -> Result<(), String> {
+    if !snapshots
+        .iter()
+        .any(|snapshot| snapshot.destination_kind == CopyCommitDestinationKind::SetupLocation)
+    {
+        return Ok(());
+    }
+    let active = snapshots
+        .iter()
+        .filter(|snapshot| {
+            matches!(
+                snapshot.destination_kind,
+                CopyCommitDestinationKind::SharedDevicePath
+                    | CopyCommitDestinationKind::SetupLocation
+            )
+        })
+        .map(|snapshot| {
+            let scope = active_copy_writer_scope(snapshot)?;
+            let (effects, creation_paths) = copy_writer_effects(snapshot, &scope)?;
+            Ok((snapshot, effects, creation_paths))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for (index, (left, left_effects, left_creation_paths)) in active.iter().enumerate() {
+        for (right, right_effects, right_creation_paths) in active.iter().skip(index + 1) {
+            let creation_conflict = creation_effects_conflict(
+                left_creation_paths,
+                right_creation_paths,
+                left_effects,
+                right_effects,
+            );
+            if creation_conflict || writer_effects_conflict(left_effects, right_effects) {
+                return Err(format!(
+                    "active copy steps {} and {} have conflicting destination effects",
+                    left.step_id, right.step_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn active_copy_writer_scope(snapshot: &ExecutionCopyCommitSnapshot) -> Result<PathBuf, String> {
+    match snapshot.destination_kind {
+        CopyCommitDestinationKind::AppTarget => {
+            Err("App Target is not a shared-storage writer".to_string())
+        }
+        CopyCommitDestinationKind::SharedDevicePath => match &snapshot.destination_binding {
+            Some(binding) => canonical_path_from_binding(binding),
+            None => canonical_shared_destination(&snapshot.destination_identity),
+        },
+        CopyCommitDestinationKind::SetupLocation => {
+            let binding = snapshot.setup_location_binding.as_ref().ok_or_else(|| {
+                "Setup Location snapshot is missing its trusted volume binding".to_string()
+            })?;
+            binding.validate()?;
+            let precondition = snapshot
+                .setup_destination_precondition
+                .as_ref()
+                .ok_or_else(|| {
+                    "Setup Location snapshot is missing its destination precondition".to_string()
+                })?;
+            canonical_path_from_scope(&precondition.canonical_scope)
+        }
+    }
+}
+
+pub(crate) fn canonical_shared_destination(destination: &str) -> Result<PathBuf, String> {
+    let mut canonical = destination.to_string();
+    for (alias, target) in [
+        ("/sdcard", "/storage/emulated/0"),
+        ("/storage/self/primary", "/storage/emulated/0"),
+    ] {
+        if canonical == alias {
+            canonical = target.to_string();
+            break;
+        }
+        if let Some(suffix) = canonical
+            .strip_prefix(alias)
+            .filter(|suffix| suffix.starts_with('/'))
+        {
+            canonical = format!("{target}{suffix}");
+            break;
+        }
+    }
+    let path = PathBuf::from(canonical);
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err("shared destination has no safe canonical scope".to_string());
+    }
+    Ok(path)
+}
+
+fn copy_writer_effects(
+    snapshot: &ExecutionCopyCommitSnapshot,
+    scope: &Path,
+) -> Result<(Vec<WriterEffect>, Vec<PathBuf>), String> {
+    let mut effects = Vec::new();
+    let mut creation_paths = Vec::new();
+    for entry in &snapshot.source_manifest {
+        let path = scope.join(&entry.relative_path);
+        match entry.kind {
+            CopyEntryKind::Directory => {
+                effects.push(WriterEffect::EnsureDirectory(path.clone()));
+                let already_directory = snapshot.destination_before_manifest.iter().any(|before| {
+                    before.relative_path == entry.relative_path
+                        && before.kind == CopyEntryKind::Directory
+                });
+                if !already_directory {
+                    creation_paths.push(path);
+                }
+            }
+            CopyEntryKind::File => effects.push(WriterEffect::WriteFile(path)),
+        }
+    }
+
+    if snapshot.destination_kind == CopyCommitDestinationKind::SetupLocation {
+        let precondition = snapshot
+            .setup_destination_precondition
+            .as_ref()
+            .ok_or_else(|| {
+                "Setup Location snapshot is missing its destination precondition".to_string()
+            })?;
+        if !precondition.missing_components.is_empty() {
+            let mut path = scope.to_path_buf();
+            for _ in 0..precondition.missing_components.len() {
+                path = path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| "Setup Location creation scope has no parent".to_string())?;
+            }
+            for component in &precondition.missing_components {
+                path.push(component);
+                effects.push(WriterEffect::EnsureDirectory(path.clone()));
+                creation_paths.push(path.clone());
+            }
+            if path != scope {
+                return Err(
+                    "Setup Location creation components do not match the canonical scope"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    for relative_path in &snapshot.reviewed_deletion_set {
+        let kind = snapshot
+            .destination_before_manifest
+            .iter()
+            .find(|entry| entry.relative_path == *relative_path)
+            .map(|entry| entry.kind)
+            .ok_or_else(|| "copy destination deletion is missing its reviewed entry".to_string())?;
+        let path = scope.join(relative_path);
+        effects.push(match kind {
+            CopyEntryKind::File => WriterEffect::DeleteFile(path),
+            CopyEntryKind::Directory => WriterEffect::DeleteDirectory(path),
+        });
+    }
+    Ok((effects, creation_paths))
+}
+
+fn creation_effects_conflict(
+    left_creations: &[PathBuf],
+    right_creations: &[PathBuf],
+    left_effects: &[WriterEffect],
+    right_effects: &[WriterEffect],
+) -> bool {
+    left_creations.iter().any(|created| {
+        right_creations
+            .iter()
+            .any(|other| paths_overlap(created, other))
+            || right_effects
+                .iter()
+                .any(|effect| paths_overlap(created, writer_effect_path(effect)))
+    }) || right_creations.iter().any(|created| {
+        left_effects
+            .iter()
+            .any(|effect| paths_overlap(created, writer_effect_path(effect)))
+    })
+}
+
+fn writer_effect_path(effect: &WriterEffect) -> &Path {
+    match effect {
+        WriterEffect::EnsureDirectory(path)
+        | WriterEffect::WriteFile(path)
+        | WriterEffect::DeleteFile(path)
+        | WriterEffect::DeleteDirectory(path) => path,
+    }
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 fn is_reviewable_shared_device_path(destination: &str) -> bool {
@@ -3999,6 +4619,17 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
         adb::RealAdbDevice::copy_commit_path_binding(self, path).map_err(map_adb_error)
     }
 
+    fn copy_commit_path_is_symlink(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_path_is_symlink(self, path).map_err(map_adb_error)
+    }
+
+    fn copy_commit_verify_setup_location(
+        &mut self,
+        binding: &StorageTargetBinding,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_verify_setup_location(self, binding).map_err(map_adb_error)
+    }
+
     fn copy_commit_create_directory(&mut self, path: &str) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::copy_commit_create_directory(self, path).map_err(map_adb_error)
     }
@@ -4839,7 +5470,7 @@ fn resolve_step_params(
 fn project_runtime_value(value: &RuntimeValue) -> Result<Value, StepFailure> {
     if matches!(
         value.type_name.as_str(),
-        "file_path" | "directory_path" | "path_list"
+        "file_path" | "directory_path" | "path_list" | "setup_location_ref"
     ) {
         serde_json::to_value(value).map_err(|error| StepFailure::new(error.to_string()))
     } else {
@@ -4856,7 +5487,7 @@ fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value,
         };
         if matches!(
             input.type_name.as_str(),
-            "file_path" | "directory_path" | "path_list"
+            "file_path" | "directory_path" | "path_list" | "setup_location_ref"
         ) {
             return serde_json::to_value(input)
                 .map_err(|error| StepFailure::new(error.to_string()));
@@ -5536,5 +6167,272 @@ mod runtime_ref_projection_tests {
                 "unexpected projection for {reference}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod setup_location_writer_tests {
+    use std::path::PathBuf;
+
+    use super::validate_active_copy_writer_collisions;
+    use crate::executor::copy_commit::{
+        CopyCommitDestinationKind, CopyCommitOperation, CopyEntryKind, CopyManifestEntry,
+        ExecutionCopyCommitSnapshot,
+    };
+    use crate::storage_targets::{
+        SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+    };
+
+    fn binding(id: &str, relative_path: &str) -> StorageTargetBinding {
+        StorageTargetBinding {
+            id: id.to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: id.to_string(),
+            relative_path: relative_path.to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        }
+    }
+
+    fn file(path: &str) -> CopyManifestEntry {
+        CopyManifestEntry {
+            relative_path: path.to_string(),
+            kind: CopyEntryKind::File,
+            sha256: Some("a".repeat(64)),
+            entry_identity: None,
+        }
+    }
+
+    fn snapshot(
+        step_id: &str,
+        location_id: &str,
+        relative_location: &str,
+        canonical_scope: &str,
+        source_manifest: Vec<CopyManifestEntry>,
+        destination_before_manifest: Vec<CopyManifestEntry>,
+        reviewed_deletion_set: Vec<&str>,
+    ) -> ExecutionCopyCommitSnapshot {
+        ExecutionCopyCommitSnapshot {
+            step_id: step_id.to_string(),
+            operation: CopyCommitOperation::AddUpdate,
+            destination_kind: CopyCommitDestinationKind::SetupLocation,
+            source_path: PathBuf::from("/tmp/source"),
+            source_root: PathBuf::from("/tmp/source"),
+            source_manifest,
+            source_digest_sha256: String::new(),
+            destination_identity: canonical_scope.to_string(),
+            fake_device_root: PathBuf::from("/tmp/fake-device"),
+            selected_root: PathBuf::from("/tmp/fake-device/selected"),
+            destination_binding: None,
+            setup_location_binding: Some(binding(location_id, relative_location)),
+            setup_destination_precondition: Some(SetupDestinationPrecondition {
+                canonical_scope: canonical_scope.to_string(),
+                existing_anchor_path: "/storage/ABCD-1234".to_string(),
+                existing_anchor_binding: "anchor".to_string(),
+                missing_components: Vec::new(),
+            }),
+            destination_before_manifest,
+            destination_before_digest_sha256: String::new(),
+            reviewed_deletion_set: reviewed_deletion_set
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn rejects_writers_when_reviewed_file_effects_overlap_across_nested_scopes() {
+        let parent = snapshot(
+            "copy-parent",
+            "parent-location",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            vec![file("Emulator")],
+            Vec::new(),
+            Vec::new(),
+        );
+        let nested = snapshot(
+            "copy-nested",
+            "nested-location",
+            "Games/Emulator",
+            "/storage/ABCD-1234/Games/Emulator",
+            vec![file("settings.cfg")],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let error = validate_active_copy_writer_collisions(&[parent, nested])
+            .expect_err("writing a file over a nested destination scope must conflict");
+        assert!(error.contains("copy-parent"));
+        assert!(error.contains("copy-nested"));
+    }
+
+    #[test]
+    fn rejects_distinct_location_ids_that_resolve_to_the_same_canonical_scope() {
+        let first = snapshot(
+            "copy-first",
+            "first-location",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            vec![file("same.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+        let second = snapshot(
+            "copy-second",
+            "second-location",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            vec![file("same.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(validate_active_copy_writer_collisions(&[first, second]).is_err());
+    }
+
+    #[test]
+    fn rejects_mixed_setup_and_legacy_writers_that_resolve_to_the_same_scope() {
+        let mut setup = snapshot(
+            "copy-setup",
+            "internal-location",
+            "Games",
+            "/storage/emulated/0/Games",
+            vec![file("same.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+        let binding = setup
+            .setup_location_binding
+            .as_mut()
+            .expect("Setup Location binding");
+        binding.mount_root = "/storage/emulated/0".to_string();
+        binding.volume_kind = StorageTargetVolumeKind::InternalShared;
+
+        let mut legacy = snapshot(
+            "copy-legacy",
+            "legacy-location",
+            "Games",
+            "/storage/emulated/0/Games",
+            vec![file("same.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+        legacy.destination_kind = CopyCommitDestinationKind::SharedDevicePath;
+        legacy.destination_identity = "/storage/self/primary/Games".to_string();
+        legacy.destination_binding =
+            Some("/storage/emulated/0/Games|parent:2:10|selected:2:11".to_string());
+        legacy.setup_location_binding = None;
+        legacy.setup_destination_precondition = None;
+
+        let error = validate_active_copy_writer_collisions(&[setup, legacy])
+            .expect_err("a legacy alias and Setup Location cannot write the same reviewed file");
+
+        assert!(error.contains("copy-setup"));
+        assert!(error.contains("copy-legacy"));
+    }
+
+    #[test]
+    fn rejects_disjoint_writers_that_share_a_reviewed_missing_parent() {
+        let mut first = snapshot(
+            "copy-first",
+            "first-location",
+            "Games/A",
+            "/storage/ABCD-1234/Games/A",
+            vec![file("first.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+        first
+            .setup_destination_precondition
+            .as_mut()
+            .expect("first precondition")
+            .missing_components = vec!["Games".to_string(), "A".to_string()];
+
+        let mut second = snapshot(
+            "copy-second",
+            "second-location",
+            "Games/B",
+            "/storage/ABCD-1234/Games/B",
+            vec![file("second.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+        second
+            .setup_destination_precondition
+            .as_mut()
+            .expect("second precondition")
+            .missing_components = vec!["Games".to_string(), "B".to_string()];
+
+        let error = validate_active_copy_writer_collisions(&[first, second])
+            .expect_err("the reviewed writers must not share a directory-creation precondition");
+
+        assert!(error.contains("copy-first"));
+        assert!(error.contains("copy-second"));
+    }
+
+    #[test]
+    fn allows_overlapping_location_scopes_when_reviewed_effects_are_disjoint() {
+        let parent = snapshot(
+            "copy-parent",
+            "parent-location",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            vec![file("arcade.rom")],
+            Vec::new(),
+            Vec::new(),
+        );
+        let nested = snapshot(
+            "copy-nested",
+            "nested-location",
+            "Games/Emulator",
+            "/storage/ABCD-1234/Games/Emulator",
+            vec![file("settings.cfg")],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        validate_active_copy_writer_collisions(&[parent, nested])
+            .expect("overlapping scopes alone do not create a writer collision");
+    }
+
+    #[test]
+    fn rejects_reviewed_directory_deletion_that_contains_another_writer() {
+        let parent = snapshot(
+            "replace-parent",
+            "parent-location",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            Vec::new(),
+            vec![CopyManifestEntry {
+                relative_path: "Emulator".to_string(),
+                kind: CopyEntryKind::Directory,
+                sha256: None,
+                entry_identity: None,
+            }],
+            vec!["Emulator"],
+        );
+        let nested = snapshot(
+            "copy-nested",
+            "nested-location",
+            "Games/Emulator",
+            "/storage/ABCD-1234/Games/Emulator",
+            vec![file("settings.cfg")],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(validate_active_copy_writer_collisions(&[parent, nested]).is_err());
+    }
+
+    #[test]
+    fn named_locations_without_active_copy_snapshots_do_not_collide() {
+        validate_active_copy_writer_collisions(&[])
+            .expect("unreferenced named locations are not destination writers");
     }
 }

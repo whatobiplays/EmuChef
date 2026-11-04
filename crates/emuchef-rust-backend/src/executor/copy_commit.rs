@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::storage_targets::{SetupDestinationPrecondition, StorageTargetBinding};
+
 /// One copy policy with semantics defined for a selected directory tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +72,8 @@ pub enum CopyCommitDestinationKind {
     #[default]
     AppTarget,
     SharedDevicePath,
+    /// A trusted, volume-bound Setup Location selected by typed Recipe input.
+    SetupLocation,
 }
 
 /// Immutable intent captured before a selected-tree mutation begins.
@@ -87,6 +91,10 @@ pub struct CopyCommitRequest {
     /// Device-side canonical path and parent/selected-directory identity
     /// captured before staging. Fake requests use the host filesystem binding.
     pub destination_binding: Option<String>,
+    /// Trusted volume binding for a typed Setup Location destination.
+    pub setup_location_binding: Option<StorageTargetBinding>,
+    /// Reviewed confinement and directory-creation precondition.
+    pub setup_destination_precondition: Option<SetupDestinationPrecondition>,
 }
 
 impl CopyCommitRequest {
@@ -135,6 +143,8 @@ impl CopyCommitRequest {
             destination_manifest,
             reviewed_deletion_set,
             destination_binding: None,
+            setup_location_binding: None,
+            setup_destination_precondition: None,
         })
     }
 
@@ -205,6 +215,150 @@ impl CopyCommitRequest {
         request.destination_kind = CopyCommitDestinationKind::SharedDevicePath;
         Ok(request)
     }
+
+    /// Captures a Setup Location directory using its trusted volume binding
+    /// and the exact destination state observed before review.
+    pub(crate) fn reviewed_setup_directory(
+        source_root: &Path,
+        fake_device_root: &Path,
+        binding: StorageTargetBinding,
+        precondition: SetupDestinationPrecondition,
+        operation: CopyCommitOperation,
+        destination_manifest: Vec<CopyManifestEntry>,
+    ) -> Result<Self, CopyCommitError> {
+        binding.validate().map_err(CopyCommitError::Rejected)?;
+        let source_metadata = fs::symlink_metadata(source_root)
+            .map_err(|error| CopyCommitError::Rejected(format!("inspect source: {error}")))?;
+        if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+            return Err(CopyCommitError::Rejected(
+                "copy source must be a non-symlink directory".to_string(),
+            ));
+        }
+        let source_root = fs::canonicalize(source_root)
+            .map_err(|error| CopyCommitError::Rejected(format!("resolve source: {error}")))?;
+        let fake_root_metadata = fs::symlink_metadata(fake_device_root)
+            .map_err(|error| CopyCommitError::Rejected(format!("inspect fake root: {error}")))?;
+        if fake_root_metadata.file_type().is_symlink() || !fake_root_metadata.is_dir() {
+            return Err(CopyCommitError::Rejected(
+                "fake device root must be a non-symlink directory".to_string(),
+            ));
+        }
+        let fake_device_root = fs::canonicalize(fake_device_root)
+            .map_err(|error| CopyCommitError::Rejected(format!("resolve fake root: {error}")))?;
+        let destination_identity = binding
+            .destination_path()
+            .map_err(CopyCommitError::Rejected)?
+            .to_string_lossy()
+            .into_owned();
+        let selected_root = selected_path(&fake_device_root, &destination_identity)?;
+        let source_manifest = scan_tree(&source_root)?;
+        validate_manifest(&destination_manifest)?;
+        let mut destination_manifest = destination_manifest;
+        destination_manifest.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        let reviewed_deletion_set =
+            reviewed_deletions(operation, &source_manifest, &destination_manifest)?;
+
+        Ok(Self {
+            operation,
+            destination_kind: CopyCommitDestinationKind::SetupLocation,
+            source_root,
+            destination_identity,
+            fake_device_root,
+            selected_root,
+            source_manifest,
+            destination_manifest,
+            reviewed_deletion_set,
+            destination_binding: None,
+            setup_location_binding: Some(binding),
+            setup_destination_precondition: Some(precondition),
+        })
+    }
+
+    /// Builds a sandbox-only Setup Location request for dry-run and fake
+    /// executor tests. The simulated volume root stays beneath `fake_root`.
+    pub(crate) fn reviewed_fake_setup_directory(
+        source_root: &Path,
+        fake_root: &Path,
+        binding: StorageTargetBinding,
+        operation: CopyCommitOperation,
+    ) -> Result<Self, CopyCommitError> {
+        binding.validate().map_err(CopyCommitError::Rejected)?;
+        let fake_root_metadata = fs::symlink_metadata(fake_root)
+            .map_err(|error| CopyCommitError::Rejected(format!("inspect fake root: {error}")))?;
+        if fake_root_metadata.file_type().is_symlink() || !fake_root_metadata.is_dir() {
+            return Err(CopyCommitError::Rejected(
+                "fake device root must be a non-symlink directory".to_string(),
+            ));
+        }
+        let fake_root = fs::canonicalize(fake_root)
+            .map_err(|error| CopyCommitError::Rejected(format!("resolve fake root: {error}")))?;
+        let mount_root = selected_path(&fake_root, &binding.mount_root)?;
+        ensure_fake_directory_under_root(&fake_root, &mount_root)?;
+        let destination_identity = binding
+            .destination_path()
+            .map_err(CopyCommitError::Rejected)?
+            .to_string_lossy()
+            .into_owned();
+        let selected_root = selected_path(&fake_root, &destination_identity)?;
+        let canonical_root = fs::canonicalize(&mount_root).map_err(|error| {
+            CopyCommitError::Rejected(format!("resolve fake volume root: {error}"))
+        })?;
+        let mut fake_path = mount_root.clone();
+        let mut canonical_scope = canonical_root;
+        let mut existing_anchor_path = mount_root.to_string_lossy().into_owned();
+        let mut existing_anchor_binding = fake_setup_path_binding(&mount_root)?;
+        let mut missing_components = Vec::new();
+        let mut found_missing = false;
+        for component in binding.relative_path.split('/') {
+            fake_path.push(component);
+            canonical_scope.push(component);
+            match fs::symlink_metadata(&fake_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(CopyCommitError::Rejected(
+                        "fake Setup Location destination contains a symbolic link".to_string(),
+                    ));
+                }
+                Ok(metadata) if found_missing || !metadata.is_dir() => {
+                    return Err(CopyCommitError::Rejected(
+                        "fake Setup Location destination is not a continuous directory path"
+                            .to_string(),
+                    ));
+                }
+                Ok(_) => {
+                    existing_anchor_path = fake_path.to_string_lossy().into_owned();
+                    existing_anchor_binding = fake_setup_path_binding(&fake_path)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    found_missing = true;
+                    missing_components.push(component.to_string());
+                }
+                Err(error) => {
+                    return Err(CopyCommitError::Rejected(format!(
+                        "inspect fake Setup Location destination: {error}"
+                    )));
+                }
+            }
+        }
+        let precondition = SetupDestinationPrecondition {
+            canonical_scope: canonical_scope.to_string_lossy().into_owned(),
+            existing_anchor_path,
+            existing_anchor_binding,
+            missing_components,
+        };
+        let destination_manifest = if precondition.missing_components.is_empty() {
+            scan_tree(&selected_root)?
+        } else {
+            Vec::new()
+        };
+        Self::reviewed_setup_directory(
+            source_root,
+            &fake_root,
+            binding,
+            precondition,
+            operation,
+            destination_manifest,
+        )
+    }
 }
 
 /// Copy state captured before review and reused unchanged during execution.
@@ -239,6 +393,12 @@ pub struct ExecutionCopyCommitSnapshot {
     pub(crate) selected_root: PathBuf,
     /// Android path and parent identity captured by the device adapter.
     pub(crate) destination_binding: Option<String>,
+    /// Trusted volume identity and relative destination captured for this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_location_binding: Option<StorageTargetBinding>,
+    /// Reviewed destination existence and safe-creation effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_destination_precondition: Option<SetupDestinationPrecondition>,
     /// Deterministic entries and file digests observed before the copy.
     pub(crate) destination_before_manifest: Vec<CopyManifestEntry>,
     /// SHA-256 digest of the serialized destination-before manifest.
@@ -266,6 +426,8 @@ impl ExecutionCopyCommitSnapshot {
             fake_device_root: request.fake_device_root.clone(),
             selected_root: request.selected_root.clone(),
             destination_binding: request.destination_binding.clone(),
+            setup_location_binding: request.setup_location_binding.clone(),
+            setup_destination_precondition: request.setup_destination_precondition.clone(),
             destination_before_manifest: request.destination_manifest.clone(),
             destination_before_digest_sha256: manifest_digest(&request.destination_manifest),
             reviewed_deletion_set: request.reviewed_deletion_set.clone(),
@@ -283,9 +445,22 @@ impl ExecutionCopyCommitSnapshot {
         destination_kind: CopyCommitDestinationKind,
         operation: CopyCommitOperation,
     ) -> Result<CopyCommitRequest, CopyCommitError> {
+        let expected_destination_reference =
+            if self.destination_kind == CopyCommitDestinationKind::SetupLocation {
+                self.setup_location_binding
+                    .as_ref()
+                    .map(|binding| binding.id.as_str())
+                    .ok_or_else(|| {
+                        CopyCommitError::Rejected(
+                            "reviewed Setup Location snapshot is missing its binding".to_string(),
+                        )
+                    })?
+            } else {
+                self.destination_identity.as_str()
+            };
         if self.step_id != step_id
             || self.source_path != source_path
-            || self.destination_identity != destination_identity
+            || expected_destination_reference != destination_identity
             || self.destination_kind != destination_kind
             || self.operation != operation
         {
@@ -310,7 +485,13 @@ impl ExecutionCopyCommitSnapshot {
                     "reviewed selected destination is outside its fake device root".to_string(),
                 )
             })?;
-        let current_selected_root = selected_path(&current_fake_root, destination_identity)?;
+        let selected_destination =
+            if self.destination_kind == CopyCommitDestinationKind::SetupLocation {
+                self.destination_identity.as_str()
+            } else {
+                destination_identity
+            };
+        let current_selected_root = selected_path(&current_fake_root, selected_destination)?;
         let current_selected_relative = current_selected_root
             .strip_prefix(&current_fake_root)
             .map_err(|_| {
@@ -352,6 +533,8 @@ impl ExecutionCopyCommitSnapshot {
             destination_manifest: self.destination_before_manifest.clone(),
             reviewed_deletion_set: self.reviewed_deletion_set.clone(),
             destination_binding: self.destination_binding.clone(),
+            setup_location_binding: self.setup_location_binding.clone(),
+            setup_destination_precondition: self.setup_destination_precondition.clone(),
         })
     }
 
@@ -394,6 +577,18 @@ impl ExecutionCopyCommitSnapshot {
                     operation,
                 )?
             }
+            CopyCommitDestinationKind::SetupLocation => {
+                CopyCommitRequest::reviewed_fake_setup_directory(
+                    source_path,
+                    fake_device_root,
+                    self.setup_location_binding.clone().ok_or_else(|| {
+                        CopyCommitError::Rejected(
+                            "reviewed Setup Location binding is missing".to_string(),
+                        )
+                    })?,
+                    operation,
+                )?
+            }
         };
         if manifest_digest(&simulation_request.source_manifest) != self.source_digest_sha256 {
             return Err(CopyCommitError::Stale(
@@ -429,6 +624,12 @@ pub struct CopyCommitReport {
     pub staged_paths: Vec<String>,
     pub staging_verified: bool,
     pub destination_binding_verified: bool,
+    /// Setup Location mutation attempt state; absent on legacy destination reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_mutation_attempted: Option<bool>,
+    /// Setup Location scope directories created before copy entries were applied.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub created_directories: Vec<String>,
     pub source_digest_sha256: String,
     /// A pending cleanup message includes the exact stage path and failure reason.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -494,6 +695,119 @@ pub(crate) trait AndroidCopyCommitDevice {
         root: &str,
     ) -> Result<Vec<CopyManifestEntry>, super::DeviceOperationError>;
     fn path_binding(&mut self, path: &str) -> Result<String, super::DeviceOperationError>;
+    fn path_exists(&mut self, _path: &str) -> Result<bool, super::DeviceOperationError> {
+        Err(super::DeviceOperationError::other(
+            "adapter cannot verify Setup Location path existence",
+        ))
+    }
+    fn path_is_dir(&mut self, _path: &str) -> Result<bool, super::DeviceOperationError> {
+        Err(super::DeviceOperationError::other(
+            "adapter cannot verify Setup Location directory state",
+        ))
+    }
+    fn path_is_symlink(&mut self, _path: &str) -> Result<bool, super::DeviceOperationError> {
+        Err(super::DeviceOperationError::other(
+            "adapter cannot verify Setup Location symbolic-link state",
+        ))
+    }
+    /// Re-observes T04 volume identity, continuity, root, state, and access.
+    fn verify_setup_location(
+        &mut self,
+        _binding: &StorageTargetBinding,
+    ) -> Result<(), super::DeviceOperationError> {
+        Err(super::DeviceOperationError::other(
+            "adapter cannot revalidate Setup Location volume continuity and access",
+        ))
+    }
+    /// Verifies that the reviewed anchor remains bound and every missing
+    /// component remains absent immediately before safe creation.
+    fn verify_setup_destination_precondition(
+        &mut self,
+        binding: &StorageTargetBinding,
+        precondition: &SetupDestinationPrecondition,
+    ) -> Result<(), super::DeviceOperationError> {
+        self.verify_setup_location(binding)?;
+        let relative_components = binding.relative_path.split('/').collect::<Vec<_>>();
+        if precondition.missing_components.len() > relative_components.len() {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location creation precondition is inconsistent",
+            ));
+        }
+        let existing_count = relative_components.len() - precondition.missing_components.len();
+        if relative_components[existing_count..]
+            .iter()
+            .copied()
+            .ne(precondition.missing_components.iter().map(String::as_str))
+        {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location missing components do not match the reviewed destination",
+            ));
+        }
+        let expected_anchor = relative_components[..existing_count].iter().fold(
+            PathBuf::from(&binding.mount_root),
+            |mut path, component| {
+                path.push(component);
+                path
+            },
+        );
+        if expected_anchor.to_string_lossy() != precondition.existing_anchor_path {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location creation anchor changed after review",
+            ));
+        }
+        if !self.path_is_dir(&precondition.existing_anchor_path)? {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location creation anchor is no longer a directory",
+            ));
+        }
+        if precondition.existing_anchor_path != binding.mount_root
+            && self.path_is_symlink(&precondition.existing_anchor_path)?
+        {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location creation anchor became a symbolic link",
+            ));
+        }
+        if self.path_binding(&precondition.existing_anchor_path)?
+            != precondition.existing_anchor_binding
+        {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location creation anchor identity changed after review",
+            ));
+        }
+        let root_binding = self.path_binding(&binding.mount_root)?;
+        let canonical_root = super::canonical_path_from_binding(&root_binding)
+            .map_err(|_| {
+                super::DeviceOperationError::other(
+                    "Setup Location volume root identity is unavailable",
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let canonical_scope = relative_components.iter().fold(
+            PathBuf::from(canonical_root),
+            |mut path, component| {
+                path.push(component);
+                path
+            },
+        );
+        if canonical_scope.to_string_lossy() != precondition.canonical_scope {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location canonical destination changed after review",
+            ));
+        }
+        let mut missing_path = PathBuf::from(&precondition.existing_anchor_path);
+        for component in &precondition.missing_components {
+            missing_path.push(component);
+            if self.path_exists(&missing_path.to_string_lossy())?
+                || self.path_is_symlink(&missing_path.to_string_lossy())?
+            {
+                return Err(super::DeviceOperationError::other(
+                    "Setup Location destination creation precondition changed after review",
+                ));
+            }
+        }
+        Ok(())
+    }
     fn create_directory(&mut self, path: &str) -> Result<(), super::DeviceOperationError>;
     fn mkdir_p(&mut self, path: &str) -> Result<(), super::DeviceOperationError>;
     fn push_file(
@@ -594,6 +908,25 @@ impl<D: super::ExecutorDevice> AndroidCopyCommitDevice for D {
 
     fn path_binding(&mut self, path: &str) -> Result<String, super::DeviceOperationError> {
         self.copy_commit_path_binding(path)
+    }
+
+    fn path_exists(&mut self, path: &str) -> Result<bool, super::DeviceOperationError> {
+        super::ExecutorDevice::path_exists(self, path)
+    }
+
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, super::DeviceOperationError> {
+        super::ExecutorDevice::path_is_dir(self, path)
+    }
+
+    fn path_is_symlink(&mut self, path: &str) -> Result<bool, super::DeviceOperationError> {
+        self.copy_commit_path_is_symlink(path)
+    }
+
+    fn verify_setup_location(
+        &mut self,
+        binding: &StorageTargetBinding,
+    ) -> Result<(), super::DeviceOperationError> {
+        self.copy_commit_verify_setup_location(binding)
     }
 
     fn create_directory(&mut self, path: &str) -> Result<(), super::DeviceOperationError> {
@@ -719,7 +1052,20 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
             None => (false, None),
         };
         let mut internal_device_error = device_error.or(binding_error);
-        let (after_manifest, outcome, report_error, internal_error) =
+        let (after_manifest, outcome, report_error, internal_error) = if request.destination_kind
+            == CopyCommitDestinationKind::SetupLocation
+        {
+            // Setup Location partial reports use the guarded path above; the staged-error fallback
+            // must not inspect a destination whose reviewed binding may not have been acquired.
+            (
+            None,
+            CopyCommitOutcome::Uncertain,
+            "copy result could not be verified after mutation".to_string(),
+            Some(format!(
+                "{error}; Setup Location destination inspection skipped because the failed request has no review-bound destination identity"
+            )),
+        )
+        } else {
             match self.device.inspect_tree(&request.destination_identity) {
                 Ok(manifest) => {
                     let outcome = if binding_verified {
@@ -743,7 +1089,8 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                         )),
                     )
                 }
-            };
+            }
+        };
         let after_paths = after_manifest
             .as_ref()
             .map(|manifest| manifest_paths(manifest))
@@ -769,6 +1116,10 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
             staged_paths,
             staging_verified,
             destination_binding_verified: binding_verified,
+            destination_mutation_attempted: (request.destination_kind
+                == CopyCommitDestinationKind::SetupLocation)
+                .then_some(false),
+            created_directories: Vec::new(),
             source_digest_sha256: manifest_digest(&request.source_manifest),
             staging_cleanup_error: None,
             error: Some(report_error),
@@ -826,7 +1177,12 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
             }
             Ok(mut report) => {
                 report.succeeded = false;
-                report.outcome = CopyCommitOutcome::Uncertain;
+                if request.destination_kind != CopyCommitDestinationKind::SetupLocation
+                    || report.destination_mutation_attempted != Some(true)
+                    || report.outcome != CopyCommitOutcome::Partial
+                {
+                    report.outcome = CopyCommitOutcome::Uncertain;
+                }
                 report.staging_cleanup_error = Some(cleanup_message.clone());
                 if report.error.is_none() {
                     report.error = Some(cleanup_message);
@@ -860,10 +1216,980 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
             }
         }
     }
+
+    fn setup_failure_before_destination_mutation(
+        request: &CopyCommitRequest,
+        staged_manifest: &[CopyManifestEntry],
+        failure: CopyCommitAttemptFailure,
+    ) -> CopyCommitReport {
+        CopyCommitReport {
+            operation: request.operation,
+            destination_identity: request.destination_identity.clone(),
+            succeeded: false,
+            outcome: CopyCommitOutcome::Uncertain,
+            before_paths: manifest_paths(&request.destination_manifest),
+            before_manifest: request.destination_manifest.clone(),
+            after_paths: Vec::new(),
+            after_manifest: None,
+            reviewed_deletion_set: request.reviewed_deletion_set.clone(),
+            deleted_paths: Vec::new(),
+            copied_paths: Vec::new(),
+            staged_paths: manifest_paths(staged_manifest),
+            staging_verified: true,
+            destination_binding_verified: false,
+            destination_mutation_attempted: Some(false),
+            created_directories: Vec::new(),
+            source_digest_sha256: manifest_digest(&request.source_manifest),
+            staging_cleanup_error: None,
+            error: Some(failure.message),
+            internal_error: None,
+            internal_device_error: failure.device_error,
+        }
+    }
+
+    fn setup_failure_after_destination_mutation(
+        &mut self,
+        request: &CopyCommitRequest,
+        expected_destination_binding: Option<&str>,
+        created_directories: &[String],
+        destination_mutation_attempted: bool,
+        failure: CopyCommitAttemptFailure,
+    ) -> CopyCommitReport {
+        let (message, device_error) = (failure.message, failure.device_error);
+        let mut internal_device_error = device_error;
+        let binding_verified = match (
+            request.setup_location_binding.as_ref(),
+            expected_destination_binding,
+        ) {
+            (Some(binding), Some(expected)) => {
+                let fresh = self.device.verify_setup_location(binding).is_ok();
+                match self.device.path_binding(&request.destination_identity) {
+                    Ok(actual) => fresh && actual == expected,
+                    Err(error) => {
+                        if internal_device_error.is_none() {
+                            internal_device_error = Some(error);
+                        }
+                        false
+                    }
+                }
+            }
+            _ => false,
+        };
+        let after_manifest = if binding_verified {
+            match self.device.inspect_tree(&request.destination_identity) {
+                Ok(manifest) => Some(manifest),
+                Err(error) => {
+                    if internal_device_error.is_none() {
+                        internal_device_error = Some(error);
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let outcome = if destination_mutation_attempted
+            && ((binding_verified && after_manifest.is_some()) || !created_directories.is_empty())
+        {
+            CopyCommitOutcome::Partial
+        } else {
+            CopyCommitOutcome::Uncertain
+        };
+        let after_paths = after_manifest
+            .as_deref()
+            .map(manifest_paths)
+            .unwrap_or_default();
+        CopyCommitReport {
+            operation: request.operation,
+            destination_identity: request.destination_identity.clone(),
+            succeeded: false,
+            outcome,
+            before_paths: manifest_paths(&request.destination_manifest),
+            before_manifest: request.destination_manifest.clone(),
+            after_paths,
+            after_manifest,
+            reviewed_deletion_set: request.reviewed_deletion_set.clone(),
+            deleted_paths: Vec::new(),
+            copied_paths: Vec::new(),
+            staged_paths: manifest_paths(&request.source_manifest),
+            staging_verified: true,
+            destination_binding_verified: binding_verified,
+            destination_mutation_attempted: Some(destination_mutation_attempted),
+            created_directories: created_directories.to_vec(),
+            source_digest_sha256: manifest_digest(&request.source_manifest),
+            staging_cleanup_error: None,
+            error: Some(message),
+            internal_error: None,
+            internal_device_error,
+        }
+    }
+
+    fn verify_setup_destination_ready(
+        &mut self,
+        binding: &StorageTargetBinding,
+        destination: &str,
+        expected_binding: &str,
+    ) -> Result<(), super::DeviceOperationError> {
+        self.device.verify_setup_location(binding)?;
+        if self.device.path_binding(destination)? != expected_binding {
+            return Err(super::DeviceOperationError::other(
+                "Setup Location destination identity changed before mutation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit_setup_location(
+        &mut self,
+        request: &CopyCommitRequest,
+    ) -> Result<CopyCommitReport, CopyCommitError> {
+        validate_android_destination(&request.destination_identity)?;
+        validate_manifest(&request.source_manifest)?;
+        validate_manifest(&request.destination_manifest)?;
+        let binding = request.setup_location_binding.as_ref().ok_or_else(|| {
+            CopyCommitError::Rejected(
+                "Setup Location copy is missing its trusted volume binding".to_string(),
+            )
+        })?;
+        let reviewed_precondition =
+            request
+                .setup_destination_precondition
+                .as_ref()
+                .ok_or_else(|| {
+                    CopyCommitError::Rejected(
+                        "Setup Location copy is missing its destination precondition".to_string(),
+                    )
+                })?;
+        let expected_destination = binding
+            .destination_path()
+            .map_err(CopyCommitError::Rejected)?
+            .to_string_lossy()
+            .into_owned();
+        if expected_destination != request.destination_identity {
+            return Err(CopyCommitError::Rejected(
+                "Setup Location binding does not match the reviewed destination".to_string(),
+            ));
+        }
+        if !request.destination_manifest.is_empty()
+            && !reviewed_precondition.missing_components.is_empty()
+        {
+            return Err(CopyCommitError::Rejected(
+                "a missing Setup Location destination cannot have a reviewed tree".to_string(),
+            ));
+        }
+        self.device
+            .verify_setup_destination_precondition(binding, reviewed_precondition)
+            .map_err(CopyCommitError::from)?;
+        let initial_manifest = if reviewed_precondition.missing_components.is_empty() {
+            self.device
+                .inspect_tree(&request.destination_identity)
+                .map_err(CopyCommitError::from)?
+        } else {
+            Vec::new()
+        };
+        if initial_manifest != request.destination_manifest {
+            return Err(CopyCommitError::Stale(
+                "Setup Location destination changed after review".to_string(),
+            ));
+        }
+        let expected_deletions = reviewed_deletions(
+            request.operation,
+            &request.source_manifest,
+            &request.destination_manifest,
+        )?;
+        if expected_deletions != request.reviewed_deletion_set {
+            return Err(CopyCommitError::Rejected(
+                "reviewed deletion set does not match selected Setup Location operation"
+                    .to_string(),
+            ));
+        }
+        let source_tree = SourceTreeReader::open(&request.source_root)?;
+        if scan_tree(&request.source_root)? != request.source_manifest {
+            return Err(CopyCommitError::Stale(
+                "source tree changed after review".to_string(),
+            ));
+        }
+
+        let stage_root = unique_stage_root();
+        let stage_parent = Path::new(&stage_root).parent().ok_or_else(|| {
+            CopyCommitError::Rejected("Android staging root has no parent".to_string())
+        })?;
+        self.device
+            .mkdir_p(&stage_parent.to_string_lossy())
+            .map_err(CopyCommitError::from)?;
+        let actions = android_stage_actions(request, &stage_root)?;
+        if !matches!(
+            actions.first(),
+            Some(AndroidStageAction::CreateDirectory(path)) if path == &stage_root
+        ) {
+            return Err(CopyCommitError::Rejected(
+                "Android staging plan did not begin by creating its unique root".to_string(),
+            ));
+        }
+        self.device
+            .create_directory(&stage_root)
+            .map_err(CopyCommitError::from)?;
+        let expected_helper_path = format!("{stage_root}-helper");
+        let mut helper_path_for_cleanup = Some(expected_helper_path.clone());
+        let staged_result: Result<CopyCommitReport, CopyCommitError> = (|| {
+            for action in actions.iter().skip(1) {
+                match action {
+                    AndroidStageAction::CreateDirectory(path) => {
+                        self.device.mkdir_p(path).map_err(CopyCommitError::from)?
+                    }
+                    AndroidStageAction::PushFile {
+                        relative_path,
+                        expected_sha256,
+                        destination,
+                    } => {
+                        let staged_source = stage_reviewed_source_file(
+                            &source_tree,
+                            relative_path,
+                            expected_sha256,
+                        )?;
+                        self.device
+                            .push_file(staged_source.path(), destination)
+                            .map_err(CopyCommitError::from)?;
+                    }
+                }
+            }
+            let staged_manifest = self
+                .device
+                .inspect_tree(&stage_root)
+                .map_err(CopyCommitError::from)?;
+            if !manifest_content_matches(&staged_manifest, &request.source_manifest) {
+                return Err(CopyCommitError::Stale(
+                    "staged Android tree does not match the reviewed source manifest".to_string(),
+                ));
+            }
+
+            if scan_tree(&request.source_root)? != request.source_manifest {
+                return Ok(Self::setup_failure_before_destination_mutation(
+                    request,
+                    &staged_manifest,
+                    CopyCommitAttemptFailure::message("source tree changed before mutation"),
+                ));
+            }
+            if let Err(error) = self
+                .device
+                .verify_setup_destination_precondition(binding, reviewed_precondition)
+            {
+                return Ok(Self::setup_failure_before_destination_mutation(
+                    request,
+                    &staged_manifest,
+                    CopyCommitAttemptFailure::device(
+                        "Setup Location verification failed before destination mutation",
+                        error,
+                    ),
+                ));
+            }
+            if reviewed_precondition.missing_components.is_empty()
+                && self
+                    .device
+                    .inspect_tree(&request.destination_identity)
+                    .map_err(CopyCommitError::from)?
+                    != request.destination_manifest
+            {
+                return Ok(Self::setup_failure_before_destination_mutation(
+                    request,
+                    &staged_manifest,
+                    CopyCommitAttemptFailure::message(
+                        "Setup Location destination tree changed before mutation",
+                    ),
+                ));
+            }
+
+            let prepared_helper_path = match self.device.prepare_mutation_helper(&stage_root) {
+                Ok(path) if path == expected_helper_path => path,
+                Ok(_) => {
+                    return Ok(Self::setup_failure_before_destination_mutation(
+                        request,
+                        &staged_manifest,
+                        CopyCommitAttemptFailure::message(
+                            "Setup Location no-follow mutation helper was not bound to its stage",
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    return Ok(Self::setup_failure_before_destination_mutation(
+                        request,
+                        &staged_manifest,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location no-follow mutation helper is unavailable",
+                            error,
+                        ),
+                    ));
+                }
+            };
+            helper_path_for_cleanup = Some(prepared_helper_path.clone());
+
+            let mut current_precondition = reviewed_precondition.clone();
+            let mut created_directories = Vec::new();
+            let mut destination_mutation_attempted = false;
+            while let Some(component) = current_precondition.missing_components.first().cloned() {
+                if let Err(error) = self
+                    .device
+                    .verify_setup_destination_precondition(binding, &current_precondition)
+                {
+                    let report = if destination_mutation_attempted {
+                        self.setup_failure_after_destination_mutation(
+                            request,
+                            None,
+                            &created_directories,
+                            true,
+                            CopyCommitAttemptFailure::device(
+                                "Setup Location verification failed during destination creation",
+                                error,
+                            ),
+                        )
+                    } else {
+                        Self::setup_failure_before_destination_mutation(
+                            request,
+                            &staged_manifest,
+                            CopyCommitAttemptFailure::device(
+                                "Setup Location verification failed before destination mutation",
+                                error,
+                            ),
+                        )
+                    };
+                    return Ok(report);
+                }
+                let anchor = current_precondition.existing_anchor_path.clone();
+                let anchor_binding = current_precondition.existing_anchor_binding.clone();
+                let mutation = CopyCommitMutation::EnsureDirectory {
+                    relative_path: component.clone(),
+                };
+                destination_mutation_attempted = true;
+                if let Err(error) = self.device.apply_selected_root_mutation(
+                    &anchor,
+                    &anchor_binding,
+                    &stage_root,
+                    &prepared_helper_path,
+                    "absent",
+                    &mutation,
+                ) {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        request,
+                        None,
+                        &created_directories,
+                        true,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location destination directory creation failed",
+                            error,
+                        ),
+                    );
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                let created_anchor = Path::new(&anchor).join(&component);
+                let created_anchor_string = created_anchor.to_string_lossy().into_owned();
+                let root = Path::new(&binding.mount_root);
+                if let Ok(relative) = created_anchor.strip_prefix(root) {
+                    created_directories.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+                let created_binding = match self.device.path_binding(&created_anchor_string) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        let mut report = self.setup_failure_after_destination_mutation(
+                            request,
+                            None,
+                            &created_directories,
+                            true,
+                            CopyCommitAttemptFailure::device(
+                                "Setup Location created directory could not be rebound",
+                                error,
+                            ),
+                        );
+                        report.staged_paths = manifest_paths(&staged_manifest);
+                        report.staging_verified = true;
+                        return Ok(report);
+                    }
+                };
+                current_precondition.existing_anchor_path = created_anchor_string;
+                current_precondition.existing_anchor_binding = created_binding;
+                current_precondition.missing_components.remove(0);
+            }
+
+            if let Err(error) = self
+                .device
+                .verify_setup_destination_precondition(binding, &current_precondition)
+            {
+                let failure = CopyCommitAttemptFailure::device(
+                    "Setup Location verification failed after destination creation",
+                    error,
+                );
+                let mut report = if destination_mutation_attempted {
+                    self.setup_failure_after_destination_mutation(
+                        request,
+                        None,
+                        &created_directories,
+                        true,
+                        failure,
+                    )
+                } else {
+                    Self::setup_failure_before_destination_mutation(
+                        request,
+                        &staged_manifest,
+                        failure,
+                    )
+                };
+                report.staged_paths = manifest_paths(&staged_manifest);
+                report.staging_verified = true;
+                return Ok(report);
+            }
+
+            let mut active_request = request.clone();
+            let destination_binding = match self.device.path_binding(&request.destination_identity)
+            {
+                Ok(binding) => binding,
+                Err(error) if destination_mutation_attempted => {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        request,
+                        None,
+                        &created_directories,
+                        true,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location destination could not be bound after creation",
+                            error,
+                        ),
+                    );
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                Err(error) => {
+                    return Ok(Self::setup_failure_before_destination_mutation(
+                        request,
+                        &staged_manifest,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location destination binding could not be verified",
+                            error,
+                        ),
+                    ));
+                }
+            };
+            active_request.destination_binding = Some(destination_binding.clone());
+            let mut current_manifest = match self.device.inspect_tree(&request.destination_identity)
+            {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        Some(&destination_binding),
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location destination could not be inspected after creation",
+                            error,
+                        ),
+                    );
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+            };
+            if current_manifest != request.destination_manifest {
+                if destination_mutation_attempted {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        Some(&destination_binding),
+                        &created_directories,
+                        true,
+                        CopyCommitAttemptFailure::message(
+                            "Setup Location destination differs from its reviewed tree after creation",
+                        ),
+                    );
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                return Ok(Self::setup_failure_before_destination_mutation(
+                    request,
+                    &staged_manifest,
+                    CopyCommitAttemptFailure::message(
+                        "Setup Location destination tree changed before mutation",
+                    ),
+                ));
+            }
+
+            let expected_after = match expected_manifest(request) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        None,
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::message(format!(
+                            "could not calculate expected Setup Location result: {error}"
+                        )),
+                    );
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+            };
+            let mut deleted_paths = Vec::new();
+            let mut copied_paths = Vec::new();
+            let run_mutation = |device: &mut D,
+                                path: &str,
+                                expected_binding: &str,
+                                mutation: &CopyCommitMutation,
+                                expected_entry: &str,
+                                stage_root: &str,
+                                helper_path: &str|
+             -> Result<(), (super::DeviceOperationError, bool)> {
+                device
+                    .verify_setup_location(binding)
+                    .map_err(|error| (error, false))?;
+                if device.path_binding(path).map_err(|error| (error, false))? != expected_binding {
+                    return Err((super::DeviceOperationError::other(
+                        "Setup Location destination identity changed immediately before mutation",
+                    ), false));
+                }
+                device
+                    .apply_selected_root_mutation(
+                        path,
+                        expected_binding,
+                        stage_root,
+                        helper_path,
+                        expected_entry,
+                        mutation,
+                    )
+                    .map_err(|error| (error, true))
+            };
+
+            let mut deletion_order = request.reviewed_deletion_set.clone();
+            deletion_order
+                .sort_by_key(|path| (std::cmp::Reverse(path.matches('/').count()), path.clone()));
+            for relative_path in &deletion_order {
+                let kind = request
+                    .destination_manifest
+                    .iter()
+                    .find(|entry| entry.relative_path == *relative_path)
+                    .map(|entry| entry.kind)
+                    .ok_or_else(|| {
+                        CopyCommitError::Rejected(format!(
+                            "reviewed deletion is absent from its manifest: {relative_path}"
+                        ))
+                    })?;
+                let mutation = match kind {
+                    CopyEntryKind::File => CopyCommitMutation::RemoveFile {
+                        relative_path: relative_path.clone(),
+                    },
+                    CopyEntryKind::Directory => CopyCommitMutation::RemoveDirectory {
+                        relative_path: relative_path.clone(),
+                    },
+                };
+                let expected_entry =
+                    match mutation_entry_precondition(&current_manifest, relative_path) {
+                        Ok(expected_entry) => expected_entry,
+                        Err(error) => {
+                            let mut report = self.setup_failure_after_destination_mutation(
+                                &active_request,
+                                Some(&destination_binding),
+                                &created_directories,
+                                destination_mutation_attempted,
+                                CopyCommitAttemptFailure::message(format!(
+                                    "could not verify reviewed Setup Location deletion: {error}"
+                                )),
+                            );
+                            report.copied_paths = copied_paths;
+                            report.deleted_paths = deleted_paths;
+                            report.staged_paths = manifest_paths(&staged_manifest);
+                            report.staging_verified = true;
+                            return Ok(report);
+                        }
+                    };
+                if let Err(error) = run_mutation(
+                    self.device,
+                    &request.destination_identity,
+                    &destination_binding,
+                    &mutation,
+                    &expected_entry,
+                    &stage_root,
+                    &prepared_helper_path,
+                ) {
+                    let (error, mutation_attempted) = error;
+                    let attempted = destination_mutation_attempted || mutation_attempted;
+                    let failure = CopyCommitAttemptFailure::device(
+                        "reviewed Setup Location deletion failed",
+                        error,
+                    );
+                    let mut report = if attempted {
+                        self.setup_failure_after_destination_mutation(
+                            &active_request,
+                            mutation_attempted.then_some(destination_binding.as_str()),
+                            &created_directories,
+                            attempted,
+                            failure,
+                        )
+                    } else {
+                        Self::setup_failure_before_destination_mutation(
+                            request,
+                            &staged_manifest,
+                            failure,
+                        )
+                    };
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                destination_mutation_attempted = true;
+                if let Err(error) = apply_manifest_mutation(
+                    &mut current_manifest,
+                    &request.source_manifest,
+                    &mutation,
+                ) {
+                    deleted_paths.push(relative_path.clone());
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        None,
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::message(format!(
+                            "could not record completed Setup Location deletion: {error}"
+                        )),
+                    );
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                deleted_paths.push(relative_path.clone());
+            }
+
+            for entry in request
+                .source_manifest
+                .iter()
+                .filter(|entry| entry.kind == CopyEntryKind::Directory)
+            {
+                let mutation = CopyCommitMutation::EnsureDirectory {
+                    relative_path: entry.relative_path.clone(),
+                };
+                let expected_entry =
+                    match mutation_entry_precondition(&current_manifest, &entry.relative_path) {
+                        Ok(expected_entry) => expected_entry,
+                        Err(error) => {
+                            let mut report = self.setup_failure_after_destination_mutation(
+                                &active_request,
+                                Some(&destination_binding),
+                                &created_directories,
+                                destination_mutation_attempted,
+                                CopyCommitAttemptFailure::message(format!(
+                                    "could not verify reviewed Setup Location directory: {error}"
+                                )),
+                            );
+                            report.copied_paths = copied_paths;
+                            report.deleted_paths = deleted_paths;
+                            report.staged_paths = manifest_paths(&staged_manifest);
+                            report.staging_verified = true;
+                            return Ok(report);
+                        }
+                    };
+                if let Err(error) = run_mutation(
+                    self.device,
+                    &request.destination_identity,
+                    &destination_binding,
+                    &mutation,
+                    &expected_entry,
+                    &stage_root,
+                    &prepared_helper_path,
+                ) {
+                    let (error, mutation_attempted) = error;
+                    let attempted = destination_mutation_attempted || mutation_attempted;
+                    let failure = CopyCommitAttemptFailure::device(
+                        "reviewed Setup Location directory creation failed",
+                        error,
+                    );
+                    let mut report = if attempted {
+                        self.setup_failure_after_destination_mutation(
+                            &active_request,
+                            mutation_attempted.then_some(destination_binding.as_str()),
+                            &created_directories,
+                            attempted,
+                            failure,
+                        )
+                    } else {
+                        Self::setup_failure_before_destination_mutation(
+                            request,
+                            &staged_manifest,
+                            failure,
+                        )
+                    };
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                destination_mutation_attempted = true;
+                if let Err(error) = apply_manifest_mutation(
+                    &mut current_manifest,
+                    &request.source_manifest,
+                    &mutation,
+                ) {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        None,
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::message(format!(
+                            "could not record completed Setup Location directory creation: {error}"
+                        )),
+                    );
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+            }
+
+            for entry in request
+                .source_manifest
+                .iter()
+                .filter(|entry| entry.kind == CopyEntryKind::File)
+            {
+                let mutation = CopyCommitMutation::PublishFile {
+                    relative_path: entry.relative_path.clone(),
+                    expected_source_sha256: entry.sha256.clone().ok_or_else(|| {
+                        CopyCommitError::Rejected(format!(
+                            "reviewed file lacks a digest: {}",
+                            entry.relative_path
+                        ))
+                    })?,
+                };
+                let expected_entry =
+                    match mutation_entry_precondition(&current_manifest, &entry.relative_path) {
+                        Ok(expected_entry) => expected_entry,
+                        Err(error) => {
+                            let mut report = self.setup_failure_after_destination_mutation(
+                                &active_request,
+                                Some(&destination_binding),
+                                &created_directories,
+                                destination_mutation_attempted,
+                                CopyCommitAttemptFailure::message(format!(
+                                    "could not verify reviewed Setup Location file: {error}"
+                                )),
+                            );
+                            report.copied_paths = copied_paths;
+                            report.deleted_paths = deleted_paths;
+                            report.staged_paths = manifest_paths(&staged_manifest);
+                            report.staging_verified = true;
+                            return Ok(report);
+                        }
+                    };
+                if let Err(error) = run_mutation(
+                    self.device,
+                    &request.destination_identity,
+                    &destination_binding,
+                    &mutation,
+                    &expected_entry,
+                    &stage_root,
+                    &prepared_helper_path,
+                ) {
+                    let (error, mutation_attempted) = error;
+                    let attempted = destination_mutation_attempted || mutation_attempted;
+                    let failure = CopyCommitAttemptFailure::device(
+                        "reviewed Setup Location file publication failed",
+                        error,
+                    );
+                    let mut report = if attempted {
+                        self.setup_failure_after_destination_mutation(
+                            &active_request,
+                            mutation_attempted.then_some(destination_binding.as_str()),
+                            &created_directories,
+                            attempted,
+                            failure,
+                        )
+                    } else {
+                        Self::setup_failure_before_destination_mutation(
+                            request,
+                            &staged_manifest,
+                            failure,
+                        )
+                    };
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                destination_mutation_attempted = true;
+                if let Err(error) = apply_manifest_mutation(
+                    &mut current_manifest,
+                    &request.source_manifest,
+                    &mutation,
+                ) {
+                    copied_paths.push(entry.relative_path.clone());
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        Some(&destination_binding),
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::message(format!(
+                            "could not record completed Setup Location file publication: {error}"
+                        )),
+                    );
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+                copied_paths.push(entry.relative_path.clone());
+            }
+            copied_paths.sort();
+            deleted_paths.sort();
+
+            if let Err(error) = self.device.verify_setup_location(binding) {
+                let mut report = self.setup_failure_after_destination_mutation(
+                    &active_request,
+                    None,
+                    &created_directories,
+                    destination_mutation_attempted,
+                    CopyCommitAttemptFailure::device(
+                        "Setup Location volume verification failed after mutation",
+                        error,
+                    ),
+                );
+                report.copied_paths = copied_paths;
+                report.deleted_paths = deleted_paths;
+                report.staged_paths = manifest_paths(&staged_manifest);
+                report.staging_verified = true;
+                return Ok(report);
+            }
+            let final_binding = match self.device.path_binding(&request.destination_identity) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        None,
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location destination could not be rebound after mutation",
+                            error,
+                        ),
+                    );
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+            };
+            if final_binding != destination_binding {
+                let mut report = self.setup_failure_after_destination_mutation(
+                    &active_request,
+                    None,
+                    &created_directories,
+                    destination_mutation_attempted,
+                    CopyCommitAttemptFailure::message(
+                        "Setup Location destination identity changed after mutation",
+                    ),
+                );
+                report.copied_paths = copied_paths;
+                report.deleted_paths = deleted_paths;
+                report.staged_paths = manifest_paths(&staged_manifest);
+                report.staging_verified = true;
+                return Ok(report);
+            }
+            if let Err(error) = self.device.verify_setup_location(binding) {
+                let mut report = self.setup_failure_after_destination_mutation(
+                    &active_request,
+                    None,
+                    &created_directories,
+                    destination_mutation_attempted,
+                    CopyCommitAttemptFailure::device(
+                        "Setup Location volume verification failed before final inspection",
+                        error,
+                    ),
+                );
+                report.copied_paths = copied_paths;
+                report.deleted_paths = deleted_paths;
+                report.staged_paths = manifest_paths(&staged_manifest);
+                report.staging_verified = true;
+                return Ok(report);
+            }
+            let after_manifest = match self.device.inspect_tree(&request.destination_identity) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    let mut report = self.setup_failure_after_destination_mutation(
+                        &active_request,
+                        Some(&destination_binding),
+                        &created_directories,
+                        destination_mutation_attempted,
+                        CopyCommitAttemptFailure::device(
+                            "Setup Location destination could not be inspected after mutation",
+                            error,
+                        ),
+                    );
+                    report.copied_paths = copied_paths;
+                    report.deleted_paths = deleted_paths;
+                    report.staged_paths = manifest_paths(&staged_manifest);
+                    report.staging_verified = true;
+                    return Ok(report);
+                }
+            };
+            if !manifest_content_matches(&after_manifest, &expected_after) {
+                let mut report = self.setup_failure_after_destination_mutation(
+                    &active_request,
+                    Some(&destination_binding),
+                    &created_directories,
+                    destination_mutation_attempted,
+                    CopyCommitAttemptFailure::message(
+                        "Setup Location destination differs from the reviewed expected tree",
+                    ),
+                );
+                report.copied_paths = copied_paths;
+                report.deleted_paths = deleted_paths;
+                return Ok(report);
+            }
+
+            Ok(CopyCommitReport {
+                operation: request.operation,
+                destination_identity: request.destination_identity.clone(),
+                succeeded: true,
+                outcome: CopyCommitOutcome::Succeeded,
+                before_paths: manifest_paths(&request.destination_manifest),
+                before_manifest: request.destination_manifest.clone(),
+                after_paths: manifest_paths(&after_manifest),
+                after_manifest: Some(after_manifest),
+                reviewed_deletion_set: request.reviewed_deletion_set.clone(),
+                deleted_paths,
+                copied_paths,
+                staged_paths: manifest_paths(&staged_manifest),
+                staging_verified: true,
+                destination_binding_verified: true,
+                destination_mutation_attempted: Some(destination_mutation_attempted),
+                created_directories,
+                source_digest_sha256: manifest_digest(&request.source_manifest),
+                staging_cleanup_error: None,
+                error: None,
+                internal_error: None,
+                internal_device_error: None,
+            })
+        })();
+        self.finish_staged_result(
+            request,
+            &stage_root,
+            helper_path_for_cleanup.as_deref(),
+            staged_result,
+        )
+    }
 }
 
 impl<D: AndroidCopyCommitDevice> CopyCommitAdapter for AndroidCopyCommitAdapter<'_, D> {
     fn commit(&mut self, request: &CopyCommitRequest) -> Result<CopyCommitReport, CopyCommitError> {
+        if request.destination_kind == CopyCommitDestinationKind::SetupLocation {
+            return self.commit_setup_location(request);
+        }
         validate_android_destination(&request.destination_identity)?;
         validate_manifest(&request.source_manifest)?;
         validate_manifest(&request.destination_manifest)?;
@@ -1207,6 +2533,8 @@ impl<D: AndroidCopyCommitDevice> CopyCommitAdapter for AndroidCopyCommitAdapter<
                 staged_paths: manifest_paths(&staged_manifest),
                 staging_verified: true,
                 destination_binding_verified: true,
+                destination_mutation_attempted: None,
+                created_directories: Vec::new(),
                 source_digest_sha256: manifest_digest(&request.source_manifest),
                 staging_cleanup_error: None,
                 error: None,
@@ -1428,6 +2756,8 @@ fn fake_post_mutation_report(
     selected: &SelectedRootMutator,
     mut deleted_paths: Vec<String>,
     mut copied_paths: Vec<String>,
+    destination_mutation_attempted: bool,
+    created_directories: &[String],
     error: CopyCommitError,
 ) -> CopyCommitReport {
     deleted_paths.sort();
@@ -1473,6 +2803,10 @@ fn fake_post_mutation_report(
         staged_paths: Vec::new(),
         staging_verified: false,
         destination_binding_verified: binding_verified,
+        destination_mutation_attempted: (request.destination_kind
+            == CopyCommitDestinationKind::SetupLocation)
+            .then_some(destination_mutation_attempted),
+        created_directories: created_directories.to_vec(),
         source_digest_sha256: manifest_digest(&request.source_manifest),
         staging_cleanup_error: None,
         error: Some(error.to_string()),
@@ -1481,8 +2815,27 @@ fn fake_post_mutation_report(
     }
 }
 
+fn setup_location_created_directories(request: &CopyCommitRequest) -> Vec<String> {
+    let (Some(binding), Some(precondition)) = (
+        request.setup_location_binding.as_ref(),
+        request.setup_destination_precondition.as_ref(),
+    ) else {
+        return Vec::new();
+    };
+    let components = binding.relative_path.split('/').collect::<Vec<_>>();
+    let start = components
+        .len()
+        .saturating_sub(precondition.missing_components.len());
+    (start..components.len())
+        .map(|end| components[..=end].join("/"))
+        .collect()
+}
+
 impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
     fn commit(&mut self, request: &CopyCommitRequest) -> Result<CopyCommitReport, CopyCommitError> {
+        if request.destination_kind == CopyCommitDestinationKind::SetupLocation {
+            validate_fake_setup_precondition(request)?;
+        }
         if selected_path(&request.fake_device_root, &request.destination_identity)?
             != request.selected_root
         {
@@ -1520,6 +2873,16 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
         let source_digest_sha256 = manifest_digest(&request.source_manifest);
         let mut deleted_paths = Vec::new();
         let mut copied_paths = Vec::new();
+        let created_directories =
+            if request.destination_kind == CopyCommitDestinationKind::SetupLocation {
+                setup_location_created_directories(request)
+            } else {
+                Vec::new()
+            };
+        // Opening an initially absent Setup Location uses mkdirat for each
+        // selected-root component, so its reviewed creation effects count as
+        // destination mutation even if a later copy operation fails.
+        let mut destination_mutation_attempted = !created_directories.is_empty();
 
         let selected =
             SelectedRootMutator::open_or_create(&request.fake_device_root, &request.selected_root)?;
@@ -1549,6 +2912,7 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
                     })?;
                 validate_path_binding(&request.fake_device_root, &request.selected_root)?;
                 verify_selected_entry(&selected, &current_manifest, relative_path)?;
+                destination_mutation_attempted = true;
                 match kind {
                     CopyEntryKind::File => selected.remove_file(relative_path)?,
                     CopyEntryKind::Directory => selected.remove_directory(relative_path)?,
@@ -1587,6 +2951,7 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
                 };
                 match entry.kind {
                     CopyEntryKind::Directory => {
+                        destination_mutation_attempted = true;
                         selected.ensure_directory(&entry.relative_path)?;
                     }
                     CopyEntryKind::File => {
@@ -1596,6 +2961,7 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
                                 entry.relative_path
                             ))
                         })?;
+                        destination_mutation_attempted = true;
                         selected
                             .publish_file(&source_tree, &entry.relative_path, expected_sha256)
                             .map_err(|error| {
@@ -1632,6 +2998,8 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
                     &selected,
                     deleted_paths,
                     copied_paths,
+                    destination_mutation_attempted,
+                    &created_directories,
                     error,
                 ));
             }
@@ -1654,6 +3022,10 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
             staged_paths: Vec::new(),
             staging_verified: false,
             destination_binding_verified: true,
+            destination_mutation_attempted: (request.destination_kind
+                == CopyCommitDestinationKind::SetupLocation)
+                .then_some(destination_mutation_attempted),
+            created_directories,
             source_digest_sha256,
             staging_cleanup_error: None,
             error: None,
@@ -1661,6 +3033,119 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
             internal_device_error: None,
         })
     }
+}
+
+fn validate_fake_setup_precondition(request: &CopyCommitRequest) -> Result<(), CopyCommitError> {
+    let binding = request.setup_location_binding.as_ref().ok_or_else(|| {
+        CopyCommitError::Rejected("fake Setup Location binding is missing".to_string())
+    })?;
+    binding.validate().map_err(CopyCommitError::Rejected)?;
+    let precondition = request
+        .setup_destination_precondition
+        .as_ref()
+        .ok_or_else(|| {
+            CopyCommitError::Rejected("fake Setup Location precondition is missing".to_string())
+        })?;
+    if binding
+        .destination_path()
+        .map_err(CopyCommitError::Rejected)?
+        .to_string_lossy()
+        != request.destination_identity
+    {
+        return Err(CopyCommitError::Rejected(
+            "fake Setup Location destination no longer matches its binding".to_string(),
+        ));
+    }
+    let fake_root = fs::canonicalize(&request.fake_device_root)
+        .map_err(|error| CopyCommitError::Io(format!("resolve fake device root: {error}")))?;
+    let mount_root = selected_path(&fake_root, &binding.mount_root)?;
+    let canonical_root = fs::canonicalize(&mount_root)
+        .map_err(|error| CopyCommitError::Stale(format!("fake volume root changed: {error}")))?;
+    let components = binding.relative_path.split('/').collect::<Vec<_>>();
+    if precondition.missing_components.len() > components.len() {
+        return Err(CopyCommitError::Rejected(
+            "fake Setup Location precondition is inconsistent".to_string(),
+        ));
+    }
+    let existing_count = components.len() - precondition.missing_components.len();
+    if components[existing_count..]
+        != precondition
+            .missing_components
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    {
+        return Err(CopyCommitError::Rejected(
+            "fake Setup Location missing components do not match the reviewed binding".to_string(),
+        ));
+    }
+    let expected_anchor =
+        components[..existing_count]
+            .iter()
+            .fold(mount_root.clone(), |mut path, component| {
+                path.push(component);
+                path
+            });
+    if expected_anchor.to_string_lossy() != precondition.existing_anchor_path
+        || fake_setup_path_binding(&expected_anchor)? != precondition.existing_anchor_binding
+    {
+        return Err(CopyCommitError::Stale(
+            "fake Setup Location anchor changed after review".to_string(),
+        ));
+    }
+    let expected_scope = components
+        .iter()
+        .fold(canonical_root, |mut path, component| {
+            path.push(component);
+            path
+        });
+    if expected_scope.to_string_lossy() != precondition.canonical_scope {
+        return Err(CopyCommitError::Stale(
+            "fake Setup Location canonical scope changed after review".to_string(),
+        ));
+    }
+    let mut missing = expected_anchor;
+    for component in &precondition.missing_components {
+        missing.push(component);
+        match fs::symlink_metadata(&missing) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(CopyCommitError::Stale(
+                    "fake Setup Location creation precondition changed after review".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(CopyCommitError::Io(format!(
+                    "inspect fake Setup Location precondition: {error}"
+                )));
+            }
+        }
+    }
+    if precondition.missing_components.is_empty() {
+        let metadata = fs::symlink_metadata(&request.selected_root).map_err(|error| {
+            CopyCommitError::Stale(format!("fake Setup Location destination changed: {error}"))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CopyCommitError::Stale(
+                "fake Setup Location destination is no longer a directory".to_string(),
+            ));
+        }
+    } else {
+        match fs::symlink_metadata(&request.selected_root) {
+            Ok(_) => {
+                return Err(CopyCommitError::Stale(
+                    "fake Setup Location destination unexpectedly exists".to_string(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CopyCommitError::Io(format!(
+                    "inspect fake Setup Location destination precondition: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Holds the reviewed source root open and resolves files beneath its
@@ -2353,6 +3838,70 @@ fn validate_path_binding(root: &Path, selected: &Path) -> Result<(), CopyCommitE
     Ok(())
 }
 
+fn ensure_fake_directory_under_root(
+    root: &Path,
+    destination: &Path,
+) -> Result<(), CopyCommitError> {
+    let relative = destination.strip_prefix(root).map_err(|_| {
+        CopyCommitError::Rejected("fake Setup Location escaped its sandbox root".to_string())
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(CopyCommitError::Rejected(
+                "fake Setup Location contains an invalid path component".to_string(),
+            ));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(CopyCommitError::Rejected(
+                    "fake Setup Location volume root is not a safe directory".to_string(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|error| {
+                    CopyCommitError::Io(format!("create simulated volume root: {error}"))
+                })?;
+            }
+            Err(error) => {
+                return Err(CopyCommitError::Io(format!(
+                    "inspect simulated volume root: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fake_setup_path_binding(path: &Path) -> Result<String, CopyCommitError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        CopyCommitError::Io(format!("inspect fake Setup Location anchor: {error}"))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CopyCommitError::Rejected(
+            "fake Setup Location anchor is not a non-symlink directory".to_string(),
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        CopyCommitError::Io(format!("resolve fake Setup Location anchor: {error}"))
+    })?;
+    let selected_identity =
+        filesystem_identity(&metadata).unwrap_or_else(|| "host-path".to_string());
+    let parent_identity = path
+        .parent()
+        .and_then(|parent| fs::metadata(parent).ok())
+        .and_then(|metadata| filesystem_identity(&metadata))
+        .unwrap_or_else(|| "host-parent".to_string());
+    Ok(format!(
+        "{}|parent:{}|selected:{}",
+        canonical.display(),
+        parent_identity,
+        selected_identity
+    ))
+}
+
 fn scan_tree(root: &Path) -> Result<Vec<CopyManifestEntry>, CopyCommitError> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -2931,6 +4480,718 @@ mod tests {
     }
 
     #[test]
+    fn setup_location_verification_failure_performs_no_destination_mutation_and_reports_stage_cleanup(
+    ) {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let legacy_target = selected_path(&fake_root, "/data/user/0/fixture/assets").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&legacy_target).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            &source,
+            &fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.destination_identity = "/storage/ABCD-1234/EmuChef".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: vec!["EmuChef".to_string()],
+        });
+
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: 2,
+            destination_mutations: 0,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: true,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+        };
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("a post-stage guard failure should produce a truthful report");
+
+        assert_eq!(device.destination_mutations, 0);
+        assert_eq!(report.destination_mutation_attempted, Some(false));
+        assert!(report.copied_paths.is_empty());
+        assert!(report.deleted_paths.is_empty());
+        assert!(report.staging_verified);
+        assert_eq!(
+            report.staged_paths,
+            manifest_paths(&request.source_manifest)
+        );
+        assert!(report
+            .staging_cleanup_error
+            .as_deref()
+            .is_some_and(|message| message.contains("injected staging cleanup failure")));
+        assert_eq!(
+            device.cleanup_paths,
+            [
+                format!("{}/payload.bin", device.stage_root.as_deref().unwrap()),
+                device.stage_root.as_deref().unwrap().to_string()
+            ]
+        );
+        assert!(report
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("verification failed")));
+        assert!(report
+            .internal_device_error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("volume continuity")));
+    }
+
+    #[test]
+    fn setup_location_partial_creation_survives_staging_cleanup_failure() {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let legacy_target = selected_path(&fake_root, "/data/user/0/fixture/assets").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&legacy_target).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            &source,
+            &fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.destination_identity = "/storage/ABCD-1234/EmuChef/Games".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef/Games".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: vec!["EmuChef".to_string(), "Games".to_string()],
+        });
+
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: 4,
+            destination_mutations: 0,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: true,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+        };
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("post-creation guard failure should be reported");
+
+        assert_eq!(device.destination_mutations, 1);
+        assert_eq!(device.unverified_destination_inspections, 0);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.created_directories, vec!["EmuChef".to_string()]);
+        assert_eq!(report.outcome, CopyCommitOutcome::Partial);
+        assert!(!report.destination_binding_verified);
+        assert!(report.after_manifest.is_none());
+        assert!(report.after_paths.is_empty());
+        assert!(report.staging_verified);
+        assert_eq!(
+            report.staged_paths,
+            manifest_paths(&request.source_manifest)
+        );
+        assert!(report
+            .staging_cleanup_error
+            .as_deref()
+            .is_some_and(|message| message.contains("injected staging cleanup failure")));
+    }
+
+    #[test]
+    fn setup_location_revalidates_after_final_directory_creation_before_inspection() {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let legacy_target = selected_path(&fake_root, "/data/user/0/fixture/assets").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&legacy_target).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            &source,
+            &fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.destination_identity = "/storage/ABCD-1234/EmuChef/Games".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef/Games".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: vec!["EmuChef".to_string(), "Games".to_string()],
+        });
+
+        for fail_verification_at in [5, 6] {
+            let mut device = SetupLocationVerificationFailureDevice {
+                stage_root: None,
+                setup_verifications: 0,
+                fail_verification_at,
+                destination_mutations: 0,
+                cleanup_paths: Vec::new(),
+                cleanup_fails: false,
+                destination_inspections: 0,
+                fail_destination_inspection_at: None,
+                unverified_destination_inspections: 0,
+                destination_binding_changes_after_mutation: false,
+            };
+            let report = AndroidCopyCommitAdapter::new(&mut device)
+                .commit(&request)
+                .expect("failed post-creation verification should be reported");
+
+            assert_eq!(device.destination_mutations, 2);
+            assert_eq!(
+                device.unverified_destination_inspections, 0,
+                "failure at verification {fail_verification_at} must not trigger a report scan"
+            );
+            if fail_verification_at == 5 {
+                assert_eq!(device.destination_inspections, 0);
+            }
+            assert_eq!(report.destination_mutation_attempted, Some(true));
+            assert_eq!(
+                report.created_directories,
+                ["EmuChef".to_string(), "EmuChef/Games".to_string()]
+            );
+            assert!(report.copied_paths.is_empty());
+            assert!(report.deleted_paths.is_empty());
+            assert_eq!(report.outcome, CopyCommitOutcome::Partial);
+            assert!(!report.destination_binding_verified);
+            assert!(report.after_manifest.is_none());
+            assert!(report.after_paths.is_empty());
+        }
+    }
+
+    #[test]
+    fn setup_location_staged_error_cleanup_does_not_inspect_unverified_destination() {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let legacy_target = selected_path(&fake_root, "/data/user/0/fixture/assets").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&legacy_target).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            &source,
+            &fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.destination_identity = "/storage/ABCD-1234/EmuChef".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: Vec::new(),
+        });
+
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: true,
+            destination_inspections: 0,
+            fail_destination_inspection_at: Some(2),
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+        };
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("failed inspection and staging cleanup should return an uncertain report");
+
+        assert_eq!(device.destination_inspections, 2);
+        assert_eq!(device.destination_mutations, 0);
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert!(!report.destination_binding_verified);
+        assert_eq!(report.destination_mutation_attempted, Some(false));
+        assert!(report.after_manifest.is_none());
+        assert!(report.after_paths.is_empty());
+        assert!(report
+            .staging_cleanup_error
+            .as_deref()
+            .is_some_and(|message| { message.contains("injected staging cleanup failure") }));
+    }
+
+    #[test]
+    fn setup_location_binding_mismatch_skips_after_mutation_inspection() {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let legacy_target = selected_path(&fake_root, "/data/user/0/fixture/assets").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&legacy_target).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            &source,
+            &fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.destination_identity = "/storage/ABCD-1234/EmuChef".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234/EmuChef".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: Vec::new(),
+        });
+
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: false,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: true,
+        };
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("a binding mismatch should produce a partial report");
+
+        assert_eq!(device.destination_mutations, 1);
+        assert_eq!(device.destination_inspections, 3);
+        assert_eq!(device.unverified_destination_inspections, 0);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert!(!report.destination_binding_verified);
+        assert!(report.after_manifest.is_none());
+        assert!(report.after_paths.is_empty());
+        assert!(report
+            .error
+            .as_deref()
+            .is_some_and(|error| { error.contains("identity changed after mutation") }));
+    }
+
+    #[test]
+    fn fake_setup_anchor_verification_failure_leaves_selected_destination_absent() {
+        use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let binding = StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let mut request = CopyCommitRequest::reviewed_fake_setup_directory(
+            &source,
+            &fake_root,
+            binding,
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request
+            .setup_destination_precondition
+            .as_mut()
+            .unwrap()
+            .existing_anchor_binding = "stale-anchor".to_string();
+
+        assert!(!request.selected_root.exists());
+        let result = FakeFilesystemCopyCommitAdapter.commit(&request);
+
+        assert!(matches!(result, Err(CopyCommitError::Stale(_))));
+        assert!(!request.selected_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setup_commit_creates_missing_scope_components_under_the_reviewed_volume() {
+        use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+        let binding = StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let request = CopyCommitRequest::reviewed_fake_setup_directory(
+            &source,
+            &fake_root,
+            binding,
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+
+        let report = FakeFilesystemCopyCommitAdapter
+            .commit(&request)
+            .expect("fake Setup Location copy should create its reviewed scope");
+
+        assert!(report.succeeded);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(
+            report.created_directories,
+            vec!["EmuChef".to_string(), "EmuChef/Games".to_string()]
+        );
+        assert_eq!(
+            fs::read(request.selected_root.join("payload.bin")).unwrap(),
+            b"payload"
+        );
+        for directory in [
+            request.selected_root.parent().unwrap(),
+            request.selected_root.as_path(),
+        ] {
+            let metadata = fs::symlink_metadata(directory).unwrap();
+            assert!(metadata.is_dir());
+            assert!(!metadata.file_type().is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_shared_device_path_copy_keeps_its_path_and_report_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let destination_identity = "/storage/emulated/0/ROMs";
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+        let request = CopyCommitRequest::reviewed_shared_directory(
+            &source,
+            &fake_root,
+            destination_identity,
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        assert_eq!(
+            request.destination_kind,
+            CopyCommitDestinationKind::SharedDevicePath
+        );
+        assert_eq!(request.destination_identity, destination_identity);
+        assert!(request.setup_location_binding.is_none());
+        assert!(request.setup_destination_precondition.is_none());
+
+        let report = FakeFilesystemCopyCommitAdapter
+            .commit(&request)
+            .expect("legacy shared path copy should retain its T03 behavior");
+        let serialized = serde_json::to_value(&report).unwrap();
+
+        assert!(report.succeeded);
+        assert_eq!(report.destination_mutation_attempted, None);
+        assert!(report.created_directories.is_empty());
+        assert_eq!(
+            fs::read(request.selected_root.join("payload.bin")).unwrap(),
+            b"payload"
+        );
+        assert!(serialized.get("destinationMutationAttempted").is_none());
+        assert!(serialized.get("createdDirectories").is_none());
+    }
+
+    struct SetupLocationVerificationFailureDevice {
+        stage_root: Option<String>,
+        setup_verifications: usize,
+        fail_verification_at: usize,
+        destination_mutations: usize,
+        cleanup_paths: Vec<String>,
+        cleanup_fails: bool,
+        destination_inspections: usize,
+        fail_destination_inspection_at: Option<usize>,
+        unverified_destination_inspections: usize,
+        destination_binding_changes_after_mutation: bool,
+    }
+
+    impl AndroidCopyCommitDevice for SetupLocationVerificationFailureDevice {
+        fn inspect_tree(
+            &mut self,
+            root: &str,
+        ) -> Result<Vec<CopyManifestEntry>, super::super::DeviceOperationError> {
+            if self.stage_root.as_deref() == Some(root) {
+                return Ok(vec![CopyManifestEntry {
+                    relative_path: "payload.bin".to_string(),
+                    kind: CopyEntryKind::File,
+                    sha256: Some(
+                        "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+                            .to_string(),
+                    ),
+                    entry_identity: None,
+                }]);
+            }
+            self.destination_inspections += 1;
+            if self.fail_destination_inspection_at == Some(self.destination_inspections) {
+                return Err(super::super::DeviceOperationError::other(
+                    "injected destination inspection failure",
+                ));
+            }
+            if self.setup_verifications >= self.fail_verification_at {
+                self.unverified_destination_inspections += 1;
+            }
+            if self
+                .fail_destination_inspection_at
+                .is_some_and(|failed_at| self.destination_inspections > failed_at)
+            {
+                return Ok(vec![CopyManifestEntry {
+                    relative_path: "unverified-owned-file.bin".to_string(),
+                    kind: CopyEntryKind::File,
+                    sha256: Some(
+                        "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+                            .to_string(),
+                    ),
+                    entry_identity: None,
+                }]);
+            }
+            Ok(Vec::new())
+        }
+
+        fn path_binding(
+            &mut self,
+            _path: &str,
+        ) -> Result<String, super::super::DeviceOperationError> {
+            if self.destination_binding_changes_after_mutation && self.destination_mutations > 0 {
+                Ok("replacement-binding".to_string())
+            } else {
+                Ok("anchor-binding".to_string())
+            }
+        }
+
+        fn create_directory(
+            &mut self,
+            path: &str,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            self.stage_root.get_or_insert_with(|| path.to_string());
+            Ok(())
+        }
+
+        fn mkdir_p(&mut self, _path: &str) -> Result<(), super::super::DeviceOperationError> {
+            Ok(())
+        }
+
+        fn push_file(
+            &mut self,
+            _source: &Path,
+            _destination: &str,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            Ok(())
+        }
+
+        fn copy_file(
+            &mut self,
+            _source: &str,
+            _destination: &str,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            Err(super::super::DeviceOperationError::other(
+                "unexpected selected destination copy",
+            ))
+        }
+
+        fn remove_file(&mut self, path: &str) -> Result<(), super::super::DeviceOperationError> {
+            self.cleanup_paths.push(path.to_string());
+            Ok(())
+        }
+
+        fn remove_empty_directory(
+            &mut self,
+            path: &str,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            self.cleanup_paths.push(path.to_string());
+            if self.cleanup_fails && self.stage_root.as_deref() == Some(path) {
+                Err(super::super::DeviceOperationError::other(
+                    "injected staging cleanup failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn verify_setup_location(
+            &mut self,
+            _binding: &crate::storage_targets::StorageTargetBinding,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            self.setup_verifications += 1;
+            if self.setup_verifications == self.fail_verification_at {
+                return Err(super::super::DeviceOperationError::other(
+                    "setup location volume continuity changed",
+                ));
+            }
+            Ok(())
+        }
+
+        fn verify_setup_destination_precondition(
+            &mut self,
+            binding: &crate::storage_targets::StorageTargetBinding,
+            _precondition: &crate::storage_targets::SetupDestinationPrecondition,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            self.verify_setup_location(binding)
+        }
+
+        fn prepare_mutation_helper(
+            &mut self,
+            stage_root: &str,
+        ) -> Result<String, super::super::DeviceOperationError> {
+            Ok(format!("{stage_root}-helper"))
+        }
+
+        fn apply_selected_root_mutation(
+            &mut self,
+            _selected_root: &str,
+            _destination_binding: &str,
+            _stage_root: &str,
+            _helper_path: &str,
+            _expected_entry: &str,
+            _mutation: &CopyCommitMutation,
+        ) -> Result<(), super::super::DeviceOperationError> {
+            self.destination_mutations += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
     fn fake_adapter_does_not_claim_staging_it_does_not_perform() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -2948,13 +5209,24 @@ mod tests {
             CopyCommitOperation::AddUpdate,
         )
         .unwrap();
+        assert_eq!(
+            request.destination_kind,
+            CopyCommitDestinationKind::AppTarget
+        );
+        assert_eq!(request.destination_identity, destination_identity);
+        assert!(request.setup_location_binding.is_none());
+        assert!(request.setup_destination_precondition.is_none());
 
         let report = FakeFilesystemCopyCommitAdapter
             .commit(&request)
             .expect("fake copy should succeed");
+        let serialized = serde_json::to_value(&report).unwrap();
 
         assert!(!report.staging_verified);
         assert!(report.staged_paths.is_empty());
+        assert_eq!(report.destination_mutation_attempted, None);
+        assert!(serialized.get("destinationMutationAttempted").is_none());
+        assert!(serialized.get("createdDirectories").is_none());
     }
 
     #[cfg(unix)]
@@ -3537,6 +5809,8 @@ mod tests {
                 staged_paths: vec!["new.txt".to_string()],
                 staging_verified: true,
                 destination_binding_verified: outcome == CopyCommitOutcome::Partial,
+                destination_mutation_attempted: Some(outcome == CopyCommitOutcome::Partial),
+                created_directories: Vec::new(),
                 source_digest_sha256: "source-digest".to_string(),
                 staging_cleanup_error: None,
                 error: Some("copy result could not be verified after mutation".to_string()),

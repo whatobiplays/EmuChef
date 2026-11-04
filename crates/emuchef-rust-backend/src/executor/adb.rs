@@ -1,15 +1,18 @@
+use std::cell::RefCell;
 use std::fmt;
 use std::path::Path;
 
 #[cfg(test)]
 use std::collections::VecDeque;
 
+use crate::device_probe::{CommandOutput, CommandRunner, DeviceProbeError};
 use crate::owned_process::{
     run_owned_process, OwnedProcessError, ProcessCleanup, ProcessFailureKind, ProcessOperation,
 };
 #[cfg(test)]
 use crate::owned_process::{run_owned_process_observed, OwnedProcessObservationHandle};
 use crate::planner::{RootShellRoute, TargetDeviceBinding};
+use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
 
 use super::copy_commit::{CopyCommitMutation, CopyEntryKind, CopyManifestEntry};
 use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
@@ -691,6 +694,40 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
     }
 }
 
+/// Lets the T04 parser use the same injected ADB executor and serial as the
+/// copy adapter, while keeping its read-only command boundary intact.
+struct StorageEvidenceCommandRunner<'a, E: AdbCommandExecutor> {
+    runner: RefCell<&'a mut AdbCommandRunner<E>>,
+}
+
+impl<E: AdbCommandExecutor> CommandRunner for StorageEvidenceCommandRunner<'_, E> {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+        let result = self
+            .runner
+            .borrow_mut()
+            .run_raw(argv.to_vec(), false, ProcessOperation::Probe)
+            .map_err(|error| match error {
+                AdbCommandError::TimedOut { .. } => DeviceProbeError::TimedOut,
+                AdbCommandError::DeviceOffline
+                | AdbCommandError::DeviceUnauthorized
+                | AdbCommandError::DeviceDisconnected
+                | AdbCommandError::AdbServerUnavailable
+                | AdbCommandError::TransportReset
+                | AdbCommandError::TransportFailure => DeviceProbeError::Unavailable {
+                    message: "T04 storage observation transport failed".to_string(),
+                },
+                _ => DeviceProbeError::Failed {
+                    message: "T04 storage observation failed".to_string(),
+                },
+            })?;
+        Ok(CommandOutput {
+            status_code: Some(result.returncode),
+            stdout: result.stdout,
+            stderr: result.stderr,
+        })
+    }
+}
+
 /// Convert Android package-manager rejection markers to stable, sanitized
 /// categories without retaining command output, package names, or paths.
 fn classify_install_rejection(result: &AdbCommandResult) -> AdbCommandError {
@@ -1108,6 +1145,129 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         })
     }
 
+    /// Checks a path for a symbolic link without following it.
+    pub(crate) fn copy_commit_path_is_symlink(
+        &mut self,
+        path: &str,
+    ) -> Result<bool, AdbCommandError> {
+        self.guarded_typed(DeviceCommandEffect::ReadOnly, |device| {
+            let result = device.run_shell_unchecked(
+                vec!["test".to_string(), "-L".to_string(), path.to_string()],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            copy_commit_predicate_result(&result)
+        })
+    }
+
+    /// Re-observes T04's parsed volume evidence and confirms access before a
+    /// Setup Location can be inspected or mutated.
+    pub(crate) fn copy_commit_verify_setup_location(
+        &mut self,
+        binding: &StorageTargetBinding,
+    ) -> Result<(), AdbCommandError> {
+        binding.validate().map_err(AdbCommandError::Resolution)?;
+        let executable = self.runner.executable.clone();
+        let serial = self.runner.serial.clone().ok_or_else(|| {
+            AdbCommandError::Resolution(
+                "Setup Location verification requires the reviewed device session".to_string(),
+            )
+        })?;
+
+        self.guarded_typed(DeviceCommandEffect::ReadOnly, |device| {
+            let observation = {
+                let runner = StorageEvidenceCommandRunner {
+                    runner: RefCell::new(&mut device.runner),
+                };
+                crate::device_storage::list_device_volumes_with_runner(
+                    &executable,
+                    &serial,
+                    &runner,
+                )
+                .map_err(|_| {
+                    AdbCommandError::Resolution(
+                        "fresh T04 Setup Location volume evidence is unavailable".to_string(),
+                    )
+                })?
+            };
+            if observation.get("state").and_then(serde_json::Value::as_str) != Some("observed") {
+                return Err(AdbCommandError::Resolution(
+                    "fresh T04 Setup Location volume evidence is unavailable".to_string(),
+                ));
+            }
+            let expected_kind = match binding.volume_kind {
+                StorageTargetVolumeKind::InternalShared => "internalShared",
+                StorageTargetVolumeKind::RemovableSd => "removableSd",
+            };
+            let current_volume = observation
+                .get("volumes")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|volumes| {
+                    let mut matching = volumes.iter().filter(|volume| {
+                        volume
+                            .get("identityToken")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(binding.volume_identity.as_str())
+                    });
+                    let volume = matching.next()?;
+                    matching.next().is_none().then_some(volume)
+                });
+            let continuity_matches = current_volume.is_some_and(|volume| {
+                volume
+                    .get("continuityToken")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(binding.volume_continuity.as_str())
+                    && volume
+                        .get("setupLocationKind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(expected_kind)
+                    && volume.get("mountRoot").and_then(serde_json::Value::as_str)
+                        == Some(binding.mount_root.as_str())
+                    && volume.get("status").and_then(serde_json::Value::as_str) == Some("available")
+                    && volume.get("mountState").and_then(serde_json::Value::as_str)
+                        == Some("mountedRw")
+            });
+            if !continuity_matches {
+                return Err(AdbCommandError::Resolution(
+                    "Setup Location volume identity or continuity changed after review".to_string(),
+                ));
+            }
+
+            // Existing path binding also checks that the T04-visible root
+            // still resolves within its expected Android storage alias.
+            device.copy_commit_path_binding(&binding.mount_root)?;
+            let directory = device.run_shell_unchecked(
+                vec![
+                    "test".to_string(),
+                    "-d".to_string(),
+                    binding.mount_root.clone(),
+                ],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            if !copy_commit_predicate_result(&directory)? {
+                return Err(AdbCommandError::Resolution(
+                    "Setup Location volume root is not accessible".to_string(),
+                ));
+            }
+            let writable = device.run_shell_unchecked(
+                vec![
+                    "test".to_string(),
+                    "-w".to_string(),
+                    binding.mount_root.clone(),
+                ],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            if !copy_commit_predicate_result(&writable)? {
+                return Err(AdbCommandError::Resolution(
+                    "Setup Location volume is not writable".to_string(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
     /// Inspects a selected directory through bounded `find` and `sha256sum`
     /// operations. Symbolic links and unsupported filesystem objects are
     /// rejected rather than followed into another destination boundary.
@@ -1320,9 +1480,12 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             }
             let parent_identity = copy_commit_stat_identity(device, &parent, privileged)?;
             let selected_identity = copy_commit_stat_identity(device, path, privileged)?;
-            Ok(format!(
-                "{canonical_path}|parent:{parent_identity}|selected:{selected_identity}"
-            ))
+        serde_json::to_string(&super::CopyCommitPathBinding {
+            canonical_path: canonical_path.to_string(),
+            parent_identity,
+            selected_identity,
+        })
+        .map_err(|_| AdbCommandError::Resolution("copy commit path identity could not be captured".to_string()))
         })
     }
 
@@ -2661,23 +2824,131 @@ mod tests {
     }
 
     #[test]
+    fn setup_location_verification_rejects_changed_continuity_before_root_access() {
+        use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
+
+        const MOUNT_DUMP: &str = "Disks:\n\
+ DiskInfo{disk:179,0}:\n\
+  flags=DEFAULT_PRIMARY size=32000000000 label=null\n\
+  sysPath=/sys/block/sda\n\
+ DiskInfo{disk:179,64}:\n\
+  flags=SD size=32000000000 label=SDCARD\n\
+  sysPath=/sys/block/mmcblk0\n\
+\n\
+Volumes:\n\
+ VolumeInfo{emulated;0}:\n\
+  type=EMULATED diskId=disk:179,0 partGuid=null mountFlags=PRIMARY|VISIBLE_FOR_READ|VISIBLE_FOR_WRITE mountUserId=0 state=MOUNTED\n\
+  fsType=null fsUuid=null fsLabel=null\n\
+  path=/storage/emulated/0 internalPath=/data/media/0\n\
+ VolumeInfo{public:179,65}:\n\
+  type=PUBLIC diskId=disk:179,64 partGuid=null mountFlags=VISIBLE_FOR_READ|VISIBLE_FOR_WRITE mountUserId=0 state=MOUNTED\n\
+  fsType=vfat fsUuid=8C4B-1A2F fsLabel=SDCARD\n\
+  path=/storage/8C4B-1A2F internalPath=/mnt/media_rw/8C4B-1A2F\n\
+\n\
+Records:\n\
+ VolumeRecord:\n\
+  type=PUBLIC fsUuid=DEAD-BEEF partGuid=null\n\
+  nickname=OLD userFlags=0\n\
+\n\
+Primary storage UUID: null\n\
+\n\
+Internal storage (/storage/emulated/0) total size: 32000000000 (30517 MiB)\n";
+        const DEVICE_LIST: &str =
+            "List of devices attached\nemulator-5554\tdevice transport_id:1\n";
+        const SHELL_VOLUMES: &str = "emulated;0 mounted null\npublic:179,65 mounted 8C4B-1A2F\n";
+
+        fn evidence_executor() -> FakeAdbCommandExecutor {
+            let mut executor = FakeAdbCommandExecutor::default();
+            executor.push_completed(0, DEVICE_LIST, "");
+            executor.push_completed(0, MOUNT_DUMP, "");
+            executor.push_completed(0, SHELL_VOLUMES, "");
+            executor
+        }
+
+        let mut evidence_device =
+            RealAdbDevice::with_executor("adb", Some("emulator-5554"), evidence_executor());
+        let observation = {
+            let runner = StorageEvidenceCommandRunner {
+                runner: RefCell::new(&mut evidence_device.runner),
+            };
+            crate::device_storage::list_device_volumes_with_runner("adb", "emulator-5554", &runner)
+                .expect("T04 should parse the synthetic volume evidence")
+        };
+        let current_volume = observation["volumes"]
+            .as_array()
+            .expect("T04 should return observed volumes")
+            .iter()
+            .find(|volume| volume["setupLocationKind"] == "removableSd")
+            .expect("T04 should identify the removable SD volume");
+        let current_identity = current_volume["identityToken"]
+            .as_str()
+            .expect("T04 should provide an opaque volume identity")
+            .to_string();
+        let current_continuity = current_volume["continuityToken"]
+            .as_str()
+            .expect("T04 should provide opaque continuity evidence");
+        let stale_continuity = if current_continuity == "f".repeat(32) {
+            "e".repeat(32)
+        } else {
+            "f".repeat(32)
+        };
+        let binding = StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/8C4B-1A2F".to_string(),
+            volume_identity: current_identity,
+            volume_continuity: stale_continuity,
+            observation_token: "4".repeat(32),
+        };
+        let mut device =
+            RealAdbDevice::with_executor("adb", Some("emulator-5554"), evidence_executor());
+
+        let error = device
+            .copy_commit_verify_setup_location(&binding)
+            .expect_err("a changed continuity token must fail closed");
+
+        assert!(matches!(
+            error,
+            AdbCommandError::Resolution(message)
+                if message.contains("identity or continuity changed")
+        ));
+        assert_eq!(
+            device.command_executor().calls().len(),
+            3,
+            "continuity failure must stop before path binding and root access probes"
+        );
+    }
+
+    #[test]
     fn shared_copy_commit_binding_checks_shell_uid_and_reviewed_sdcard_alias_chain() {
         let mut executor = FakeAdbCommandExecutor::default();
         executor.push_completed(0, "2000\n", "");
         executor.push_completed(0, "/storage/self/primary\n", "");
         executor.push_completed(0, "/storage/emulated/0\n", "");
-        executor.push_completed(0, "/storage/emulated/0/ROMs\n", "");
+        executor.push_completed(0, "/storage/emulated/0/ROMs|Retro\n", "");
         executor.push_completed(0, "253:102\n", "");
         executor.push_completed(0, "253:103\n", "");
         let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
 
         let binding = device
-            .copy_commit_path_binding("/sdcard/ROMs")
+            .copy_commit_path_binding("/sdcard/ROMs|Retro")
             .expect("reviewed shared ROM path binding should be captured");
-
+        let serialized: serde_json::Value = serde_json::from_str(&binding)
+            .expect("path binding should use structured serialization");
         assert_eq!(
-            binding,
-            "/storage/emulated/0/ROMs|parent:253:102|selected:253:103"
+            serialized["canonicalPath"],
+            "/storage/emulated/0/ROMs|Retro"
+        );
+        assert_eq!(serialized["parentIdentity"], "253:102");
+        assert_eq!(serialized["selectedIdentity"], "253:103");
+        assert_eq!(
+            super::super::canonical_path_from_binding(&binding).unwrap(),
+            std::path::PathBuf::from("/storage/emulated/0/ROMs|Retro"),
         );
         let calls = device.command_executor().calls();
         assert_eq!(

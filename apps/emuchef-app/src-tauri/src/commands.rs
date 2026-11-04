@@ -324,6 +324,7 @@ pub(crate) fn qualification_transition_lock(state: &AppState) -> QualificationTr
 pub struct InputContractSnapshot {
     request_generation: u64,
     contracts: HashMap<String, InputContract>,
+    setup_location_keys: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -339,6 +340,7 @@ impl InputContractSnapshot {
         if request_generation < self.request_generation {
             return false;
         }
+        let mut setup_location_keys = HashSet::new();
         let contracts = description
             .get("inputs")
             .and_then(Value::as_array)
@@ -347,6 +349,10 @@ impl InputContractSnapshot {
             .filter_map(|input| {
                 let key = input.get("key")?.as_str()?.to_string();
                 let type_name = input.get("type")?.as_str()?.to_string();
+                if type_name == "setup_location_ref" {
+                    setup_location_keys.insert(key);
+                    return None;
+                }
                 if !matches!(
                     type_name.as_str(),
                     "file" | "directory" | "path" | "path_list"
@@ -379,7 +385,52 @@ impl InputContractSnapshot {
             .collect();
         self.request_generation = request_generation;
         self.contracts = contracts;
+        self.setup_location_keys = setup_location_keys;
         true
+    }
+
+    fn setup_location_binding_ids_for_plan(
+        &self,
+        request_generation: u64,
+        bindings: &HashMap<String, Value>,
+        plan: &Value,
+    ) -> Result<Vec<String>, String> {
+        self.require_generation(request_generation)?;
+        let steps = plan.get("steps").and_then(Value::as_array).ok_or_else(|| {
+            safe_error(
+                "setup_location_plan_unavailable",
+                "The reviewed plan could not be verified safely.",
+            )
+        })?;
+        let mut ids = Vec::new();
+        for step in steps {
+            if step.get("type").and_then(Value::as_str) != Some("copy_files") {
+                continue;
+            }
+            let Some(key) = step
+                .pointer("/params/dest/ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("inputs."))
+                .filter(|key| self.setup_location_keys.contains(*key))
+            else {
+                continue;
+            };
+            let id = bindings
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+                .ok_or_else(|| {
+                    safe_error(
+                        "setup_location_binding_invalid",
+                        "Choose a valid Setup Location for each storage destination.",
+                    )
+                })?;
+            ids.push(id);
+        }
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     fn require(&self, request_generation: u64, key: &str) -> Result<InputContract, String> {
@@ -406,6 +457,7 @@ impl InputContractSnapshot {
     fn clear(&mut self) {
         self.request_generation = 0;
         self.contracts.clear();
+        self.setup_location_keys.clear();
     }
 }
 
@@ -1461,6 +1513,11 @@ pub fn describe_configuration(
         recovery.required_reentry()
     };
     let mut public = public_configuration_description(&result, &exact_serial);
+    public["setupLocations"] = serde_json::to_value(
+        crate::device_storage::list_setup_locations(state, &device_handle, &device_plan)
+            .unwrap_or_default(),
+    )
+    .unwrap_or_else(|_| json!([]));
     add_recovery_reentry_diagnostics(&mut public, &required_reentry, &binding_keys);
     Ok(public)
 }
@@ -1468,12 +1525,21 @@ pub fn describe_configuration(
 /// Prepare one plan through the trusted sidecar before it is projected to React
 /// or retained for execution. The prepared response carries the exact plan,
 /// digest, selected-tree snapshots, and backend-authored review.
-fn plan_and_prepare_execution_review<F>(payload: Value, request: &mut F) -> Result<Value, String>
+fn plan_and_prepare_execution_review<F, S>(
+    payload: Value,
+    request: &mut F,
+    resolve_storage_targets: &mut S,
+) -> Result<Value, String>
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
+    S: FnMut(&Value, &mut F) -> Result<Value, String>,
 {
     let target_device = payload.get("targetDevice").cloned().unwrap_or(Value::Null);
-    let plan_configuration = request("planConfiguration", payload)?;
+    let mut planning_payload = payload;
+    if let Some(object) = planning_payload.as_object_mut() {
+        object.remove("storageTargets");
+    }
+    let plan_configuration = request("planConfiguration", planning_payload)?;
     let Some(plan) = plan_configuration
         .get("plan")
         .filter(|value| !value.is_null())
@@ -1481,12 +1547,14 @@ where
     else {
         return Ok(plan_configuration);
     };
+    let storage_targets = resolve_storage_targets(&plan, request)?;
     request(
         "prepareExecutionReview",
         json!({
             "plan": plan,
             "mode": "real",
-            "targetDevice": target_device
+            "targetDevice": target_device,
+            "storageTargets": storage_targets,
         }),
     )
 }
@@ -1552,12 +1620,12 @@ where
             "Re-enter the omitted sensitive configuration values before creating a new review.",
         ));
     }
-    let payload = configuration_payload(
+    let mut payload = configuration_payload(
         state,
         &device_handle,
         &device_plan,
         selected_recipes,
-        bindings,
+        bindings.clone(),
     )?;
     let target = payload
         .get("targetDevice")
@@ -1567,11 +1635,55 @@ where
         .get("catalog")
         .cloned()
         .expect("configuration payload always binds a catalog");
-    let result = plan_and_prepare_execution_review(payload, request).map_err(|_| {
-        safe_error(
-            "review_generation_failed",
-            "The reviewed plan could not be generated.",
-        )
+    let mut storage_target_error = None;
+    let result = plan_and_prepare_execution_review(payload, request, &mut |plan, request| {
+        let resolved = (|| {
+            let setup_location_ids = state
+                .input_contracts
+                .lock()
+                .map_err(|_| {
+                    safe_error(
+                        "input_state_unavailable",
+                        "Input requirements are unavailable.",
+                    )
+                })?
+                .setup_location_binding_ids_for_plan(request_generation, &bindings, plan)?;
+            if setup_location_ids.is_empty() {
+                return Ok(json!([]));
+            }
+            let mut clock = Instant::now;
+            crate::device_storage::get_device_volumes_with_runtime(
+                state,
+                &device_handle,
+                false,
+                request,
+                &mut clock,
+            )?;
+            let targets = crate::device_storage::setup_location_bindings(
+                state,
+                &device_handle,
+                &device_plan,
+                &setup_location_ids,
+            )?;
+            serde_json::to_value(targets).map_err(|_| {
+                safe_error(
+                    "setup_location_binding_invalid",
+                    "The selected Setup Location could not be resolved safely.",
+                )
+            })
+        })();
+        if let Err(error) = &resolved {
+            storage_target_error = Some(error.clone());
+        }
+        resolved
+    })
+    .map_err(|_| {
+        storage_target_error.unwrap_or_else(|| {
+            safe_error(
+                "review_generation_failed",
+                "The reviewed plan could not be generated.",
+            )
+        })
     })?;
     let plan = result
         .get("plan")
@@ -4170,6 +4282,56 @@ mod tests {
         );
     }
 }
+
+#[test]
+fn setup_location_input_contract_resolves_only_active_copy_destinations() {
+    let mut snapshot = InputContractSnapshot::default();
+    assert!(snapshot.replace(
+        8,
+        &json!({
+            "inputs": [{
+                "key": "recipe/active_destination",
+                "type": "setup_location_ref",
+                "multiple": false
+            }, {
+                "key": "recipe/inactive_destination",
+                "type": "setup_location_ref",
+                "multiple": false
+            }]
+        })
+    ));
+    let plan = json!({
+        "steps": [{
+            "type": "copy_files",
+            "params": { "dest": { "ref": "inputs.recipe/active_destination" } }
+        }, {
+            "type": "install_apk",
+            "params": { "apk": { "ref": "inputs.recipe/inactive_destination" } }
+        }]
+    });
+    let bindings = HashMap::from([
+        ("recipe/active_destination".to_string(), json!("location-1")),
+        (
+            "recipe/inactive_destination".to_string(),
+            json!("stale-unused-location"),
+        ),
+    ]);
+    assert_eq!(
+        snapshot
+            .setup_location_binding_ids_for_plan(8, &bindings, &plan)
+            .unwrap(),
+        vec!["location-1".to_string()]
+    );
+    assert!(snapshot
+        .setup_location_binding_ids_for_plan(7, &bindings, &plan)
+        .unwrap_err()
+        .contains("input_request_stale"));
+    let malformed = HashMap::from([("recipe/active_destination".to_string(), json!(7))]);
+    assert!(snapshot
+        .setup_location_binding_ids_for_plan(8, &malformed, &plan)
+        .unwrap_err()
+        .contains("setup_location_binding_invalid"));
+}
 #[cfg(test)]
 mod prepared_review_bridge_tests {
     use super::plan_and_prepare_execution_review;
@@ -4221,6 +4383,10 @@ mod prepared_review_bridge_tests {
                     _ => Err(format!("unexpected operation: {operation}")),
                 }
             },
+            &mut |resolved_plan, _request| {
+                assert_eq!(resolved_plan, &plan);
+                Ok(json!([{"id": "location-1"}]))
+            },
         )
         .expect("production review preparation should succeed");
 
@@ -4230,6 +4396,7 @@ mod prepared_review_bridge_tests {
         assert_eq!(calls[1].1["plan"], plan);
         assert_eq!(calls[1].1["mode"], "real");
         assert_eq!(calls[1].1["targetDevice"], target_device);
+        assert_eq!(calls[1].1["storageTargets"], json!([{"id": "location-1"}]));
         assert_eq!(result, prepared_review);
         assert_eq!(result["digest"], "prepared-digest");
         assert_eq!(result["selectedTreeSnapshots"][0]["digest"], "tree-digest");

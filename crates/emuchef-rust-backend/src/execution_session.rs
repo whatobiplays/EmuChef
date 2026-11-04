@@ -28,6 +28,7 @@ use crate::executor::{
 };
 use crate::model::OrderedMap;
 use crate::planner::{ExecutionArtifactSource, ExecutionPlan, RuntimeValue, TargetDeviceBinding};
+use crate::storage_targets::StorageTargetBinding;
 
 /// Filesystem and executable policy fixed when the sidecar starts.
 #[derive(Clone, Debug)]
@@ -527,10 +528,23 @@ impl ExecutionSessionManager {
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
     ) -> Result<ExecutionPlan, ApiError> {
+        self.prepare_review_plan_with_storage_targets(plan, mode, supplied_target, Vec::new())
+    }
+
+    /// Prepare a reviewed plan with trusted Setup Location bindings active in
+    /// its typed Recipe destination inputs.
+    pub(crate) fn prepare_review_plan_with_storage_targets(
+        &self,
+        plan: ExecutionPlan,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+        storage_targets: Vec<StorageTargetBinding>,
+    ) -> Result<ExecutionPlan, ApiError> {
         self.prepare_review_plan_with_device_factory(
             plan,
             mode,
             supplied_target,
+            &storage_targets,
             crate::executor::adb::RealAdbDevice::new,
         )
     }
@@ -544,6 +558,7 @@ impl ExecutionSessionManager {
         mut plan: ExecutionPlan,
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
+        storage_targets: &[StorageTargetBinding],
         real_device_factory: F,
     ) -> Result<ExecutionPlan, ApiError>
     where
@@ -588,7 +603,7 @@ impl ExecutionSessionManager {
                     fake_device_root,
                     read_only_roots,
                 );
-                prepare_copy_commit_snapshots(&mut plan, adapters)
+                prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
             }
             ExecutionMode::Real => {
                 let serial = target.map(|binding| binding.serial);
@@ -600,7 +615,7 @@ impl ExecutionSessionManager {
                     read_only_roots,
                     true,
                 );
-                prepare_copy_commit_snapshots(&mut plan, adapters)
+                prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
             }
         };
         preparation.map_err(|message| {
@@ -1234,8 +1249,10 @@ fn push_test_identity_sample(executor: &mut FakeAdbCommandExecutor, android_id: 
 fn prepare_copy_commit_snapshots<D: ExecutorDevice>(
     plan: &mut ExecutionPlan,
     adapters: ExecutorAdapters<D>,
+    storage_targets: &[StorageTargetBinding],
 ) -> Result<(), String> {
-    ExecutorRunner::new(adapters).prepare_copy_commit_snapshots(plan)
+    ExecutorRunner::new(adapters)
+        .prepare_copy_commit_snapshots_with_storage_targets(plan, storage_targets)
 }
 
 fn run_with_device<D: ExecutorDevice>(

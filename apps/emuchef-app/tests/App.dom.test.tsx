@@ -38,6 +38,9 @@ const mockApi = vi.hoisted(() => ({
   probeDevice: vi.fn(),
   deviceVolumes: vi.fn(),
   selectDeviceVolume: vi.fn(),
+  listSetupLocations: vi.fn(),
+  saveSetupLocation: vi.fn(),
+  removeSetupLocation: vi.fn(),
   removePlatformTools: vi.fn(),
   restartRuntime: vi.fn(),
   supportSnapshot: vi.fn(),
@@ -336,6 +339,9 @@ function resetApi(): void {
     selectedVolumeHandle: null,
     selectionNotice: null,
   });
+mockApi.listSetupLocations.mockResolvedValue([]);
+mockApi.saveSetupLocation.mockResolvedValue([]);
+mockApi.removeSetupLocation.mockResolvedValue([]);
   mockApi.matchDevice.mockResolvedValue(supportedMatch);
   mockApi.pickInputPath.mockResolvedValue(null);
   mockApi.describeConfiguration.mockResolvedValue({
@@ -383,6 +389,513 @@ async function advanceToInputs(user: ReturnType<typeof userEvent.setup>): Promis
   await user.click(screen.getByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Provide required files and options" });
 }
+
+test("an inventory poll disables Setup Locations until current readiness is reloaded", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd",
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  };
+  mockApi.describeConfiguration.mockResolvedValue({
+    devicePlan: "plan.supported",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    inputs: [{
+      key: "recipe.one/destination",
+      recipeId: "recipe.one",
+      inputId: "destination",
+      type: "setup_location_ref",
+      label: "Install destination",
+      description: "Choose a named destination.",
+      required: true,
+      sensitive: false,
+      value: "location-opaque",
+      valueSource: "explicit",
+      diagnostics: [],
+    }],
+    diagnostics: [],
+  });
+  mockApi.listSetupLocations
+    .mockResolvedValueOnce([readyLocation])
+    .mockResolvedValueOnce([{
+      ...readyLocation,
+      ready: false,
+      detail: "Refresh storage options to verify this location.",
+    }]);
+
+  await advanceToInputs(user);
+  const locationOption = await screen.findByRole("option", { name: /Games · games · SD card/ });
+  expect((locationOption as HTMLOptionElement).disabled).toBe(false);
+
+  await act(async () => {
+    triggerDevicePoll();
+  });
+
+  await waitFor(() => expect(
+    (screen.getByRole("option", { name: /Games · games · SD card/ }) as HTMLOptionElement).disabled,
+  ).toBe(true));
+  expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(2);
+});
+
+test("saves a Setup Location for the active plan without changing the T04 selection", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockResolvedValue([{
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd",
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  }]);
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() => expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    true,
+  ));
+  await waitFor(() => expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    "plan.supported",
+  ));
+  await waitFor(() => expect(
+    (screen.getByLabelText("Storage volume for Setup Location") as HTMLSelectElement).disabled,
+  ).toBe(false));
+
+  await user.selectOptions(screen.getByLabelText("Storage volume for Setup Location"), sdHandle);
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+
+  expect(mockApi.saveSetupLocation).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    "plan.supported",
+    observationToken,
+    sdHandle,
+    undefined,
+    "Games",
+    "games",
+  );
+  expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
+  expect(screen.getByText("Ready for recipe selection.")).toBeTruthy();
+});
+
+test("a failed Setup Location save for an old plan does not set an error on the newly selected plan", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const save = deferred<[]>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.matchDevice.mockResolvedValue({
+    ...supportedMatch,
+    candidates: [
+      supportedMatch.candidates[0],
+      { ...safePlan, planId: "plan.alternate", name: "Alternate setup" },
+    ],
+  });
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(save.promise);
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() => expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    true,
+  ));
+  await waitFor(() => expect(
+    (screen.getByLabelText("Storage volume for Setup Location") as HTMLSelectElement).disabled,
+  ).toBe(false));
+
+  await user.selectOptions(screen.getByLabelText("Storage volume for Setup Location"), sdHandle);
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalled());
+
+  await user.click(screen.getByRole("radio", { name: /Alternate setup/ }));
+  save.reject(new Error("The old plan's location could not be saved."));
+  await waitFor(() => expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    "plan.alternate",
+  ));
+
+  expect(screen.queryByText("The old plan's location could not be saved.")).toBeNull();
+});
+
+test("an inventory poll preserves an in-flight Setup Location save", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const savedLocations = [{
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd",
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  }];
+  const saveResponse = deferred<typeof savedLocations>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(saveResponse.promise);
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() => expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    true,
+  ));
+  await waitFor(() => expect(
+    (screen.getByLabelText("Storage volume for Setup Location") as HTMLSelectElement).disabled,
+  ).toBe(false));
+  await user.selectOptions(screen.getByLabelText("Storage volume for Setup Location"), sdHandle);
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1));
+  const pollCallsBeforeRefresh = mockApi.pollDevices.mock.calls.length;
+  const locationListCallsBeforePoll = mockApi.listSetupLocations.mock.calls.length;
+  const qualificationCallsBeforeRefresh = mockApi.deviceQualification.mock.calls.length;
+
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await waitFor(() => expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBeforeRefresh + 1));
+  await waitFor(() => expect(mockApi.deviceQualification).toHaveBeenCalledTimes(qualificationCallsBeforeRefresh + 1));
+  expect((screen.getByRole("button", { name: "Save Setup Location" }) as HTMLButtonElement).disabled).toBe(true);
+
+  await act(async () => {
+    saveResponse.resolve(savedLocations);
+  });
+  await waitFor(() => expect(
+    (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+  ).toBe(""));
+  await waitFor(() => expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(locationListCallsBeforePoll + 1));
+  expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
+    availableDevice.deviceHandle,
+    "plan.supported",
+  );
+  expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
+});
+
+test("a superseded inventory poll cannot invalidate an in-flight Setup Location save", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const savedLocations = [{
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd",
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  }];
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  const saveResponse = deferred<typeof savedLocations>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(saveResponse.promise);
+
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() => expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    true,
+  ));
+  await waitFor(() => expect(
+    (screen.getByLabelText("Storage volume for Setup Location") as HTMLSelectElement).disabled,
+  ).toBe(false));
+  await user.selectOptions(screen.getByLabelText("Storage volume for Setup Location"), sdHandle);
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1));
+
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  const qualificationCallsBefore = mockApi.deviceQualification.mock.calls.length;
+  const locationListCallsBefore = mockApi.listSetupLocations.mock.calls.length;
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() => expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2));
+
+  await act(async () => {
+    newerPoll.resolve([availableDevice]);
+  });
+  await waitFor(() => expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+    qualificationCallsBefore + 1,
+  ));
+  await act(async () => {
+    olderPoll.resolve([]);
+    await flushPendingPromises();
+  });
+  expect(mockApi.deviceQualification).toHaveBeenCalledTimes(qualificationCallsBefore + 1);
+
+  await act(async () => {
+    saveResponse.resolve(savedLocations);
+  });
+  await waitFor(() => expect(
+    (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+  ).toBe(""));
+  await waitFor(() => expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+    locationListCallsBefore + 1,
+  ));
+});
+
+test.each(["save", "remove"] as const)(
+  "a queued Setup Location refresh preserves a failed %s alert",
+  async (operation) => {
+    const user = userEvent.setup();
+    const triggerDevicePoll = captureDevicePollTick();
+    const internalHandle = "11111111111111111111111111111111";
+    const sdHandle = "22222222222222222222222222222222";
+    const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+    const savedLocations = [{
+      id: "location-opaque",
+      name: "Games",
+      relativePath: "games",
+      volumeKind: "removableSd",
+      volumeLabel: "SD card",
+      ready: true,
+      detail: "Available.",
+    }];
+    const mutationResponse = deferred<typeof savedLocations>();
+    const failureMessage = `${operation} failed`;
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.deviceVolumes.mockResolvedValue({
+      deviceHandle: availableDevice.deviceHandle,
+      sessionEpoch: 1,
+      observationToken,
+      discoveryStatus: "observed",
+      evidence: "live",
+      volumes: [
+        {
+          presentationKey: internalHandle,
+          volumeHandle: internalHandle,
+          kind: "internalShared",
+          label: "Internal storage",
+          status: "available",
+          selectable: true,
+          detail: "Mounted.",
+        },
+        {
+          presentationKey: sdHandle,
+          volumeHandle: sdHandle,
+          kind: "removableSd",
+          label: "SD card",
+          status: "available",
+          selectable: true,
+          detail: "Mounted.",
+        },
+      ],
+      selectedVolumeHandle: internalHandle,
+      selectionNotice: null,
+    });
+    mockApi.listSetupLocations.mockResolvedValue(operation === "remove" ? savedLocations : []);
+    if (operation === "save") {
+      mockApi.saveSetupLocation.mockReturnValue(mutationResponse.promise);
+    } else {
+      mockApi.removeSetupLocation.mockReturnValue(mutationResponse.promise);
+    }
+
+    await renderReadyApp();
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await screen.findByRole("heading", { name: "Example Handheld" });
+    if (operation === "save") {
+      await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+      await waitFor(() => expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+        availableDevice.deviceHandle,
+        true,
+      ));
+      await waitFor(() => expect(
+        (screen.getByLabelText("Storage volume for Setup Location") as HTMLSelectElement).disabled,
+      ).toBe(false));
+      await user.selectOptions(screen.getByLabelText("Storage volume for Setup Location"), sdHandle);
+      await user.type(screen.getByLabelText("Setup Location name"), "Games");
+      await user.type(screen.getByLabelText("Relative folder"), "games");
+      await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+      await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1));
+    } else {
+      await user.click(await screen.findByRole("button", { name: "Remove Games" }));
+      await waitFor(() => expect(mockApi.removeSetupLocation).toHaveBeenCalledWith(
+        availableDevice.deviceHandle,
+        "plan.supported",
+        "location-opaque",
+      ));
+    }
+
+    const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+    const qualificationCallsBefore = mockApi.deviceQualification.mock.calls.length;
+    const locationListCallsBefore = mockApi.listSetupLocations.mock.calls.length;
+    await act(async () => {
+      triggerDevicePoll();
+    });
+    await waitFor(() => expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 1));
+    await waitFor(() => expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+      qualificationCallsBefore + 1,
+    ));
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(locationListCallsBefore);
+
+    await act(async () => {
+      mutationResponse.reject(new Error(failureMessage));
+      await flushPendingPromises();
+    });
+    await waitFor(() => expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationListCallsBefore + 1,
+    ));
+    await flushPendingPromises();
+    expect(screen.getByText(failureMessage)).toBeTruthy();
+  },
+);
 
 test("a successful storage selection announces once in the shell live region", async () => {
   const user = userEvent.setup();
@@ -2723,6 +3236,7 @@ test("runtime-loss recovery presents the failed app service when device qualific
 
 test("an authoritative inventory poll reloads qualification status without a manual refresh", async () => {
   const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
   const qualificationStatus = {
     enabled: true,
     recordable: true,
@@ -2822,17 +3336,38 @@ test("an authoritative inventory poll reloads qualification status without a man
   await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
 
   const statusReads = mockApi.deviceQualificationModeStatus.mock.calls.length;
-  // Rust closes the attempt while reconciling the next authoritative
-  // inventory. The public device list stays identical, so only the committed
-  // inventory transition can tell the presentation layer to re-read status.
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
+
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() => expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2));
+
+  await act(async () => {
+    newerPoll.reject(new Error("The newer inventory request failed before commit."));
+    await flushPendingPromises();
+  });
+
+  // The older request's inventory commit still closes the native attempt,
+  // although its stale UI generation must not replace device presentation.
   activeSession = null;
+  await act(async () => {
+    olderPoll.resolve([availableDevice]);
+    await flushPendingPromises();
+  });
 
   await waitFor(
     () => expect(mockApi.deviceQualificationModeStatus.mock.calls.length).toBeGreaterThan(statusReads),
-    { timeout: 6000, interval: 50 },
+    { timeout: 300, interval: 10 },
   );
   await waitFor(
     () => expect(screen.queryByRole("heading", { name: "Normal workflow intent is locked" })).toBeNull(),
-    { timeout: 6000, interval: 50 },
+    { timeout: 300, interval: 10 },
   );
 });

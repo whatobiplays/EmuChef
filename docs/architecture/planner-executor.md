@@ -27,6 +27,51 @@ human-readable notes. Notes use `progress_note`, step name, humanized step type,
 then step id. The plan SHA-256 digest is calculated from recursively key-sorted,
 whitespace-free canonical JSON while preserving every array's normalized order.
 
+## Setup Location destinations
+
+A Recipe may declare a typed `setup_location_ref` input for `copy_files.dest`.
+The supported writers copy a host directory to a device directory using
+`merge` (Add or Update), `replace`, or directory-style `sync` (Mirror). A
+Setup Location reference in any other operation or parameter fails validation
+or planning closed. Existing Recipe parsing and validation, App Target
+references, and legacy device-path destinations retain their established
+semantics.
+
+Tauri resolves each named Setup Location from its own current T04 volume
+evidence and retains the binding independently of T04's single presentation
+selection. Planning includes only bindings used by selected Recipe writers.
+The immutable plan digest covers each active trusted binding, including the
+volume evidence, root, and relative path. The retained review binds its
+canonical destination scope, tree snapshot, and any directory-creation effects.
+Overlapping named locations are permitted when unused. Active Setup Location
+and legacy shared-path writers are compared by canonical resolved scope and
+reviewed effects. Conflicting file writes, destructive same-path/ancestor
+effects, and overlapping directory creations that would invalidate another
+writer's reviewed missing-path precondition fail before execution. An
+idempotent directory effect may coexist when the directory already exists at
+review time and no other effect conflicts.
+
+T04's ten-second observation lifetime governs whether volume evidence is fresh
+enough to resolve or refresh a Setup Location. It does not expire an immutable
+review or change its digest. Before the first selected-destination mutation,
+execution requires fresh matching volume identity and continuity evidence,
+current write access, canonical confinement, and the reviewed destination
+preconditions. A missing destination suffix is allowed only beneath an
+existing verified directory; each absent component is an explicit reviewed
+creation effect and is created one at a time through the no-follow directory
+helper. If verification or that safe helper is unavailable, execution fails
+closed before destination mutation. Staging and its cleanup remain separately
+reported under T03 copy semantics; failures after an authorized mutation retain
+truthful partial outcomes.
+
+Public review shows the Setup Location name, volume category, relative path, and
+reviewed effects. Legacy shared-path destinations are presented with a
+sanitized shared-storage label and relative suffix when that suffix is known;
+otherwise review uses a generic shared-storage label. Physical mount roots,
+device identity, volume UUIDs, and continuity evidence remain in trusted
+Rust/Tauri state and the canonical plan binding; they are excluded from every
+public review projection.
+
 The sidecar execution manager is outside the pure planner/executor boundary. It
 owns attempt ids, one-active-attempt coordination, RFC 3339 UTC timestamps,
 full-plan report snapshots, recipe-grouped status, ordered sequence-numbered
@@ -125,4 +170,4 @@ use of any individual handle.
 The normative future contract is [EmuChef requirements](../product/emuchef-requirements.md): a reviewed OEM bundle freezes content, destination, backup mode and strategy across separate invocation attempts; an actual invocation start is different from staging/acknowledgement, and unknown start evidence blocks changed-preference authority. The required implementation must stop before an unapproved overwrite on enabled-backup failure, reconcile all started attempts under a serial OEM barrier, retain Recovery Originals independently of ZIPs/staging, and treat an individual verified-owned cleanup failure as a warning with pending retry. This paragraph does not describe existing executor behavior.
 
 
-The [EmuChef product realignment proposal](../product/emuchef-product-realignment-proposal.md) records accepted owner requirements for app-generated configuration, logical storage, per-file backups/restoration, and staged review. Until the corresponding T07–T13 changes are implemented and qualified, this document's current executor/no-backup/no-restoration statements remain factual. Any new file-level restoration must be separately bounded and must not imply a transactional setup rollback or reactivation of old execution authority.
+The [EmuChef product realignment proposal](../product/emuchef-product-realignment-proposal.md) records accepted owner requirements for app-generated configuration, per-file backups/restoration, and staged review. T05 Setup Locations provide logical destinations only for the supported T03 `copy_files` writers described above; they do not add backup, restoration, or transactional setup rollback. Until the corresponding broader requirements are implemented and qualified, the current no-backup/no-restoration statements remain factual. Any file-level restoration must be separately bounded and must not imply a transactional setup rollback or reactivation of old execution authority.

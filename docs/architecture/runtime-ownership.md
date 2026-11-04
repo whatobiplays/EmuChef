@@ -190,8 +190,11 @@ legacy and three-field AOSP shell volume lines. Repeated VolumeInfo or DiskInfo
 records are accepted while the fields used for classification agree; a repeat
 that changes only fields EmuChef does not classify stays accepted. Contradictory
 classification evidence and conflicting primary-storage declarations fail
-closed. Raw filesystem UUIDs, mount paths, disk identifiers, and serials remain
-sidecar-owned. An adopted primary volume resolves the stacked emulated volume
+closed. Raw filesystem UUIDs, disk identifiers, and ADB reports remain
+sidecar-owned. The private Rust response includes a verified setup mount root
+and eligible setup kind for Tauri; Tauri retains those values only in native
+storage state. Neither physical roots nor device evidence digests enter the
+React projection. An adopted primary volume resolves the stacked emulated volume
 through the private volume's disk identity, without relying on the private
 volume's mount user. A sole emulated volume with no positive user evidence uses
 the assumed-user compatibility fallback. A volume positively associated with a
@@ -250,3 +253,57 @@ projection and any newer selection. A mounted volume does not imply writability,
 application access, or execution eligibility. A read-only mount stays visible in
 the non-destination list with its mount detail. The selection never participates
 in planning, review, execution, or real-device authority.
+
+## Setup Location boundary
+
+Setup Locations are named destinations retained by Tauri for a device session
+and setup plan. Each location resolves independently from fresh
+`listDeviceVolumes` evidence and an opaque volume handle; it does not read or
+write T04's single selected-volume slot. The sidecar's setup root and eligible
+volume kind are private inputs to Tauri's trusted resolver; the public T04
+projection and Setup Location interface omit the physical root. Rust derives
+the actual root from the reported visible mount path and accepts only the positively associated system
+emulated root `/storage/emulated/0` or a corroborated removable-SD root at
+`/storage/<safe-volume-id>`. It never derives a destination from `internalPath`.
+The volume must be mounted read-write and accessible to the executor. This also
+preserves the existing T04 classification for a physical-primary volume while
+binding its setup destination as removable SD.
+
+A refresh keeps a location resolved only when its volume kind, root, identity,
+continuity evidence, session, runtime generation, and Platform-Tools revision
+still match. A mismatch, read-only or unavailable volume, failed probe, or
+authority/session invalidation marks the location unresolved (or clears it
+with the invalidated device session); it cannot be used to plan or execute.
+The ten-second T04 observation lifetime applies to resolving and refreshing
+locations. A retained immutable review remains digest-bound after that cache
+entry expires, but mutation requires a fresh matching observation.
+
+The typed Recipe reference `setup_location_ref` is accepted only as
+`copy_files.dest` for a host directory to device directory copy using `merge`,
+`replace`, or directory-style `sync`. Other destination-writing consumers fail
+closed. Existing Recipe formats, App Target behavior, and legacy destination
+semantics remain unchanged. The plan digest binds each active location's
+trusted volume identity and continuity, root, and relative path. The retained
+review binds canonical destination scope and reviewed destination preconditions.
+Public review exposes only a Setup Location's name, volume category, relative
+path, and effects. Legacy shared-path writers receive a sanitized shared-storage
+label and relative suffix when that suffix is known, with a generic label when
+it cannot be resolved safely. Physical paths, serials, UUIDs, and
+identity/continuity details stay in trusted Rust/Tauri state.
+
+Only active destination writers participate in collision checks: Setup Location
+writers and legacy shared-path writers are compared using canonical resolved
+scopes and reviewed effects, including when distinct location IDs resolve to
+the same or nested directories. Conflicting file or destructive effects fail
+closed. Shared directory creation also fails when it would invalidate another
+writer's reviewed missing-path precondition; an already-existing directory
+effect may be shared when the remaining effects do not conflict. Unused named
+locations may overlap.
+Initially absent destination suffixes are eligible only below an existing,
+verified directory. Review records each planned directory creation, and
+execution rechecks volume continuity, access, confinement, the existing anchor,
+and the exact missing suffix before creating one component at a time with the
+no-follow directory helper. If a required guard or helper is unavailable,
+execution stops before selected-destination mutation. Staging and cleanup are
+reported separately, and failures after authorized mutations retain T03's
+truthful partial-result semantics.

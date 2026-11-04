@@ -80,6 +80,9 @@ pub mod runtime_configuration;
 pub(crate) mod runtime_refs;
 pub mod session;
 pub mod step_specs;
+pub mod storage_targets;
+#[cfg(test)]
+mod storage_targets_tests;
 pub mod user_configuration;
 pub mod user_configuration_document;
 pub mod validation;
