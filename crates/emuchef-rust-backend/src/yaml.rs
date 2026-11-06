@@ -540,6 +540,7 @@ fn validate_input_declaration(input_id: &str, input: &InputDeclaration) -> Resul
         "directory",
         "path",
         "device_path",
+        "setup_location_ref",
         "string_list",
         "path_list",
         "object",
@@ -549,6 +550,20 @@ fn validate_input_declaration(input_id: &str, input: &InputDeclaration) -> Resul
             "input {} has unsupported type {}",
             single_quote(input_id),
             single_quote(&input.type_name)
+        ));
+    }
+    if input.type_name == "setup_location_ref"
+        && (input.multiple
+            || !input.default.is_null()
+            || !input.options.is_empty()
+            || input.validation.must_exist
+            || !input.validation.allowed_extensions.is_empty()
+            || input.validation.path_kind.is_some()
+            || !input.validation.allowed_prefixes.is_empty())
+    {
+        return Err(format!(
+            "Setup Location input {} must be a scalar reference without path validation, options, or a default",
+            single_quote(input_id)
         ));
     }
     if let Some(path_kind) = &input.validation.path_kind {
@@ -1925,6 +1940,33 @@ mod tests {
             raw.as_mapping().expect("recipe YAML should be a mapping"),
             Path::new("test.recipe.yaml"),
         )
+    }
+
+    #[test]
+    fn setup_location_reference_input_is_scalar_and_has_no_path_or_enum_defaults() {
+        let source = "schema_version: 1\nkind: recipe\nid: test.recipe\nname: Test\ninputs:\n  rom_destination:\n    type: setup_location_ref\n    role: rom_destination\n    label: ROM destination\n    required: true\nartifacts: {}\nsteps: []\n";
+        let recipe = load_recipe_from_bytes(source.as_bytes(), Path::new("test.recipe.yaml"))
+            .expect("a scalar Setup Location input should remain an authored Recipe");
+        let input = &recipe.inputs["rom_destination"];
+        assert_eq!(input.type_name, "setup_location_ref");
+        assert!(!input.multiple);
+        assert!(input.options.is_empty());
+        assert!(input.default.is_null());
+
+        for extra in [
+            "    multiple: true\n",
+            "    default: internal\n",
+            "    options:\n      - value: internal\n        label: Internal\n",
+            "    validation:\n      path_kind: directory\n",
+        ] {
+            let source = format!(
+                "schema_version: 1\nkind: recipe\nid: test.recipe\nname: Test\ninputs:\n  rom_destination:\n    type: setup_location_ref\n    role: rom_destination\n    label: ROM destination\n    required: true\n{extra}artifacts: {{}}\nsteps: []\n"
+            );
+            assert!(
+                load_recipe_from_bytes(source.as_bytes(), Path::new("test.recipe.yaml")).is_err(),
+                "Setup Location inputs must reject {extra:?}"
+            );
+        }
     }
 
     fn recipe_with_unmanaged_literals(count: usize, value: &str) -> String {

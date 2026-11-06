@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use async_io::{block_on, Timer};
 use async_process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+#[cfg(test)]
+use emuchef_rust_backend::session::DocumentSessionManager;
 use futures_lite::future::{self, poll_fn};
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use serde::Serialize;
@@ -28,6 +30,8 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "getExecution",
     "getExecutionEvents",
     "cancelExecution",
+    "revokeSetupLocationLease",
+    "retireSetupLocationLeaseAttempt",
     "launchExecutionApp",
     "openUserConfiguration",
     "createUserConfiguration",
@@ -104,7 +108,7 @@ impl SidecarState {
         client.generation = 1;
         client.initialize_with_process(SidecarProcess::InProcessBackend {
             generation: 1,
-            config,
+            sessions: DocumentSessionManager::with_runtime_config(config),
         });
         Self {
             inner: Mutex::new(client),
@@ -113,7 +117,6 @@ impl SidecarState {
 
     pub fn initialize(&self) {
         let mut client = self.inner.lock().expect("sidecar mutex poisoned");
-        client.generation = client.generation.saturating_add(1).max(1);
         client.initialize();
     }
 
@@ -139,8 +142,8 @@ impl SidecarState {
     }
 
     /// Report whether the current process generation lost its protocol
-    /// session after startup. Callers use this to discard all authority that
-    /// depended on the terminated in-memory runtime.
+    /// session. Callers check cleanup confirmation before discarding device
+    /// authority derived from that runtime.
     pub(crate) fn runtime_session_was_lost(&self) -> bool {
         self.inner
             .lock()
@@ -155,6 +158,28 @@ impl SidecarState {
             .unwrap_or(false)
     }
 
+    /// Returns whether cleanup confirmed that the owned runtime process stopped.
+    pub(crate) fn runtime_process_cleanup_confirmed(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|client| client.last_cleanup != SidecarCleanup::Uncertain)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_runtime_session_lost_with_uncertain_cleanup(&self) {
+        let mut client = self.inner.lock().unwrap();
+        client.session_lost = true;
+        client.last_cleanup = SidecarCleanup::Uncertain;
+        client.status = RuntimeStatusDto::Failed {
+            error: RuntimeErrorDto {
+                code: "runtime_session_lost",
+                message: "The local app service stopped responding.".to_string(),
+                actions: vec!["retry"],
+            },
+        };
+    }
+
     /// Fail the current in-memory runtime session because a successful
     /// protocol response was structurally unusable for the caller.
     ///
@@ -164,8 +189,8 @@ impl SidecarState {
     /// worker cannot be allowed to keep mutating behind the app's ownership
     /// model. This applies the same fail-and-stop behavior used for broken
     /// protocol responses: the status becomes a stable
-    /// `runtime_session_lost` failure, the owned child is stopped, and every
-    /// later request in this generation stays lost.
+    /// `runtime_session_lost` failure, records the child cleanup result, and
+    /// keeps every later request in this generation lost.
     pub(crate) fn invalidate_runtime_session(&self) {
         let mut client = self.inner.lock().expect("sidecar mutex poisoned");
         client.fail_runtime_session();
@@ -230,7 +255,20 @@ impl SidecarClient {
     }
 
     fn initialize(&mut self) {
-        self.stop();
+        if self.stop() == SidecarCleanup::Uncertain {
+            // A new runtime cannot safely replace a process that may still
+            // own the previous session's work.
+            self.status = RuntimeStatusDto::Failed {
+                error: RuntimeErrorDto {
+                    code: "runtime_session_lost",
+                    message: "The local app service stopped responding.".to_string(),
+                    actions: vec!["retry"],
+                },
+            };
+            self.session_lost = true;
+            return;
+        }
+        self.generation = self.generation.saturating_add(1).max(1);
         // A new generation starts with no cleanup obligation. Any process
         // created below will replace this evidence if startup later fails.
         self.last_cleanup = SidecarCleanup::NotRequired;
@@ -296,7 +334,7 @@ impl SidecarClient {
 
     fn negotiate_existing_process(&mut self) -> Result<u64, StartFailure> {
         let hello = self
-            .raw_request("hello", json!({}))
+            .raw_request("hello", json!({ "runtimeGeneration": self.generation }))
             .map_err(StartFailure::SessionLost)?;
         let result = startup_result(&hello)?;
         let protocol_version = result
@@ -337,7 +375,18 @@ impl SidecarClient {
 
     #[cfg(test)]
     fn initialize_with_process(&mut self, process: SidecarProcess) {
-        self.stop();
+        if self.stop() == SidecarCleanup::Uncertain {
+            self.status = RuntimeStatusDto::Failed {
+                error: RuntimeErrorDto {
+                    code: "runtime_session_lost",
+                    message: "The local app service stopped responding.".to_string(),
+                    actions: vec!["retry"],
+                },
+            };
+            self.session_lost = true;
+            let _ = process.stop();
+            return;
+        }
         self.last_cleanup = SidecarCleanup::NotRequired;
         self.session_lost = false;
         self.status = RuntimeStatusDto::Starting;
@@ -383,9 +432,9 @@ impl SidecarClient {
 
     fn fail_runtime_session(&mut self) -> String {
         // A broken or structurally invalid response proves this in-memory
-        // protocol session cannot answer future requests. Stop the child and
-        // retain a stable failure code for every later request in this process
-        // generation so all dependent native authority can be invalidated.
+        // protocol session cannot answer future requests. Request child
+        // shutdown and retain its cleanup result so callers can decide whether
+        // dependent native authority is safe to invalidate.
         self.status = RuntimeStatusDto::Failed {
             error: RuntimeErrorDto {
                 code: "runtime_session_lost",
@@ -482,7 +531,7 @@ enum SidecarProcess {
     #[cfg(test)]
     InProcessBackend {
         generation: u64,
-        config: emuchef_rust_backend::execution_session::SidecarRuntimeConfig,
+        sessions: DocumentSessionManager,
     },
 }
 
@@ -568,13 +617,20 @@ impl SidecarProcess {
                 Ok(frame)
             }
             #[cfg(test)]
-            Self::InProcessBackend { config, .. } => {
+            Self::InProcessBackend { sessions, .. } => {
                 let input = std::str::from_utf8(request)
                     .map_err(|_| "Rust runtime request was not valid UTF-8.".to_string())?;
-                Ok(
-                    emuchef_rust_backend::jsonl::process_jsonl_with_config(input, config.clone())
-                        .into_bytes(),
-                )
+                let request = serde_json::from_str(input)
+                    .map_err(|_| "Rust runtime request was not valid JSON.".to_string())?;
+                let response =
+                    emuchef_rust_backend::request::handle_sidecar_value(request, sessions);
+                let mut frame = serde_json::to_vec(&response)
+                    .map_err(|_| "Rust runtime response could not be encoded.".to_string())?;
+                frame.push(b'\n');
+                if frame.len() > MAX_FRAME_BYTES {
+                    return Err("Rust runtime response exceeded its frame limit.".to_string());
+                }
+                Ok(frame)
             }
         }
     }
@@ -914,6 +970,8 @@ mod tests {
                 "getExecution",
                 "getExecutionEvents",
                 "cancelExecution",
+                "revokeSetupLocationLease",
+                "retireSetupLocationLeaseAttempt",
                 "launchExecutionApp",
                 "openUserConfiguration",
                 "createUserConfiguration",
@@ -959,6 +1017,28 @@ mod tests {
             observer.transport_accesses.load(Ordering::SeqCst),
             accesses_after_loss
         );
+    }
+
+    #[test]
+    fn uncertain_process_cleanup_blocks_reinitializing_the_runtime() {
+        let mut client = SidecarClient::new(PathBuf::from("unused-test-cache"));
+        client.generation = 7;
+        client.status = RuntimeStatusDto::Ready {
+            protocol_version: 1,
+            catalog_version: None,
+        };
+        let (process, _) = scripted_process_with_cleanup(None, SidecarCleanup::Uncertain);
+        client.process = Some(process);
+        let _ = client.fail_runtime_session();
+
+        let (replacement, observer) = scripted_process(None);
+        client.initialize_with_process(replacement);
+
+        assert_eq!(observer.transport_accesses.load(Ordering::SeqCst), 0);
+        assert!(observer.stopped.load(Ordering::SeqCst));
+        assert_eq!(client.last_cleanup, SidecarCleanup::Uncertain);
+        assert_eq!(client.generation, 7);
+        assert!(client.session_lost);
     }
 
     #[test]
@@ -1157,7 +1237,7 @@ mod tests {
         );
         assert_eq!(
             payload["requiredCapabilities"].as_array().unwrap().len(),
-            26
+            28
         );
         assert_eq!(payload["optionalCapabilities"], json!([]));
         assert!(payload.get("required").is_none());
@@ -1171,7 +1251,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            26
+            28
         );
 
         let mut missing_execution = payload;

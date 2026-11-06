@@ -15,6 +15,7 @@ tauri-build = { version = "2.5.1", features = [] }
 [dependencies]
 async-io = "2.6.0"
 async-process = "2.5.0"
+emuchef-rust-backend = { path = "../../../crates/emuchef-rust-backend" }
 futures-lite = "2.6.1"
 hex = "0.4"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls"] }
@@ -35,7 +36,6 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 libc = "0.2"
 
 [dev-dependencies]
-emuchef-rust-backend = { path = "../../../crates/emuchef-rust-backend" }
 tauri = { version = "2.11.0", features = ["test"] }
 tempfile = "3.20"
 

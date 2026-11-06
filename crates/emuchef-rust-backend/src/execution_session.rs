@@ -28,6 +28,9 @@ use crate::executor::{
 };
 use crate::model::OrderedMap;
 use crate::planner::{ExecutionArtifactSource, ExecutionPlan, RuntimeValue, TargetDeviceBinding};
+use crate::storage_targets::{
+    SetupLocationExecutionLease, SetupLocationMutationLease, StorageTargetBinding,
+};
 
 /// Filesystem and executable policy fixed when the sidecar starts.
 #[derive(Clone, Debug)]
@@ -219,6 +222,270 @@ struct ExecutionState {
     records: HashMap<String, ExecutionRecord>,
 }
 
+#[derive(Debug, Default)]
+struct SetupLocationLeaseRegistryState {
+    runtime_generation: Option<u64>,
+    revoked_session_epochs: HashMap<(String, u64), u64>,
+    // A runtime-local high-water mark rejects replay without retaining every attempt.
+    last_attempt_sequence: u64,
+    // Active gates are removed when their worker terminates or revocation drains them.
+    leases: HashMap<u64, Arc<SetupLocationMutationLease>>,
+}
+
+/// Mirrors Tauri-issued leases only to serialize destination mutation with
+/// revocation. The backend never creates a session epoch or revalidates it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SetupLocationLeaseRegistry {
+    state: Arc<Mutex<SetupLocationLeaseRegistryState>>,
+    registry_poisoned: Arc<AtomicBool>,
+}
+
+impl SetupLocationLeaseRegistry {
+    pub(crate) fn set_runtime_generation(&self, runtime_generation: u64) -> Result<(), ApiError> {
+        if runtime_generation == 0 {
+            return Err(setup_location_lease_error(
+                "Tauri runtime generation is invalid.",
+            ));
+        }
+        let mut state = self.state.lock().map_err(|_| {
+            self.registry_poisoned.store(true, Ordering::Release);
+            setup_location_lease_error("Setup Location authority is unavailable.")
+        })?;
+        if self.registry_poisoned.load(Ordering::Acquire) {
+            return Err(setup_location_lease_error(
+                "Setup Location authority is unavailable.",
+            ));
+        }
+        match state.runtime_generation {
+            None => state.runtime_generation = Some(runtime_generation),
+            Some(current) if current == runtime_generation => {}
+            Some(_) => {
+                return Err(setup_location_lease_error(
+                    "Tauri runtime generation changed within one sidecar session.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn activate(
+        &self,
+        context: SetupLocationExecutionLease,
+    ) -> Result<Arc<SetupLocationMutationLease>, ApiError> {
+        context.validate().map_err(|_| {
+            setup_location_lease_error("Setup Location execution authority is invalid.")
+        })?;
+        let mut state = self.state.lock().map_err(|_| {
+            self.registry_poisoned.store(true, Ordering::Release);
+            setup_location_lease_error("Setup Location authority is unavailable.")
+        })?;
+        if self.registry_poisoned.load(Ordering::Acquire) {
+            return Err(setup_location_lease_error(
+                "Setup Location authority is unavailable.",
+            ));
+        }
+        if state.runtime_generation != Some(context.runtime_generation) {
+            return Err(setup_location_lease_error(
+                "Setup Location runtime session has changed.",
+            ));
+        }
+        let session_key = (context.device_handle.clone(), context.runtime_generation);
+        if state
+            .revoked_session_epochs
+            .get(&session_key)
+            .is_some_and(|revoked_epoch| context.session_epoch <= *revoked_epoch)
+        {
+            return Err(setup_location_lease_error(
+                "Setup Location device session has expired.",
+            ));
+        }
+        if context.attempt_sequence <= state.last_attempt_sequence {
+            return Err(setup_location_lease_error(
+                "Setup Location execution attempt has already been used.",
+            ));
+        }
+        if state.leases.contains_key(&context.attempt_sequence) {
+            return Err(setup_location_lease_error(
+                "Setup Location execution attempt has already been used.",
+            ));
+        }
+        let lease = Arc::new(SetupLocationMutationLease::new_with_registry_poison(
+            context.clone(),
+            Arc::clone(&self.registry_poisoned),
+        ));
+        state.last_attempt_sequence = context.attempt_sequence;
+        state
+            .leases
+            .insert(context.attempt_sequence, Arc::clone(&lease));
+        Ok(lease)
+    }
+
+    fn retire_attempt(&self, context: &SetupLocationExecutionLease) -> Result<(), ApiError> {
+        context
+            .validate()
+            .map_err(|_| setup_location_lease_error("Setup Location retirement is invalid."))?;
+        let mut state = self.state.lock().map_err(|_| {
+            self.registry_poisoned.store(true, Ordering::Release);
+            setup_location_lease_error("Setup Location authority unavailable.")
+        })?;
+        if self.registry_poisoned.load(Ordering::Acquire) {
+            return Err(setup_location_lease_error(
+                "Setup Location authority unavailable.",
+            ));
+        }
+        if state.runtime_generation != Some(context.runtime_generation) {
+            return Err(setup_location_lease_error(
+                "Setup Location runtime session has changed.",
+            ));
+        }
+        let attempt_key = context.attempt_sequence;
+        let Some(lease) = state.leases.get(&attempt_key).cloned() else {
+            state.last_attempt_sequence = state.last_attempt_sequence.max(attempt_key);
+            return Ok(());
+        };
+        if lease.context() != context {
+            return Err(setup_location_lease_error(
+                "Setup Location execution authority does not match the active attempt.",
+            ));
+        }
+        lease
+            .revoke()
+            .map_err(|_| setup_location_lease_error("Setup Location authority unavailable."))?;
+        lease
+            .wait_for_idle()
+            .map_err(|_| setup_location_lease_error("Setup Location authority unavailable."))?;
+        state.leases.remove(&attempt_key);
+        Ok(())
+    }
+
+    pub(crate) fn revoke_session(
+        &self,
+        context: &SetupLocationExecutionLease,
+    ) -> Result<(), ApiError> {
+        context
+            .validate()
+            .map_err(|_| setup_location_lease_error("Setup Location revocation is invalid."))?;
+        let (mut state, was_poisoned) = match self.state.lock() {
+            Ok(state) => (state, false),
+            Err(poisoned) => {
+                self.registry_poisoned.store(true, Ordering::Release);
+                (poisoned.into_inner(), true)
+            }
+        };
+        if self.registry_poisoned.load(Ordering::Acquire) && !was_poisoned {
+            return Err(setup_location_lease_error(
+                "Setup Location authority is unavailable.",
+            ));
+        }
+        if state.runtime_generation != Some(context.runtime_generation) {
+            return Err(setup_location_lease_error(
+                "Setup Location runtime session has changed.",
+            ));
+        }
+        let session_key = (context.device_handle.clone(), context.runtime_generation);
+        state
+            .revoked_session_epochs
+            .entry(session_key.clone())
+            .and_modify(|epoch| *epoch = (*epoch).max(context.session_epoch))
+            .or_insert(context.session_epoch);
+        let revoked_through = state.revoked_session_epochs[&session_key];
+        let leases = state
+            .leases
+            .values()
+            .filter(|lease| {
+                let lease_context = lease.context();
+                lease_context.device_handle == context.device_handle
+                    && lease_context.runtime_generation == context.runtime_generation
+                    && lease_context.session_epoch <= revoked_through
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        // Close every matching gate before waiting on any active mutation.
+        let mut revocation_failed = false;
+        for lease in &leases {
+            if lease.revoke().is_err() {
+                revocation_failed = true;
+            }
+        }
+        for lease in leases {
+            if lease.wait_for_idle().is_err() {
+                revocation_failed = true;
+            }
+        }
+        state.leases.retain(|_, lease| {
+            let lease_context = lease.context();
+            lease_context.device_handle != context.device_handle
+                || lease_context.runtime_generation != context.runtime_generation
+                || lease_context.session_epoch > revoked_through
+        });
+        if was_poisoned || revocation_failed {
+            return Err(setup_location_lease_error(
+                "Setup Location authority is unavailable.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn setup_location_lease_error(message: &str) -> ApiError {
+    ApiError::new(ApiErrorCode::InvalidExecutionPlan, message, json!({}))
+}
+
+fn validate_setup_location_execution_lease(
+    plan: &ExecutionPlan,
+    mode: ExecutionMode,
+    context: Option<&SetupLocationExecutionLease>,
+    actual_digest: &str,
+) -> Result<(), ApiError> {
+    let setup_snapshots = plan
+        .copy_commit_snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.destination_kind
+                == crate::executor::copy_commit::CopyCommitDestinationKind::SetupLocation
+        })
+        .collect::<Vec<_>>();
+
+    for snapshot in &setup_snapshots {
+        let binding = snapshot.setup_location_binding.as_ref().ok_or_else(|| {
+            setup_location_lease_error("Setup Location copy has no trusted reviewed binding.")
+        })?;
+        if context.is_some_and(|lease| lease.session_epoch != binding.session_epoch) {
+            return Err(setup_location_lease_error(
+                "Setup Location review belongs to another device session.",
+            ));
+        }
+    }
+
+    match (mode, setup_snapshots.is_empty(), context) {
+        (ExecutionMode::DryRun, _, None) => Ok(()),
+        (ExecutionMode::DryRun, _, Some(_)) => Err(setup_location_lease_error(
+            "Dry runs cannot carry real Setup Location execution authority.",
+        )),
+        (ExecutionMode::Real, true, None) => Ok(()),
+        (ExecutionMode::Real, true, Some(_)) => Err(setup_location_lease_error(
+            "An execution lease was supplied without a Setup Location writer.",
+        )),
+        (ExecutionMode::Real, false, None) => Err(setup_location_lease_error(
+            "Real Setup Location writes require Tauri session authority.",
+        )),
+        (ExecutionMode::Real, false, Some(context)) => {
+            context.validate().map_err(|_| {
+                setup_location_lease_error("Setup Location execution authority is invalid.")
+            })?;
+            if context.plan_id != plan.id
+                || context.plan_digest.to_lowercase() != actual_digest.to_lowercase()
+            {
+                return Err(setup_location_lease_error(
+                    "Setup Location execution authority does not match the reviewed plan.",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Private qualification observation of the manager's real single-owner slot.
 /// The public execution report and status DTOs do not expose this state.
 #[cfg(test)]
@@ -286,6 +553,7 @@ fn acquire_execution_slot_locked(
 pub struct ExecutionSessionManager {
     config: SidecarRuntimeConfig,
     state: Arc<Mutex<ExecutionState>>,
+    setup_location_leases: SetupLocationLeaseRegistry,
 }
 
 impl Default for ExecutionSessionManager {
@@ -299,7 +567,29 @@ impl ExecutionSessionManager {
         Self {
             config,
             state: Arc::new(Mutex::new(ExecutionState::default())),
+            setup_location_leases: SetupLocationLeaseRegistry::default(),
         }
+    }
+
+    pub(crate) fn set_runtime_generation(&self, runtime_generation: u64) -> Result<(), ApiError> {
+        self.setup_location_leases
+            .set_runtime_generation(runtime_generation)
+    }
+
+    pub(crate) fn revoke_setup_location_lease(
+        &self,
+        context: &SetupLocationExecutionLease,
+    ) -> Result<Value, ApiError> {
+        self.setup_location_leases.revoke_session(context)?;
+        Ok(json!({ "revoked": true }))
+    }
+
+    pub(crate) fn retire_setup_location_lease_attempt(
+        &self,
+        context: &SetupLocationExecutionLease,
+    ) -> Result<Value, ApiError> {
+        self.setup_location_leases.retire_attempt(context)?;
+        Ok(json!({ "retired": true }))
     }
 
     /// Run one qualification closure under the same RAII slot guard carried by
@@ -343,6 +633,17 @@ impl ExecutionSessionManager {
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
     ) -> Result<Value, ApiError> {
+        self.start_with_setup_location_lease(plan, required_digest, mode, supplied_target, None)
+    }
+
+    pub(crate) fn start_with_setup_location_lease(
+        &self,
+        plan: ExecutionPlan,
+        required_digest: String,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+        setup_location_lease_context: Option<SetupLocationExecutionLease>,
+    ) -> Result<Value, ApiError> {
         crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
             ApiError::new(
                 ApiErrorCode::InvalidExecutionPlan,
@@ -373,7 +674,14 @@ impl ExecutionSessionManager {
         }
         let target = preflight_target(&plan, mode, supplied_target, &self.config.adb_path)?;
 
-        let (execution_id, report, cancel_requested, slot_lease) = {
+        validate_setup_location_execution_lease(
+            &plan,
+            mode,
+            setup_location_lease_context.as_ref(),
+            &actual_digest,
+        )?;
+
+        let (execution_id, report, cancel_requested, slot_lease, mutation_lease) = {
             let mut state = lock(&self.state);
             if let Some(active) = &state.active_execution_id {
                 return Err(ApiError::new(
@@ -398,6 +706,10 @@ impl ExecutionSessionManager {
                     read_only_roots: read_only_roots(&plan),
                 },
             )?;
+
+            let mutation_lease = setup_location_lease_context
+                .map(|context| self.setup_location_leases.activate(context))
+                .transpose()?;
 
             let cancel_requested = Arc::new(AtomicBool::new(false));
             state.next_execution_id = prospective_number;
@@ -426,9 +738,17 @@ impl ExecutionSessionManager {
             let report = record.report.clone();
             state.records.insert(execution_id.clone(), record);
             let slot_lease = acquire_execution_slot_locked(&self.state, &mut state, &execution_id);
-            (execution_id, report, cancel_requested, slot_lease)
+            (
+                execution_id,
+                report,
+                cancel_requested,
+                slot_lease,
+                mutation_lease,
+            )
         };
 
+        let lease_registry = self.setup_location_leases.clone();
+        let lease_context = mutation_lease.as_ref().map(|lease| lease.context().clone());
         let state = Arc::clone(&self.state);
         let config = self.config.clone();
         let worker_execution_id = execution_id.clone();
@@ -442,8 +762,14 @@ impl ExecutionSessionManager {
                     target,
                     config,
                     cancel_requested,
+                    mutation_lease,
                 )
             }));
+            if let Some(context) = lease_context.as_ref() {
+                // The execution has returned or unwound, so no copy operation can still hold a permit.
+                // A poisoned registry remains fail-closed for subsequent lease admission and revocation.
+                let _ = lease_registry.retire_attempt(context);
+            }
             match outcome {
                 Ok(result) => finish_attempt(&state, &worker_execution_id, result),
                 Err(_) => finish_panicked(&state, &worker_execution_id),
@@ -527,10 +853,23 @@ impl ExecutionSessionManager {
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
     ) -> Result<ExecutionPlan, ApiError> {
+        self.prepare_review_plan_with_storage_targets(plan, mode, supplied_target, Vec::new())
+    }
+
+    /// Prepare a reviewed plan with trusted Setup Location bindings active in
+    /// its typed Recipe destination inputs.
+    pub(crate) fn prepare_review_plan_with_storage_targets(
+        &self,
+        plan: ExecutionPlan,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+        storage_targets: Vec<StorageTargetBinding>,
+    ) -> Result<ExecutionPlan, ApiError> {
         self.prepare_review_plan_with_device_factory(
             plan,
             mode,
             supplied_target,
+            &storage_targets,
             crate::executor::adb::RealAdbDevice::new,
         )
     }
@@ -544,6 +883,7 @@ impl ExecutionSessionManager {
         mut plan: ExecutionPlan,
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
+        storage_targets: &[StorageTargetBinding],
         real_device_factory: F,
     ) -> Result<ExecutionPlan, ApiError>
     where
@@ -588,7 +928,7 @@ impl ExecutionSessionManager {
                     fake_device_root,
                     read_only_roots,
                 );
-                prepare_copy_commit_snapshots(&mut plan, adapters)
+                prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
             }
             ExecutionMode::Real => {
                 let serial = target.map(|binding| binding.serial);
@@ -600,7 +940,7 @@ impl ExecutionSessionManager {
                     read_only_roots,
                     true,
                 );
-                prepare_copy_commit_snapshots(&mut plan, adapters)
+                prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
             }
         };
         preparation.map_err(|message| {
@@ -1119,6 +1459,7 @@ fn execute_attempt(
     target: Option<TargetDeviceBinding>,
     config: SidecarRuntimeConfig,
     cancel_requested: Arc<AtomicBool>,
+    mutation_lease: Option<Arc<SetupLocationMutationLease>>,
 ) -> ExecutionRunResult {
     #[cfg(test)]
     if plan.id == "__test_execution_worker_panics__" {
@@ -1144,6 +1485,7 @@ fn execute_attempt(
                         true,
                     ),
                     cancel_requested,
+                    None,
                 );
             }
             run_with_device(
@@ -1157,6 +1499,7 @@ fn execute_attempt(
                     read_only_roots,
                 ),
                 cancel_requested,
+                None,
             )
         }
         ExecutionMode::Real => {
@@ -1192,6 +1535,7 @@ fn execute_attempt(
                         true,
                     ),
                     cancel_requested,
+                    mutation_lease.clone(),
                 );
             }
             run_with_device(
@@ -1207,6 +1551,7 @@ fn execute_attempt(
                     true,
                 ),
                 cancel_requested,
+                mutation_lease,
             )
         }
     }
@@ -1234,8 +1579,10 @@ fn push_test_identity_sample(executor: &mut FakeAdbCommandExecutor, android_id: 
 fn prepare_copy_commit_snapshots<D: ExecutorDevice>(
     plan: &mut ExecutionPlan,
     adapters: ExecutorAdapters<D>,
+    storage_targets: &[StorageTargetBinding],
 ) -> Result<(), String> {
-    ExecutorRunner::new(adapters).prepare_copy_commit_snapshots(plan)
+    ExecutorRunner::new(adapters)
+        .prepare_copy_commit_snapshots_with_storage_targets(plan, storage_targets)
 }
 
 fn run_with_device<D: ExecutorDevice>(
@@ -1244,8 +1591,9 @@ fn run_with_device<D: ExecutorDevice>(
     plan: &ExecutionPlan,
     adapters: ExecutorAdapters<D>,
     cancel_requested: Arc<AtomicBool>,
+    mutation_lease: Option<Arc<SetupLocationMutationLease>>,
 ) -> ExecutionRunResult {
-    let mut runner = ExecutorRunner::new(adapters);
+    let mut runner = ExecutorRunner::new_with_setup_location_lease(adapters, mutation_lease);
     runner.run_with_progress_and_cancel(
         plan,
         |event| record_progress(state, execution_id, event),
@@ -1726,6 +2074,320 @@ mod tests {
         PermissionActionApplicability, PermissionFailurePolicy, PermissionPlan,
         PermissionPlanAction, PermissionSetKind, RuntimeCapabilities,
     };
+
+    fn setup_location_lease_context(
+        attempt_sequence: u64,
+        session_epoch: u64,
+        runtime_generation: u64,
+    ) -> SetupLocationExecutionLease {
+        SetupLocationExecutionLease {
+            attempt_sequence,
+            device_handle: "device-test".to_string(),
+            session_epoch,
+            runtime_generation,
+            plan_id: "plan-test".to_string(),
+            plan_digest: "a".repeat(64),
+        }
+    }
+
+    fn setup_location_plan(id: &str) -> ExecutionPlan {
+        let mut plan = test_plan(id);
+        plan.copy_commit_snapshots.push(
+            crate::executor::copy_commit::ExecutionCopyCommitSnapshot {
+                step_id: "step-copy".to_string(),
+                operation: crate::executor::copy_commit::CopyCommitOperation::AddUpdate,
+                destination_kind:
+                    crate::executor::copy_commit::CopyCommitDestinationKind::SetupLocation,
+                source_path: std::path::PathBuf::from("/tmp/source"),
+                source_root: std::path::PathBuf::from("/tmp/source"),
+                source_manifest: Vec::new(),
+                source_digest_sha256: "a".repeat(64),
+                destination_identity: "/storage/volume/EmuChef".to_string(),
+                fake_device_root: std::path::PathBuf::from("/tmp/device"),
+                selected_root: std::path::PathBuf::from("/tmp/device/selected"),
+                destination_binding: None,
+                setup_location_binding: Some(StorageTargetBinding {
+                    id: "location-test".to_string(),
+                    device_plan: id.to_string(),
+                    session_epoch: 4,
+                    name: "Games".to_string(),
+                    relative_path: "EmuChef".to_string(),
+                    volume_handle: "1".repeat(32),
+                    volume_kind: crate::storage_targets::StorageTargetVolumeKind::RemovableSd,
+                    mount_root: "/storage/volume".to_string(),
+                    volume_identity: "2".repeat(32),
+                    volume_continuity: "3".repeat(32),
+                    observation_token: "4".repeat(32),
+                }),
+                setup_destination_precondition: Some(
+                    crate::storage_targets::SetupDestinationPrecondition {
+                        canonical_scope: "/storage/volume/EmuChef".to_string(),
+                        existing_anchor_path: "/storage/volume".to_string(),
+                        existing_anchor_binding: "anchor".to_string(),
+                        missing_components: vec!["EmuChef".to_string()],
+                    },
+                ),
+                destination_before_manifest: Vec::new(),
+                destination_before_digest_sha256: "b".repeat(64),
+                reviewed_deletion_set: Vec::new(),
+            },
+        );
+        plan
+    }
+
+    #[test]
+    fn setup_location_registry_rejects_replay_and_expired_session_contexts() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+        let context = setup_location_lease_context(1, 4, 7);
+        let lease = registry.activate(context.clone()).unwrap();
+
+        assert!(registry.activate(context.clone()).is_err());
+        let mut wrong_device = context.clone();
+        wrong_device.device_handle = "another-device".to_string();
+        assert!(registry.activate(wrong_device).is_err());
+        assert!(registry
+            .activate(setup_location_lease_context(2, 5, 8))
+            .is_err());
+
+        registry.revoke_session(&context).unwrap();
+        assert!(lease.acquire().is_err());
+        assert!(registry
+            .activate(setup_location_lease_context(1, 4, 7))
+            .is_err());
+
+        let next_session = setup_location_lease_context(2, 5, 7);
+        assert!(registry.activate(next_session).is_ok());
+    }
+
+    #[test]
+    fn poisoned_setup_location_registry_fails_closed_for_issued_lease() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+        let context = setup_location_lease_context(1, 4, 7);
+        let lease = registry.activate(context.clone()).unwrap();
+        let registry_state = Arc::clone(&registry.state);
+
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = registry_state.lock().unwrap();
+            panic!("inject registry poison before session revocation");
+        }));
+        assert!(poison.is_err());
+
+        assert!(registry.revoke_session(&context).is_err());
+
+        let mut selected_destination_mutations = 0;
+        if lease.acquire().is_ok() {
+            selected_destination_mutations += 1;
+        }
+        assert_eq!(
+            selected_destination_mutations, 0,
+            "an issued lease must not authorize destination mutation after registry failure"
+        );
+    }
+
+    #[test]
+    fn retiring_a_rejected_setup_location_start_allows_same_session_retry() {
+        let manager = ExecutionSessionManager::default();
+        manager.set_runtime_generation(7).unwrap();
+        let rejected_attempt = setup_location_lease_context(1, 4, 7);
+
+        manager
+            .retire_setup_location_lease_attempt(&rejected_attempt)
+            .expect("an unactivated rejected start can retire its attempt");
+
+        assert!(manager
+            .setup_location_leases
+            .activate(setup_location_lease_context(1, 4, 7))
+            .is_err());
+
+        let retry = setup_location_lease_context(2, 4, 7);
+        manager
+            .setup_location_leases
+            .activate(retry)
+            .expect("retiring one attempt must not revoke the still-current session");
+    }
+
+    #[test]
+    fn setup_location_registry_rejects_runtime_generation_changes() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+
+        assert!(registry.set_runtime_generation(8).is_err());
+        assert!(registry
+            .activate(setup_location_lease_context(1, 4, 8))
+            .is_err());
+    }
+
+    #[test]
+    fn setup_location_registry_keeps_replay_high_water_after_session_revocation() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+        let old_session = setup_location_lease_context(1, 4, 7);
+        registry.activate(old_session.clone()).unwrap();
+
+        registry.revoke_session(&old_session).unwrap();
+
+        {
+            let state = registry.state.lock().unwrap();
+            assert!(state.leases.is_empty());
+            assert_eq!(state.last_attempt_sequence, old_session.attempt_sequence);
+        }
+        assert!(registry.activate(old_session).is_err());
+
+        let next_session = setup_location_lease_context(2, 5, 7);
+        registry
+            .activate(next_session)
+            .expect("a later session epoch may use its next attempt sequence");
+    }
+
+    #[test]
+    fn worker_uses_local_mutation_lease_while_tauri_start_transition_is_held() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+        let context = setup_location_lease_context(1, 4, 7);
+        let lease = registry.activate(context).unwrap();
+        let transition_gate = std::sync::Arc::new(std::sync::Mutex::new(()));
+        let transition_guard = transition_gate.lock().unwrap();
+        let (mutation_done_tx, mutation_done_rx) = std::sync::mpsc::sync_channel(0);
+        let mutations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_lease = std::sync::Arc::clone(&lease);
+        let worker_mutations = std::sync::Arc::clone(&mutations);
+        let worker = std::thread::spawn(move || {
+            let permit = worker_lease
+                .acquire()
+                .expect("the preissued backend lease authorizes this mutation");
+            worker_mutations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(permit);
+            mutation_done_tx
+                .send(())
+                .expect("the transition test is waiting for the worker");
+        });
+
+        mutation_done_rx
+            .recv()
+            .expect("worker permission must not round-trip through Tauri's held transition");
+        assert!(transition_gate.try_lock().is_err());
+        assert_eq!(mutations.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(transition_guard);
+        worker.join().expect("worker should finish");
+    }
+
+    #[test]
+    fn setup_location_registry_retires_terminal_gate_and_keeps_epoch_replay_guard() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+        let context = setup_location_lease_context(1, 4, 7);
+        let lease = registry.activate(context.clone()).unwrap();
+
+        registry.retire_attempt(&context).unwrap();
+
+        assert!(lease.acquire().is_err());
+        let state = registry.state.lock().unwrap();
+        assert!(state.leases.is_empty());
+        assert_eq!(state.last_attempt_sequence, context.attempt_sequence);
+        drop(state);
+        assert!(registry.activate(context).is_err());
+    }
+
+    #[test]
+    fn setup_location_registry_bounds_replay_history_after_retired_attempts() {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+
+        for attempt_sequence in 1..=1024 {
+            let context = setup_location_lease_context(attempt_sequence, 4, 7);
+            registry.activate(context.clone()).unwrap();
+            registry.retire_attempt(&context).unwrap();
+        }
+
+        let state = registry.state.lock().unwrap();
+        assert_eq!(state.last_attempt_sequence, 1024);
+        drop(state);
+
+        assert!(registry
+            .activate(setup_location_lease_context(1024, 4, 7))
+            .is_err());
+        let next = setup_location_lease_context(1025, 4, 7);
+        assert!(registry.activate(next).is_ok());
+    }
+
+    #[test]
+    fn setup_location_execution_lease_must_match_reviewed_plan_identity_and_digest() {
+        let plan = setup_location_plan("plan-test");
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let mut context = setup_location_lease_context(1, 4, 7);
+        context.plan_id = plan.id.clone();
+        context.plan_digest = digest.clone();
+
+        validate_setup_location_execution_lease(
+            &plan,
+            ExecutionMode::Real,
+            Some(&context),
+            &digest,
+        )
+        .expect("matching reviewed plan authority should be accepted");
+
+        let mut wrong_session = context.clone();
+        wrong_session.session_epoch += 1;
+        assert!(validate_setup_location_execution_lease(
+            &plan,
+            ExecutionMode::Real,
+            Some(&wrong_session),
+            &digest,
+        )
+        .is_err());
+
+        assert!(validate_setup_location_execution_lease(
+            &plan,
+            ExecutionMode::DryRun,
+            None,
+            &digest,
+        )
+        .is_ok());
+        assert!(validate_setup_location_execution_lease(
+            &plan,
+            ExecutionMode::DryRun,
+            Some(&context),
+            &digest,
+        )
+        .is_err());
+
+        let mut wrong_plan = context.clone();
+        wrong_plan.plan_id = "another-plan".to_string();
+        assert!(validate_setup_location_execution_lease(
+            &plan,
+            ExecutionMode::Real,
+            Some(&wrong_plan),
+            &digest,
+        )
+        .is_err());
+
+        let mut wrong_digest = context;
+        wrong_digest.plan_digest = "c".repeat(64);
+        assert!(validate_setup_location_execution_lease(
+            &plan,
+            ExecutionMode::Real,
+            Some(&wrong_digest),
+            &digest,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn setup_location_binding_changes_canonical_plan_digest() {
+        let mut plan = setup_location_plan("plan-test");
+        let original_digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        plan.copy_commit_snapshots[0]
+            .setup_location_binding
+            .as_mut()
+            .unwrap()
+            .volume_identity = "5".repeat(32);
+
+        let changed_digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+
+        assert_ne!(changed_digest, original_digest);
+    }
 
     #[test]
     fn backend_default_cache_root_remains_working_directory_local() {
