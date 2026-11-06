@@ -55,6 +55,8 @@ pub const CAPABILITIES: &[&str] = &[
     "getExecution",
     "getExecutionEvents",
     "cancelExecution",
+    "revokeSetupLocationLease",
+    "retireSetupLocationLeaseAttempt",
     "launchExecutionApp",
     "openRecipe",
     "openAppDefinition",

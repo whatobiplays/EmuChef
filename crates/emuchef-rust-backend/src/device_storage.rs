@@ -1701,6 +1701,8 @@ fn remove_ambiguous_duplicate_identities(volumes: &mut [DeviceVolume]) {
     for volume in volumes.iter_mut() {
         if counts.get(&volume.identity_token).copied().unwrap_or(0) > 1 {
             volume.status = VolumeStatus::Ambiguous;
+            volume.setup_location_kind = None;
+            volume.mount_root = None;
             if !volume
                 .reasons
                 .iter()
@@ -2334,12 +2336,24 @@ public:1A2B-3C4D mounted
         assert_eq!(candidates.len(), 2);
         for candidate in candidates {
             assert_eq!(candidate["status"], "ambiguous");
+            assert!(candidate.get("setupLocationKind").is_none());
+            assert!(candidate.get("mountRoot").is_none());
             assert!(candidate["reasons"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|reason| reason == "duplicate_identity"));
         }
+
+        let internal = observation["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["kind"] == "internalShared")
+            .expect("independent internal storage remains in the observation");
+        assert_eq!(internal["status"], "available");
+        assert_eq!(internal["setupLocationKind"], "internalShared");
+        assert_eq!(internal["mountRoot"], "/storage/emulated/0");
     }
 
     #[test]

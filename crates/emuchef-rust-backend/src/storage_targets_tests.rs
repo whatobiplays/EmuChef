@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::storage_targets::*;
 use crate::model::{
@@ -11,6 +11,141 @@ use crate::planner::{
     plan_execution_with_app_definitions, DeviceContext, PlannerInput, PlanningStatus,
     RuntimeCapabilities,
 };
+
+const SETUP_LOCATION_RECIPE_YAML: &str = "schema_version: 1\nkind: recipe\nid: test.setup_location\nname: Setup Location\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs:\n  rom_source:\n    type: directory\n    role: source\n    label: ROM source\n    required: true\n  rom_destination:\n    type: setup_location_ref\n    role: destination\n    label: ROM destination\n    required: true\nartifacts: {}\nsteps:\n  - id: copy_roms\n    type: copy_files\n    name: Copy ROMs\n    user_toggleable: false\n    dependencies: []\n    constraints:\n      capabilities: []\n      conflicts_with: []\n    skip_if: []\n    params:\n      source: {ref: inputs.rom_source}\n      dest: {ref: inputs.rom_destination}\n      copy_policy: merge\n    verify: []\n";
+
+fn write_setup_location_recipe(root: &Path) -> PathBuf {
+    for directory in ["apps", "device_profiles", "device_plans"] {
+        std::fs::create_dir_all(root.join(directory)).expect("create catalog directory");
+    }
+    let recipes = root.join("recipes");
+    std::fs::create_dir_all(&recipes).expect("create recipe catalog");
+    let path = recipes.join("setup-location.yaml");
+    std::fs::write(&path, SETUP_LOCATION_RECIPE_YAML).expect("write Setup Location Recipe");
+    path
+}
+
+fn load_setup_location_recipe() -> Recipe {
+    crate::yaml::load_recipe_from_bytes(
+        SETUP_LOCATION_RECIPE_YAML.as_bytes(),
+        Path::new("recipes/setup-location.yaml"),
+    )
+    .expect("Setup Location Recipe fixture should parse")
+}
+
+#[test]
+fn copy_files_destination_contract_lists_setup_location_ref_without_changing_legacy_contract() {
+    let destination = &crate::step_specs::step_spec_for("copy_files")
+        .expect("copy_files StepSpec")
+        .params["dest"];
+
+    assert_eq!(
+        destination.accepted_sources,
+        ["literal", "input_ref", "app_target"]
+    );
+    assert_eq!(
+        destination.accepted_value_types,
+        ["device_path", "setup_location_ref"]
+    );
+}
+
+#[test]
+fn setup_location_ref_passes_shared_recipe_validation() {
+    let root = tempfile::tempdir().expect("temporary catalog");
+    let path = write_setup_location_recipe(root.path());
+    let validation = crate::validation::validate_recipe_path_result(&path, None);
+    assert_eq!(
+        validation["diagnostics"]
+            .as_array()
+            .expect("diagnostic list")
+            .iter()
+            .filter(|diagnostic| diagnostic["severity"] == "error")
+            .count(),
+        0,
+        "shared Recipe validation: {validation}"
+    );
+}
+
+#[test]
+fn setup_location_ref_passes_catalog_validation() {
+    let root = tempfile::tempdir().expect("temporary catalog");
+    let path = write_setup_location_recipe(root.path());
+    let (validated_paths, diagnostics) = crate::catalog::validate_authored_root(root.path());
+    assert!(
+        validated_paths.contains(&crate::yaml::resolved_path_string(&path)),
+        "valid Recipe should remain in catalog validation results: {validated_paths:?}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["severity"] == "error"),
+        "catalog diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn setup_location_ref_passes_recipe_validation_through_the_cli() {
+    let root = tempfile::tempdir().expect("temporary recipe root");
+    let path = write_setup_location_recipe(root.path());
+    let output = crate::cli::run(&[
+        "validate".to_string(),
+        "--authored-root".to_string(),
+        root.path().to_string_lossy().into_owned(),
+        path.to_string_lossy().into_owned(),
+    ]);
+
+    assert_eq!(output.exit_code, 0, "{}{}", output.stdout, output.stderr);
+    assert!(output.stdout.contains("Validation status: success"));
+}
+
+#[test]
+fn setup_location_ref_remains_rejected_for_unsupported_copy_parameters_and_input_shapes() {
+    for parameter in ["source", "copy_policy"] {
+        let mut recipe = load_setup_location_recipe();
+        recipe.steps[0].params.insert(
+            parameter.to_string(),
+            ParamValue::Ref("inputs.rom_destination".to_string()),
+        );
+        let errors = crate::planner::validate_recipe_static_contracts(&recipe);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.code == "invalid_param_value_type"),
+            "Setup Location must not become copy_files.{parameter}: {errors:?}"
+        );
+    }
+
+    let mut unsupported_operation = load_setup_location_recipe();
+    unsupported_operation.steps[0].type_name = "wait".to_string();
+    unsupported_operation.steps[0].params.clear();
+    unsupported_operation.steps[0].params.insert(
+        "duration_ms".to_string(),
+        ParamValue::Ref("inputs.rom_destination".to_string()),
+    );
+    let errors = crate::planner::validate_recipe_static_contracts(&unsupported_operation);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code == "invalid_param_source"),
+        "Setup Location must not become a wait input: {errors:?}"
+    );
+
+    let invalid_shapes = [
+        "    multiple: true\n",
+        "    default: location-roms\n",
+        "    options:\n      - value: location-roms\n        label: ROMs\n",
+    ];
+    for extra in invalid_shapes {
+        let yaml = SETUP_LOCATION_RECIPE_YAML.replace(
+            "    label: ROM destination\n    required: true\n",
+            &format!("    label: ROM destination\n    required: true\n{extra}"),
+        );
+        assert!(
+            crate::yaml::load_recipe_from_bytes(yaml.as_bytes(), Path::new("recipe.yaml")).is_err(),
+            "Setup Location input must reject {extra:?}"
+        );
+    }
+}
 
 #[test]
 fn setup_location_reference_is_a_single_string_input() {
@@ -36,6 +171,10 @@ fn setup_location_reference_is_a_single_string_input() {
 
     assert!(declaration.value_matches_type(&json!("loc-123")));
     assert!(!declaration.value_matches_type(&json!(["loc-123"])));
+    assert!(!declaration.value_matches_type(&json!(7)));
+    assert!(!declaration.value_matches_type(&json!(true)));
+    assert!(!declaration.value_matches_type(&json!({ "id": "loc-123" })));
+    assert!(!declaration.value_matches_type(&Value::Null));
 }
 
 #[test]

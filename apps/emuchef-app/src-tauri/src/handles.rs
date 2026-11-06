@@ -71,6 +71,40 @@ struct ParsedInventoryDevice {
     transport_id: Option<String>,
 }
 
+fn parse_inventory_devices(
+    inventory: &Value,
+    invalid_response_message: &str,
+) -> Result<Vec<ParsedInventoryDevice>, String> {
+    let raw = inventory
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_response_message.to_string())?;
+    raw.iter()
+        .map(|device| {
+            Ok(ParsedInventoryDevice {
+                serial: device
+                    .get("serial")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "ADB inventory device omitted its serial.".to_string())?
+                    .to_string(),
+                state: device
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| "ADB inventory device omitted its state.".to_string())?,
+                model: device
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                transport_id: device
+                    .get("transportId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub struct SessionHandles {
     devices_by_handle: HashMap<String, DeviceRecord>,
@@ -95,38 +129,10 @@ impl SessionHandles {
     }
 
     pub fn update_devices(&mut self, inventory: &Value) -> Result<Vec<DeviceDto>, String> {
-        let raw = inventory
-            .get("devices")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "ADB inventory response was invalid.".to_string())?;
         // Decode everything first. Callers treat a failed reconciliation as
         // "no inventory was committed", so retained authority must be
         // untouched whenever any entry is rejected.
-        let parsed = raw
-            .iter()
-            .map(|device| {
-                Ok(ParsedInventoryDevice {
-                    serial: device
-                        .get("serial")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "ADB inventory device omitted its serial.".to_string())?
-                        .to_string(),
-                    state: device
-                        .get("state")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "ADB inventory device omitted its state.".to_string())?
-                        .to_string(),
-                    model: device
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    transport_id: device
-                        .get("transportId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let parsed = parse_inventory_devices(inventory, "ADB inventory response was invalid.")?;
         let inventory_count = parsed.len();
         let cardinality_transition = self
             .last_inventory_count
@@ -232,6 +238,51 @@ impl SessionHandles {
     }
 
     /// Aggregate, serial-free device facts for troubleshooting projection.
+    /// Return the current device-session epochs this inventory would invalidate.
+    /// Tauri uses this before committing the snapshot so matching execution
+    /// leases can be revoked before the session transition becomes visible.
+    pub(crate) fn session_epochs_invalidated_by_inventory(
+        &self,
+        inventory: &Value,
+    ) -> Result<Vec<(String, u64)>, String> {
+        let parsed = parse_inventory_devices(inventory, "ADB inventory response is invalid.")?;
+        let cardinality_transition = self
+            .last_inventory_count
+            .is_some_and(|previous| previous > 1 || parsed.len() > 1);
+        let mut invalidated = HashSet::new();
+        if cardinality_transition {
+            invalidated.extend(self.session_epoch_by_handle.keys().cloned());
+            invalidated.extend(self.devices_by_handle.keys().cloned());
+        }
+        for (handle, previous) in &self.devices_by_handle {
+            let current = parsed
+                .iter()
+                .rev()
+                .find(|device| device.serial == previous.serial);
+            let continuity_lost = current.is_none_or(|device| {
+                !(previous.state == "available"
+                    && device.state == "available"
+                    && previous.model == device.model
+                    && previous.transport_id.is_some()
+                    && previous.transport_id == device.transport_id)
+            });
+            if continuity_lost {
+                invalidated.insert(handle.clone());
+            }
+        }
+        let mut sessions = invalidated
+            .into_iter()
+            .filter_map(|handle| {
+                self.session_epoch_by_handle
+                    .get(&handle)
+                    .copied()
+                    .map(|epoch| (handle, epoch))
+            })
+            .collect::<Vec<_>>();
+        sessions.sort();
+        Ok(sessions)
+    }
+
     pub fn support_summary(&self) -> Value {
         let available = self
             .devices_by_handle
@@ -638,6 +689,47 @@ mod tests {
         let serialized = serde_json::to_string(&first).unwrap();
         assert!(!serialized.contains("sensitive"));
         assert!(serialized.contains("1234"));
+    }
+
+    #[test]
+    fn inventory_preview_reports_invalidated_session_before_committing_it() {
+        let mut store = SessionHandles::default();
+        let initial = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-1"
+            }]
+        });
+        let handle = store.update_devices(&initial).unwrap()[0]
+            .device_handle
+            .clone();
+        let epoch = store.device_session_epoch(&handle).unwrap();
+
+        assert!(store
+            .session_epochs_invalidated_by_inventory(&initial)
+            .unwrap()
+            .is_empty());
+
+        let changed = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-2"
+            }]
+        });
+        assert_eq!(
+            store
+                .session_epochs_invalidated_by_inventory(&changed)
+                .unwrap(),
+            vec![(handle.clone(), epoch)]
+        );
+        assert_eq!(store.device_session_epoch(&handle), Some(epoch));
+
+        store.update_devices(&changed).unwrap();
+        assert!(store.device_session_epoch(&handle).unwrap() > epoch);
     }
 
     #[test]

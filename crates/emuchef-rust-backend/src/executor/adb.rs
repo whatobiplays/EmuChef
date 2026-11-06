@@ -1620,6 +1620,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                         .to_string(),
                 ));
             }
+            let (canonical_path, selected_identity) =
+                Self::copy_commit_helper_binding_arguments(destination_binding)?;
             let (action, relative_path, expected_source_sha256) = match mutation {
                 CopyCommitMutation::EnsureDirectory { relative_path } => {
                     ("ensure-dir", relative_path, None)
@@ -1642,7 +1644,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             let mut helper_arguments = vec![
                 helper_path.to_string(),
                 selected_root.to_string(),
-                destination_binding.to_string(),
+                canonical_path,
+                selected_identity,
                 stage_root.to_string(),
                 action.to_string(),
                 relative_path.to_string(),
@@ -1664,8 +1667,26 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
     }
 
-    /// Removes only the temporary helper executable after the selected-root
-    /// operation completes.
+    /// Extracts the canonical path and selected identity for separate helper arguments.
+    #[cfg(feature = "android-copy-commit-helper")]
+    fn copy_commit_helper_binding_arguments(
+        binding: &str,
+    ) -> Result<(String, String), AdbCommandError> {
+        let binding =
+            serde_json::from_str::<super::CopyCommitPathBinding>(binding).map_err(|_| {
+                AdbCommandError::Resolution(
+                    "selected-root helper requires structured path identity".to_string(),
+                )
+            })?;
+        if binding.parent_identity.is_empty() || binding.selected_identity.is_empty() {
+            return Err(AdbCommandError::Resolution(
+                "selected-root helper requires complete path identity".to_string(),
+            ));
+        }
+        Ok((binding.canonical_path, binding.selected_identity))
+    }
+
+    /// Removes the temporary helper executable after the selected-root operation completes.
     pub(crate) fn copy_commit_cleanup_mutation_helper(
         &mut self,
         helper_path: &str,
@@ -2347,6 +2368,29 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "android-copy-commit-helper")]
+    #[test]
+    fn helper_binding_fields_are_separate_and_preserve_pipe_in_canonical_path() {
+        let binding = serde_json::json!({
+            "canonicalPath": "/storage/ABCD-1234/ROM|collections",
+            "parentIdentity": "202:9",
+            "selectedIdentity": "202:10"
+        })
+        .to_string();
+        let arguments =
+            RealAdbDevice::<FakeAdbCommandExecutor>::copy_commit_helper_binding_arguments(&binding)
+                .expect("structured path binding should project to helper arguments");
+
+        assert_eq!(arguments.0, "/storage/ABCD-1234/ROM|collections");
+        assert_eq!(arguments.1, "202:10");
+        assert!(
+            RealAdbDevice::<FakeAdbCommandExecutor>::copy_commit_helper_binding_arguments(
+                "/storage/ABCD-1234|parent:202:9|selected:202:10"
+            )
+            .is_err()
+        );
+    }
 
     #[cfg(feature = "android-copy-commit-helper")]
     #[test]

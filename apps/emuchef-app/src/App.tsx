@@ -246,6 +246,17 @@ function unavailableSetupLocations(
   }));
 }
 
+function setupLocationEvidenceInvalid(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+  /(?:^|[^a-z0-9_])(stale_observation|stale_context|stale_device_session|volume_not_found|volume_not_selectable|unknown_device_handle)(?:$|[^a-z0-9_])/i.test(
+      message,
+    ) ||
+    message.includes("Storage options changed. Refresh and choose a volume again.") ||
+    message.includes("That Setup Location is no longer available.")
+  );
+}
+
 export function App({ dialogController: suppliedDialogController }: AppProps = {}) {
   const ownedDialogControllerRef = useRef<AppDialogController | null>(null);
   if (!ownedDialogControllerRef.current) {
@@ -281,7 +292,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [setupLocationProjectionState, setSetupLocationProjectionState] = useState<{
     contextKey: string;
     locations: SetupLocationProjection[];
-  }>({ contextKey: "", locations: [] });
+    listStatus: "loading" | "unavailable" | "ready";
+  }>({ contextKey: "", locations: [], listStatus: "loading" });
   const [setupLocationLoading, setSetupLocationLoading] = useState(false);
   const [setupLocationError, setSetupLocationError] = useState<string | null>(null);
   const deviceVolumesGenerationRef = useRef(0);
@@ -335,6 +347,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const setupLocations = setupLocationProjectionState.contextKey === setupLocationContextKey
     ? setupLocationProjectionState.locations
     : [];
+  const setupLocationListStatus = setupLocationProjectionState.contextKey === setupLocationContextKey
+    ? setupLocationProjectionState.listStatus
+    : "loading";
   const [touchedInputKeys, setTouchedInputKeys] = useState<Set<string>>(() => new Set());
   const [validationRequested, setValidationRequested] = useState(false);
   const [support, supportDispatch] = useReducer(supportReducer, initialSupportState);
@@ -1728,9 +1743,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const runtimeGeneration = runtimeGenerationRef.current;
     const current = workflowRef.current;
     if (current.deviceHandle !== deviceHandle || current.devicePlan !== devicePlan) return null;
-  setSetupLocationProjectionState((previous) => previous.contextKey === contextKey
-    ? { ...previous, locations: unavailableSetupLocations(previous.locations) }
-      : { contextKey, locations: [] });
+    setSetupLocationProjectionState((previous) => previous.contextKey === contextKey
+      ? {
+        ...previous,
+        locations: unavailableSetupLocations(previous.locations),
+        listStatus: "loading",
+      }
+      : { contextKey, locations: [], listStatus: "loading" });
     setSetupLocationLoading(true);
     if (!preserveCurrentError) setSetupLocationError(null);
     try {
@@ -1742,13 +1761,16 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         || active.deviceHandle !== deviceHandle
         || active.devicePlan !== devicePlan
       ) return null;
-      setSetupLocationProjectionState({ contextKey, locations });
+      setSetupLocationProjectionState({ contextKey, locations, listStatus: "ready" });
       return locations;
     } catch (error) {
       if (
         setupLocationGenerationRef.current === generation
         && runtimeGenerationRef.current === runtimeGeneration
       ) {
+        setSetupLocationProjectionState((previous) => previous.contextKey === contextKey
+          ? { ...previous, listStatus: "unavailable" }
+          : previous);
         if (preserveCurrentError) {
           setSetupLocationError((currentError) => currentError ?? errorMessage(error));
         } else {
@@ -1765,7 +1787,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const { deviceHandle, devicePlan } = workflow;
     if (!deviceHandle || !devicePlan) {
       setupLocationGenerationRef.current += 1;
-      setSetupLocationProjectionState({ contextKey: "", locations: [] });
+      setSetupLocationProjectionState({ contextKey: "", locations: [], listStatus: "loading" });
       setSetupLocationLoading(false);
       setSetupLocationError(null);
       return;
@@ -1783,6 +1805,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const loadDeviceVolumes = useCallback(async (
     deviceHandle: string,
     refresh: boolean,
+    preserveSetupLocationError = false,
   ): Promise<DeviceVolumesProjection | null> => {
     const generation = ++deviceVolumesGenerationRef.current;
     const runtimeGeneration = runtimeGenerationRef.current;
@@ -1801,7 +1824,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       setDeviceVolumesPhase("idle");
       const current = workflowRef.current;
       if (current.deviceHandle === deviceHandle && current.devicePlan) {
-        void loadSetupLocations(deviceHandle, current.devicePlan);
+        void loadSetupLocations(deviceHandle, current.devicePlan, preserveSetupLocationError);
       }
       return projection;
     } catch (error) {
@@ -1815,7 +1838,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         setDeviceVolumesPhase("failed");
         const active = workflowRef.current;
         if (active.deviceHandle === deviceHandle && active.devicePlan) {
-          void loadSetupLocations(deviceHandle, active.devicePlan);
+          void loadSetupLocations(deviceHandle, active.devicePlan, preserveSetupLocationError);
         }
       }
       return null;
@@ -1854,7 +1877,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const runtimeGeneration = runtimeGenerationRef.current;
     setSetupLocationProjectionState((previous) => previous.contextKey === contextKey
       ? previous
-      : { contextKey, locations: [] });
+      : { contextKey, locations: [], listStatus: "loading" });
     setSetupLocationLoading(true);
     setSetupLocationError(null);
     let mutationFailed = false;
@@ -1875,7 +1898,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         || active.deviceHandle !== deviceHandle
         || active.devicePlan !== devicePlan
       ) return false;
-      setSetupLocationProjectionState({ contextKey, locations });
+      setSetupLocationProjectionState({ contextKey, locations, listStatus: "ready" });
       return true;
     } catch (error) {
       if (
@@ -1884,6 +1907,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ) {
         mutationFailed = true;
         setSetupLocationError(errorMessage(error));
+        setSetupLocationProjectionState((previous) => previous.contextKey === contextKey
+          ? {
+            ...previous,
+            locations: unavailableSetupLocations(previous.locations),
+            listStatus: "loading",
+          }
+          : previous);
+        void loadDeviceVolumes(deviceHandle, true, true);
       }
       return false;
     } finally {
@@ -1895,7 +1926,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         void loadSetupLocations(pending.deviceHandle, pending.devicePlan, mutationFailed);
       }
     }
-  }, [deviceVolumes, loadSetupLocations, takePendingSetupLocationRefresh]);
+  }, [deviceVolumes, loadDeviceVolumes, loadSetupLocations, takePendingSetupLocationRefresh]);
 
   const removeSetupLocation = useCallback(async (id: string): Promise<void> => {
     const { deviceHandle, devicePlan } = workflowRef.current;
@@ -1922,14 +1953,27 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         && runtimeGenerationRef.current === runtimeGeneration
         && active.deviceHandle === deviceHandle
         && active.devicePlan === devicePlan
-      ) setSetupLocationProjectionState({ contextKey, locations });
+      ) setSetupLocationProjectionState({ contextKey, locations, listStatus: "ready" });
     } catch (error) {
+      const active = workflowRef.current;
       if (
         setupLocationGenerationRef.current === generation
         && runtimeGenerationRef.current === runtimeGeneration
+        && active.deviceHandle === deviceHandle
+        && active.devicePlan === devicePlan
       ) {
         mutationFailed = true;
         setSetupLocationError(errorMessage(error));
+        if (setupLocationEvidenceInvalid(error)) {
+          setSetupLocationProjectionState((previous) => previous.contextKey === contextKey
+            ? {
+              ...previous,
+              locations: unavailableSetupLocations(previous.locations),
+              listStatus: "loading",
+            }
+            : previous);
+          void loadDeviceVolumes(deviceHandle, true, true);
+        }
       }
     } finally {
       setupLocationMutationRef.current = false;
@@ -1940,7 +1984,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         void loadSetupLocations(pending.deviceHandle, pending.devicePlan, mutationFailed);
       }
     }
-  }, [loadSetupLocations, setupLocationProjectionState, takePendingSetupLocationRefresh]);
+  }, [loadDeviceVolumes, loadSetupLocations, setupLocationProjectionState, takePendingSetupLocationRefresh]);
 
   // Complete one explicit storage action. A device poll during the action
   // invalidated its response through the generation fence, so read the
@@ -2041,6 +2085,51 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (
         devicePollGenerationRef.current !== generation
         || runtimeGenerationRef.current !== runtimeGeneration
+      ) {
+        const workflowBeforeQualification = workflowRef.current;
+        const sameRuntime = runtimeGenerationRef.current === runtimeGeneration;
+        if (sameRuntime) discardDeviceVolumes();
+        if (!setupLocationMutationRef.current) {
+          setupLocationGenerationRef.current += 1;
+          const setupLocationContextKey = workflowBeforeQualification.deviceHandle
+            && workflowBeforeQualification.devicePlan
+            ? JSON.stringify([
+              workflowBeforeQualification.deviceHandle,
+              workflowBeforeQualification.devicePlan,
+            ])
+            : "";
+          setSetupLocationProjectionState((previous) => previous.contextKey === setupLocationContextKey
+            ? {
+              ...previous,
+              locations: unavailableSetupLocations(previous.locations),
+              listStatus: "unavailable",
+            }
+            : previous);
+          setSetupLocationLoading(false);
+          setSetupLocationError(null);
+        } else if (sameRuntime) {
+          setupLocationGenerationRef.current += 1;
+          const deviceHandle = workflowBeforeQualification.deviceHandle;
+          const devicePlan = workflowBeforeQualification.devicePlan;
+          if (deviceHandle && devicePlan) {
+            pendingSetupLocationRefreshRef.current = { deviceHandle, devicePlan };
+          }
+          const setupLocationContextKey = deviceHandle && devicePlan
+            ? JSON.stringify([deviceHandle, devicePlan])
+            : "";
+          setSetupLocationProjectionState((previous) => previous.contextKey === setupLocationContextKey
+            ? {
+              ...previous,
+              locations: unavailableSetupLocations(previous.locations),
+              listStatus: "loading",
+            }
+            : previous);
+        }
+        return null;
+      }
+      if (
+        devicePollGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
       ) return null;
     const workflowBeforeQualification = workflowRef.current;
     const selectedSetupDeviceRemainsAvailable = Boolean(
@@ -2060,7 +2149,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ])
       : "";
     setSetupLocationProjectionState((previous) => previous.contextKey === setupLocationContextKey
-      ? { ...previous, locations: unavailableSetupLocations(previous.locations) }
+      ? {
+        ...previous,
+        locations: unavailableSetupLocations(previous.locations),
+        listStatus: "loading",
+      }
       : previous);
     if (!setupLocationMutationRef.current) setSetupLocationLoading(false);
     setSetupLocationError(null);
@@ -2075,6 +2168,29 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         workflowBeforeQualification.deviceHandle,
         workflowBeforeQualification.devicePlan,
       );
+    }
+    const setupDevice = workflowRef.current.step === "setup"
+      && next.length === 1
+      && next[0].state === "available"
+      ? next[0].deviceHandle
+      : null;
+    if (setupDevice) {
+      setDeviceVolumes((current) => current
+        ? unavailableDeviceVolumes(setupDevice, current)
+        : current);
+      if (deviceVolumesActionRef.current === 0) {
+        deviceVolumesPendingRefreshRef.current = false;
+        void loadDeviceVolumes(setupDevice, false);
+      } else {
+        // The inventory commit invalidated the observation used by the
+        // in-flight storage action. Keep the projection unavailable until
+        // that action settles and the current session is read again.
+        deviceVolumesPendingRefreshRef.current = true;
+        setDeviceVolumesPhase("loading");
+      }
+    } else if (devicePollGenerationRef.current === generation) {
+      deviceVolumesPendingRefreshRef.current = false;
+      discardDeviceVolumes();
     }
       // The inventory request above is the authoritative commit in Rust:
       // transitions such as a second available device, a disappeared device,
@@ -2092,28 +2208,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ) return null;
       setDevices(next);
       setDeviceQualification(qualification);
-      const setupDevice = workflowRef.current.step === "setup"
-        && next.length === 1
-        && next[0].state === "available"
-        ? next[0].deviceHandle
-        : null;
-      if (setupDevice && deviceVolumesActionRef.current === 0) {
-        deviceVolumesPendingRefreshRef.current = false;
-        void loadDeviceVolumes(setupDevice, false);
-      } else if (setupDevice) {
-        // This poll invalidated the generation fence of the storage action
-        // that is still running, so the displayed projection can no longer be
-        // treated as current evidence for this session. Drop the choice and
-        // queue one read for after the action settles.
-        deviceVolumesPendingRefreshRef.current = true;
-        setDeviceVolumes((current) => current
-          ? unavailableDeviceVolumes(setupDevice, current)
-          : current);
-        setDeviceVolumesPhase("loading");
-      } else if (devicePollGenerationRef.current === generation) {
-        deviceVolumesPendingRefreshRef.current = false;
-        discardDeviceVolumes();
-      }
       rootCheckGenerationRef.current += 1;
       setRootCheckPhase("idle");
       const current = workflowRef.current;
@@ -3521,6 +3615,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 busy={busy || workflow.descriptionDirty}
                 description={workflow.description}
                 setupLocations={setupLocations}
+                setupLocationListStatus={setupLocationListStatus}
                 onBack={() => dispatch({ type: "back" })}
                 onBindingChange={updateBindingIntent}
                 onClearInput={(input) => clearBindingIntent(input.key)}

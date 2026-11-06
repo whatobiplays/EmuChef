@@ -27,6 +27,22 @@ fn fixture_path(relative: &str) -> String {
         .into_owned()
 }
 
+fn setup_location_copy_recipe() -> String {
+    let source = fs::read_to_string(fixture_path("recipes/phase6i_commands.yaml"))
+        .expect("copy recipe fixture should be readable");
+    let recipe = source
+        .replace("id: phase6i.commands", "id: test.setup_location_contract")
+        .replace("name: Phase 6I Commands", "name: Setup Location Contract")
+        .replace(
+            "inputs:\n  source_dir:",
+            "inputs:\n  destination:\n    type: setup_location_ref\n    role: destination\n    label: ROM destination\n    required: true\n  source_dir:",
+        )
+        .replace("dest: /sdcard/Input", "dest: {ref: inputs.destination}");
+    assert!(recipe.contains("type: setup_location_ref"));
+    assert!(recipe.contains("dest: {ref: inputs.destination}"));
+    recipe
+}
+
 fn minimal_plan_yaml() -> String {
     r#"schema_version: 1
 kind: execution_plan
@@ -258,6 +274,8 @@ fn preserves_one_shot_json_and_sidecar_dispatch() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "revokeSetupLocationLease",
+            "retireSetupLocationLeaseAttempt",
             "launchExecutionApp",
             "openRecipe",
             "openAppDefinition",
@@ -340,6 +358,35 @@ fn validate_recipe_path_matches_compatibility_summary_shape() {
         .stdout
         .contains("  - authored_data_invalid: Recipe top-level 'permissions' is no longer supported; author permissions under grant_permissions.params."));
     assert!(output.stdout.contains("    field: permissions"));
+}
+
+#[test]
+fn validate_recipe_accepts_setup_location_copy_destination() {
+    let authored_root = TempDir::new().expect("temporary authored root should be available");
+    let recipes_dir = authored_root.path().join("recipes");
+    fs::create_dir_all(&recipes_dir).expect("temporary recipe directory should be writable");
+    let path = recipes_dir.join("setup_location_contract.yaml");
+    fs::write(&path, setup_location_copy_recipe())
+        .expect("Setup Location Recipe should be writable");
+
+    let output = run_with_args_and_input(
+        &args(&[
+            "validate",
+            "--authored-root",
+            authored_root.path().to_str().unwrap(),
+            path.to_str().unwrap(),
+        ]),
+        "",
+    );
+
+    assert_eq!(
+        output.exit_code, 0,
+        "stdout: {}\nstderr: {}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(output.stderr, "");
+    assert!(output.stdout.contains("Validation status: success"));
+    assert!(output.stdout.contains(path.to_str().unwrap()));
 }
 
 #[test]

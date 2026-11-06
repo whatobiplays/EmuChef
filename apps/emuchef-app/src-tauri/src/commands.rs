@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
+use emuchef_rust_backend::storage_targets::SetupLocationExecutionLease;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
@@ -143,6 +144,69 @@ pub(crate) fn reconcile_inventory_snapshot_with_state_and_hook<F>(
 where
     F: FnOnce(),
 {
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    let result = reconcile_inventory_snapshot_with_execution_store_and_hook(
+        state,
+        inventory,
+        runtime_generation,
+        platform_tools_revision,
+        &mut executions,
+        after_product_commit,
+    );
+    let runtime_lost = result
+        .as_ref()
+        .is_err_and(|error| crate::execution::runtime_session_lost(state, error));
+    drop(executions);
+    if runtime_lost {
+        let _ = crate::execution::invalidate_lost_runtime_authority(state);
+        return Err(crate::execution::runtime_session_lost_error());
+    }
+    result
+}
+
+/// Reconcile an inventory while the caller owns the execution store. The
+/// execution-store-before-transition-gate order keeps lease revocation
+/// serialized with execution admission and session invalidation.
+pub(crate) fn reconcile_inventory_snapshot_with_execution_store_and_hook<F>(
+    state: &AppState,
+    inventory: &Value,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    executions: &mut crate::execution::ExecutionHandleStore,
+    after_product_commit: F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnOnce(),
+{
+    reconcile_inventory_snapshot_with_execution_store_and_revoker(
+        state,
+        inventory,
+        runtime_generation,
+        platform_tools_revision,
+        executions,
+        |lease| crate::execution::revoke_setup_location_lease(state, lease),
+        after_product_commit,
+    )
+}
+
+fn reconcile_inventory_snapshot_with_execution_store_and_revoker<F, R>(
+    state: &AppState,
+    inventory: &Value,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    executions: &mut crate::execution::ExecutionHandleStore,
+    mut revoke_lease: R,
+    after_product_commit: F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnOnce(),
+    R: FnMut(&SetupLocationExecutionLease) -> Result<(), String>,
+{
     let transition = qualification_transition_lock(state);
     let current_platform_tools_revision = state
         .adb
@@ -159,6 +223,29 @@ where
             "platform_tools_revision_stale",
             "Device status changed. Refresh device discovery before continuing.",
         ));
+    }
+    let invalidated_sessions = state
+        .handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+        .session_epochs_invalidated_by_inventory(inventory)?;
+    if let Some(lease) = executions.setup_location_lease() {
+        let session_will_change = invalidated_sessions.iter().any(|(device_handle, epoch)| {
+            lease.device_handle == *device_handle && lease.session_epoch == *epoch
+        });
+        if session_will_change {
+            if let Err(error) = revoke_lease(&lease) {
+                transition.release_and_retry_best_effort();
+                return Err(error);
+            }
+            if !executions.clear_setup_location_lease_after_revocation(&lease) {
+                transition.release_and_retry_best_effort();
+                return Err(safe_error(
+                    "setup_location_lease_state_changed",
+                    "Setup Location execution authority changed during device refresh.",
+                ));
+            }
+        }
     }
     let result = reconcile_inventory_with_context(
         &state.handles,
@@ -552,30 +639,38 @@ pub fn restart_runtime(
     expected_generation: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    if expected_generation.is_some_and(|expected| expected != state.sidecar.generation()) {
-        return Err(safe_error(
-            "runtime_generation_stale",
-            "App service status changed. Review troubleshooting status before retrying.",
-        ));
-    }
-    if state
-        .executions
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .has_in_flight()
-    {
-        return Err(safe_error(
-            "execution_active",
-            "The app service cannot restart while an execution is starting or active.",
-        ));
-    }
-    state.sidecar.initialize();
-    reset_app_session(&state, false)?;
+    restart_runtime_with_initializer(&state, expected_generation, |_| state.sidecar.initialize())
+}
+
+/// Revoke retained Setup Location leases before starting a new sidecar generation.
+///
+/// The current runtime owns the lease registry, so reset must finish before
+/// initialization replaces that runtime.
+fn restart_runtime_with_initializer(
+    state: &AppState,
+    expected_generation: Option<u64>,
+    initialize: impl FnOnce(&ExecutionHandleStore),
+) -> Result<Value, String> {
+    reset_app_session_with_hooks(
+        state,
+        false,
+        |executions| {
+            if expected_generation.is_some_and(|expected| expected != state.sidecar.generation()) {
+                return Err(safe_error(
+                    "runtime_generation_stale",
+                    "App service status changed. Review troubleshooting status before retrying.",
+                ));
+            }
+            if executions.has_in_flight() {
+                return Err(safe_error(
+                    "execution_active",
+                    "The app service cannot restart while an execution is starting or active.",
+                ));
+            }
+            Ok(())
+        },
+        |executions| initialize(executions),
+    )?;
     Ok(public_runtime_status(state.sidecar.status()))
 }
 
@@ -613,6 +708,27 @@ fn reset_app_session_with_hook<F>(
 where
     F: FnOnce(),
 {
+    reset_app_session_with_hooks(
+        state,
+        close_documents,
+        |_| {
+            after_execution_lock();
+            Ok(())
+        },
+        |_| {},
+    )
+}
+
+fn reset_app_session_with_hooks<BeforeTransition, AfterReset>(
+    state: &AppState,
+    close_documents: bool,
+    before_transition: BeforeTransition,
+    after_reset: AfterReset,
+) -> Result<(), String>
+where
+    BeforeTransition: FnOnce(&ExecutionHandleStore) -> Result<(), String>,
+    AfterReset: FnOnce(&ExecutionHandleStore),
+{
     // Real execution start holds this store while reserving, admitting, and
     // retaining product authority. Acquire it before the transition gate so a
     // reset cannot interleave with an admission commit or reverse lock order.
@@ -622,8 +738,16 @@ where
             "Execution state is unavailable.",
         )
     })?;
-    after_execution_lock();
+    before_transition(&executions)?;
     let transition = qualification_transition_lock(state);
+
+    // The reset invalidates every device session. Revoke before advancing any
+    // session epoch so the backend acknowledges that no stale worker can keep
+    // mutating a Setup Location before this transition commits. A failed or
+    // malformed acknowledgement leaves the reset uncommitted.
+    if let Some(lease) = executions.setup_location_lease() {
+        crate::execution::revoke_setup_location_lease(state, &lease)?;
+    }
 
     state
         .root_qualification
@@ -680,6 +804,7 @@ where
         .lock()
         .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
         .invalidate();
+    after_reset(&executions);
     drop(transition);
     drop(executions);
 
@@ -913,7 +1038,7 @@ where
     // execution-store-before-transition-gate boundary with removal and
     // real-execution start. An execution that is starting or active rejects the
     // replacement before anything becomes authoritative.
-    let executions = state.executions.lock().map_err(|_| {
+    let mut executions = state.executions.lock().map_err(|_| {
         safe_error(
             "execution_state_unavailable",
             "Execution state is unavailable.",
@@ -925,6 +1050,18 @@ where
             "execution_active",
             "Platform-Tools cannot be replaced while an execution is starting or active.",
         ));
+    }
+    // Revoke Setup Location authority before publishing replacement
+    // Platform-Tools. If the backend cannot confirm revocation, keep the
+    // active runtime and device-session state intact.
+    if let Some(lease) = executions.setup_location_lease() {
+        crate::execution::revoke_setup_location_lease(state, &lease)?;
+        if !executions.clear_setup_location_lease_after_revocation(&lease) {
+            return Err(safe_error(
+                "setup_location_lease_state_changed",
+                "Setup Location execution authority changed during Platform-Tools replacement.",
+            ));
+        }
     }
     let activated = {
         let mut adb = state.adb.lock().map_err(|_| {
@@ -1513,11 +1650,6 @@ pub fn describe_configuration(
         recovery.required_reentry()
     };
     let mut public = public_configuration_description(&result, &exact_serial);
-    public["setupLocations"] = serde_json::to_value(
-        crate::device_storage::list_setup_locations(state, &device_handle, &device_plan)
-            .unwrap_or_default(),
-    )
-    .unwrap_or_else(|_| json!([]));
     add_recovery_reentry_diagnostics(&mut public, &required_reentry, &binding_keys);
     Ok(public)
 }
@@ -1620,7 +1752,7 @@ where
             "Re-enter the omitted sensitive configuration values before creating a new review.",
         ));
     }
-    let mut payload = configuration_payload(
+    let payload = configuration_payload(
         state,
         &device_handle,
         &device_plan,
@@ -3375,6 +3507,363 @@ mod tests {
             .is_empty());
     }
 
+    fn test_setup_location_lease(
+        device_handle: &str,
+        session_epoch: u64,
+    ) -> SetupLocationExecutionLease {
+        SetupLocationExecutionLease {
+            attempt_sequence: 1,
+            device_handle: device_handle.to_string(),
+            session_epoch,
+            runtime_generation: 1,
+            plan_id: "plan-test".to_string(),
+            plan_digest: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn runtime_restart_revokes_retained_setup_lease_before_initializing_next_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = reset_test_state(temp.path());
+        let runtime_root = temp.path().join("sidecar-runtime");
+        let cache_root = temp.path().join("sidecar-cache");
+        state.sidecar = SidecarState::with_test_backend(
+            cache_root.clone(),
+            emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                runtime_root,
+                cache_root,
+                adb_path: "unused-test-adb".to_string(),
+            },
+        );
+        let lease = test_setup_location_lease("restart-retained-lease-device", 1);
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(lease.clone());
+        {
+            let executions = state.executions.lock().unwrap();
+            assert!(!executions.has_in_flight());
+            assert_eq!(executions.setup_location_lease(), Some(lease));
+        }
+
+        let mut initialized = false;
+        let result = restart_runtime_with_initializer(&state, Some(1), |executions| {
+            assert_eq!(executions.setup_location_lease(), None);
+            assert_eq!(state.sidecar.generation(), 1);
+            assert!(matches!(
+                state.executions.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            assert!(matches!(
+                state.qualification_transition_gate.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            initialized = true;
+        });
+
+        assert!(
+            result.is_ok(),
+            "restart should revoke on the old runtime: {result:?}"
+        );
+        assert!(
+            initialized,
+            "the next runtime should initialize after revocation"
+        );
+    }
+
+    #[test]
+    fn runtime_restart_does_not_initialize_after_old_generation_revocation_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = reset_test_state(temp.path());
+        let runtime_root = temp.path().join("sidecar-runtime");
+        let cache_root = temp.path().join("sidecar-cache");
+        state.sidecar = SidecarState::with_test_backend(
+            cache_root.clone(),
+            emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                runtime_root,
+                cache_root,
+                adb_path: "unused-test-adb".to_string(),
+            },
+        );
+        let mut lease = test_setup_location_lease("restart-revocation-failure-device", 1);
+        lease.runtime_generation = 2;
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(lease.clone());
+
+        let mut initialized = false;
+        let result = restart_runtime_with_initializer(&state, Some(1), |_| initialized = true);
+
+        assert!(result.is_err());
+        assert!(
+            !initialized,
+            "a failed old-generation revoke must block restart"
+        );
+        assert_eq!(
+            state.executions.lock().unwrap().setup_location_lease(),
+            Some(lease)
+        );
+    }
+
+    #[test]
+    fn invalidating_inventory_revokes_setup_lease_before_session_epoch_advances() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let initial = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-1"
+            }]
+        });
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles.update_devices(&initial).unwrap();
+            handles.qualification_devices()[0].handle.clone()
+        };
+        let epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .unwrap();
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(test_setup_location_lease(&device_handle, epoch));
+
+        let revision = state.adb.lock().unwrap().revision();
+        let unchanged_revocations = std::sync::atomic::AtomicUsize::new(0);
+        let mut executions = state.executions.lock().unwrap();
+        reconcile_inventory_snapshot_with_execution_store_and_revoker(
+            &state,
+            &initial,
+            1,
+            revision,
+            &mut executions,
+            |_| {
+                unchanged_revocations.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(unchanged_revocations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .device_session_epoch(&device_handle),
+            Some(epoch)
+        );
+
+        let changed = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-2"
+            }]
+        });
+        let revocation_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_count = std::sync::Arc::clone(&revocation_count);
+        let after_commit_count = std::sync::Arc::clone(&revocation_count);
+        let expected_device_handle = device_handle.clone();
+        let handles_for_revocation = &state.handles;
+        reconcile_inventory_snapshot_with_execution_store_and_revoker(
+            &state,
+            &changed,
+            1,
+            revision,
+            &mut executions,
+            move |lease| {
+                assert_eq!(lease.device_handle, expected_device_handle);
+                assert_eq!(lease.session_epoch, epoch);
+                assert_eq!(
+                    handles_for_revocation
+                        .lock()
+                        .unwrap()
+                        .device_session_epoch(&lease.device_handle),
+                    Some(epoch),
+                    "revocation must precede session-epoch advancement"
+                );
+                callback_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move || {
+                assert_eq!(after_commit_count.load(Ordering::SeqCst), 1);
+            },
+        )
+        .unwrap();
+        assert!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .device_session_epoch(&device_handle)
+                .unwrap()
+                > epoch
+        );
+        assert_eq!(executions.setup_location_lease(), None);
+    }
+
+    #[test]
+    fn cardinality_transition_revokes_lease_for_unchanged_device_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let initial = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-1"
+            }]
+        });
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles.update_devices(&initial).unwrap();
+            handles.qualification_devices()[0].handle.clone()
+        };
+        let epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .unwrap();
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(test_setup_location_lease(&device_handle, epoch));
+
+        let changed = json!({
+            "devices": [
+                {
+                    "serial": "private-device",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-1"
+                },
+                {
+                    "serial": "another-device",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-2"
+                }
+            ]
+        });
+        let revision = state.adb.lock().unwrap().revision();
+        let mut executions = state.executions.lock().unwrap();
+        let revocations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_revocations = std::sync::Arc::clone(&revocations);
+        let committed_revocations = std::sync::Arc::clone(&revocations);
+        let expected_device_handle = device_handle.clone();
+        let handles_for_revocation = &state.handles;
+
+        reconcile_inventory_snapshot_with_execution_store_and_revoker(
+            &state,
+            &changed,
+            1,
+            revision,
+            &mut executions,
+            move |lease| {
+                assert_eq!(lease.device_handle, expected_device_handle);
+                assert_eq!(lease.session_epoch, epoch);
+                let handles = handles_for_revocation.lock().unwrap();
+                let device = handles.device(&lease.device_handle).unwrap();
+                assert_eq!(device.serial, "private-device");
+                assert_eq!(device.model.as_deref(), Some("Pocket"));
+                assert_eq!(device.transport_id.as_deref(), Some("transport-1"));
+                assert_eq!(device.session_epoch, epoch);
+                callback_revocations.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move || {
+                assert_eq!(committed_revocations.load(Ordering::SeqCst), 1);
+            },
+        )
+        .unwrap();
+
+        let handles = state.handles.lock().unwrap();
+        let device = handles.device(&device_handle).unwrap();
+        assert_eq!(device.serial, "private-device");
+        assert_eq!(device.model.as_deref(), Some("Pocket"));
+        assert_eq!(device.transport_id.as_deref(), Some("transport-1"));
+        assert!(device.session_epoch > epoch);
+        assert_eq!(executions.setup_location_lease(), None);
+    }
+
+    #[test]
+    fn failed_setup_lease_revocation_leaves_inventory_and_session_epoch_uncommitted() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let initial = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-1"
+            }]
+        });
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles.update_devices(&initial).unwrap();
+            handles.qualification_devices()[0].handle.clone()
+        };
+        let epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .unwrap();
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(test_setup_location_lease(&device_handle, epoch));
+        let changed = json!({
+            "devices": [{
+                "serial": "private-device",
+                "state": "available",
+                "model": "Pocket",
+                "transportId": "transport-2"
+            }]
+        });
+        let revision = state.adb.lock().unwrap().revision();
+        let mut executions = state.executions.lock().unwrap();
+
+        let error = reconcile_inventory_snapshot_with_execution_store_and_revoker(
+            &state,
+            &changed,
+            1,
+            revision,
+            &mut executions,
+            |_| Err("revocation unavailable".to_string()),
+            || panic!("uncommitted inventory must not be reported"),
+        )
+        .expect_err("inventory must fail closed when revocation cannot be confirmed");
+
+        assert_eq!(error, "revocation unavailable");
+        assert_eq!(
+            executions.setup_location_lease(),
+            Some(test_setup_location_lease(&device_handle, epoch))
+        );
+        assert_eq!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .device_session_epoch(&device_handle),
+            Some(epoch)
+        );
+    }
+
     #[test]
     fn accepted_termination_marker_removal_waits_for_qualification_transitions() {
         let temp = tempfile::tempdir().unwrap();
@@ -3477,6 +3966,141 @@ mod tests {
             .unwrap()
             .device(&device_handle)
             .is_err());
+    }
+
+    #[test]
+    fn session_reset_does_not_commit_when_setup_lease_revocation_is_unconfirmed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "reset-revocation-device",
+                        "state": "available",
+                        "transportId": "reset-revocation-transport"
+                    }]
+                }))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        let epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .unwrap();
+        let lease = test_setup_location_lease(&device_handle, epoch);
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(lease.clone());
+
+        let error = reset_app_session(&state, false)
+            .expect_err("reset cannot commit without confirmed lease revocation");
+
+        assert!(error.contains("runtime_session_lost"), "error was {error}");
+        assert!(state.sidecar.runtime_session_was_lost());
+        assert!(state.handles.lock().unwrap().device(&device_handle).is_ok());
+        assert_eq!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .device_session_epoch(&device_handle),
+            Some(epoch)
+        );
+        assert_eq!(
+            state.executions.lock().unwrap().setup_location_lease(),
+            Some(lease)
+        );
+    }
+
+    #[test]
+    fn platform_tools_replacement_does_not_activate_when_setup_lease_revocation_is_unconfirmed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let lease = test_setup_location_lease("platform-tools-revocation-device", 1);
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(lease.clone());
+        let (prepared, original_revision) = {
+            let adb = state.adb.lock().unwrap();
+            (
+                crate::adb::test_support::prepare_platform_tools_install(&adb),
+                adb.revision(),
+            )
+        };
+        let hook_called = std::sync::atomic::AtomicBool::new(false);
+
+        let error = finish_platform_tools_import_with_hook(&state, prepared, || {
+            hook_called.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect_err("replacement cannot activate before lease revocation is confirmed");
+
+        assert!(error.contains("runtime_session_lost"), "error was {error}");
+        assert_eq!(state.adb.lock().unwrap().revision(), original_revision);
+        assert!(!hook_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            state.executions.lock().unwrap().setup_location_lease(),
+            Some(lease)
+        );
+    }
+
+    #[test]
+    fn runtime_loss_does_not_advance_device_epoch_when_sidecar_cleanup_is_uncertain() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let device_handle = {
+            let mut handles = state.handles.lock().unwrap();
+            handles
+                .update_devices(&json!({
+                    "devices": [{
+                        "serial": "uncertain-cleanup-device",
+                        "state": "available",
+                        "transportId": "uncertain-cleanup-transport"
+                    }]
+                }))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        let epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .unwrap();
+        let lease = test_setup_location_lease(&device_handle, epoch);
+        state
+            .executions
+            .lock()
+            .unwrap()
+            .set_test_setup_location_lease(lease.clone());
+        state
+            .sidecar
+            .set_test_runtime_session_lost_with_uncertain_cleanup();
+
+        let error = crate::execution::invalidate_lost_runtime_authority(&state)
+            .expect_err("runtime loss cannot commit while process cleanup is uncertain");
+
+        assert!(error.contains("runtime_session_lost"), "error was {error}");
+        assert!(state.handles.lock().unwrap().device(&device_handle).is_ok());
+        assert_eq!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .device_session_epoch(&device_handle),
+            Some(epoch)
+        );
+        assert_eq!(
+            state.executions.lock().unwrap().setup_location_lease(),
+            Some(lease)
+        );
     }
 
     #[test]

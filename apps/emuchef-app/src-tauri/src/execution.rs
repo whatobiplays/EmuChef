@@ -34,6 +34,7 @@ use crate::device_qualification::{
 };
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::sidecar::SidecarState;
+use emuchef_rust_backend::storage_targets::SetupLocationExecutionLease;
 
 const ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER: &str =
     "Root authority could not be confirmed after earlier device changes may have occurred.";
@@ -112,7 +113,9 @@ fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
 /// drops the older handle permanently.
 #[derive(Default)]
 pub struct ExecutionHandleStore {
+    next_setup_location_attempt_sequence: u64,
     start_reserved: Option<ExecutionKind>,
+    pending_setup_location_lease: Option<SetupLocationExecutionLease>,
     active: Option<ExecutionMapping>,
     latest_terminal: Option<ExecutionMapping>,
     latest_terminal_report: Option<StoredExecutionReport>,
@@ -140,7 +143,56 @@ impl ExecutionHandleStore {
     }
 
     pub fn reset(&mut self) {
+        let next_setup_location_attempt_sequence = self.next_setup_location_attempt_sequence;
         *self = Self::default();
+        self.next_setup_location_attempt_sequence = next_setup_location_attempt_sequence;
+    }
+
+    fn issue_setup_location_attempt_sequence(&mut self) -> Result<u64, String> {
+        self.next_setup_location_attempt_sequence = self
+            .next_setup_location_attempt_sequence
+            .checked_add(1)
+            .ok_or_else(|| {
+                safe_error(
+                    "setup_location_session_unavailable",
+                    "Current Setup Location execution authority is unavailable.",
+                )
+            })?;
+        Ok(self.next_setup_location_attempt_sequence)
+    }
+
+    pub(crate) fn setup_location_lease(&self) -> Option<SetupLocationExecutionLease> {
+        self.pending_setup_location_lease.clone()
+    }
+
+    pub(crate) fn clear_setup_location_lease_after_revocation(
+        &mut self,
+        lease: &SetupLocationExecutionLease,
+    ) -> bool {
+        if self.pending_setup_location_lease.as_ref() != Some(lease) {
+            return false;
+        }
+        self.pending_setup_location_lease = None;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_setup_location_lease(&mut self, lease: SetupLocationExecutionLease) {
+        self.pending_setup_location_lease = Some(lease);
+    }
+
+    fn set_pending_setup_location_lease(
+        &mut self,
+        lease: Option<SetupLocationExecutionLease>,
+    ) -> Result<(), String> {
+        if self.start_reserved != Some(ExecutionKind::Real) {
+            return Err(safe_error(
+                "execution_state_unavailable",
+                "Real-device execution state unavailable.",
+            ));
+        }
+        self.pending_setup_location_lease = lease;
+        Ok(())
     }
 
     /// Return aggregate-only execution retention state for support diagnostics.
@@ -191,7 +243,10 @@ impl ExecutionHandleStore {
     }
 
     fn reserve_start(&mut self, kind: ExecutionKind) -> Result<(), ()> {
-        if self.start_reserved.is_some() || self.active.is_some() {
+        if self.start_reserved.is_some()
+            || self.active.is_some()
+            || self.pending_setup_location_lease.is_some()
+        {
             return Err(());
         }
         self.start_reserved = Some(kind);
@@ -199,7 +254,13 @@ impl ExecutionHandleStore {
     }
 
     fn release_start(&mut self) {
+        if self.active.is_none() && self.pending_setup_location_lease.is_some() {
+            return;
+        }
         self.start_reserved = None;
+        if self.active.is_none() {
+            self.pending_setup_location_lease = None;
+        }
     }
 
     /// Place the store directly into one of the two in-flight states so
@@ -309,6 +370,9 @@ impl ExecutionHandleStore {
             .as_ref()
             .is_some_and(|mapping| mapping.kind == kind && mapping.public_handle == public_handle)
         {
+            let retain_setup_location_lease = report
+                .as_ref()
+                .is_some_and(|stored| report_has_uncertain_copy_commit_outcome(&stored.report));
             if let Some(previous) = self.latest_terminal.as_ref() {
                 let previous_handle = previous.public_handle.clone();
                 self.discard_launch_actions_for_execution(&previous_handle);
@@ -316,6 +380,9 @@ impl ExecutionHandleStore {
             }
             self.latest_terminal = self.active.take();
             self.latest_terminal_report = report;
+            if !retain_setup_location_lease {
+                self.pending_setup_location_lease = None;
+            }
             return true;
         }
         false
@@ -447,6 +514,7 @@ impl ExecutionHandleStore {
 
     fn mark_lost(&mut self, public_handle: &str, mapping: Option<ExecutionMapping>) {
         self.forget_mapping(ExecutionKind::Real, public_handle);
+        self.pending_setup_location_lease = None;
         self.latest_lost = Some((public_handle.to_string(), mapping));
     }
 
@@ -533,7 +601,9 @@ impl ExecutionHandleStore {
         {
             self.discard_launch_actions_for_execution(public_handle);
             self.successful_launches.remove(public_handle);
-            return self.active.take();
+            let mapping = self.active.take();
+            self.pending_setup_location_lease = None;
+            return mapping;
         }
         if self
             .latest_terminal
@@ -621,19 +691,38 @@ fn list_and_reconcile_preflight_inventory<R>(
     state: &AppState,
     runtime: &R,
     platform_tools: &crate::commands::AdbRuntimeSnapshot,
+    execution_store: Option<&mut ExecutionHandleStore>,
 ) -> Result<Vec<DeviceDto>, PreflightInventoryFailure>
 where
     R: RuntimeRequester,
 {
     let snapshot = request_preflight_inventory(state, runtime, platform_tools)?;
-    crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
-        state,
-        &snapshot.inventory,
-        snapshot.runtime_generation,
-        snapshot.platform_tools.revision,
-        || {},
-    )
-    .map_err(|_| PreflightInventoryFailure::ProductUnavailable)
+    let result = match execution_store {
+        Some(executions) => {
+            crate::commands::reconcile_inventory_snapshot_with_execution_store_and_hook(
+                state,
+                &snapshot.inventory,
+                snapshot.runtime_generation,
+                snapshot.platform_tools.revision,
+                executions,
+                || {},
+            )
+        }
+        None => crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+            state,
+            &snapshot.inventory,
+            snapshot.runtime_generation,
+            snapshot.platform_tools.revision,
+            || {},
+        ),
+    };
+    result.map_err(|error| {
+        if runtime_session_lost(state, &error) {
+            PreflightInventoryFailure::Runtime(error)
+        } else {
+            PreflightInventoryFailure::ProductUnavailable
+        }
+    })
 }
 
 #[tauri::command]
@@ -696,8 +785,9 @@ fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
 
     validate_review_executable(&review)?;
     let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
-    let _devices = list_and_reconcile_preflight_inventory(state, runtime, &platform_tools)
-        .map_err(|failure| match failure {
+    let _devices =
+        list_and_reconcile_preflight_inventory(state, runtime, &platform_tools, Some(executions))
+            .map_err(|failure| match failure {
             PreflightInventoryFailure::ProductUnavailable => {
                 stale_review("The reviewed device inventory changed.")
             }
@@ -1441,14 +1531,21 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         )
     })?;
     if let Some(state) = qualification_state {
-        crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
+        crate::commands::reconcile_inventory_snapshot_with_execution_store_and_hook(
             state,
             &inventory,
             platform_tools.runtime_generation,
             platform_tools.platform_tools_revision,
+            executions,
             || {},
         )
-        .map_err(|_| device_disconnected())?;
+        .map_err(|error| {
+            if runtime_session_lost(state, &error) {
+                resolve_proven_runtime_session_loss(state, executions)
+            } else {
+                device_disconnected()
+            }
+        })?;
     } else {
         crate::device_qualification::reconcile_inventory_with_context(
             handles,
@@ -1738,7 +1835,58 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         qualification_result?;
     }
 
-    let start_result = match request_real_start(runtime, &refreshed_review) {
+    let setup_location_attempt_sequence = executions.issue_setup_location_attempt_sequence()?;
+    let setup_location_lease = setup_location_lease_for_review(
+        &refreshed_review,
+        session_epoch,
+        platform_tools.runtime_generation,
+        setup_location_attempt_sequence,
+    )?;
+    let start_response = if let Some(lease) = setup_location_lease.as_ref() {
+        let transition = qualification_state.map(crate::commands::qualification_transition_lock);
+        let current = handles
+            .lock()
+            .map_err(|_| session_error())?
+            .device(&refreshed_review.device_handle)
+            .is_ok_and(|device| {
+                device.state == "available"
+                    && device.serial == serial
+                    && device.session_epoch == session_epoch
+                    && device.facts_session_epoch == Some(session_epoch)
+            });
+        if !current {
+            if let Some(transition) = transition {
+                transition.release_and_retry_best_effort();
+            }
+            return Err(device_disconnected());
+        }
+        executions.set_pending_setup_location_lease(Some(lease.clone()))?;
+        let mut response = request_real_start(runtime, &refreshed_review, Some(lease));
+        if response.is_err() {
+            let revocation = qualification_state
+                .map(|state| retire_setup_location_lease_attempt(state, &lease))
+                .unwrap_or_else(|| Err(runtime_session_lost_error()));
+            if let Err(error) = revocation {
+                // The start response may have been lost after the worker began.
+                // Keep both the lease and start reservation until revocation is
+                // acknowledged, so later work cannot replace its authority.
+                response = Err(error);
+            } else {
+                if executions.clear_setup_location_lease_after_revocation(&lease) {
+                    executions.release_start();
+                } else {
+                    response = Err(runtime_session_lost_error());
+                }
+            }
+        }
+        if let Some(transition) = transition {
+            transition.release_and_retry_best_effort();
+        }
+        response
+    } else {
+        request_real_start(runtime, &refreshed_review, None)
+    };
+    let start_result = match start_response {
         Ok(public) => public,
         Err(error) => {
             return Err(resolve_runtime_request_failure(
@@ -1759,6 +1907,9 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     // qualification-specific, so it holds for every caller.
     if real_start_execution_identity(&start_result).is_none() {
         let Some(state) = qualification_state else {
+            if executions.setup_location_lease().is_some() {
+                return Err(runtime_session_lost_error());
+            }
             executions.reset();
             return Err(runtime_session_lost_error());
         };
@@ -1832,20 +1983,89 @@ fn resolve_proven_runtime_session_loss(
 fn request_real_start(
     runtime: &impl RuntimeRequester,
     review: &ReviewedPlanSnapshot,
+    setup_location_lease: Option<&SetupLocationExecutionLease>,
 ) -> Result<Value, String> {
     // The raw runtime error is preserved so the start seam can distinguish a
     // lost runtime session from an ordinary start rejection before the error is
     // sanitized for the frontend.
-    runtime_request(
-        runtime,
-        "startExecution",
-        json!({
-            "plan": review.response.get("plan"),
-            "planDigest": review.plan_digest,
-            "mode": "real",
-            "targetDevice": review.target,
-        }),
-    )
+    let mut payload = json!({
+        "plan": review.response.get("plan"),
+        "planDigest": review.plan_digest,
+        "mode": "real",
+        "targetDevice": review.target,
+    });
+    if let Some(lease) = setup_location_lease {
+        payload["setupLocationLease"] =
+            serde_json::to_value(lease).map_err(|_| runtime_session_lost_error())?;
+    }
+    runtime_request(runtime, "startExecution", payload)
+}
+
+fn setup_location_lease_for_review(
+    review: &ReviewedPlanSnapshot,
+    session_epoch: u64,
+    runtime_generation: u64,
+    attempt_sequence: u64,
+) -> Result<Option<SetupLocationExecutionLease>, String> {
+    let plan = review
+        .response
+        .get("plan")
+        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
+    let snapshots = plan
+        .get("copyCommitSnapshots")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let bindings = snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.get("setupLocationBinding"))
+        .collect::<Vec<_>>();
+    if bindings.is_empty() {
+        return Ok(None);
+    }
+    if bindings
+        .iter()
+        .any(|binding| binding.get("sessionEpoch").and_then(Value::as_u64) != Some(session_epoch))
+    {
+        return Err(safe_error(
+            "setup_location_session_stale",
+            "The reviewed Setup Location belongs to an earlier device session. Review the plan again.",
+        ));
+    }
+    let qualification = review.qualification_context.as_ref().ok_or_else(|| {
+        safe_error(
+            "setup_location_session_unavailable",
+            "Current device-session authority is unavailable for this Setup Location.",
+        )
+    })?;
+    if qualification.device_handle != review.device_handle
+        || qualification.session_epoch != session_epoch
+        || qualification.runtime_generation != runtime_generation
+    {
+        return Err(safe_error(
+            "setup_location_session_stale",
+            "The reviewed Setup Location belongs to an earlier device session. Review the plan again.",
+        ));
+    }
+    let plan_id = plan
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| stale_review("The retained reviewed plan identity is invalid."))?;
+    let lease = SetupLocationExecutionLease {
+        attempt_sequence,
+        device_handle: review.device_handle.clone(),
+        session_epoch,
+        runtime_generation,
+        plan_id: plan_id.to_string(),
+        plan_digest: review.plan_digest.to_lowercase(),
+    };
+    lease.validate().map_err(|_| {
+        safe_error(
+            "setup_location_session_unavailable",
+            "Current device-session authority is unavailable for this Setup Location.",
+        )
+    })?;
+    Ok(Some(lease))
 }
 
 fn bind_real_start_result(
@@ -2115,6 +2335,22 @@ fn retain_terminal_real_execution(
     report: &Value,
     observed_at: &str,
 ) -> Result<Option<RealExecutionMonitorEvent>, String> {
+    retain_terminal_real_execution_with_lease_revoker(
+        state,
+        mapping,
+        report,
+        observed_at,
+        |lease| revoke_setup_location_lease(state, lease),
+    )
+}
+
+fn retain_terminal_real_execution_with_lease_revoker(
+    state: &AppState,
+    mapping: &ExecutionMapping,
+    report: &Value,
+    observed_at: &str,
+    revoke_lease: impl FnOnce(&SetupLocationExecutionLease) -> Result<(), String>,
+) -> Result<Option<RealExecutionMonitorEvent>, String> {
     // Reject a response whose captured mapping no longer owns the product
     // execution before consulting report metadata or touching device/root
     // authority. Recheck below after report construction because ownership can
@@ -2159,6 +2395,12 @@ fn retain_terminal_real_execution(
         return Ok(None);
     }
     if identity_failed {
+        if let Some(lease) = executions.setup_location_lease() {
+            revoke_lease(&lease)?;
+            if !executions.clear_setup_location_lease_after_revocation(&lease) {
+                return Err(runtime_session_lost_error());
+            }
+        }
         invalidate_identity_terminal_authority(&state.handles, &state.root_qualification, mapping)?;
     } else if root_failed {
         invalidate_root_terminal_authority(&state.handles, &state.root_qualification, mapping)?;
@@ -2766,20 +3008,21 @@ where
         .clone();
     let platform_tools = resolve_platform_tools(state, &review)?;
 
-    let _devices = match list_and_reconcile_preflight_inventory(state, runtime, &platform_tools) {
-        Ok(devices) => devices,
-        Err(PreflightInventoryFailure::ProductUnavailable) => {
-            return Err(device_disconnected());
-        }
-        Err(PreflightInventoryFailure::Runtime(error)) => {
-            if let Some(lost) =
-                recover_launch_runtime_failure(state, &mapping.public_handle, &error)?
-            {
-                return Err(lost);
+    let _devices =
+        match list_and_reconcile_preflight_inventory(state, runtime, &platform_tools, None) {
+            Ok(devices) => devices,
+            Err(PreflightInventoryFailure::ProductUnavailable) => {
+                return Err(device_disconnected());
             }
-            return Err(device_disconnected());
-        }
-    };
+            Err(PreflightInventoryFailure::Runtime(error)) => {
+                if let Some(lost) =
+                    recover_launch_runtime_failure(state, &mapping.public_handle, &error)?
+                {
+                    return Err(lost);
+                }
+                return Err(device_disconnected());
+            }
+        };
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
         let refreshed = handles
@@ -3038,12 +3281,20 @@ fn recover_from_real_execution_loss(
     let retained_mapping = mapping.clone();
     match loss {
         ExecutionSessionLoss::RuntimeSessionLost => {
+            if !runtime_loss_allows_execution_reset(state, &executions) {
+                return Err(runtime_session_lost_error());
+            }
             executions.reset();
             recover_poisoned_lock(&state.handles)
                 .invalidate_runtime_authority_preserving_identities();
             recover_poisoned_lock(&state.root_qualification).invalidate();
         }
         ExecutionSessionLoss::UnknownExecution => {
+            if let Some(lease) = executions.setup_location_lease() {
+                // An unknown execution mapping does not prove its destination
+                // worker has stopped. Revoke its lease before discarding it.
+                revoke_setup_location_lease(state, &lease)?;
+            }
             let removed = executions.forget_mapping(ExecutionKind::Real, public_handle);
             if let Some(mapping) = removed {
                 recover_poisoned_lock(&state.handles)
@@ -3066,12 +3317,53 @@ fn recover_from_real_execution_loss(
     Ok(())
 }
 
-/// Discard native authority after the shared runtime session is lost. Acquire
-/// the execution store before the transition gate, matching admission and real
-/// execution loss, then publish the qualification consequence before release.
+/// Discard native authority after runtime cleanup is confirmed. Acquire the
+/// execution store before the transition gate, then publish the qualification
+/// consequence before release.
 pub(crate) fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
     let executions = recover_poisoned_lock(&state.executions);
     invalidate_lost_runtime_authority_with_execution_guard(state, executions, || {})
+}
+
+/// Revoke one Tauri-issued Setup Location lease through the existing sidecar
+/// request stream. Any unavailable or malformed acknowledgement terminates
+/// the runtime so a worker cannot continue without confirmed revocation.
+pub(crate) fn revoke_setup_location_lease(
+    state: &AppState,
+    lease: &SetupLocationExecutionLease,
+) -> Result<(), String> {
+    let payload = serde_json::to_value(lease).map_err(|_| runtime_session_lost_error())?;
+    match state.sidecar.request("revokeSetupLocationLease", payload) {
+        Ok(result) if result.get("revoked").and_then(Value::as_bool) == Some(true) => Ok(()),
+        _ => {
+            state.sidecar.invalidate_runtime_session();
+            Err(runtime_session_lost_error())
+        }
+    }
+}
+
+fn retire_setup_location_lease_attempt_with_runtime(
+    runtime: &impl RuntimeRequester,
+    lease: &SetupLocationExecutionLease,
+) -> Result<(), String> {
+    let payload = serde_json::to_value(lease).map_err(|_| runtime_session_lost_error())?;
+    match runtime_request(runtime, "retireSetupLocationLeaseAttempt", payload) {
+        Ok(result) if result.get("retired").and_then(Value::as_bool) == Some(true) => Ok(()),
+        _ => Err(runtime_session_lost_error()),
+    }
+}
+
+fn retire_setup_location_lease_attempt(
+    state: &AppState,
+    lease: &SetupLocationExecutionLease,
+) -> Result<(), String> {
+    match retire_setup_location_lease_attempt_with_runtime(&state.sidecar, lease) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.sidecar.invalidate_runtime_session();
+            Err(error)
+        }
+    }
 }
 
 fn invalidate_lost_runtime_authority_with_execution_guard(
@@ -3079,6 +3371,12 @@ fn invalidate_lost_runtime_authority_with_execution_guard(
     mut executions: std::sync::MutexGuard<'_, ExecutionHandleStore>,
     after_store_reset: impl FnOnce(),
 ) -> Result<(), String> {
+    // A stopped sidecar does not prove that every destination child has
+    // stopped. Keep native session and execution authority while a T05 lease
+    // remains unrevoked.
+    if !runtime_loss_allows_execution_reset(state, &executions) {
+        return Err(runtime_session_lost_error());
+    }
     let transition = crate::commands::qualification_transition_lock(state);
     executions.reset();
     after_store_reset();
@@ -3088,19 +3386,27 @@ fn invalidate_lost_runtime_authority_with_execution_guard(
     Ok(())
 }
 
-/// Discard the authority derived from a runtime session that can no longer
-/// answer requests while the caller already owns the execution store. The
-/// store reset, the native authority invalidation, and the qualification loss
-/// observation commit inside one transition, preserving the documented
-/// execution-store-before-transition-gate order.
+/// Discard authority from a lost runtime after cleanup is confirmed while the
+/// caller owns the execution store. The store reset, native authority change,
+/// and qualification loss observation commit inside one transition.
 fn invalidate_lost_runtime_authority_with_store(
     state: &AppState,
     executions: &mut ExecutionHandleStore,
 ) {
+    if !runtime_loss_allows_execution_reset(state, executions) {
+        return;
+    }
     let transition = crate::commands::qualification_transition_lock(state);
     executions.reset();
     invalidate_lost_runtime_authority_in_transition(state);
     transition.release_and_retry_best_effort();
+}
+
+fn runtime_loss_allows_execution_reset(
+    state: &AppState,
+    executions: &ExecutionHandleStore,
+) -> bool {
+    state.sidecar.runtime_process_cleanup_confirmed() && executions.setup_location_lease().is_none()
 }
 
 /// Native authority that cannot survive a lost runtime session. The caller owns
@@ -3478,12 +3784,18 @@ fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
                     );
                     sanitize_real_field(step, "name", exact_serial, "Setup step");
                     sanitize_real_field(step, "note", exact_serial, "");
-                    step["message"] = match step.get("status").and_then(Value::as_str) {
-                        Some("failed" | "blocked") => {
-                            Value::String("This device operation did not complete.".to_string())
-                        }
-                        _ => Value::Null,
-                    };
+                    let message = step
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .filter(|message| is_safe_projected_step_message(message))
+                        .map(str::to_string)
+                        .or_else(|| match step.get("status").and_then(Value::as_str) {
+                            Some("failed" | "blocked") => {
+                                Some("This device operation did not complete.".to_string())
+                            }
+                            _ => None,
+                        });
+                    step["message"] = message.map_or(Value::Null, Value::String);
                 }
             }
         }
@@ -4338,17 +4650,106 @@ fn project_step(step: &Value, exact_serial: &str) -> Value {
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("pending");
-    let message = match status {
-        "failed" => Some("This action did not complete."),
-        "blocked" => Some("This action was blocked by required earlier work."),
-        "cancelled" => Some(CANCELLED_SAFE_BOUNDARY_TEXT),
+    let message = copy_commit_failure_message(step).or_else(|| match status {
+        "failed" => Some("This action did not complete.".to_string()),
+        "blocked" => Some("This action was blocked by required earlier work.".to_string()),
+        "cancelled" => Some(CANCELLED_SAFE_BOUNDARY_TEXT.to_string()),
         _ => None,
-    };
+    });
     json!({
         "name": sanitize_text(&name, exact_serial),
         "note": step.get("note").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
         "status": status,
         "message": message,
+    })
+}
+
+fn copy_commit_failure_message(step: &Value) -> Option<String> {
+    let output = step.get("outputs")?.get("copy_commit_report")?;
+    let report = output.get("value").unwrap_or(output);
+    let outcome = copy_commit_report_outcome(step)?;
+    if !matches!(outcome, "succeeded" | "noChange" | "partial" | "uncertain") {
+        return None;
+    }
+
+    let destination_mutation_attempted = report
+        .get("destinationMutationAttempted")
+        .and_then(Value::as_bool);
+    let staged_paths = report.get("stagedPaths").and_then(Value::as_array);
+    let staging_cleanup_pending = report
+        .get("stagingCleanupError")
+        .and_then(Value::as_str)
+        .is_some_and(|error| !error.trim().is_empty());
+    let staging_used =
+        staging_cleanup_pending || staged_paths.is_some_and(|paths| !paths.is_empty());
+
+    let mut messages = Vec::new();
+    match destination_mutation_attempted {
+        Some(false) => messages.push("No destination changes were made."),
+        Some(true) | None => match outcome {
+            "noChange" => messages.push("No destination changes were made."),
+            "partial" => messages.push(
+                "Some destination changes were made before this action stopped; some changes may remain.",
+            ),
+            "uncertain" => messages.push(
+                "The final destination state could not be confirmed.",
+            ),
+            _ => {}
+        },
+    }
+    if staging_cleanup_pending {
+        messages.push("Temporary staging cleanup remains pending.");
+    } else if staging_used {
+        messages.push("Temporary staging files were removed.");
+    }
+
+    (!messages.is_empty()).then(|| messages.join(" "))
+}
+
+fn copy_commit_report_outcome(step: &Value) -> Option<&str> {
+    let output = step.get("outputs")?.get("copy_commit_report")?;
+    let report = output.get("value").unwrap_or(output);
+    report.get("outcome").and_then(Value::as_str)
+}
+
+fn report_has_uncertain_copy_commit_outcome(report: &Value) -> bool {
+    report
+        .get("recipes")
+        .and_then(Value::as_array)
+        .is_some_and(|recipes| {
+            recipes.iter().any(|recipe| {
+                recipe
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .is_some_and(|steps| {
+                        steps
+                            .iter()
+                            .any(|step| copy_commit_report_outcome(step) == Some("uncertain"))
+                    })
+            })
+        })
+}
+
+fn is_safe_projected_step_message(message: &str) -> bool {
+    const SAFE_SENTENCES: &[&str] = &[
+        "No destination changes were made.",
+        "This action did not complete.",
+        "This action was blocked by required earlier work.",
+        "This device operation did not complete.",
+        "No destination changes were made.",
+        "Some destination changes were made before this action stopped; some changes may remain.",
+        "The final destination state could not be confirmed.",
+        "Temporary staging cleanup remains pending.",
+        "Temporary staging files were removed.",
+    ];
+
+    message.split(". ").all(|sentence| {
+        let sentence = if sentence.ends_with('.') {
+            sentence.to_string()
+        } else {
+            format!("{sentence}.")
+        };
+        SAFE_SENTENCES.contains(&sentence.as_str()) || sentence == CANCELLED_SAFE_BOUNDARY_TEXT
     })
 }
 
@@ -4993,6 +5394,346 @@ pub(crate) mod tests {
         store.reserve_start(ExecutionKind::Simulated).unwrap();
         store.release_start();
         store.reserve_start(ExecutionKind::Real).unwrap();
+    }
+
+    #[test]
+    fn setup_location_attempt_sequence_survives_execution_store_reset() {
+        let mut store = ExecutionHandleStore::default();
+        assert_eq!(store.issue_setup_location_attempt_sequence().unwrap(), 1);
+        store.reset();
+        assert_eq!(store.issue_setup_location_attempt_sequence().unwrap(), 2);
+    }
+
+    #[test]
+    fn setup_location_review_lease_rejects_prior_session_with_same_volume_identity() {
+        let mut review = review();
+        let plan = review.response.get_mut("plan").expect("reviewed plan");
+        plan["copyCommitSnapshots"] = json!([{
+            "setupLocationBinding": {
+                "sessionEpoch": 4,
+                "volumeIdentity": "stable-volume-identity",
+                "volumeContinuity": "prior-session-continuity"
+            }
+        }]);
+        review.plan_digest = canonical_json_digest(plan).expect("updated reviewed plan digest");
+
+        let error = setup_location_lease_for_review(&review, 5, 1, 1)
+            .expect_err("a prior reviewed destination cannot survive a reconnect");
+        assert!(
+            error.contains("setup_location_session_stale"),
+            "error was {error}"
+        );
+    }
+
+    #[test]
+    fn setup_location_review_lease_rejects_a_different_device_handle() {
+        let (executions, _handles, _root, public_handle, _) = active_setup_location_execution();
+        let mapping = executions
+            .mapping(
+                ExecutionKind::Real,
+                &public_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .unwrap();
+        let mut review = mapping.review.clone();
+        let session_epoch = review
+            .qualification_context
+            .as_ref()
+            .expect("Setup Location review carries its qualified session")
+            .session_epoch;
+        review.device_handle = "another-device".to_string();
+
+        let error = setup_location_lease_for_review(&review, session_epoch, 1, 8)
+            .expect_err("Tauri must not issue a lease for a different device session");
+
+        assert!(error.contains("setup_location_session_stale"), "{error}");
+    }
+
+    #[test]
+    fn failed_setup_location_start_retires_only_its_attempt() {
+        let lease = SetupLocationExecutionLease {
+            attempt_sequence: 3,
+            device_handle: "device-test".to_string(),
+            session_epoch: 4,
+            runtime_generation: 7,
+            plan_id: "plan-test".to_string(),
+            plan_digest: "a".repeat(64),
+        };
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![Ok(json!({ "retired": true }))]),
+        };
+        retire_setup_location_lease_attempt_with_runtime(&runtime, &lease)
+            .expect("failed start should retire only its attempt");
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "retireSetupLocationLeaseAttempt");
+        assert_eq!(
+            requests[0].1,
+            serde_json::to_value(lease).expect("lease should serialize")
+        );
+    }
+
+    #[test]
+    fn failed_setup_location_start_keeps_lease_when_revocation_is_unconfirmed() {
+        let (handles, root, original_review_handle) = prepared_real_review(false);
+        let (review_handle, session_epoch) =
+            add_setup_location_binding(&handles, &original_review_handle);
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Err(json!({ "code": "runtime_session_lost" }).to_string()),
+            ]),
+        };
+        let platform_tools = PlatformToolsSnapshot {
+            adb_path: "/trusted/adb",
+            runtime_generation: 1,
+            platform_tools_revision: 2,
+        };
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+
+        let error = start_real_execution_inner_with_runtime(
+            &review_handle,
+            None,
+            &handles,
+            &root,
+            &mut executions,
+            &runtime,
+            &platform_tools,
+        )
+        .unwrap_err();
+
+        assert!(!error.is_empty(), "a failed start returns an error");
+        let requests = runtime.requests.lock().unwrap();
+        let (_, payload) = requests
+            .iter()
+            .find(|(request_type, _)| request_type == "startExecution")
+            .unwrap_or_else(|| panic!("start request missing after {error}: {requests:?}"));
+        assert_eq!(payload["setupLocationLease"]["sessionEpoch"], session_epoch);
+        drop(requests);
+        assert!(
+            executions.setup_location_lease().is_some(),
+            "a lost start response cannot discard the lease needed for revocation"
+        );
+        assert_eq!(executions.start_reserved, Some(ExecutionKind::Real));
+
+        executions.release_start();
+
+        assert!(
+            executions.setup_location_lease().is_some(),
+            "public failed-start cleanup must retain an unrevoked lease"
+        );
+        assert_eq!(
+            executions.start_reserved,
+            Some(ExecutionKind::Real),
+            "later starts remain gated until lease revocation is confirmed"
+        );
+        assert!(
+            executions.reserve_start(ExecutionKind::Real).is_err(),
+            "a later start cannot reserve while lease revocation is unresolved"
+        );
+    }
+
+    #[test]
+    fn runtime_loss_does_not_clear_a_setup_location_lease_after_sidecar_cleanup() {
+        let (executions, handles, root, public_handle, lease) = active_setup_location_execution();
+        let (_temp, app) = test_app(Mutex::new(executions), handles, root);
+        let state = app.state::<AppState>();
+        assert!(state.sidecar.runtime_process_cleanup_confirmed());
+
+        let error = recover_from_real_execution_loss(
+            &state,
+            &public_handle,
+            &safe_error("runtime_session_lost", "the runtime session is gone"),
+        )
+        .expect_err("sidecar cleanup does not prove the Setup Location mutation is idle");
+
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        let executions = state.executions.lock().unwrap();
+        assert_eq!(executions.setup_location_lease(), Some(lease));
+        assert!(executions
+            .mapping(
+                ExecutionKind::Real,
+                &public_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn uncertain_terminal_report_keeps_setup_location_lease_and_blocks_new_start() {
+        let (mut executions, _handles, _root, public_handle, lease) =
+            active_setup_location_execution();
+
+        assert!(executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &public_handle,
+            json!({
+                "recipes": [{
+                    "steps": [{
+                        "outputs": {
+                            "copy_commit_report": {
+                                "value": { "outcome": "uncertain" }
+                            }
+                        }
+                    }]
+                }]
+            }),
+            json!({ "status": "failed" }),
+        ));
+
+        assert_eq!(executions.setup_location_lease(), Some(lease));
+        assert!(executions.reserve_start(ExecutionKind::Real).is_err());
+    }
+
+    #[test]
+    fn terminal_identity_invalidation_waits_for_setup_location_revocation_acknowledgement() {
+        let (executions, handles, root, public_handle, lease) = active_setup_location_execution();
+        let (_temp, app) = test_app(Mutex::new(executions), handles, root);
+        let state = app.state::<AppState>();
+        let mapping = state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(
+                ExecutionKind::Real,
+                &public_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .unwrap()
+            .clone();
+        let initial_epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&lease.device_handle)
+            .expect("the setup location device session is retained");
+        let report = json!({
+            "executionId": "sidecar-setup-location",
+            "status": "failed",
+            "errors": [{ "code": "device_identity_changed" }],
+            "recipes": [{
+                "steps": [{
+                    "outputs": {
+                        "copy_commit_report": {
+                            "value": { "outcome": "uncertain" }
+                        }
+                    }
+                }]
+            }]
+        });
+
+        let unconfirmed = retain_terminal_real_execution_with_lease_revoker(
+            &state,
+            &mapping,
+            &report,
+            "2026-11-05T00:00:00Z",
+            |_| Err(runtime_session_lost_error()),
+        );
+
+        assert!(unconfirmed.is_err());
+        assert_eq!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .device_session_epoch(&lease.device_handle),
+            Some(initial_epoch),
+            "an unconfirmed revocation must not advance the device session epoch"
+        );
+        let executions = state.executions.lock().unwrap();
+        assert_eq!(executions.setup_location_lease(), Some(lease.clone()));
+        assert!(!executions.terminal_retained(ExecutionKind::Real, &public_handle));
+        drop(executions);
+
+        let retained = retain_terminal_real_execution_with_lease_revoker(
+            &state,
+            &mapping,
+            &report,
+            "2026-11-05T00:00:01Z",
+            |revoked| {
+                assert_eq!(revoked, &lease);
+                Ok(())
+            },
+        )
+        .expect("confirmed lease revocation permits identity invalidation")
+        .expect("the terminal report is retained once");
+
+        assert!(matches!(
+            retained,
+            RealExecutionMonitorEvent::Terminal { .. }
+        ));
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .update_devices(&supported_inventory("transport-1"))
+            .expect("the invalidated device is reconciled as a new session");
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&lease.device_handle)
+            .is_some_and(|epoch| epoch > initial_epoch));
+        assert_eq!(
+            state.executions.lock().unwrap().setup_location_lease(),
+            None
+        );
+    }
+
+    #[test]
+    fn resolved_terminal_report_releases_setup_location_lease() {
+        let (mut executions, _handles, _root, public_handle, _) = active_setup_location_execution();
+        assert!(executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &public_handle,
+            json!({
+                "recipes": [{
+                    "steps": [{
+                        "outputs": {
+                            "copy_commit_report": {
+                                "value": { "outcome": "succeeded" }
+                            }
+                        }
+                    }]
+                }]
+            }),
+            json!({ "status": "succeeded" }),
+        ));
+        assert_eq!(executions.setup_location_lease(), None);
+        assert!(executions.reserve_start(ExecutionKind::Real).is_ok());
+    }
+
+    #[test]
+    fn unknown_execution_does_not_discard_a_setup_location_lease_without_revocation() {
+        let (executions, handles, root, public_handle, lease) = active_setup_location_execution();
+        let (_temp, app) = test_app(Mutex::new(executions), handles, root);
+        let state = app.state::<AppState>();
+        state
+            .sidecar
+            .set_test_runtime_session_lost_with_uncertain_cleanup();
+
+        let error = recover_from_real_execution_loss(
+            &state,
+            &public_handle,
+            &safe_error("unknown_execution", "the execution is unavailable"),
+        )
+        .expect_err("a missing execution mapping cannot stand in for lease revocation");
+
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        let executions = state.executions.lock().unwrap();
+        assert_eq!(executions.setup_location_lease(), Some(lease));
+        assert!(executions
+            .mapping(
+                ExecutionKind::Real,
+                &public_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .is_ok());
     }
 
     fn app_less_launch_review() -> ReviewedPlanSnapshot {
@@ -6717,6 +7458,68 @@ pub(crate) mod tests {
         }
         let review_handle = handles.lock().unwrap().insert_review(retained);
         (handles, root, review_handle)
+    }
+
+    fn add_setup_location_binding(
+        handles: &Mutex<SessionHandles>,
+        review_handle: &str,
+    ) -> (String, u64) {
+        let (mut retained, session_epoch) = {
+            let mut handles = handles.lock().unwrap();
+            let retained = handles.review(review_handle).unwrap().clone();
+            let session_epoch = handles
+                .device(&retained.device_handle)
+                .unwrap()
+                .session_epoch;
+            (retained, session_epoch)
+        };
+        retained.response["plan"]["copyCommitSnapshots"] = json!([{
+            "setupLocationBinding": { "sessionEpoch": session_epoch }
+        }]);
+        retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
+
+        let mut handles = handles.lock().unwrap();
+        handles.discard_review(review_handle).unwrap();
+        let review_handle = handles.insert_review(retained);
+        (review_handle, session_epoch)
+    }
+
+    fn active_setup_location_execution() -> (
+        ExecutionHandleStore,
+        Mutex<SessionHandles>,
+        Mutex<RootQualificationStore>,
+        String,
+        SetupLocationExecutionLease,
+    ) {
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let (review_handle, session_epoch) = add_setup_location_binding(&handles, &review_handle);
+        let snapshot = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .clone();
+        let lease = SetupLocationExecutionLease {
+            attempt_sequence: 7,
+            device_handle: snapshot.device_handle.clone(),
+            session_epoch,
+            runtime_generation: 1,
+            plan_id: snapshot.response["plan"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            plan_digest: snapshot.plan_digest.clone(),
+        };
+        let mut executions = ExecutionHandleStore::default();
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        executions.set_test_setup_location_lease(lease.clone());
+        let mapping = executions.bind_started(
+            ExecutionKind::Real,
+            "sidecar-setup-location".to_string(),
+            review_handle,
+            snapshot,
+        );
+        (executions, handles, root, mapping.public_handle, lease)
     }
 
     fn run_integrated_case(
@@ -11442,7 +12245,7 @@ pub(crate) mod tests {
             "reviewedDeletionSet": ["stale.rom"]
         }]);
         retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
-        request_real_start(&runtime, &retained).unwrap();
+        request_real_start(&runtime, &retained, None).unwrap();
         let requests = runtime.requests.lock().unwrap();
         assert_eq!(requests[0].0, "startExecution");
         assert_eq!(requests[0].1["mode"], "real");
@@ -11457,6 +12260,54 @@ pub(crate) mod tests {
         for forbidden in ["adbPath", "runtimeRoot", "cacheRoot", "artifactPath"] {
             assert!(requests[0].1.get(forbidden).is_none());
         }
+    }
+
+    #[test]
+    fn real_start_sends_tauri_lease_in_one_request_while_transition_is_held() {
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Ok(json!({ "execution": { "executionId": "sidecar-execution" } })),
+        };
+        let mut retained = review();
+        retained.response["plan"]["copy_commit_snapshots"] = json!([{
+            "setup_location_binding": { "session_epoch": 4 }
+        }]);
+        retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
+        let lease = SetupLocationExecutionLease {
+            attempt_sequence: 9,
+            device_handle: retained.device_handle.clone(),
+            session_epoch: 4,
+            runtime_generation: 7,
+            plan_id: retained.response["plan"]["id"]
+                .as_str()
+                .expect("reviewed plan has an identity")
+                .to_string(),
+            plan_digest: retained.plan_digest.clone(),
+        };
+        let (_temp, app) = test_app(
+            Mutex::new(ExecutionHandleStore::default()),
+            Mutex::new(SessionHandles::default()),
+            Mutex::new(RootQualificationStore::default()),
+        );
+        let state = app.state::<AppState>();
+        let transition_guard = crate::commands::qualification_transition_lock(&state);
+
+        request_real_start(&runtime, &retained, Some(&lease)).unwrap();
+
+        assert!(state.qualification_transition_gate.try_lock().is_err());
+        let requests = runtime.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "start uses no worker permission round trip"
+        );
+        assert_eq!(requests[0].0, "startExecution");
+        assert_eq!(
+            requests[0].1["setupLocationLease"],
+            serde_json::to_value(&lease).unwrap()
+        );
+        drop(requests);
+        drop(transition_guard);
     }
 
     #[derive(Default)]
@@ -11572,7 +12423,21 @@ pub(crate) mod tests {
                 "recipeId": "recipe.one", "name": "Recipe One", "status": "failed",
                 "steps": [{
                     "stepId": "step.one", "name": "Step One", "note": "Open https://user:secret@example.test/file?token=x",
-                    "status": "failed", "message": "sensitive-serial /Users/private", "outputs": { "private": true }
+                    "status": "failed", "message": "sensitive-serial /Users/private", "outputs": {
+                        "private": true,
+                        "copy_commit_report": {
+                            "type": "copy_commit_report",
+                            "value": {
+                                "destinationIdentity": "filesystem-uuid-private",
+                                "outcome": "partial",
+                                "destinationMutationAttempted": true,
+                                "copiedPaths": ["/Volumes/SD-UUID-PRIVATE/roms/game.iso"],
+                                "stagedPaths": ["/Volumes/SD-UUID-PRIVATE/.emuchef-stage/attempt"],
+                                "stagingCleanupError": "could not remove /Volumes/SD-UUID-PRIVATE/.emuchef-stage/attempt"
+                            },
+                            "location": "device"
+                        }
+                    }
                 }]
             }],
             "warnings": [],
@@ -11588,7 +12453,23 @@ pub(crate) mod tests {
         assert_eq!(public["target"]["model"], "Pocket S");
         assert_eq!(public["target"]["androidApiLevel"], 33);
         assert!(public["target"].get("androidVersion").is_none());
+        assert_eq!(
+            public["recipes"][0]["steps"][0]["message"],
+            "Some destination changes were made before this action stopped; some changes may remain. Temporary staging cleanup remains pending."
+        );
         assert!(public["errors"][0].get("code").is_none());
+        let mut no_change_report = report.clone();
+        no_change_report["recipes"][0]["steps"][0]["outputs"]["copy_commit_report"]["value"]
+            ["outcome"] = json!("noChange");
+        no_change_report["recipes"][0]["steps"][0]["outputs"]["copy_commit_report"]["value"]
+            ["copiedPaths"] = json!([]);
+        let no_change_public = project_real_snapshot(&mapping, &no_change_report);
+        assert_eq!(
+            no_change_public["recipes"][0]["steps"][0]["message"],
+            "No destination changes were made. Temporary staging cleanup remains pending."
+        );
+        let no_change_serialized = no_change_public.to_string();
+        assert!(!no_change_serialized.contains("/Volumes/SD-UUID-PRIVATE"));
         for forbidden in [
             "execution-private",
             "sensitive-serial",
@@ -11597,6 +12478,8 @@ pub(crate) mod tests {
             "user:secret",
             "token=x",
             "outputs",
+            "filesystem-uuid-private",
+            "/Volumes/SD-UUID-PRIVATE",
             "raw",
         ] {
             assert!(!serialized.contains(forbidden), "leaked {forbidden}");

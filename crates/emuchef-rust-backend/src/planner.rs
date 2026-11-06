@@ -2655,6 +2655,10 @@ fn binding_to_runtime_value(
         "directory" => ("directory_path", Some("host".to_string())),
         "path" => ("path", Some("host".to_string())),
         "device_path" => ("device_path", Some("device".to_string())),
+        "setup_location_ref" => (
+            crate::runtime_refs::input_value_type(&declaration.type_name, declaration.multiple),
+            None,
+        ),
         "enum" | "string" => ("string", None),
         "integer" => ("integer", None),
         "boolean" => ("boolean", None),
@@ -3035,10 +3039,6 @@ fn validate_ref_param_contract(
     let Some(value_type) = value_type else {
         return Vec::new();
     };
-    if value_type == "setup_location_ref" && step.type_name == "copy_files" && param_name == "dest"
-    {
-        return Vec::new();
-    }
     if spec
         .accepted_value_types
         .iter()
@@ -3123,19 +3123,6 @@ fn validate_setup_location_input_consumers(
             }
         }
         for step in &recipe.steps {
-            for (parameter, value) in &step.params {
-                let ParamValue::Ref(reference) = value else {
-                    continue;
-                };
-                if references_setup_input(recipe, reference)
-                    && !(step.type_name == "copy_files" && parameter == "dest")
-                {
-                    errors.push(setup_location_consumer_error(
-                        recipe_id,
-                        &format!("step '{}' parameter '{parameter}'", step.id),
-                    ));
-                }
-            }
             for condition in step.skip_if.iter().chain(&step.verify) {
                 if condition
                     .params

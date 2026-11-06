@@ -275,15 +275,56 @@ the App Definition.
 
 An App Definition target names a file or directory at `app_data`,
 `external_app_data`, `shared_storage`, or `absolute_device_path`. App-aware
-`copy_files.dest` and compatible `path_exists` or `file_exists` conditions use
-the single-key `{ app_target: <target-id> }` value. The enclosing step's
-`app_ref` supplies the owning App Definition. Planning resolves user-0 paths,
-validates source and destination kinds and app provenance, and derives
-`app_data_write` or `shared_storage_write` before capability selection. The
-execution plan retains concrete paths and effective capability constraints;
-review and execution do not resolve authored target IDs. Generic copy
-destinations and the user-configured ROM-copy Recipe retain their existing
-literal or input-reference behavior.
+`copy_files.dest` accepts literal device paths, compatible input references,
+typed App Targets, and typed Setup Location references. Setup Location references
+are supported only by directory-copy writers using `merge`, `replace`, or
+directory-style `sync`; conditions retain their existing accepted sources. The
+enclosing step's `app_ref` supplies the owning App Definition for App Target
+resolution. Planning resolves App Targets to user-0 paths and Setup Locations
+through trusted current volume roots, validates destination kinds and app
+provenance, and derives `app_data_write` or `shared_storage_write` before
+capability selection. The immutable plan digest covers active trusted bindings
+and canonical destination scopes. Review and execution do not resolve authored
+target IDs. Generic copy destinations and the user-configured ROM-copy Recipe
+retain their existing literal or input-reference behavior.
+
+The Setup Location picker distinguishes a loading list, an unavailable list,
+and a successfully empty list. A list error is never reported as an empty
+result. A save rejected for stale storage evidence invalidates the visible
+readiness and refreshes that device-plan context; a late response from an older
+device or plan cannot restore its state.
+
+A successful inventory commit invalidates the prior volume projection before
+follow-up readiness qualification begins. The UI removes old volume choices
+until the current session returns fresh storage evidence.
+
+A real execution that writes to a Setup Location carries a private Tauri-issued
+lease bound to the device handle, session epoch, runtime generation, reviewed
+plan identity and digest, and execution attempt. Tauri sends the lease only
+through the trusted Rust sidecar `startExecution` request; authored Recipes,
+renderer state, and user-supplied request fields cannot grant execution
+authority. The backend checks the lease against the reviewed plan and installs
+its per-attempt mutation gate before starting the worker. That gate only mirrors
+the Tauri-issued authority and serializes mutation with revocation; Tauri remains
+the authority for whether the device session is current. The worker rechecks
+volume identity and continuity, write access, path confinement, and reviewed
+destination preconditions immediately before each protected mutation. Each
+mutation permit spans its device operation. Tauri closes matching gates before
+committing a changed session epoch, and revocation waits for an already
+authorized operation to finish before acknowledging. The worker does not call
+back into Tauri for permission. Revocation does not roll back prior writes;
+reports distinguish staging, cleanup, and truthful partial destination effects.
+A rejected start retires its matching attempt and leaves the current session
+epoch available for a later attempt sequence. Device and runtime transitions
+revoke matching leases before publishing invalidated authority. Tauri releases
+local authority after the corresponding retirement or revocation is
+acknowledged. A sidecar restart revokes retained leases through the generation
+that issued them before replacing that runtime. If revocation is not
+acknowledged, Tauri retains the lease and rejects the restart. A lost
+acknowledgement, unknown execution mapping, or uncertain
+terminal copy-commit outcome keeps the lease closed and blocks new starts until
+runtime recovery confirms authority. Runtime-process cleanup alone cannot
+clear the lease or reset device authority.
 
 ### App-owned configuration contracts
 
@@ -770,6 +811,9 @@ enum options; sensitive and advanced presentation flags; extensible metadata;
 and validation for existence, extensions, path kind, and allowed device-path
 prefixes. Enum option values are unique, defaults match the declared type and
 enum options, and canonical YAML preserves declaration and option order.
+
+Config Editor input definitions do not include `setup_location_ref`; that
+Recipe type is accepted only for `copy_files.dest`.
 
 Planner runtime types map host files and directories to `file_path` and
 `directory_path`, device paths to `device_path`, enums to strings, and declared
@@ -1623,6 +1667,10 @@ readiness only when the same volume kind, root, identity, continuity, device
 session, runtime generation, and Platform-Tools revision are still evidenced.
 Changed, unavailable, read-only, stale, or failed observations make the location
 unresolved; session or device-authority invalidation clears its authority.
+Recipe input description is independent of the named-location list request.
+Inputs load that list separately and distinguish loading, unavailable, and
+successfully empty results, so a storage-list failure does not block describing
+the selected Recipes or appear as an empty list.
 
 Only Setup Locations referenced by selected `copy_files.dest` writers enter
 planning and review. The immutable plan digest covers each active trusted
@@ -1630,11 +1678,21 @@ binding, including volume evidence, root, and relative path. The retained review
 binds canonical destination scopes, manifests, preconditions, and reviewed
 effects, including any required directory creation. Active Setup Location and
 legacy shared-path writers are compared by canonical scope and reviewed effect.
+Device `extract_archive` steps also join this comparison by canonical
+destination scope and reviewed effects. The planner rejects overlapping
+writers and fails closed when it cannot resolve the destination. Host extraction
+does not write to device storage.
 Conflicting writes, destructive overlaps, and shared directory creations that
 would invalidate another writer's reviewed missing-path precondition are
 rejected before execution. Idempotent directory effects may coexist when those
 directories already exist at review time and no other effect conflicts. Unused
 named locations do not participate and may have overlapping paths.
+
+Public review output for a legacy shared-storage copy replaces its physical
+destination with a logical storage label and relative path, and omits
+`deviceLocation`. If the authored boundary and device location disagree,
+review fails closed. App Target review behavior retains its established
+contract.
 
 The T04 ten-second observation lifetime applies to location resolution and
 refresh, not to immutable review validity. Before mutation, execution requires
@@ -1646,6 +1704,37 @@ anchor and exact missing suffix, then creates components individually through
 the no-follow directory helper. Missing guards or safe creation support fail
 closed before destination mutation. T03 staging, cleanup, and partial outcomes
 remain reported separately and truthfully.
+
+Execution step results include a sanitized copy outcome when destination state
+may be partial or uncertain. They distinguish no destination changes from
+partial or unconfirmed changes and report pending staging cleanup without
+exposing physical paths or volume identities.
+
+Setup Location copies whose source depends on a runtime step output fail
+during planning and snapshot coverage. The source cannot be immutably reviewed
+before earlier steps execute. Existing App Target and legacy destination
+behavior retains its established contract.
+
+A failed Setup Location write is `noChange` only when fresh inspection
+confirms the destination manifest is unchanged and no destination directories
+were created. `partial` requires observed destination effects; `uncertain`
+means the final state could not be verified. Staging and cleanup are reported
+separately.
+
+Tauri issues strictly increasing Setup Location attempt sequences that survive
+execution-store resets. The sidecar retains one runtime-local replay high-water
+mark, rejecting reused or older sequences without retaining each completed
+attempt.
+
+The T05 threat model excludes independent, uncooperative processes that
+concurrently modify a Setup Location destination. EmuChef orders its reviewed
+mutations, verifies destination preconditions through the trusted adapter, and
+rejects drift detected by those checks. Global filesystem exclusivity and
+atomic compare-and-mutate behavior against unrelated writers are outside this
+guarantee; a concurrent external change can race a checked unlinkat or
+renameat. Tauri session and volume identity checks, destination confinement,
+no-follow traversal, reviewed manifests, bounded destructive effects, and
+EmuChef's internal execution ordering remain required.
 
 ## Developer commands
 

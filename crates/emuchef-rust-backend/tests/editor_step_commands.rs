@@ -205,6 +205,8 @@ fn capabilities_stay_on_editor_session_surface() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "revokeSetupLocationLease",
+            "retireSetupLocationLeaseAttempt",
             "launchExecutionApp",
             "openRecipe",
             "openAppDefinition",

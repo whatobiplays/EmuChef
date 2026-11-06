@@ -25,6 +25,22 @@ fn plain_recipe_path(name: &str) -> PathBuf {
     backend_fixture_root().join("recipes").join(name)
 }
 
+fn setup_location_copy_recipe() -> String {
+    let source = fs::read_to_string(plain_recipe_path("phase6i_commands.yaml"))
+        .expect("copy recipe fixture should be readable");
+    let recipe = source
+        .replace("id: phase6i.commands", "id: test.setup_location_contract")
+        .replace("name: Phase 6I Commands", "name: Setup Location Contract")
+        .replace(
+            "inputs:\n  source_dir:",
+            "inputs:\n  destination:\n    type: setup_location_ref\n    role: destination\n    label: ROM destination\n    required: true\n  source_dir:",
+        )
+        .replace("dest: /sdcard/Input", "dest: {ref: inputs.destination}");
+    assert!(recipe.contains("type: setup_location_ref"));
+    assert!(recipe.contains("dest: {ref: inputs.destination}"));
+    recipe
+}
+
 fn workspace_root(name: &str) -> PathBuf {
     fixture_root().join(name)
 }
@@ -220,6 +236,8 @@ fn capabilities_include_catalog_context_session_update() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "revokeSetupLocationLease",
+            "retireSetupLocationLeaseAttempt",
             "launchExecutionApp",
             "openRecipe",
             "openAppDefinition",
@@ -736,6 +754,25 @@ fn valid_authored_root_reports_recipe_dependency_diagnostics() {
     assert_eq!(
         diagnostics,
         read_diagnostic_golden("phase6l_missing_dependency.diagnostics.json")
+    );
+}
+
+#[test]
+fn setup_location_ref_is_accepted_as_copy_files_destination_by_catalog_validation() {
+    let workspace = TempWorkspace::copy_fixture("complete");
+    let path = workspace.recipe_path("setup_location_contract.yaml");
+    fs::write(&path, setup_location_copy_recipe())
+        .expect("Setup Location Recipe should be writable in the authored catalog");
+
+    let response = validate_path(&path, Some(&workspace.authored_root()));
+
+    assert_eq!(response["ok"], true, "{response:#?}");
+    let diagnostics = diagnostic_set(&response);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["severity"] != "error"),
+        "Setup Location destination should pass catalog validation: {diagnostics:#?}"
     );
 }
 

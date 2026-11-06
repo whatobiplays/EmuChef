@@ -14,11 +14,15 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::storage_targets::{SetupDestinationPrecondition, StorageTargetBinding};
+use crate::owned_process::ProcessCleanup;
+use crate::storage_targets::{
+    SetupDestinationPrecondition, SetupLocationMutationLease, StorageTargetBinding,
+};
 
 /// One copy policy with semantics defined for a selected directory tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
@@ -27,6 +31,57 @@ pub enum CopyCommitOperation {
     AddUpdate,
     Replace,
     Mirror,
+}
+
+#[cfg(test)]
+mod setup_location_lease_tests {
+    use std::sync::Arc;
+
+    use crate::storage_targets::{SetupLocationExecutionLease, SetupLocationMutationLease};
+
+    fn lease() -> Arc<SetupLocationMutationLease> {
+        Arc::new(SetupLocationMutationLease::new(
+            SetupLocationExecutionLease {
+                attempt_sequence: 1,
+                device_handle: "device-1".to_string(),
+                session_epoch: 4,
+                runtime_generation: 7,
+                plan_id: "plan-1".to_string(),
+                plan_digest: "a".repeat(64),
+            },
+        ))
+    }
+
+    #[test]
+    fn revoked_setup_location_lease_denies_new_mutation_permits() {
+        let lease = lease();
+        let permit = lease.acquire().expect("current session may mutate");
+
+        lease.revoke().unwrap();
+
+        assert!(lease.acquire().is_err());
+        drop(permit);
+        lease
+            .wait_for_idle()
+            .expect("revocation drains prior mutation");
+    }
+
+    #[test]
+    fn revocation_waiter_finishes_after_the_active_mutation_releases_its_permit() {
+        let lease = lease();
+        let permit = lease.acquire().expect("current session may mutate");
+        lease.revoke().expect("revocation closes the mutation gate");
+        let waiter_lease = Arc::clone(&lease);
+        let waiter = std::thread::spawn(move || waiter_lease.wait_for_idle());
+
+        drop(permit);
+
+        waiter
+            .join()
+            .expect("revocation waiter should not panic")
+            .expect("revocation should finish after active mutation");
+        assert!(lease.acquire().is_err());
+    }
 }
 
 impl CopyCommitOperation {
@@ -95,6 +150,8 @@ pub struct CopyCommitRequest {
     pub setup_location_binding: Option<StorageTargetBinding>,
     /// Reviewed confinement and directory-creation precondition.
     pub setup_destination_precondition: Option<SetupDestinationPrecondition>,
+    /// Runtime-only gate supplied by Tauri for each real destination mutation.
+    pub(crate) setup_location_lease: Option<Arc<SetupLocationMutationLease>>,
 }
 
 impl CopyCommitRequest {
@@ -145,6 +202,7 @@ impl CopyCommitRequest {
             destination_binding: None,
             setup_location_binding: None,
             setup_destination_precondition: None,
+            setup_location_lease: None,
         })
     }
 
@@ -271,6 +329,7 @@ impl CopyCommitRequest {
             destination_binding: None,
             setup_location_binding: Some(binding),
             setup_destination_precondition: Some(precondition),
+            setup_location_lease: None,
         })
     }
 
@@ -535,6 +594,7 @@ impl ExecutionCopyCommitSnapshot {
             destination_binding: self.destination_binding.clone(),
             setup_location_binding: self.setup_location_binding.clone(),
             setup_destination_precondition: self.setup_destination_precondition.clone(),
+            setup_location_lease: None,
         })
     }
 
@@ -649,6 +709,7 @@ pub struct CopyCommitReport {
 #[serde(rename_all = "camelCase")]
 pub enum CopyCommitOutcome {
     Succeeded,
+    NoChange,
     Partial,
     Uncertain,
 }
@@ -1288,7 +1349,20 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
         } else {
             None
         };
-        let outcome = if destination_mutation_attempted
+        let cleanup_uncertain = internal_device_error
+            .as_ref()
+            .is_some_and(|error| error.cleanup == Some(ProcessCleanup::Uncertain));
+        let outcome = if cleanup_uncertain {
+            CopyCommitOutcome::Uncertain
+        } else if destination_mutation_attempted
+            && created_directories.is_empty()
+            && binding_verified
+            && after_manifest
+                .as_deref()
+                .is_some_and(|manifest| manifest == request.destination_manifest.as_slice())
+        {
+            CopyCommitOutcome::NoChange
+        } else if destination_mutation_attempted
             && ((binding_verified && after_manifest.is_some()) || !created_directories.is_empty())
         {
             CopyCommitOutcome::Partial
@@ -1324,25 +1398,15 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
         }
     }
 
-    fn verify_setup_destination_ready(
-        &mut self,
-        binding: &StorageTargetBinding,
-        destination: &str,
-        expected_binding: &str,
-    ) -> Result<(), super::DeviceOperationError> {
-        self.device.verify_setup_location(binding)?;
-        if self.device.path_binding(destination)? != expected_binding {
-            return Err(super::DeviceOperationError::other(
-                "Setup Location destination identity changed before mutation",
-            ));
-        }
-        Ok(())
-    }
-
     fn commit_setup_location(
         &mut self,
         request: &CopyCommitRequest,
     ) -> Result<CopyCommitReport, CopyCommitError> {
+        let mutation_lease = request.setup_location_lease.as_ref().ok_or_else(|| {
+            CopyCommitError::Rejected(
+                "Setup Location copy requires live Tauri session authority".to_string(),
+            )
+        })?;
         validate_android_destination(&request.destination_identity)?;
         validate_manifest(&request.source_manifest)?;
         validate_manifest(&request.destination_manifest)?;
@@ -1559,6 +1623,32 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                 let mutation = CopyCommitMutation::EnsureDirectory {
                     relative_path: component.clone(),
                 };
+                let mutation_permit = match mutation_lease.acquire() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let failure = CopyCommitAttemptFailure::message(
+                            "Setup Location session authority expired before mutation",
+                        );
+                        let mut report = if destination_mutation_attempted {
+                            self.setup_failure_after_destination_mutation(
+                                request,
+                                None,
+                                &created_directories,
+                                true,
+                                failure,
+                            )
+                        } else {
+                            Self::setup_failure_before_destination_mutation(
+                                request,
+                                &staged_manifest,
+                                failure,
+                            )
+                        };
+                        report.staged_paths = manifest_paths(&staged_manifest);
+                        report.staging_verified = true;
+                        return Ok(report);
+                    }
+                };
                 destination_mutation_attempted = true;
                 if let Err(error) = self.device.apply_selected_root_mutation(
                     &anchor,
@@ -1568,6 +1658,9 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                     "absent",
                     &mutation,
                 ) {
+                    if error.cleanup == Some(ProcessCleanup::Uncertain) {
+                        mutation_permit.mark_cleanup_uncertain();
+                    }
                     let mut report = self.setup_failure_after_destination_mutation(
                         request,
                         None,
@@ -1748,16 +1841,44 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                         "Setup Location destination identity changed immediately before mutation",
                     ), false));
                 }
-                device
-                    .apply_selected_root_mutation(
-                        path,
-                        expected_binding,
-                        stage_root,
-                        helper_path,
-                        expected_entry,
-                        mutation,
-                    )
-                    .map_err(|error| (error, true))
+                // Keep the permit alive through the destination command. Uncertain
+                // child cleanup marks the lease before the permit is released.
+                let mutation_permit = request
+                    .setup_location_lease
+                    .as_ref()
+                    .ok_or_else(|| {
+                        (
+                            super::DeviceOperationError::other(
+                                "Tauri session authority is unavailable",
+                            ),
+                            false,
+                        )
+                    })?
+                    .acquire()
+                    .map_err(|_| {
+                        (
+                            super::DeviceOperationError::other(
+                                "Tauri session authority expired before mutation",
+                            ),
+                            false,
+                        )
+                    })?;
+                let result = device.apply_selected_root_mutation(
+                    path,
+                    expected_binding,
+                    stage_root,
+                    helper_path,
+                    expected_entry,
+                    mutation,
+                );
+                if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.cleanup == Some(ProcessCleanup::Uncertain))
+                {
+                    mutation_permit.mark_cleanup_uncertain();
+                }
+                result.map_err(|error| (error, true))
             };
 
             let mut deletion_order = request.reviewed_deletion_set.clone();
@@ -2758,6 +2879,7 @@ fn fake_post_mutation_report(
     mut copied_paths: Vec<String>,
     destination_mutation_attempted: bool,
     created_directories: &[String],
+    created_directories_verified: bool,
     error: CopyCommitError,
 ) -> CopyCommitReport {
     deleted_paths.sort();
@@ -2778,8 +2900,18 @@ fn fake_post_mutation_report(
     };
     let after_manifest = after_result.ok();
     let binding_verified = binding_error.is_none();
-    let outcome = if binding_verified && after_manifest.is_some() {
+    let observed_destination_change = !created_directories.is_empty()
+        || after_manifest
+            .as_deref()
+            .is_some_and(|manifest| manifest != request.destination_manifest.as_slice());
+    let verified_no_change = binding_verified
+        && created_directories_verified
+        && after_manifest.as_deref() == Some(request.destination_manifest.as_slice())
+        && created_directories.is_empty();
+    let outcome = if observed_destination_change {
         CopyCommitOutcome::Partial
+    } else if verified_no_change {
+        CopyCommitOutcome::NoChange
     } else {
         CopyCommitOutcome::Uncertain
     };
@@ -2829,6 +2961,104 @@ fn setup_location_created_directories(request: &CopyCommitRequest) -> Vec<String
     (start..components.len())
         .map(|end| components[..=end].join("/"))
         .collect()
+}
+
+fn fake_observed_setup_location_created_directories(
+    request: &CopyCommitRequest,
+) -> (Vec<String>, bool) {
+    let Some(binding) = request.setup_location_binding.as_ref() else {
+        return (Vec::new(), true);
+    };
+    let Ok(fake_root) = fs::canonicalize(&request.fake_device_root) else {
+        return (Vec::new(), false);
+    };
+    let mut created = Vec::new();
+    let mut verified = true;
+    for relative in setup_location_created_directories(request) {
+        let device_path = Path::new(&binding.mount_root).join(&relative);
+        let Ok(fake_path) = selected_path(&fake_root, &device_path.to_string_lossy()) else {
+            verified = false;
+            continue;
+        };
+        if validate_path_binding(&fake_root, &fake_path).is_err() {
+            verified = false;
+            continue;
+        }
+        match fs::symlink_metadata(&fake_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                verified = false;
+            }
+            Ok(_) => created.push(relative),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => verified = false,
+        }
+    }
+    (created, verified)
+}
+
+fn fake_setup_location_open_failure_report(
+    request: &CopyCommitRequest,
+    destination_mutation_attempted: bool,
+    error: CopyCommitError,
+) -> CopyCommitReport {
+    let (created_directories, created_directories_verified) =
+        fake_observed_setup_location_created_directories(request);
+    let destination_binding_verified =
+        validate_path_binding(&request.fake_device_root, &request.selected_root).is_ok();
+    let after_result = if destination_binding_verified {
+        scan_tree(&request.selected_root)
+    } else {
+        Err(CopyCommitError::Rejected(
+            "fake Setup Location destination binding could not be verified".to_string(),
+        ))
+    };
+    let after_manifest = after_result.as_ref().ok().cloned();
+    let verified_no_change = created_directories_verified
+        && created_directories.is_empty()
+        && destination_binding_verified
+        && after_manifest.as_deref() == Some(request.destination_manifest.as_slice());
+    let outcome = if verified_no_change {
+        CopyCommitOutcome::NoChange
+    } else if created_directories_verified && !created_directories.is_empty() {
+        CopyCommitOutcome::Partial
+    } else {
+        CopyCommitOutcome::Uncertain
+    };
+    let after_paths = after_manifest
+        .as_deref()
+        .map(manifest_paths)
+        .unwrap_or_default();
+    let internal_error = after_result
+        .err()
+        .map(|after_error| after_error.to_string())
+        .or_else(|| {
+            (!created_directories_verified)
+                .then(|| "fake Setup Location creation effects could not be verified".to_string())
+        });
+
+    CopyCommitReport {
+        operation: request.operation,
+        destination_identity: request.destination_identity.clone(),
+        succeeded: false,
+        outcome,
+        before_paths: manifest_paths(&request.destination_manifest),
+        before_manifest: request.destination_manifest.clone(),
+        after_paths,
+        after_manifest,
+        reviewed_deletion_set: request.reviewed_deletion_set.clone(),
+        deleted_paths: Vec::new(),
+        copied_paths: Vec::new(),
+        staged_paths: Vec::new(),
+        staging_verified: false,
+        destination_binding_verified,
+        destination_mutation_attempted: Some(destination_mutation_attempted),
+        created_directories,
+        source_digest_sha256: manifest_digest(&request.source_manifest),
+        staging_cleanup_error: None,
+        error: Some(error.to_string()),
+        internal_error,
+        internal_device_error: None,
+    }
 }
 
 impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
@@ -2884,15 +3114,49 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
         // destination mutation even if a later copy operation fails.
         let mut destination_mutation_attempted = !created_directories.is_empty();
 
-        let selected =
-            SelectedRootMutator::open_or_create(&request.fake_device_root, &request.selected_root)?;
-        validate_path_binding(&request.fake_device_root, &request.selected_root)?;
-        if scan_tree(&request.source_root)? != request.source_manifest
-            || selected.scan_tree()? != request.destination_manifest
-        {
-            return Err(CopyCommitError::Stale(
-                "source or selected destination changed before mutation".to_string(),
-            ));
+        let selected = match SelectedRootMutator::open_or_create(
+            &request.fake_device_root,
+            &request.selected_root,
+        ) {
+            Ok(selected) => selected,
+            Err(error) if request.destination_kind == CopyCommitDestinationKind::SetupLocation => {
+                return Ok(fake_setup_location_open_failure_report(
+                    request,
+                    destination_mutation_attempted,
+                    error,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let pre_mutation_check = (|| {
+            validate_path_binding(&request.fake_device_root, &request.selected_root)?;
+            if scan_tree(&request.source_root)? != request.source_manifest
+                || selected.scan_tree()? != request.destination_manifest
+            {
+                return Err(CopyCommitError::Stale(
+                    "source or selected destination changed before mutation".to_string(),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = pre_mutation_check {
+            if request.destination_kind == CopyCommitDestinationKind::SetupLocation
+                && destination_mutation_attempted
+            {
+                let (created_directories, created_directories_verified) =
+                    fake_observed_setup_location_created_directories(request);
+                return Ok(fake_post_mutation_report(
+                    request,
+                    &selected,
+                    Vec::new(),
+                    Vec::new(),
+                    destination_mutation_attempted,
+                    &created_directories,
+                    created_directories_verified,
+                    error,
+                ));
+            }
+            return Err(error);
         }
         let mutation_result = (|| {
             let mut deletion_order = request.reviewed_deletion_set.clone();
@@ -2993,6 +3257,12 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
         let after_manifest = match mutation_result {
             Ok(manifest) => manifest,
             Err(error) => {
+                let (created_directories, created_directories_verified) =
+                    if request.destination_kind == CopyCommitDestinationKind::SetupLocation {
+                        fake_observed_setup_location_created_directories(request)
+                    } else {
+                        (Vec::new(), true)
+                    };
                 return Ok(fake_post_mutation_report(
                     request,
                     &selected,
@@ -3000,6 +3270,7 @@ impl CopyCommitAdapter for FakeFilesystemCopyCommitAdapter {
                     copied_paths,
                     destination_mutation_attempted,
                     &created_directories,
+                    created_directories_verified,
                     error,
                 ));
             }
@@ -4467,6 +4738,63 @@ fn hex_digest(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn active_setup_location_lease() -> Arc<SetupLocationMutationLease> {
+        Arc::new(SetupLocationMutationLease::new(
+            crate::storage_targets::SetupLocationExecutionLease {
+                attempt_sequence: 1,
+                device_handle: "device-test".to_string(),
+                session_epoch: 1,
+                runtime_generation: 1,
+                plan_id: "plan.test".to_string(),
+                plan_digest: "a".repeat(64),
+            },
+        ))
+    }
+
+    fn setup_location_copy_request(
+        source: &Path,
+        fake_root: &Path,
+        lease: Arc<SetupLocationMutationLease>,
+    ) -> CopyCommitRequest {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            source,
+            fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.destination_identity = "/storage/ABCD-1234/EmuChef/Games".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_lease = Some(lease);
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef/Games".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: vec!["EmuChef".to_string(), "Games".to_string()],
+        });
+        request
+    }
+
     #[test]
     fn android_destination_validation_accepts_generic_absolute_shared_paths() {
         for path in [
@@ -4480,8 +4808,320 @@ mod tests {
     }
 
     #[test]
-    fn setup_location_verification_failure_performs_no_destination_mutation_and_reports_stage_cleanup(
-    ) {
+    fn active_setup_location_lease_allows_reviewed_mutation_for_unchanged_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+        let lease = active_setup_location_lease();
+        let request = setup_location_copy_request(&source, &fake_root, Arc::clone(&lease));
+        let reviewed_binding = request.setup_location_binding.as_ref().unwrap().clone();
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            verification_pause: None,
+            revoke_lease_after_first_mutation: None,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: false,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("an unchanged reviewed Setup Location should be writable");
+
+        assert_eq!(reviewed_binding.session_epoch, 1);
+        assert_eq!(reviewed_binding.volume_identity, "2".repeat(32));
+        assert_eq!(reviewed_binding.volume_continuity, "3".repeat(32));
+        assert_eq!(device.destination_mutations, 3);
+        assert_eq!(report.outcome, CopyCommitOutcome::Succeeded, "{report:#?}");
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.copied_paths, vec!["payload.bin"]);
+        assert_eq!(report.created_directories, vec!["EmuChef", "EmuChef/Games"]);
+        assert!(report.deleted_paths.is_empty());
+        assert!(lease.acquire().is_ok());
+    }
+
+    #[test]
+    fn failed_first_destination_write_with_unchanged_tree_is_not_reported_partial() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+        let mut request =
+            setup_location_copy_request(&source, &fake_root, active_setup_location_lease());
+        request
+            .setup_destination_precondition
+            .as_mut()
+            .unwrap()
+            .missing_components
+            .clear();
+        let expected_staged_paths = manifest_paths(&request.source_manifest);
+        let before_manifest = request.destination_manifest.clone();
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: true,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: None,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: false,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("a failed first write should produce a post-inspection report");
+
+        assert_eq!(device.destination_mutations, 1);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.before_manifest, before_manifest);
+        assert_eq!(report.after_manifest, Some(before_manifest));
+        assert_eq!(report.outcome, CopyCommitOutcome::NoChange);
+        assert!(report.created_directories.is_empty());
+        assert!(report.copied_paths.is_empty());
+        assert!(report.deleted_paths.is_empty());
+        assert!(report.staging_verified);
+        assert_eq!(report.staged_paths, expected_staged_paths);
+        assert!(report.staging_cleanup_error.is_none());
+    }
+
+    fn commit_with_uncertain_destination_cleanup(
+        create_missing_components: bool,
+    ) -> (CopyCommitReport, Arc<SetupLocationMutationLease>) {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+        let lease = active_setup_location_lease();
+        let mut request = setup_location_copy_request(&source, &fake_root, Arc::clone(&lease));
+        if !create_missing_components {
+            request
+                .setup_destination_precondition
+                .as_mut()
+                .unwrap()
+                .missing_components
+                .clear();
+        }
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: true,
+            verification_pause: None,
+            revoke_lease_after_first_mutation: None,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: false,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("uncertain destination operation should return its report");
+        (report, lease)
+    }
+
+    #[test]
+    fn uncertain_process_cleanup_reports_uncertain_destination_outcome() {
+        let (report, _) = commit_with_uncertain_destination_cleanup(false);
+
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert_eq!(report.after_manifest, Some(report.before_manifest.clone()));
+        assert!(report.staging_verified);
+        assert!(report.staging_cleanup_error.is_none());
+        assert_eq!(
+            report
+                .internal_device_error
+                .as_ref()
+                .and_then(|error| error.cleanup),
+            Some(crate::owned_process::ProcessCleanup::Uncertain)
+        );
+    }
+
+    #[test]
+    fn uncertain_process_cleanup_keeps_setup_location_revocation_unconfirmed() {
+        let (_, lease) = commit_with_uncertain_destination_cleanup(false);
+
+        assert!(lease.acquire().is_err());
+        lease.revoke().expect("revocation closes the mutation gate");
+        assert!(lease.wait_for_idle().is_err());
+        assert!(lease.acquire().is_err());
+    }
+
+    #[test]
+    fn uncertain_cleanup_during_setup_location_creation_keeps_revocation_unconfirmed() {
+        let (report, lease) = commit_with_uncertain_destination_cleanup(true);
+
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert!(lease.acquire().is_err());
+        lease.revoke().expect("revocation closes the mutation gate");
+        assert!(lease.wait_for_idle().is_err());
+        assert!(lease.acquire().is_err());
+    }
+
+    #[test]
+    fn setup_location_verification_failure_before_first_mutation_reports_staging_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let request =
+            setup_location_copy_request(&source, &fake_root, active_setup_location_lease());
+        let expected_staged_paths = manifest_paths(&request.source_manifest);
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: 2,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: None,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: false,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("verification failure should produce a truthful report");
+
+        assert_eq!(device.destination_mutations, 0);
+        assert_eq!(device.setup_verifications, 2);
+        assert_eq!(report.destination_mutation_attempted, Some(false));
+        assert!(report.copied_paths.is_empty());
+        assert!(report.deleted_paths.is_empty());
+        assert!(report.staging_verified);
+        assert_eq!(report.staged_paths, expected_staged_paths);
+        assert!(report.staging_cleanup_error.is_none());
+        assert!(!device.cleanup_paths.is_empty());
+        assert_eq!(device.destination_inspections, 0);
+        assert_eq!(device.unverified_destination_inspections, 0);
+        assert!(report.error.is_some());
+    }
+
+    #[test]
+    fn tauri_session_epoch_revocation_before_worker_mutation_leaves_destination_untouched() {
+        use crate::storage_targets::StorageTargetBinding;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let lease_context = active_setup_location_lease().context().clone();
+        let registry = crate::execution_session::SetupLocationLeaseRegistry::default();
+        registry
+            .set_runtime_generation(lease_context.runtime_generation)
+            .unwrap();
+        let lease = registry.activate(lease_context.clone()).unwrap();
+        let request = setup_location_copy_request(&source, &fake_root, Arc::clone(&lease));
+        let expected_staged_paths = manifest_paths(&request.source_manifest);
+        let binding: StorageTargetBinding =
+            request.setup_location_binding.as_ref().unwrap().clone();
+        let tauri_session_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let verification_reached = Arc::new(std::sync::Barrier::new(2));
+        let resume_worker = Arc::new(std::sync::Barrier::new(2));
+
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: Some((
+                3,
+                Arc::clone(&verification_reached),
+                Arc::clone(&resume_worker),
+            )),
+            cleanup_paths: Vec::new(),
+            cleanup_fails: false,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+        let worker = std::thread::spawn(move || {
+            let report = AndroidCopyCommitAdapter::new(&mut device)
+                .commit(&request)
+                .expect("revocation before mutation should produce a report");
+            (report, device)
+        });
+
+        verification_reached.wait();
+        registry
+            .revoke_session(&lease_context)
+            .expect("Tauri session invalidation closes and drains the backend lease");
+        assert!(lease.acquire().is_err());
+        tauri_session_epoch.store(2, std::sync::atomic::Ordering::SeqCst);
+        resume_worker.wait();
+        let (report, device) = worker.join().expect("copy worker should finish");
+
+        assert_eq!(
+            tauri_session_epoch.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(binding.session_epoch, 1);
+        assert_eq!(binding.mount_root, "/storage/ABCD-1234");
+        assert_eq!(binding.volume_identity, "2".repeat(32));
+        assert_eq!(binding.volume_continuity, "3".repeat(32));
+        assert_eq!(device.destination_mutations, 0);
+        assert_eq!(report.destination_mutation_attempted, Some(false));
+        assert!(report.copied_paths.is_empty());
+        assert!(report.deleted_paths.is_empty());
+        assert!(report.staging_verified);
+        assert_eq!(report.staged_paths, expected_staged_paths);
+        assert!(report.staging_cleanup_error.is_none());
+        assert!(!device.cleanup_paths.is_empty());
+        assert!(report
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("session authority expired")));
+    }
+
+    #[test]
+    fn revoked_setup_location_lease_performs_no_destination_mutation_and_reports_stage_cleanup() {
         use crate::storage_targets::{
             SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
         };
@@ -4503,6 +5143,9 @@ mod tests {
         )
         .unwrap();
         request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        let lease = active_setup_location_lease();
+        lease.revoke().unwrap();
+        request.setup_location_lease = Some(Arc::clone(&lease));
         request.destination_identity = "/storage/ABCD-1234/EmuChef".to_string();
         request.destination_manifest.clear();
         request.reviewed_deletion_set.clear();
@@ -4530,14 +5173,19 @@ mod tests {
         let mut device = SetupLocationVerificationFailureDevice {
             stage_root: None,
             setup_verifications: 0,
-            fail_verification_at: 2,
+            fail_verification_at: usize::MAX,
             destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: true,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
             destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
         };
         let report = AndroidCopyCommitAdapter::new(&mut device)
             .commit(&request)
@@ -4566,15 +5214,12 @@ mod tests {
         assert!(report
             .error
             .as_deref()
-            .is_some_and(|message| message.contains("verification failed")));
-        assert!(report
-            .internal_device_error
-            .as_ref()
-            .is_some_and(|error| error.message.contains("volume continuity")));
+            .is_some_and(|message| message.contains("session authority expired")));
+        lease.wait_for_idle().unwrap();
     }
 
     #[test]
-    fn setup_location_partial_creation_survives_staging_cleanup_failure() {
+    fn setup_location_session_revocation_between_mutations_reports_partial_and_cleans_staging() {
         use crate::storage_targets::{
             SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
         };
@@ -4596,6 +5241,13 @@ mod tests {
         )
         .unwrap();
         request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        let lease_context = active_setup_location_lease().context().clone();
+        let registry = crate::execution_session::SetupLocationLeaseRegistry::default();
+        registry
+            .set_runtime_generation(lease_context.runtime_generation)
+            .unwrap();
+        let lease = registry.activate(lease_context.clone()).unwrap();
+        request.setup_location_lease = Some(Arc::clone(&lease));
         request.destination_identity = "/storage/ABCD-1234/EmuChef/Games".to_string();
         request.destination_manifest.clear();
         request.reviewed_deletion_set.clear();
@@ -4620,35 +5272,59 @@ mod tests {
             missing_components: vec!["EmuChef".to_string(), "Games".to_string()],
         });
 
+        let expected_staged_paths = manifest_paths(&request.source_manifest);
+        let tauri_session_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let verification_reached = Arc::new(std::sync::Barrier::new(2));
+        let resume_worker = Arc::new(std::sync::Barrier::new(2));
         let mut device = SetupLocationVerificationFailureDevice {
             stage_root: None,
             setup_verifications: 0,
-            fail_verification_at: 4,
+            fail_verification_at: usize::MAX,
             destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: Some((
+                4,
+                Arc::clone(&verification_reached),
+                Arc::clone(&resume_worker),
+            )),
             cleanup_paths: Vec::new(),
             cleanup_fails: true,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
             destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
         };
-        let report = AndroidCopyCommitAdapter::new(&mut device)
-            .commit(&request)
-            .expect("post-creation guard failure should be reported");
+        let worker = std::thread::spawn(move || {
+            let report = AndroidCopyCommitAdapter::new(&mut device)
+                .commit(&request)
+                .expect("revocation after one mutation should be reported");
+            (report, device)
+        });
+        verification_reached.wait();
+        registry
+            .revoke_session(&lease_context)
+            .expect("session revocation should close the gate between mutations");
+        tauri_session_epoch.store(2, std::sync::atomic::Ordering::SeqCst);
+        resume_worker.wait();
+        let (report, device) = worker.join().expect("copy worker should finish");
 
+        assert_eq!(
+            tauri_session_epoch.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
         assert_eq!(device.destination_mutations, 1);
-        assert_eq!(device.unverified_destination_inspections, 0);
         assert_eq!(report.destination_mutation_attempted, Some(true));
         assert_eq!(report.created_directories, vec!["EmuChef".to_string()]);
         assert_eq!(report.outcome, CopyCommitOutcome::Partial);
-        assert!(!report.destination_binding_verified);
-        assert!(report.after_manifest.is_none());
-        assert!(report.after_paths.is_empty());
+        assert!(report
+            .error
+            .as_deref()
+            .is_some_and(|message| { message.contains("session authority expired") }));
         assert!(report.staging_verified);
-        assert_eq!(
-            report.staged_paths,
-            manifest_paths(&request.source_manifest)
-        );
+        assert_eq!(report.staged_paths, expected_staged_paths);
         assert!(report
             .staging_cleanup_error
             .as_deref()
@@ -4678,6 +5354,7 @@ mod tests {
         )
         .unwrap();
         request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.setup_location_lease = Some(active_setup_location_lease());
         request.destination_identity = "/storage/ABCD-1234/EmuChef/Games".to_string();
         request.destination_manifest.clear();
         request.reviewed_deletion_set.clear();
@@ -4708,12 +5385,17 @@ mod tests {
                 setup_verifications: 0,
                 fail_verification_at,
                 destination_mutations: 0,
+                fail_selected_mutation_before_change: false,
+                uncertain_mutation_cleanup: false,
+                revoke_lease_after_first_mutation: None,
+                verification_pause: None,
                 cleanup_paths: Vec::new(),
                 cleanup_fails: false,
                 destination_inspections: 0,
                 fail_destination_inspection_at: None,
                 unverified_destination_inspections: 0,
                 destination_binding_changes_after_mutation: false,
+                destination_manifest: Vec::new(),
             };
             let report = AndroidCopyCommitAdapter::new(&mut device)
                 .commit(&request)
@@ -4764,6 +5446,7 @@ mod tests {
         )
         .unwrap();
         request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.setup_location_lease = Some(active_setup_location_lease());
         request.destination_identity = "/storage/ABCD-1234/EmuChef".to_string();
         request.destination_manifest.clear();
         request.reviewed_deletion_set.clear();
@@ -4793,12 +5476,17 @@ mod tests {
             setup_verifications: 0,
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: true,
             destination_inspections: 0,
             fail_destination_inspection_at: Some(2),
             unverified_destination_inspections: 0,
             destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
         };
         let report = AndroidCopyCommitAdapter::new(&mut device)
             .commit(&request)
@@ -4840,6 +5528,7 @@ mod tests {
         )
         .unwrap();
         request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        request.setup_location_lease = Some(active_setup_location_lease());
         request.destination_identity = "/storage/ABCD-1234/EmuChef".to_string();
         request.destination_manifest.clear();
         request.reviewed_deletion_set.clear();
@@ -4869,12 +5558,17 @@ mod tests {
             setup_verifications: 0,
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            uncertain_mutation_cleanup: false,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
             destination_binding_changes_after_mutation: true,
+            destination_manifest: Vec::new(),
         };
         let report = AndroidCopyCommitAdapter::new(&mut device)
             .commit(&request)
@@ -4935,6 +5629,111 @@ mod tests {
 
         assert!(matches!(result, Err(CopyCommitError::Stale(_))));
         assert!(!request.selected_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_setup_open_failure_reports_directories_created_before_the_error() {
+        use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        let binding = StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let request = CopyCommitRequest::reviewed_fake_setup_directory(
+            &source,
+            &fake_root,
+            binding,
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        fs::create_dir_all(request.selected_root.parent().unwrap()).unwrap();
+
+        let report = fake_setup_location_open_failure_report(
+            &request,
+            true,
+            CopyCommitError::Io("injected selected-root open failure".to_string()),
+        );
+
+        assert!(!report.succeeded);
+        assert_eq!(report.outcome, CopyCommitOutcome::Partial);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.created_directories, vec!["EmuChef".to_string()]);
+        assert_eq!(report.after_manifest, Some(Vec::new()));
+        assert!(!request.selected_root.exists());
+        assert!(report.internal_error.is_none());
+        assert!(report.error.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_post_mutation_report_returns_no_change_when_inspection_matches_review() {
+        use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        let destination = selected_path(&fake_root, "/storage/ABCD-1234/EmuChef/Games").unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("existing.bin"), b"reviewed bytes").unwrap();
+        let binding = StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        };
+        let request = CopyCommitRequest::reviewed_fake_setup_directory(
+            &source,
+            &fake_root,
+            binding,
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        let selected = SelectedRootMutator::open_or_create(&fake_root, &destination).unwrap();
+
+        let report = fake_post_mutation_report(
+            &request,
+            &selected,
+            Vec::new(),
+            Vec::new(),
+            true,
+            &[],
+            true,
+            CopyCommitError::Io("injected pre-mutation failure".to_string()),
+        );
+
+        assert!(!report.succeeded);
+        assert_eq!(report.outcome, CopyCommitOutcome::NoChange);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert!(report.created_directories.is_empty());
+        assert_eq!(
+            report.after_manifest,
+            Some(request.destination_manifest.clone())
+        );
+        assert!(report.error.is_some());
     }
 
     #[cfg(unix)]
@@ -5039,12 +5838,17 @@ mod tests {
         setup_verifications: usize,
         fail_verification_at: usize,
         destination_mutations: usize,
+        fail_selected_mutation_before_change: bool,
+        uncertain_mutation_cleanup: bool,
+        verification_pause: Option<(usize, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+        revoke_lease_after_first_mutation: Option<Arc<SetupLocationMutationLease>>,
         cleanup_paths: Vec<String>,
         cleanup_fails: bool,
         destination_inspections: usize,
         fail_destination_inspection_at: Option<usize>,
         unverified_destination_inspections: usize,
         destination_binding_changes_after_mutation: bool,
+        destination_manifest: Vec<CopyManifestEntry>,
     }
 
     impl AndroidCopyCommitDevice for SetupLocationVerificationFailureDevice {
@@ -5086,7 +5890,7 @@ mod tests {
                     entry_identity: None,
                 }]);
             }
-            Ok(Vec::new())
+            Ok(self.destination_manifest.clone())
         }
 
         fn path_binding(
@@ -5154,6 +5958,13 @@ mod tests {
             _binding: &crate::storage_targets::StorageTargetBinding,
         ) -> Result<(), super::super::DeviceOperationError> {
             self.setup_verifications += 1;
+            if let Some((pause_at, verification_reached, resume_worker)) = &self.verification_pause
+            {
+                if self.setup_verifications == *pause_at {
+                    verification_reached.wait();
+                    resume_worker.wait();
+                }
+            }
             if self.setup_verifications == self.fail_verification_at {
                 return Err(super::super::DeviceOperationError::other(
                     "setup location volume continuity changed",
@@ -5184,9 +5995,42 @@ mod tests {
             _stage_root: &str,
             _helper_path: &str,
             _expected_entry: &str,
-            _mutation: &CopyCommitMutation,
+            mutation: &CopyCommitMutation,
         ) -> Result<(), super::super::DeviceOperationError> {
             self.destination_mutations += 1;
+            if self.uncertain_mutation_cleanup {
+                return Err(super::super::DeviceOperationError::timed_out(
+                    crate::owned_process::ProcessCleanup::Uncertain,
+                ));
+            }
+            if self.fail_selected_mutation_before_change {
+                return Err(super::super::DeviceOperationError::other(
+                    "injected selected-root mutation failure before changing the destination",
+                ));
+            }
+            if let CopyCommitMutation::PublishFile {
+                relative_path,
+                expected_source_sha256,
+            } = mutation
+            {
+                self.destination_manifest
+                    .retain(|entry| entry.relative_path != *relative_path);
+                self.destination_manifest.push(CopyManifestEntry {
+                    relative_path: relative_path.clone(),
+                    kind: CopyEntryKind::File,
+                    sha256: Some(expected_source_sha256.clone()),
+                    entry_identity: None,
+                });
+                self.destination_manifest
+                    .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+            }
+            if self.destination_mutations == 1 {
+                if let Some(lease) = &self.revoke_lease_after_first_mutation {
+                    lease
+                        .revoke()
+                        .map_err(super::super::DeviceOperationError::other)?;
+                }
+            }
             Ok(())
         }
     }
@@ -6217,6 +7061,52 @@ mod tests {
 
     #[cfg(all(unix, feature = "android-copy-commit-helper"))]
     #[test]
+    fn compiled_helper_accepts_canonical_and_selected_identity_as_separate_arguments() {
+        use std::os::unix::fs::MetadataExt;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let selected_path = temp.path().join("selected|root");
+        let stage_root = temp.path().join("stage");
+        fs::create_dir_all(&selected_path).unwrap();
+        fs::create_dir_all(&stage_root).unwrap();
+        fs::write(stage_root.join("new.rom"), b"reviewed bytes").unwrap();
+
+        let selected_root = fs::canonicalize(&selected_path).unwrap();
+        let stage_root = fs::canonicalize(&stage_root).unwrap();
+        let selected = fs::metadata(&selected_root).unwrap();
+        let selected_identity = format!("{}:{}", selected.dev(), selected.ino());
+        let source_digest = hash_file(&stage_root.join("new.rom")).unwrap();
+        let selected_root_text = selected_root.to_str().unwrap();
+        let stage_root_text = stage_root.to_str().unwrap();
+
+        let result = Command::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_HOST"))
+            .args([
+                selected_root_text,
+                selected_root_text,
+                &selected_identity,
+                stage_root_text,
+                "publish",
+                "new.rom",
+                "absent",
+                &source_digest,
+            ])
+            .output()
+            .unwrap();
+
+        assert!(
+            result.status.success(),
+            "helper must accept the reviewed binding fields: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            fs::read(selected_root.join("new.rom")).unwrap(),
+            b"reviewed bytes"
+        );
+    }
+
+    #[cfg(all(unix, feature = "android-copy-commit-helper"))]
+    #[test]
     fn compiled_android_helper_rejects_staged_bytes_changed_after_review() {
         use std::os::unix::fs::MetadataExt;
         use std::process::Command;
@@ -6232,16 +7122,8 @@ mod tests {
 
         let selected_root = fs::canonicalize(&selected_path).unwrap();
         let stage_root = fs::canonicalize(&stage_root).unwrap();
-        let parent = fs::metadata(selected_root.parent().unwrap()).unwrap();
         let selected = fs::metadata(&selected_root).unwrap();
-        let binding = format!(
-            "{}|parent:{}:{}|selected:{}:{}",
-            selected_root.display(),
-            parent.dev(),
-            parent.ino(),
-            selected.dev(),
-            selected.ino()
-        );
+        let selected_identity = format!("{}:{}", selected.dev(), selected.ino());
         let replacement = stage_root.join("later.replacement");
         fs::write(&replacement, b"unreviewed staged bytes").unwrap();
         fs::rename(&replacement, &staged_file).unwrap();
@@ -6250,7 +7132,8 @@ mod tests {
         let result = Command::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_HOST"))
             .args([
                 selected_root.to_str().unwrap(),
-                &binding,
+                selected_root.to_str().unwrap(),
+                &selected_identity,
                 stage_root.to_str().unwrap(),
                 "publish",
                 "later.bin",
@@ -6286,16 +7169,8 @@ mod tests {
 
         let selected_root = fs::canonicalize(&selected_path).unwrap();
         let stage_root = fs::canonicalize(&stage_root).unwrap();
-        let parent = fs::metadata(selected_root.parent().unwrap()).unwrap();
         let selected = fs::metadata(&selected_root).unwrap();
-        let binding = format!(
-            "{}|parent:{}:{}|selected:{}:{}",
-            selected_root.display(),
-            parent.dev(),
-            parent.ino(),
-            selected.dev(),
-            selected.ino()
-        );
+        let selected_identity = format!("{}:{}", selected.dev(), selected.ino());
         fs::remove_file(&staged_file).unwrap();
         symlink(&outside, &staged_file).unwrap();
         assert_ne!(reviewed_digest, hash_file(&outside).unwrap());
@@ -6303,7 +7178,8 @@ mod tests {
         let result = Command::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_HOST"))
             .args([
                 selected_root.to_str().unwrap(),
-                &binding,
+                selected_root.to_str().unwrap(),
+                &selected_identity,
                 stage_root.to_str().unwrap(),
                 "publish",
                 "later.bin",
@@ -6338,18 +7214,18 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::create_dir_all(&stage_root).unwrap();
-        fs::write(outside.join("payload.bin"), b"outside sentinel").unwrap();
+        let outside_payload = outside.join("payload.bin");
+        fs::write(&outside_payload, b"outside sentinel").unwrap();
 
         let selected_root = fs::canonicalize(&selected_path).unwrap();
-        let parent = fs::metadata(selected_root.parent().unwrap()).unwrap();
         let selected = fs::metadata(&selected_root).unwrap();
-        let binding = format!(
-            "{}|parent:{}:{}|selected:{}:{}",
-            selected_root.display(),
-            parent.dev(),
-            parent.ino(),
-            selected.dev(),
-            selected.ino()
+        let selected_identity = format!("{}:{}", selected.dev(), selected.ino());
+        let outside_metadata = fs::metadata(&outside_payload).unwrap();
+        let outside_precondition = format!(
+            "file|{}:{}|{}",
+            outside_metadata.dev(),
+            outside_metadata.ino(),
+            hash_file(&outside_payload).unwrap()
         );
 
         fs::rename(&nested, selected_root.join("detached")).unwrap();
@@ -6357,20 +7233,22 @@ mod tests {
         let result = Command::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_HOST"))
             .args([
                 selected_root.to_str().unwrap(),
-                &binding,
+                selected_root.to_str().unwrap(),
+                &selected_identity,
                 stage_root.to_str().unwrap(),
                 "remove-file",
                 "nested/payload.bin",
-                "absent",
+                &outside_precondition,
             ])
             .output()
             .unwrap();
 
         assert!(!result.status.success());
-        assert_eq!(
-            fs::read(outside.join("payload.bin")).unwrap(),
-            b"outside sentinel"
-        );
+        assert_eq!(fs::read(&outside_payload).unwrap(), b"outside sentinel");
+        assert!(fs::symlink_metadata(selected_root.join("nested"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(all(unix, feature = "android-copy-commit-helper"))]
@@ -6391,16 +7269,8 @@ mod tests {
 
         let selected_root = fs::canonicalize(&selected_path).unwrap();
         let stage_root = fs::canonicalize(&stage_root).unwrap();
-        let parent = fs::metadata(selected_root.parent().unwrap()).unwrap();
         let selected = fs::metadata(&selected_root).unwrap();
-        let binding = format!(
-            "{}|parent:{}:{}|selected:{}:{}",
-            selected_root.display(),
-            parent.dev(),
-            parent.ino(),
-            selected.dev(),
-            selected.ino()
-        );
+        let selected_identity = format!("{}:{}", selected.dev(), selected.ino());
         let reviewed_digest = hash_file(&destination_file).unwrap();
         let reviewed_metadata = fs::metadata(&destination_file).unwrap();
         let reviewed_entry = format!(
@@ -6414,7 +7284,8 @@ mod tests {
         let result = Command::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_HOST"))
             .args([
                 selected_root.to_str().unwrap(),
-                &binding,
+                selected_root.to_str().unwrap(),
+                &selected_identity,
                 stage_root.to_str().unwrap(),
                 "publish",
                 "B.rom",
@@ -6456,22 +7327,15 @@ mod tests {
 
         let selected_root = fs::canonicalize(&selected_path).unwrap();
         let stage_root = fs::canonicalize(&stage_root).unwrap();
-        let parent = fs::metadata(selected_root.parent().unwrap()).unwrap();
         let selected = fs::metadata(&selected_root).unwrap();
-        let binding = format!(
-            "{}|parent:{}:{}|selected:{}:{}",
-            selected_root.display(),
-            parent.dev(),
-            parent.ino(),
-            selected.dev(),
-            selected.ino()
-        );
+        let selected_identity = format!("{}:{}", selected.dev(), selected.ino());
         symlink(&outside, selected_root.join("payload.bin")).unwrap();
 
         let result = Command::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_HOST"))
             .args([
                 selected_root.to_str().unwrap(),
-                &binding,
+                selected_root.to_str().unwrap(),
+                &selected_identity,
                 stage_root.to_str().unwrap(),
                 "publish",
                 "payload.bin",

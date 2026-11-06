@@ -28,6 +28,7 @@ function valueSourceLabel(source: NonNullable<InputDescriptor["valueSource"]>): 
 interface InputsStepProps {
   description: ConfigurationDescription;
   setupLocations: SetupLocationProjection[];
+  setupLocationListStatus: "loading" | "unavailable" | "ready";
   bindings: Record<string, unknown>;
   busy: boolean;
   touchedInputKeys: Set<string>;
@@ -50,6 +51,7 @@ interface InputsStepProps {
 export function InputsStep({
   description,
   setupLocations,
+  setupLocationListStatus,
   bindings,
   busy,
   touchedInputKeys,
@@ -109,6 +111,14 @@ export function InputsStep({
             const descriptionId = `${inputId}-description`;
             const extensionsId = `${inputId}-extensions`;
             const sourceId = `${inputId}-source`;
+            const setupLocationStatusId = `${inputId}-location-list-status`;
+            const setupLocationStatusMessage = setupLocationListStatus === "loading"
+              ? "Loading saved Setup Locations…"
+              : setupLocationListStatus === "unavailable"
+                ? "Saved Setup Locations could not be loaded. Refresh device storage to retry."
+                : setupLocationListStatus === "ready" && setupLocations.length === 0
+                  ? "No named Setup Locations are available for this device plan. Define one in device setup."
+                  : null;
             const diagnostics = inputDiagnosticsForDisplay(input).filter((diagnostic) =>
               diagnosticIsBlocking(
                 diagnostic.code,
@@ -167,6 +177,7 @@ export function InputsStep({
                       aria-describedby={describedBy(
                         input.description && descriptionId,
                         input.valueSource && sourceId,
+                        setupLocationStatusMessage ? setupLocationStatusId : undefined,
                         ...diagnosticIds,
                       )}
                       aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
@@ -187,8 +198,14 @@ export function InputsStep({
                         </option>
                       ))}
                     </select>
-                    {setupLocations.length === 0 && (
-                      <small>No named Setup Locations are available for this device plan. Define one in device setup.</small>
+                    {setupLocationStatusMessage && (
+                      <small
+                        aria-live="polite"
+                        id={setupLocationStatusId}
+                        role="status"
+                      >
+                        {setupLocationStatusMessage}
+                      </small>
                     )}
                   </>
                 ) : input.options?.length ? (

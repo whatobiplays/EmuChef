@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     fn duplicate_sd_payload() -> Value {
-        observed_payload(&[
+        let mut payload = observed_payload(&[
             (
                 INTERNAL_IDENTITY,
                 "internalShared",
@@ -2117,7 +2117,29 @@ mod tests {
             ),
             (SD_IDENTITY, "removableSd", "ambiguous", "mountedRw"),
             (SD_IDENTITY, "removableSd", "ambiguous", "mountedRw"),
-        ])
+        ]);
+        for volume in payload["volumes"].as_array_mut().expect("volumes array") {
+            match volume["kind"].as_str() {
+                Some("internalShared") => {
+                    volume["setupLocationKind"] = json!("internalShared");
+                    volume["mountRoot"] = json!("/storage/emulated/0");
+                    volume["reasons"] = json!([
+                        "primary_storage_emulated",
+                        "emulated_user_associated",
+                        "volume_mounted_rw"
+                    ]);
+                }
+                Some("removableSd") => {
+                    volume["reasons"] = json!([
+                        "disk_removable_sd",
+                        "volume_mounted_rw",
+                        "duplicate_identity"
+                    ]);
+                }
+                _ => unreachable!("fixture contains only internal and removable volumes"),
+            }
+        }
+        payload
     }
 
     fn handles_at_epoch(epoch: u64) -> Mutex<SessionHandles> {
@@ -4070,6 +4092,14 @@ public:179,65 {shell_state} {fs_uuid}
         );
         assert!(duplicates.iter().all(|volume| !volume.selectable));
 
+        let internal = projection
+            .volumes
+            .iter()
+            .find(|volume| volume.kind == "internalShared")
+            .expect("internal volume remains independently selectable");
+        assert!(internal.selectable);
+        assert_ne!(internal.volume_handle, duplicates[0].volume_handle);
+
         let sequence =
             begin_selection_request(&handles, &context.device_handle).expect("selection sequence");
         let error = admit_device_volume_selection_at_sequence(
@@ -4083,6 +4113,19 @@ public:179,65 {shell_state} {fs_uuid}
         )
         .expect_err("an ambiguous duplicate cannot be selected");
         assert!(error.contains("volume_not_selectable"), "error was {error}");
+
+        let internal_sequence =
+            begin_selection_request(&handles, &context.device_handle).expect("internal sequence");
+        admit_device_volume_selection_at_sequence(
+            &handles,
+            &context,
+            Some(&internal.volume_handle),
+            Some(&projection.observation_token),
+            internal_sequence,
+            "cached",
+            base,
+        )
+        .expect("the independent internal volume remains selectable");
     }
 
     #[test]
@@ -4385,6 +4428,19 @@ public:179,65 {shell_state} {fs_uuid}
         assert!(!serialized.contains("/storage/"));
         assert!(!serialized.contains(INTERNAL_IDENTITY));
         assert!(!serialized.contains(SD_IDENTITY));
+        for private_field in [
+            "mountRoot",
+            "volumeIdentity",
+            "volumeContinuity",
+            "observationToken",
+            "deviceHandle",
+            "sessionEpoch",
+        ] {
+            assert!(
+                !serialized.contains(private_field),
+                "public Setup Location projection leaked {private_field}"
+            );
+        }
 
         let refreshed = observation(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
