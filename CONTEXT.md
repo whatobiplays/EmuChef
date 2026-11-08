@@ -315,16 +315,30 @@ authorized operation to finish before acknowledging. The worker does not call
 back into Tauri for permission. Revocation does not roll back prior writes;
 reports distinguish staging, cleanup, and truthful partial destination effects.
 A rejected start retires its matching attempt and leaves the current session
-epoch available for a later attempt sequence. Device and runtime transitions
+epoch available for a later attempt sequence. A final session check that
+rejects before Tauri sends `startExecution` clears only its matching unrequested
+marker and releases the reserved start. A mismatched marker, active worker or
+lease, or durable-marker removal failure keeps the fence in place. Device and
+runtime transitions
 revoke matching leases before publishing invalidated authority. Tauri releases
 local authority after the corresponding retirement or revocation is
 acknowledged. A sidecar restart revokes retained leases through the generation
 that issued them before replacing that runtime. If revocation is not
 acknowledged, Tauri retains the lease and rejects the restart. A lost
-acknowledgement, unknown execution mapping, or uncertain
-terminal copy-commit outcome keeps the lease closed and blocks new starts until
-runtime recovery confirms authority. Runtime-process cleanup alone cannot
-clear the lease or reset device authority.
+acknowledgement, unknown execution mapping, or uncertain terminal copy-commit
+outcome keeps the lease closed and blocks new starts until proven rejection or
+matching trusted terminal evidence resolves it. T05 provides no automatic or
+in-session recovery for an ambiguously accepted Android start. Reaping the
+local sidecar or ADB client and closing their pipes does not prove that the
+Android shell command and its descendants are quiescent. The current request
+path has no remote operation identity or completion acknowledgement that
+Tauri can use to establish that proof. Keep the old lease and runtime authority
+blocked; a timeout or host-only cleanup cannot authorize a restart or a new
+Setup Location execution. Report the outcome as uncertain. A future
+owner-approved protocol may provide trustworthy remote completion evidence,
+but that protocol is outside T05; without such evidence, the fence remains in
+place. Runtime-process cleanup alone cannot clear the lease or reset device
+authority.
 
 ### App-owned configuration contracts
 
@@ -1687,6 +1701,10 @@ would invalidate another writer's reviewed missing-path precondition are
 rejected before execution. Idempotent directory effects may coexist when those
 directories already exist at review time and no other effect conflicts. Unused
 named locations do not participate and may have overlapping paths.
+Collision checks follow execution order. If an earlier active writer would
+change any part of a later writer's reviewed whole-tree destination snapshot,
+planning rejects the plan before execution. Disjoint effects outside that later
+scope may coexist when the remaining reviewed preconditions hold.
 
 Public review output for a legacy shared-storage copy replaces its physical
 destination with a logical storage label and relative path, and omits
@@ -1720,6 +1738,16 @@ confirms the destination manifest is unchanged and no destination directories
 were created. `partial` requires observed destination effects; `uncertain`
 means the final state could not be verified. Staging and cleanup are reported
 separately.
+
+The copy report's `noChange` outcome describes the selected destination; it
+does not prove that a timed-out remote operation is quiescent. If the typed
+device failure may outlive the local call, execution retains operation
+uncertainty and its durable fence even when the destination report shows no
+mutation. If a Setup Location destination is verified but staging or helper
+cleanup has ambiguous remote completion, the overall result is `uncertain`.
+The report retains the verified after-manifest and cleanup details, and the
+mutation lease remains uncertain. Cleanup with known terminal completion
+remains a cleanup warning; legacy destination behavior keeps its T03 contract.
 
 Tauri issues strictly increasing Setup Location attempt sequences that survive
 execution-store resets. The sidecar retains one runtime-local replay high-water
@@ -1904,12 +1932,13 @@ shutdown and offers it on the next launch. Deferred disposition is separate
 from current-session dirty state. Explicit discard, successful Save or Save As,
 or a newer atomically staged dirty generation clears or supersedes it.
 
-Only authored input `sensitive` metadata controls binding recovery. Explicitly
-non-sensitive values follow the existing portable saved-configuration rules,
-including existing file/directory bindings. Sensitive and unclassified values
-are omitted without hashes, masks, or length leakage and produce a sanitized
-required-re-entry diagnostic after restore. Key names and value shapes never
-classify secrecy.
+Recovery omits sensitive and unclassified input values. It also omits
+`setup_location_ref` because each reference belongs to one device session and
+plan; restored intent requires a fresh location selection. Other explicitly
+non-sensitive values follow existing portable saved-configuration rules,
+including file and directory bindings. Omitted values produce sanitized
+required-re-entry diagnostics. Key names and value shapes never classify
+secrecy.
 
 ## End-User Troubleshooting and Local State
 
@@ -2970,3 +2999,24 @@ observation and revalidates continuity, access, confinement, and destination
 preconditions. A failure before the first destination mutation leaves the
 selected destination untouched; staging and cleanup are reported separately.
 After an authorized mutation, failures retain T03's truthful partial outcome.
+### Lost runtime and remote completion
+
+Before Tauri sends a real execution request, it retains a private operation identity bound to the runtime generation, monotonic attempt sequence, device handle, and reviewed plan digest. It also creates and syncs a fixed marker in app data. The marker contains generic state text only; it contains no device handle, plan digest, destination path, or volume identity. A valid execution identity replaces the unresolved-start fence with the normal active execution mapping.
+
+An explicit backend rejection before worker admission proves that the request was not accepted and clears the marker. A matching trusted terminal report clears it only when status is known and no uncertain device operation remains. Execution-store resets preserve unresolved state. App startup treats a marker or inability to inspect it as an active fence. If a real-start response is lost or lacks a usable identity, Tauri invalidates device and review evidence while retaining the operation fence and any in-memory Setup Location lease. The current ADB request path has no remote operation-status query, so T05 keeps uncertain operations blocked.
+
+For a lost ADB response, confirmed exit for a local sidecar or ADB child proves only that the host process stopped; it does not prove Android-side completion. The durable operation fence persists across execution-store reset, app-service restart, session reentry, and app relaunch, and blocks restart and new real writes until a proven rejection or matching trusted terminal evidence resolves the operation. A new device, session, runtime generation, volume, or review identity alone does not prove that the previous remote operation stopped. T05 accepts this fail-closed availability state and does not require automatic or in-session recovery or an Android-side operation-identity protocol. Setup Location references, mount roots, leases, and execution authority are not persisted in saved setup intent. The marker contains generic text only. See [AOSP shell child setup](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/daemon/shell_service.cpp#341) and [protocol-loss handling](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/daemon/shell_service.cpp#583).
+
+The backend invokes the configured ADB client without assigning a dedicated
+EmuChef host-server endpoint. An ADB client can start a host server when none
+is running or reuse one that is already running. A newly started server enters
+its own session; a reused server is outside the runtime process group. Group
+cleanup therefore proves only that local processes still in the owned group
+have exited. It does not prove that the ADB server or Android command has
+completed, so an uncertain Setup Location lease remains retained until trusted
+completion evidence is available.
+
+Tauri reads local cleanup evidence without waiting on the sidecar state mutex.
+Contention or poisoned state is unconfirmed: recovery returns an error, leaves
+device and review authority unchanged, and retains any unresolved-start fence
+or Setup Location lease.

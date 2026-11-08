@@ -475,7 +475,7 @@ export function DeviceStorageChoices({
           </ul>
         )}
         <form onSubmit={(event) => void submitSetupLocation(event)}>
-          <label>
+          <label className="input-field">
             Storage volume for Setup Location
             <select
               disabled={
@@ -500,7 +500,7 @@ export function DeviceStorageChoices({
               ))}
             </select>
           </label>
-          <label>
+          <label className="input-field">
             Setup Location name
             <input
               autoComplete="off"
@@ -509,7 +509,7 @@ export function DeviceStorageChoices({
               value={setupLocationName}
             />
           </label>
-          <label>
+          <label className="input-field">
             Relative folder
             <input
               autoComplete="off"

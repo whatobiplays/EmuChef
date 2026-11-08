@@ -9,6 +9,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -25,6 +27,110 @@ use futures_lite::io::{AsyncRead, AsyncReadExt};
 pub(crate) const OUTPUT_CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const STREAM_BUFFER_BYTES: usize = 16 * 1024;
+
+/// Confirms that a command was configured to lead a private host process group.
+#[derive(Clone, Copy, Debug)]
+/// Token recording that a command was configured to create its own process group.
+pub struct ProcessGroupConfig(());
+
+/// Places a command in a new process group on supported Unix systems.
+///
+/// Attach the returned token to the spawned child to retain an opaque handle
+/// for bounded cleanup. Unsupported platforms return None and leave the
+/// command unchanged.
+pub fn isolate_process_group(command: &mut std::process::Command) -> Option<ProcessGroupConfig> {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+        Some(ProcessGroupConfig(()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        None
+    }
+}
+
+/// Handle for the local process group owned by one runtime generation.
+///
+/// The handle keeps the process-group identifier inside the process ownership
+/// boundary so callers can request cleanup without managing raw identifiers.
+#[derive(Clone, Copy, Debug)]
+/// Opaque handle to the local process group owned by one runtime generation.
+///
+/// This covers only processes that remain in the group. A descendant that
+/// starts a new session or process group is outside this handle's scope, and
+/// local cleanup does not prove that a remote Android command has completed.
+pub struct OwnedProcessGroup {
+    #[cfg(unix)]
+    process_group: libc::pid_t,
+}
+
+impl ProcessGroupConfig {
+    /// Associates the configured process group with the spawned child.
+    pub fn attach_to(self, child: &Child) -> Option<OwnedProcessGroup> {
+        #[cfg(unix)]
+        {
+            let process_group = libc::pid_t::try_from(child.id()).ok()?;
+            (process_group > 0).then_some(OwnedProcessGroup { process_group })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            None
+        }
+    }
+}
+
+impl OwnedProcessGroup {
+    /// Sends SIGKILL to every process that remains in the owned group.
+    ///
+    /// Returns true when the signal was sent or the group was already empty.
+    pub fn terminate(&self) -> bool {
+        #[cfg(unix)]
+        {
+            // SAFETY: the group identifier came from the child configured by this module.
+            let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Waits until the group disappears or the timeout expires.
+    ///
+    /// Returns false if the group remains or its emptiness cannot be proven.
+    pub fn wait_until_empty(&self, timeout: Duration) -> bool {
+        #[cfg(unix)]
+        {
+            let started = Instant::now();
+            loop {
+                if !process_group_exists(self.process_group) {
+                    return true;
+                }
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return false;
+                }
+                block_on(Timer::after(remaining.min(Duration::from_millis(10))));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = timeout;
+            false
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_group_exists(process_group: libc::pid_t) -> bool {
+    // SAFETY: signal zero only probes whether the owned process group exists.
+    let result = unsafe { libc::kill(-process_group, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
 
 #[cfg(test)]
 thread_local! {

@@ -12,8 +12,9 @@
 mod root_requirements;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File};
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -111,10 +112,49 @@ fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
 /// A start reservation prevents concurrent preflight races. At most one active
 /// mapping and the latest terminal mapping are retained; terminal replacement
 /// drops the older handle permanently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnresolvedRealStart {
+    runtime_generation: u64,
+    attempt_sequence: u64,
+    device_handle: String,
+    plan_digest: String,
+}
+
+#[cfg(unix)]
+fn write_durable_operation_fence(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "operation fence path has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+    let mut marker = options.open(path)?;
+    marker.write_all(b"EmuChef unresolved real-device operation\n")?;
+    marker.sync_all()?;
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn write_durable_operation_fence(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "durable device-operation fencing is unavailable on this platform",
+    ))
+}
+
 #[derive(Default)]
 pub struct ExecutionHandleStore {
     next_setup_location_attempt_sequence: u64,
     start_reserved: Option<ExecutionKind>,
+    // A lost or malformed real-start response leaves the old operation
+    // unresolved. This fence grants no execution rights; it keeps restart and
+    // later starts blocked until the same request receives terminal evidence.
+    unresolved_real_start: Option<UnresolvedRealStart>,
     pending_setup_location_lease: Option<SetupLocationExecutionLease>,
     active: Option<ExecutionMapping>,
     latest_terminal: Option<ExecutionMapping>,
@@ -123,11 +163,43 @@ pub struct ExecutionHandleStore {
     launch_actions: HashMap<String, LaunchActionRecord>,
     launch_attempts_in_flight: HashSet<String>,
     successful_launches: HashSet<String>,
+    durable_operation_fence_path: Option<PathBuf>,
+    durable_operation_fence_active: bool,
 }
 
 impl ExecutionHandleStore {
+    pub(crate) fn with_durable_operation_fence(path: PathBuf) -> Self {
+        let durable_operation_fence_active = {
+            #[cfg(unix)]
+            {
+                match fs::symlink_metadata(&path) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(_) => true,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path.as_path();
+                true
+            }
+        };
+        Self {
+            durable_operation_fence_path: Some(path),
+            durable_operation_fence_active,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn has_durable_operation_fence(&self) -> bool {
+        self.durable_operation_fence_active
+    }
+
     pub fn has_in_flight(&self) -> bool {
-        self.start_reserved.is_some() || self.active.is_some()
+        self.start_reserved.is_some()
+            || self.active.is_some()
+            || self.unresolved_real_start.is_some()
+            || self.durable_operation_fence_active
     }
 
     /// Whether the shared execution slot is currently owned by a real start
@@ -136,6 +208,9 @@ impl ExecutionHandleStore {
     /// admission. Simulated runs never mutate the device and do not block them.
     pub(crate) fn real_in_flight(&self) -> bool {
         self.start_reserved == Some(ExecutionKind::Real)
+            || self.unresolved_real_start.is_some()
+            || self.pending_setup_location_lease.is_some()
+            || self.durable_operation_fence_active
             || self
                 .active
                 .as_ref()
@@ -144,8 +219,138 @@ impl ExecutionHandleStore {
 
     pub fn reset(&mut self) {
         let next_setup_location_attempt_sequence = self.next_setup_location_attempt_sequence;
+        let unresolved_real_start = self.unresolved_real_start.clone();
+        let pending_setup_location_lease = self.pending_setup_location_lease.clone();
+        let durable_operation_fence_path = self.durable_operation_fence_path.clone();
+        let durable_operation_fence_active = self.durable_operation_fence_active;
         *self = Self::default();
         self.next_setup_location_attempt_sequence = next_setup_location_attempt_sequence;
+        self.unresolved_real_start = unresolved_real_start;
+        self.pending_setup_location_lease = pending_setup_location_lease;
+        self.durable_operation_fence_path = durable_operation_fence_path;
+        self.durable_operation_fence_active = durable_operation_fence_active;
+    }
+
+    fn retain_unresolved_real_start(
+        &mut self,
+        operation: UnresolvedRealStart,
+    ) -> Result<(), String> {
+        if self.unresolved_real_start.is_some() {
+            return Err(runtime_session_lost_error());
+        }
+        self.persist_durable_operation_fence()?;
+        self.unresolved_real_start = Some(operation);
+        Ok(())
+    }
+
+    fn clear_unresolved_real_start(&mut self, operation: &UnresolvedRealStart) -> bool {
+        if self.unresolved_real_start.as_ref() != Some(operation) {
+            return false;
+        }
+        self.unresolved_real_start = None;
+        true
+    }
+
+    /// Clears a matching start fence while the attempt is still reserved and no worker or lease exists.
+    /// If the durable marker cannot be cleared, the reservation remains in place.
+    fn release_unrequested_real_start(
+        &mut self,
+        operation: &UnresolvedRealStart,
+    ) -> Result<bool, String> {
+        if self.start_reserved != Some(ExecutionKind::Real)
+            || self.active.is_some()
+            || self.pending_setup_location_lease.is_some()
+            || self.unresolved_real_start.as_ref() != Some(operation)
+        {
+            return Ok(false);
+        }
+        self.clear_durable_operation_fence()?;
+        if !self.clear_unresolved_real_start(operation) {
+            return Ok(false);
+        }
+        self.release_start();
+        Ok(true)
+    }
+
+    fn persist_durable_operation_fence(&mut self) -> Result<(), String> {
+        let Some(path) = self.durable_operation_fence_path.as_deref() else {
+            return Ok(());
+        };
+        if self.durable_operation_fence_active {
+            return Err(safe_error(
+                "execution_quiescence_unconfirmed",
+                "A previous device operation may still be active. New device writes remain blocked.",
+            ));
+        }
+
+        match write_durable_operation_fence(path) {
+            Ok(()) => {
+                self.durable_operation_fence_active = true;
+                Ok(())
+            }
+            Err(_) => {
+                self.durable_operation_fence_active = match fs::symlink_metadata(path) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(_) => true,
+                };
+                Err(safe_error(
+                    "execution_fence_unavailable",
+                    "The app could not safely retain device-operation state. No device operation was started.",
+                ))
+            }
+        }
+    }
+
+    fn clear_durable_operation_fence(&mut self) -> Result<(), String> {
+        if !self.durable_operation_fence_active {
+            return Ok(());
+        }
+        let Some(path) = self.durable_operation_fence_path.as_deref() else {
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "Device-operation state is unavailable. Later device writes remain blocked.",
+            ));
+        };
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "This platform cannot safely clear device-operation state. Later device writes remain blocked.",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let parent = path.parent().ok_or_else(|| {
+                safe_error(
+                    "execution_fence_unavailable",
+                    "Device-operation state is unavailable. Later device writes remain blocked.",
+                )
+            })?;
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err(safe_error(
+                        "execution_fence_unavailable",
+                        "The app could not safely clear device-operation state. Later device writes remain blocked.",
+                    ));
+                }
+            }
+            if File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .is_err()
+            {
+                let _ = write_durable_operation_fence(path);
+                return Err(safe_error(
+                    "execution_fence_unavailable",
+                    "The app could not safely clear device-operation state. Later device writes remain blocked.",
+                ));
+            }
+            self.durable_operation_fence_active = false;
+            Ok(())
+        }
     }
 
     fn issue_setup_location_attempt_sequence(&mut self) -> Result<u64, String> {
@@ -245,7 +450,9 @@ impl ExecutionHandleStore {
     fn reserve_start(&mut self, kind: ExecutionKind) -> Result<(), ()> {
         if self.start_reserved.is_some()
             || self.active.is_some()
+            || self.unresolved_real_start.is_some()
             || self.pending_setup_location_lease.is_some()
+            || self.durable_operation_fence_active
         {
             return Err(());
         }
@@ -254,7 +461,11 @@ impl ExecutionHandleStore {
     }
 
     fn release_start(&mut self) {
-        if self.active.is_none() && self.pending_setup_location_lease.is_some() {
+        if self.active.is_none()
+            && (self.pending_setup_location_lease.is_some()
+                || self.unresolved_real_start.is_some()
+                || self.durable_operation_fence_active)
+        {
             return;
         }
         self.start_reserved = None;
@@ -370,9 +581,16 @@ impl ExecutionHandleStore {
             .as_ref()
             .is_some_and(|mapping| mapping.kind == kind && mapping.public_handle == public_handle)
         {
-            let retain_setup_location_lease = report
-                .as_ref()
-                .is_some_and(|stored| report_has_uncertain_copy_commit_outcome(&stored.report));
+            let retain_setup_location_lease = report.as_ref().is_some_and(|stored| {
+                !report_confirms_terminal_status(&stored.report)
+                    || report_has_uncertain_device_operation(&stored.report)
+            });
+            if report.as_ref().is_some_and(|stored| {
+                report_confirms_terminal_status(&stored.report)
+                    && !report_has_uncertain_device_operation(&stored.report)
+            }) {
+                let _ = self.clear_durable_operation_fence();
+            }
             if let Some(previous) = self.latest_terminal.as_ref() {
                 let previous_handle = previous.public_handle.clone();
                 self.discard_launch_actions_for_execution(&previous_handle);
@@ -1333,10 +1551,17 @@ where
     executions
         .reserve_start(ExecutionKind::Real)
         .map_err(|()| {
-            safe_error(
-                "execution_in_progress",
-                "Another execution is already starting or active.",
-            )
+            if executions.has_durable_operation_fence() {
+                safe_error(
+                    "execution_quiescence_unconfirmed",
+                    "A previous device operation may still be active. New device writes are blocked.",
+                )
+            } else {
+                safe_error(
+                    "execution_in_progress",
+                    "Another execution is already starting or active.",
+                )
+            }
         })?;
     let admission_fence = match crate::qualification_session::capture_execution_admission_fence(
         state,
@@ -1842,6 +2067,13 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         platform_tools.runtime_generation,
         setup_location_attempt_sequence,
     )?;
+    let unresolved_real_start = UnresolvedRealStart {
+        runtime_generation: platform_tools.runtime_generation,
+        attempt_sequence: setup_location_attempt_sequence,
+        device_handle: refreshed_review.device_handle.clone(),
+        plan_digest: refreshed_review.plan_digest.clone(),
+    };
+    executions.retain_unresolved_real_start(unresolved_real_start.clone())?;
     let start_response = if let Some(lease) = setup_location_lease.as_ref() {
         let transition = qualification_state.map(crate::commands::qualification_transition_lock);
         let current = handles
@@ -1855,8 +2087,12 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
                     && device.facts_session_epoch == Some(session_epoch)
             });
         if !current {
+            let release_result = executions.release_unrequested_real_start(&unresolved_real_start);
             if let Some(transition) = transition {
                 transition.release_and_retry_best_effort();
+            }
+            if !release_result? {
+                return Err(runtime_session_lost_error());
             }
             return Err(device_disconnected());
         }
@@ -1889,6 +2125,13 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     let start_result = match start_response {
         Ok(public) => public,
         Err(error) => {
+            if execution_start_error_proves_rejection(qualification_state, &error)
+                && executions.pending_setup_location_lease.is_none()
+            {
+                executions.clear_durable_operation_fence()?;
+                executions.clear_unresolved_real_start(&unresolved_real_start);
+                executions.release_start();
+            }
             return Err(resolve_runtime_request_failure(
                 qualification_state,
                 executions,
@@ -1907,10 +2150,6 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     // qualification-specific, so it holds for every caller.
     if real_start_execution_identity(&start_result).is_none() {
         let Some(state) = qualification_state else {
-            if executions.setup_location_lease().is_some() {
-                return Err(runtime_session_lost_error());
-            }
-            executions.reset();
             return Err(runtime_session_lost_error());
         };
         state.sidecar.invalidate_runtime_session();
@@ -1924,6 +2163,9 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         let result = (|| {
             let public =
                 bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
+            if !executions.clear_unresolved_real_start(&unresolved_real_start) {
+                return Err(runtime_session_lost_error());
+            }
             if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
                 let mapping = executions.mapping(
                     ExecutionKind::Real,
@@ -1937,7 +2179,12 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         transition.release_and_retry_best_effort();
         result
     } else {
-        bind_real_start_result(executions, review_handle, refreshed_review, &start_result)
+        let public =
+            bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
+        if !executions.clear_unresolved_real_start(&unresolved_real_start) {
+            return Err(runtime_session_lost_error());
+        }
+        Ok(public)
     }
 }
 
@@ -1966,6 +2213,14 @@ fn resolve_runtime_request_failure(
     resolve_proven_runtime_session_loss(state, executions)
 }
 
+fn execution_start_error_proves_rejection(
+    qualification_state: Option<&AppState>,
+    error: &str,
+) -> bool {
+    execution_session_loss(error).is_none()
+        && !qualification_state.is_some_and(|state| runtime_session_lost(state, error))
+}
+
 /// Clear every piece of authority derived from a runtime session that is
 /// already proven lost and return the sanitized public failure.
 ///
@@ -1976,6 +2231,10 @@ fn resolve_proven_runtime_session_loss(
     state: &AppState,
     executions: &mut ExecutionHandleStore,
 ) -> String {
+    // A preflight reservation is not evidence that startExecution reached the
+    // runtime. release_start keeps any unresolved-start fence or Setup Location
+    // lease that was installed before a potentially accepted start request.
+    executions.release_start();
     invalidate_lost_runtime_authority_with_store(state, executions);
     runtime_session_lost_error()
 }
@@ -2011,11 +2270,23 @@ fn setup_location_lease_for_review(
         .response
         .get("plan")
         .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
-    let snapshots = plan
-        .get("copyCommitSnapshots")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let native_snapshots = plan.get("copy_commit_snapshots");
+    let camel_case_snapshots = plan.get("copyCommitSnapshots");
+    if native_snapshots.is_some() && camel_case_snapshots.is_some() {
+        return Err(stale_review(
+            "The retained reviewed plan has ambiguous copy snapshot fields.",
+        ));
+    }
+    let snapshots_value = native_snapshots.or(camel_case_snapshots);
+    let snapshots = match snapshots_value {
+        Some(Value::Array(snapshots)) => snapshots.as_slice(),
+        Some(_) => {
+            return Err(stale_review(
+                "The retained reviewed plan has invalid copy snapshots.",
+            ));
+        }
+        None => &[],
+    };
     let bindings = snapshots
         .iter()
         .filter_map(|snapshot| snapshot.get("setupLocationBinding"))
@@ -3281,7 +3552,25 @@ fn recover_from_real_execution_loss(
     let retained_mapping = mapping.clone();
     match loss {
         ExecutionSessionLoss::RuntimeSessionLost => {
-            if !runtime_loss_allows_execution_reset(state, &executions) {
+            let process_cleanup_confirmed = state.sidecar.runtime_process_cleanup_confirmed();
+            if !runtime_loss_allows_execution_reset(process_cleanup_confirmed, &executions) {
+                if !process_cleanup_confirmed {
+                    drop(executions);
+                    transition.release_and_retry_best_effort();
+                    return Err(runtime_session_lost_error());
+                }
+                // Keep the execution mapping, lease, and unresolved-start
+                // fence that prevent later writes. Other native observations
+                // belong to the lost runtime and must be invalidated now.
+                invalidate_lost_runtime_authority_in_transition(state);
+                drop(executions);
+                crate::qualification_session::observe_in_transition(
+                    state,
+                    crate::qualification_session::QualificationLifecycleObservation::RealExecutionLost {
+                        execution_handle: public_handle.to_string(),
+                    },
+                );
+                transition.release_and_retry_best_effort();
                 return Err(runtime_session_lost_error());
             }
             executions.reset();
@@ -3374,10 +3663,19 @@ fn invalidate_lost_runtime_authority_with_execution_guard(
     // A stopped sidecar does not prove that every destination child has
     // stopped. Keep native session and execution authority while a T05 lease
     // remains unrevoked.
-    if !runtime_loss_allows_execution_reset(state, &executions) {
+    let transition = crate::commands::qualification_transition_lock(state);
+    let process_cleanup_confirmed = state.sidecar.runtime_process_cleanup_confirmed();
+    if !runtime_loss_allows_execution_reset(process_cleanup_confirmed, &executions) {
+        if !process_cleanup_confirmed {
+            drop(executions);
+            transition.release_and_retry_best_effort();
+            return Err(runtime_session_lost_error());
+        }
+        invalidate_lost_runtime_authority_in_transition(state);
+        drop(executions);
+        transition.release_and_retry_best_effort();
         return Err(runtime_session_lost_error());
     }
-    let transition = crate::commands::qualification_transition_lock(state);
     executions.reset();
     after_store_reset();
     invalidate_lost_runtime_authority_in_transition(state);
@@ -3393,20 +3691,29 @@ fn invalidate_lost_runtime_authority_with_store(
     state: &AppState,
     executions: &mut ExecutionHandleStore,
 ) {
-    if !runtime_loss_allows_execution_reset(state, executions) {
+    let transition = crate::commands::qualification_transition_lock(state);
+    let process_cleanup_confirmed = state.sidecar.runtime_process_cleanup_confirmed();
+    if !runtime_loss_allows_execution_reset(process_cleanup_confirmed, executions) {
+        if !process_cleanup_confirmed {
+            transition.release_and_retry_best_effort();
+            return;
+        }
+        invalidate_lost_runtime_authority_in_transition(state);
+        transition.release_and_retry_best_effort();
         return;
     }
-    let transition = crate::commands::qualification_transition_lock(state);
     executions.reset();
     invalidate_lost_runtime_authority_in_transition(state);
     transition.release_and_retry_best_effort();
 }
 
 fn runtime_loss_allows_execution_reset(
-    state: &AppState,
+    process_cleanup_confirmed: bool,
     executions: &ExecutionHandleStore,
 ) -> bool {
-    state.sidecar.runtime_process_cleanup_confirmed() && executions.setup_location_lease().is_none()
+    process_cleanup_confirmed
+        && executions.setup_location_lease().is_none()
+        && !executions.real_in_flight()
 }
 
 /// Native authority that cannot survive a lost runtime session. The caller owns
@@ -4152,6 +4459,10 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
         "missing_capability" => (internal, "The device lacks a required capability."),
         "step_conflict" => (internal, "Conflicting work prevented this operation."),
         "operation_timed_out" => (internal, "A device operation timed out."),
+        "execution_operation_uncertain" => (
+            internal,
+            "EmuChef could not confirm that the remote device operation ended. New real execution remains blocked until the session is known to be quiescent.",
+        ),
         "copy_staging_cleanup_pending" => (
             internal,
             "The copy completed successfully, but temporary staging cleanup is still pending.",
@@ -4288,6 +4599,11 @@ fn remediation_for_code(code: &str) -> Value {
             } else {
                 "Resolve the reported feature problem, then generate and review a fresh plan."
             },
+        ),
+        "execution_operation_uncertain" => (
+            "view_report",
+            "Wait for the earlier operation to be confirmed complete",
+            "Do not start another real execution. EmuChef will keep new real executions blocked until the previous device operation is confirmed quiescent.",
         ),
         "device_offline" | "device_unauthorized" | "device_disconnected" | "device_transport_lost" => (
             "reconnect_device",
@@ -4712,22 +5028,40 @@ fn copy_commit_report_outcome(step: &Value) -> Option<&str> {
     report.get("outcome").and_then(Value::as_str)
 }
 
-fn report_has_uncertain_copy_commit_outcome(report: &Value) -> bool {
-    report
-        .get("recipes")
+fn report_has_uncertain_device_operation(report: &Value) -> bool {
+    let copy_commit_uncertain =
+        report
+            .get("recipes")
+            .and_then(Value::as_array)
+            .is_some_and(|recipes| {
+                recipes.iter().any(|recipe| {
+                    recipe
+                        .get("steps")
+                        .and_then(Value::as_array)
+                        .is_some_and(|steps| {
+                            steps
+                                .iter()
+                                .any(|step| copy_commit_report_outcome(step) == Some("uncertain"))
+                        })
+                })
+            });
+    let worker_uncertain = report
+        .get("errors")
         .and_then(Value::as_array)
-        .is_some_and(|recipes| {
-            recipes.iter().any(|recipe| {
-                recipe
-                    .get("steps")
-                    .and_then(Value::as_array)
-                    .is_some_and(|steps| {
-                        steps
-                            .iter()
-                            .any(|step| copy_commit_report_outcome(step) == Some("uncertain"))
-                    })
+        .is_some_and(|errors| {
+            errors.iter().any(|issue| {
+                issue.get("code").and_then(Value::as_str) == Some("execution_operation_uncertain")
             })
-        })
+        });
+
+    copy_commit_uncertain || worker_uncertain
+}
+
+fn report_confirms_terminal_status(report: &Value) -> bool {
+    matches!(
+        report.get("status").and_then(Value::as_str),
+        Some("succeeded" | "succeeded_with_warnings" | "failed" | "cancelled")
+    )
 }
 
 fn is_safe_projected_step_message(message: &str) -> bool {
@@ -5405,6 +5739,205 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn unresolved_real_start_survives_reset_until_matching_operation_is_resolved() {
+        let mut store = ExecutionHandleStore::default();
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 3,
+            device_handle: "device-test".to_string(),
+            plan_digest: "a".repeat(64),
+        };
+        store
+            .retain_unresolved_real_start(operation.clone())
+            .unwrap();
+
+        assert!(store.has_in_flight());
+        assert!(store.real_in_flight());
+        assert!(store.reserve_start(ExecutionKind::Real).is_err());
+
+        store.reset();
+
+        assert!(store.has_in_flight());
+        assert!(store.reserve_start(ExecutionKind::Real).is_err());
+        let mut stale_operation = operation.clone();
+        stale_operation.runtime_generation = 8;
+        assert!(!store.clear_unresolved_real_start(&stale_operation));
+        assert!(store.clear_unresolved_real_start(&operation));
+        assert!(!store.has_in_flight());
+        store.reserve_start(ExecutionKind::Real).unwrap();
+    }
+
+    #[test]
+    fn known_pre_start_rejection_clears_its_matching_durable_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let fence_path = temp.path().join("unresolved-device-operation.marker");
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 6,
+            device_handle: "device-test".to_string(),
+            plan_digest: "d".repeat(64),
+        };
+        let mut store = ExecutionHandleStore::with_durable_operation_fence(fence_path.clone());
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        store
+            .retain_unresolved_real_start(operation.clone())
+            .unwrap();
+
+        assert!(fence_path.is_file());
+        assert!(store.release_unrequested_real_start(&operation).unwrap());
+        assert!(!fence_path.exists());
+        assert!(!store.has_in_flight());
+        store.reserve_start(ExecutionKind::Real).unwrap();
+    }
+
+    #[test]
+    fn unresolved_real_start_fence_survives_store_reconstruction() {
+        let temp = tempfile::tempdir().unwrap();
+        let fence_path = temp.path().join("unresolved-device-operation.marker");
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 4,
+            device_handle: "device-test".to_string(),
+            plan_digest: "b".repeat(64),
+        };
+        let mut store = ExecutionHandleStore::with_durable_operation_fence(fence_path.clone());
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        store.retain_unresolved_real_start(operation).unwrap();
+
+        assert!(fence_path.is_file());
+
+        let mut recovered = ExecutionHandleStore::with_durable_operation_fence(fence_path);
+        assert!(recovered.has_in_flight());
+        assert!(recovered.reserve_start(ExecutionKind::Real).is_err());
+    }
+
+    #[test]
+    fn confirmed_host_cleanup_alone_does_not_allow_reset_of_uncertain_real_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let fence_path = temp.path().join("unresolved-device-operation.marker");
+        let mut executions = ExecutionHandleStore::with_durable_operation_fence(fence_path.clone());
+        executions.reserve_start(ExecutionKind::Real).unwrap();
+        executions
+            .retain_unresolved_real_start(UnresolvedRealStart {
+                runtime_generation: 7,
+                attempt_sequence: 5,
+                device_handle: "device-test".to_string(),
+                plan_digest: "c".repeat(64),
+            })
+            .unwrap();
+
+        assert!(fence_path.is_file());
+        assert!(!runtime_loss_allows_execution_reset(true, &executions));
+        assert!(!runtime_loss_allows_execution_reset(false, &executions));
+        assert!(executions.has_durable_operation_fence());
+        assert!(executions.reserve_start(ExecutionKind::Real).is_err());
+    }
+
+    #[test]
+    fn confirmed_terminal_report_clears_durable_operation_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let fence_path = temp.path().join("unresolved-device-operation.marker");
+        let mut store = ExecutionHandleStore::with_durable_operation_fence(fence_path.clone());
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 5,
+            device_handle: "device-test".to_string(),
+            plan_digest: "c".repeat(64),
+        };
+        store
+            .retain_unresolved_real_start(operation.clone())
+            .unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-terminal".to_string(),
+            "review-terminal".to_string(),
+            review(),
+        );
+        assert!(store.clear_unresolved_real_start(&operation));
+
+        assert!(store.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            json!({ "status": "failed", "errors": [] }),
+            json!({}),
+        ));
+
+        assert!(!fence_path.exists());
+        let mut recovered = ExecutionHandleStore::with_durable_operation_fence(fence_path);
+        assert!(!recovered.has_in_flight());
+        recovered.reserve_start(ExecutionKind::Real).unwrap();
+    }
+
+    #[test]
+    fn uncertain_terminal_report_keeps_durable_operation_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let fence_path = temp.path().join("unresolved-device-operation.marker");
+        let mut store = ExecutionHandleStore::with_durable_operation_fence(fence_path.clone());
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 6,
+            device_handle: "device-test".to_string(),
+            plan_digest: "d".repeat(64),
+        };
+        store
+            .retain_unresolved_real_start(operation.clone())
+            .unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-uncertain".to_string(),
+            "review-uncertain".to_string(),
+            review(),
+        );
+        assert!(store.clear_unresolved_real_start(&operation));
+
+        assert!(store.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            json!({
+                "errors": [
+                    { "code": "execution_operation_uncertain" },
+                    { "code": "operation_timed_out" }
+                ]
+            }),
+            json!({}),
+        ));
+
+        assert!(fence_path.is_file());
+        let mut recovered = ExecutionHandleStore::with_durable_operation_fence(fence_path);
+        assert!(recovered.has_in_flight());
+        assert!(recovered.reserve_start(ExecutionKind::Real).is_err());
+    }
+
+    #[test]
+    fn confirmed_real_terminal_releases_the_execution_slot() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 1,
+            device_handle: "device-test".to_string(),
+            plan_digest: "a".repeat(64),
+        };
+        store
+            .retain_unresolved_real_start(operation.clone())
+            .unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-1".into(),
+            "review-1".into(),
+            review(),
+        );
+
+        assert!(store.clear_unresolved_real_start(&operation));
+        assert!(store.real_in_flight());
+        store.mark_terminal(ExecutionKind::Real, &mapping.public_handle);
+        assert!(!store.has_in_flight());
+        assert!(!store.real_in_flight());
+    }
+
+    #[test]
     fn setup_location_review_lease_rejects_prior_session_with_same_volume_identity() {
         let mut review = review();
         let plan = review.response.get_mut("plan").expect("reviewed plan");
@@ -5423,6 +5956,68 @@ pub(crate) mod tests {
             error.contains("setup_location_session_stale"),
             "error was {error}"
         );
+    }
+
+    #[test]
+    fn setup_location_review_lease_reads_native_plan_snapshot_field() {
+        let (handles, _root, original_review_handle) = prepared_real_review(false);
+        let (review_handle, session_epoch) =
+            add_setup_location_binding(&handles, &original_review_handle);
+        let review = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .clone();
+
+        let lease = setup_location_lease_for_review(&review, session_epoch, 1, 8)
+            .expect("native plan snapshot field should be valid")
+            .expect("native plan snapshot should issue a Setup Location lease");
+
+        assert_eq!(lease.session_epoch, session_epoch);
+        assert_eq!(lease.runtime_generation, 1);
+    }
+
+    #[test]
+    fn setup_location_review_lease_rejects_ambiguous_snapshot_field_aliases() {
+        let (handles, _root, original_review_handle) = prepared_real_review(false);
+        let (review_handle, session_epoch) =
+            add_setup_location_binding(&handles, &original_review_handle);
+        let mut review = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .clone();
+        let plan = review.response.get_mut("plan").unwrap();
+        plan["copyCommitSnapshots"] = json!([]);
+        review.plan_digest = canonical_json_digest(plan).unwrap();
+
+        let error = setup_location_lease_for_review(&review, session_epoch, 1, 8)
+            .expect_err("both snapshot field aliases must not be accepted together");
+
+        assert!(error.contains("review_stale"), "error was {error}");
+    }
+
+    #[test]
+    fn setup_location_review_lease_rejects_malformed_snapshot_field() {
+        let (handles, _root, original_review_handle) = prepared_real_review(false);
+        let (review_handle, session_epoch) =
+            add_setup_location_binding(&handles, &original_review_handle);
+        let mut review = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .clone();
+        let plan = review.response.get_mut("plan").unwrap();
+        plan["copy_commit_snapshots"] = json!({});
+        review.plan_digest = canonical_json_digest(plan).unwrap();
+
+        let error = setup_location_lease_for_review(&review, session_epoch, 1, 8)
+            .expect_err("malformed snapshots must not hide a Setup Location binding");
+
+        assert!(error.contains("review_stale"), "error was {error}");
     }
 
     #[test]
@@ -5692,6 +6287,7 @@ pub(crate) mod tests {
             ExecutionKind::Real,
             &public_handle,
             json!({
+            "status": "succeeded",
                 "recipes": [{
                     "steps": [{
                         "outputs": {
@@ -6754,6 +7350,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn uncertain_operation_report_projection_is_sanitized_and_blocks_retry() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let projected = project_real_issue(
+            &mapping,
+            &json!({
+                "code": "execution_operation_uncertain",
+                "stepId": "recipe.one/copy",
+                "message": "serial=private; path=/private/raw; remote process may still be active"
+            }),
+        );
+        assert!(projected["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not confirm that the remote device operation ended"));
+        assert!(projected["remediation"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("keep new real executions blocked"));
+        let serialized = projected.to_string();
+        for forbidden in [
+            "execution_operation_uncertain",
+            "execution-private",
+            "serial=private",
+            "/private/raw",
+            "remote process may still be active",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
     fn real_storage_report_projection_exports_authored_recovery_without_private_details() {
         let mapping = ExecutionMapping {
             kind: ExecutionKind::Real,
@@ -7473,7 +8106,7 @@ pub(crate) mod tests {
                 .session_epoch;
             (retained, session_epoch)
         };
-        retained.response["plan"]["copyCommitSnapshots"] = json!([{
+        retained.response["plan"]["copy_commit_snapshots"] = json!([{
             "setupLocationBinding": { "sessionEpoch": session_epoch }
         }]);
         retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
@@ -7520,6 +8153,23 @@ pub(crate) mod tests {
             snapshot,
         );
         (executions, handles, root, mapping.public_handle, lease)
+    }
+
+    #[test]
+    fn real_worker_uncertainty_retains_setup_location_lease() {
+        let (mut executions, _handles, _root, execution_handle, lease) =
+            active_setup_location_execution();
+        let report = json!({
+            "errors": [{ "code": "execution_operation_uncertain" }]
+        });
+
+        assert!(executions.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &execution_handle,
+            report,
+            json!({}),
+        ));
+        assert_eq!(executions.setup_location_lease(), Some(lease));
     }
 
     fn run_integrated_case(
@@ -8625,43 +9275,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn product_terminal_monitor_resolves_a_lost_runtime_session_as_product_loss() {
+    fn runtime_loss_keeps_an_active_execution_blocked_until_quiescence() {
         let executions = Mutex::new(ExecutionHandleStore::default());
         let handles = Mutex::new(SessionHandles::default());
         let root = Mutex::new(RootQualificationStore::default());
         let execution_handle = bind_monitor_execution(&executions, "sidecar-lost");
-        let runtime = ScriptedRuntime {
-            requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(vec![Err(safe_error(
-                "runtime_session_lost",
-                "the runtime session is gone",
-            ))]),
-        };
         let (_temp, app) = test_app(executions, handles, root);
         let state = app.state::<AppState>();
-        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
 
-        let Some(RealExecutionMonitorEvent::Lost {
-            execution_handle: lost,
-        }) = event
-        else {
-            panic!("a lost runtime session must resolve through product loss semantics");
-        };
-        assert_eq!(lost, execution_handle);
-        assert!(
-            state
-                .executions
-                .lock()
-                .unwrap()
-                .mapping(ExecutionKind::Real, &execution_handle, "missing")
-                .is_err(),
-            "the lost runtime authority must drop the execution mapping"
-        );
-        let message = monitor_resolution_message(&RealExecutionMonitorEvent::Lost {
-            execution_handle: execution_handle.clone(),
-        });
-        assert!(message.contains(&execution_handle));
-        assert!(!message.contains("sensitive-serial"));
+        let error = recover_from_real_execution_loss(
+            &state,
+            &execution_handle,
+            &safe_error("runtime_session_lost", "the runtime session is gone"),
+        )
+        .expect_err("an active device operation cannot be retired without quiescence evidence");
+
+        assert!(error.contains("runtime_session_lost"), "{error}");
+        let mut executions = state.executions.lock().unwrap();
+        assert!(executions.real_in_flight());
+        assert!(executions
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE
+            )
+            .is_ok());
+        assert!(executions.reserve_start(ExecutionKind::Real).is_err());
     }
 
     #[test]
@@ -8682,36 +9321,63 @@ pub(crate) mod tests {
         let attempts = std::cell::Cell::new(0);
         let mut waits = Vec::new();
 
-        let event = monitor_real_terminal_with_loss_recovery(
-            &execution_handle,
-            &state,
-            &runtime,
-            &mut |interval| waits.push(interval),
-            &mut |state, handle, error| {
-                let attempt = attempts.get() + 1;
-                attempts.set(attempt);
-                if attempt == 1 {
-                    Err(safe_error(
-                        "execution_recovery_unavailable",
-                        "transient recovery failure",
-                    ))
-                } else {
-                    recover_from_real_execution_loss(state, handle, error)
-                }
-            },
-        );
+        let monitor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            monitor_real_terminal_with_loss_recovery(
+                &execution_handle,
+                &state,
+                &runtime,
+                &mut |interval| {
+                    waits.push(interval);
+                    if waits.len() == 3 {
+                        panic!("stop after verifying two bounded recovery retries");
+                    }
+                },
+                &mut |state, handle, error| {
+                    let attempt = attempts.get() + 1;
+                    attempts.set(attempt);
+                    if attempt == 1 {
+                        Err(safe_error(
+                            "execution_recovery_unavailable",
+                            "transient recovery failure",
+                        ))
+                    } else {
+                        recover_from_real_execution_loss(state, handle, error)
+                    }
+                },
+            )
+        }));
 
-        assert!(matches!(
-            event,
-            Some(RealExecutionMonitorEvent::Lost { .. })
-        ));
+        assert!(
+            monitor_result.is_err(),
+            "the test wait adapter should stop retrying"
+        );
         assert_eq!(
             attempts.get(),
             2,
-            "recovery is retried after the first failure"
+            "recovery is retried while an active operation lacks quiescence evidence"
         );
-        assert_eq!(waits, vec![Duration::from_secs(1), Duration::from_secs(2)]);
-        assert!(state.executions.lock().unwrap().is_lost(&execution_handle));
+        assert_eq!(waits.len(), 3);
+        let executions = state.executions.lock().unwrap();
+        assert!(executions.real_in_flight());
+        assert!(executions
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE
+            )
+            .is_ok());
+        assert_eq!(
+            waits,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4)
+            ]
+        );
+        assert!(
+            !executions.is_lost(&execution_handle),
+            "unproven quiescence leaves the execution blocked rather than resolved"
+        );
     }
 
     #[test]
@@ -8839,7 +9505,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn product_terminal_monitor_recovers_a_poisoned_execution_store_as_product_loss() {
+    fn poisoned_execution_store_is_recovered_but_active_mapping_remains_blocked() {
         let (_repository_root, _app_root, app, execution_handle, candidate) =
             begin_monitor_qualification_attempt();
         let state = app.state::<AppState>();
@@ -8854,14 +9520,25 @@ pub(crate) mod tests {
             responses: Mutex::new(Vec::new()),
         };
 
-        let event = monitor_real_terminal(&execution_handle, &state, &runtime, &mut |_| {});
+        let error = recover_from_real_execution_loss(
+            &state,
+            &execution_handle,
+            &safe_error("runtime_session_lost", "the runtime session is gone"),
+        )
+        .expect_err("poison recovery cannot discard an active operation without quiescence");
 
-        assert!(matches!(
-            event,
-            Some(RealExecutionMonitorEvent::Lost { .. })
-        ));
+        assert!(error.contains("runtime_session_lost"), "{error}");
         assert!(!state.executions.is_poisoned());
-        assert!(state.executions.lock().unwrap().is_lost(&execution_handle));
+        let executions = state.executions.lock().unwrap();
+        assert!(executions.real_in_flight());
+        assert!(executions
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE
+            )
+            .is_ok());
+        drop(executions);
         assert!(runtime.requests.lock().unwrap().is_empty());
         let stored = state
             .qualification_repository
@@ -9117,8 +9794,12 @@ pub(crate) mod tests {
                     &execution_handle,
                     REAL_EXECUTION_UNAVAILABLE,
                 )
-                .is_err(),
-            "the loss transition must clear execution authority for the dead process generation"
+                .is_ok(),
+            "the loss transition must retain the active execution until quiescence is proven"
+        );
+        assert!(
+            state.executions.lock().unwrap().real_in_flight(),
+            "the retained execution must block a new real start"
         );
         assert!(
         state
@@ -10105,7 +10786,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lost_runtime_during_real_start_clears_authority_and_invalidates_qualification() {
+    fn lost_runtime_during_real_start_retains_operation_fence_and_invalidates_qualification() {
         let repository_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
         std::fs::write(
@@ -10252,8 +10933,8 @@ pub(crate) mod tests {
             "the loss must be observed on the one authoritative start request"
         );
         assert!(
-            !executions.has_in_flight(),
-            "a lost runtime session must clear the reserved execution authority"
+            executions.has_in_flight(),
+            "a lost real-start response must keep later executions blocked"
         );
         assert!(
             state
@@ -10355,6 +11036,7 @@ pub(crate) mod tests {
         /// Advance the native device session epoch while a request is in flight,
         /// so the delayed response belongs to a replaced device session.
         AdvanceDeviceEpoch,
+        LoseRuntimeSessionOnStartResponse,
     }
 
     /// Scripted runtime for the start-seam loss driver. It records every
@@ -10362,6 +11044,7 @@ pub(crate) mod tests {
     /// scripted response is read.
     struct StartSeamRuntime<'a> {
         handles: &'a Mutex<SessionHandles>,
+        sidecar: &'a SidecarState,
         requests: Mutex<Vec<(String, Value)>>,
         responses: Mutex<Vec<Result<Value, String>>>,
         effect: StartSeamEffect,
@@ -10392,6 +11075,11 @@ pub(crate) mod tests {
                         before, after,
                         "the scripted side effect must advance the native device session epoch"
                     );
+                }
+                StartSeamEffect::LoseRuntimeSessionOnStartResponse
+                    if request_type == "startExecution" =>
+                {
+                    self.sidecar.invalidate_runtime_session();
                 }
                 _ => {}
             }
@@ -10508,7 +11196,9 @@ pub(crate) mod tests {
             crate::qualification_mode::QualificationCheckpointOutcome::Pass,
         )
         .unwrap();
-        let mut executions = ExecutionHandleStore::default();
+        let fence_root = tempfile::tempdir().unwrap();
+        let fence_path = fence_root.path().join("active-device-operation.marker");
+        let mut executions = ExecutionHandleStore::with_durable_operation_fence(fence_path.clone());
         executions
             .reserve_start(match seam {
                 StartSeam::Simulated => ExecutionKind::Simulated,
@@ -10517,6 +11207,7 @@ pub(crate) mod tests {
             .unwrap();
         let runtime = StartSeamRuntime {
             handles: &state.handles,
+            sidecar: &state.sidecar,
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses),
             effect,
@@ -10549,10 +11240,24 @@ pub(crate) mod tests {
             }
         };
         let in_flight = executions.has_in_flight();
+        let requests = runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(request_type, _)| request_type.clone())
+            .collect::<Vec<_>>();
+        let may_have_accepted_real_execution = matches!(seam, StartSeam::Real)
+            && requests.iter().any(|request| request == "startExecution");
         if error.contains("runtime_session_lost") {
-            assert!(
-                !in_flight,
-                "a lost runtime session must clear the reserved execution authority"
+            assert_eq!(
+                in_flight, may_have_accepted_real_execution,
+                "only a real start whose response may have been lost can retain mutation authority"
+            );
+            assert_eq!(
+                fence_path.exists(),
+                may_have_accepted_real_execution,
+                "only a real start with an unconfirmed response retains its durable fence"
             );
             assert!(
                 state
@@ -10584,13 +11289,6 @@ pub(crate) mod tests {
                 "the active attempt must fail closed when the runtime session is lost"
             );
         }
-        let requests = runtime
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(request_type, _)| request_type.clone())
-            .collect();
         StartSeamOutcome {
             error,
             requests,
@@ -10799,6 +11497,7 @@ pub(crate) mod tests {
 
         let runtime = StartSeamRuntime {
             handles: &state.handles,
+            sidecar: &state.sidecar,
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses),
             effect: StartSeamEffect::None,
@@ -11231,8 +11930,8 @@ pub(crate) mod tests {
             "an accepted start without a local execution identity must fail and stop the runtime session"
         );
         assert!(
-            !outcome.in_flight,
-            "the unowned accepted execution must clear the start reservation"
+            outcome.in_flight,
+            "an accepted real start without a local execution identity must retain a recovery fence"
         );
         assert_eq!(
             outcome.requests.last().map(String::as_str),
@@ -11272,8 +11971,8 @@ pub(crate) mod tests {
             "an empty execution id cannot own the accepted execution, so the runtime session must fail closed"
         );
         assert!(
-            !outcome.in_flight,
-            "the unowned accepted execution must clear the start reservation"
+            outcome.in_flight,
+            "an accepted real start without an execution id must retain a recovery fence"
         );
     }
 
@@ -11309,6 +12008,38 @@ pub(crate) mod tests {
             !outcome.runtime_session_lost,
             "a rejected start must not kill the runtime session"
         );
+        assert!(
+            !outcome.in_flight,
+            "a proven start rejection must release its reservation and fence"
+        );
+    }
+
+    #[test]
+    fn concurrent_runtime_loss_preserves_durable_fence_after_start_rejection() {
+        let outcome = start_seam_runtime_loss_with_effect(
+            StartSeam::Real,
+            vec![
+                Ok(supported_inventory("transport-1")),
+                Ok(target_facts()),
+                Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
+                Err(json!({
+                    "code": "execution_start_failed",
+                    "message": "The runtime rejected the start request.",
+                    "details": { "code": "artifact_not_ready" },
+                })
+                .to_string()),
+            ],
+            StartSeamEffect::LoseRuntimeSessionOnStartResponse,
+        );
+
+        assert!(
+            outcome.error.contains("runtime_session_lost"),
+            "{}",
+            outcome.error
+        );
+        assert!(outcome.runtime_session_lost);
+        assert!(outcome.in_flight);
     }
 
     #[test]
@@ -11743,8 +12474,12 @@ pub(crate) mod tests {
 
         assert!(error.contains("runtime_session_lost"), "{error}");
         assert!(
-            !executions.has_in_flight(),
-            "the unowned accepted execution must clear the start reservation"
+            executions.has_in_flight(),
+            "an accepted start without identity must retain a fail-closed execution fence"
+        );
+        assert!(
+            executions.real_in_flight(),
+            "the unresolved start must block a second real execution"
         );
     }
 

@@ -45,6 +45,7 @@ pub mod jsonl;
 pub mod model;
 pub mod one_shot;
 mod owned_process;
+pub use owned_process::{isolate_process_group, OwnedProcessGroup, ProcessGroupConfig};
 mod plan_digest;
 mod planner;
 pub(crate) mod planner_device_plan;

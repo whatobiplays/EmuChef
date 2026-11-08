@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  bindingsForPersistence,
   initialWorkflowState,
   filterRepairBindings,
   inputDiagnosticsForDisplay,
@@ -11,6 +12,7 @@ import {
   recipeSelectionDisabled,
   reviewReady,
   runBusyAction,
+  savedBindingKeysToRemove,
   updateRecipeSelection,
   workflowReducer,
 } from "../src/workflow";
@@ -489,6 +491,62 @@ test("plan selection distinguishes backend defaults from an explicit blank setup
   assert.deepEqual(blank.selectedRecipes, []);
 });
 
+test("plan changes and unknown descriptions cannot persist Setup Location references", () => {
+  const locationKey = "recipe.one/destination";
+  const bindings = {
+    [locationKey]: "location-one",
+    "recipe.one/portable": "/portable/value",
+  };
+  const description = {
+    devicePlan: "plan.old",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    inputs: [{
+      key: locationKey,
+      recipeId: "recipe.one",
+      inputId: "destination",
+      type: "setup_location_ref" as const,
+      label: "Install destination",
+      description: "Choose a named destination.",
+      required: true,
+      sensitive: false,
+      value: "location-one",
+      valueSource: "explicit" as const,
+      diagnostics: [],
+    }],
+    diagnostics: [],
+  };
+  const state = {
+    ...initialWorkflowState,
+    devicePlan: "plan.old",
+    selectedRecipes: ["recipe.one"],
+    description,
+    descriptionDirty: false,
+    bindings,
+    portableIntentDirty: true,
+  };
+
+  const changedPlan = workflowReducer(state, {
+    type: "select-plan",
+    devicePlan: "plan.new",
+  });
+
+  assert.equal(changedPlan.description, null);
+  assert.deepEqual(changedPlan.bindings, {
+    "recipe.one/portable": "/portable/value",
+  });
+  const portableBindings = bindingsForPersistence(description, bindings);
+  assert.deepEqual(portableBindings, {
+    "recipe.one/portable": "/portable/value",
+  });
+  assert.deepEqual(
+    savedBindingKeysToRemove({ [locationKey]: "location-one" }, portableBindings),
+    [locationKey],
+  );
+  assert.deepEqual(bindingsForPersistence(null, bindings), {});
+});
+
 test("empty recipe selection prevents review", () => {
   const state = {
     ...initialWorkflowState,
@@ -779,6 +837,87 @@ test("disconnect preserves only backend-classified nonsensitive intent for the s
   assert.equal(differentDevice.devicePlan, null);
   assert.deepEqual(differentDevice.bindings, {});
   assert.equal(differentDevice.portableIntentDirty, false);
+});
+
+test("portable transitions require a fresh setup-location selection", () => {
+  const description = {
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    diagnostics: [],
+    inputs: [
+      {
+        key: "recipe.one/destination",
+        recipeId: "recipe.one",
+        inputId: "destination",
+        type: "setup_location_ref",
+        label: "Install destination",
+        description: null,
+        required: true,
+        sensitive: false,
+        value: "old-location-opaque",
+        valueSource: "explicit" as const,
+        diagnostics: [],
+      },
+      {
+        key: "recipe.one/theme",
+        recipeId: "recipe.one",
+        inputId: "theme",
+        type: "string",
+        label: "Theme",
+        description: null,
+        required: false,
+        sensitive: false,
+        value: "dark",
+        valueSource: "explicit" as const,
+        diagnostics: [],
+      },
+      {
+        key: "recipe.one/token",
+        recipeId: "recipe.one",
+        inputId: "token",
+        type: "string",
+        label: "Account token",
+        description: null,
+        required: true,
+        sensitive: true,
+        value: "secret",
+        valueSource: "explicit" as const,
+        diagnostics: [],
+      },
+    ],
+  };
+  const bindings = {
+    "recipe.one/destination": "old-location-opaque",
+    "recipe.one/theme": "dark",
+    "recipe.one/token": "secret",
+  };
+
+  const portable = portableBindingsForTransition(description, bindings);
+  assert.deepEqual(portable.bindings, { "recipe.one/theme": "dark" });
+  assert.deepEqual(portable.requiredReentryBindings, ["recipe.one/token"]);
+  assert.deepEqual(portable.requiredReentryLabels, ["Account token"]);
+
+  const restored = workflowReducer(initialWorkflowState, {
+    type: "load-portable-intent",
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    bindings: portable.bindings,
+    dirty: true,
+    requiredReentryBindings: portable.requiredReentryBindings,
+  });
+  assert.deepEqual(restored.bindings, { "recipe.one/theme": "dark" });
+
+  const freshlySelected = workflowReducer(restored, {
+    type: "set-binding",
+    key: "recipe.one/destination",
+    value: "new-location-opaque",
+  });
+  assert.equal(
+    freshlySelected.bindings["recipe.one/destination"],
+    "new-location-opaque",
+  );
 });
 
 test("backend-expanded dependency selection is retained and cannot be deselected", () => {

@@ -74,7 +74,9 @@ pub fn run() {
                 root_qualification: Mutex::new(
                     device_qualification::RootQualificationStore::default(),
                 ),
-                executions: Mutex::new(execution::ExecutionHandleStore::default()),
+                executions: Mutex::new(execution::ExecutionHandleStore::with_durable_operation_fence(
+                    app_data.join("active-device-operation.marker"),
+                )),
                 saved_configurations: Mutex::new(
                     saved_configurations::SavedConfigurationStore::load(
                         app_data.join("recent-configurations.json"),

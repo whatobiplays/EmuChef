@@ -661,6 +661,12 @@ fn restart_runtime_with_initializer(
                     "App service status changed. Review troubleshooting status before retrying.",
                 ));
             }
+            if executions.has_durable_operation_fence() {
+                return Err(safe_error(
+                    "execution_quiescence_unconfirmed",
+                    "A previous device operation may still be active. Runtime restart and new device writes are blocked.",
+                ));
+            }
             if executions.has_in_flight() {
                 return Err(safe_error(
                     "execution_active",
@@ -747,6 +753,12 @@ where
     // malformed acknowledgement leaves the reset uncommitted.
     if let Some(lease) = executions.setup_location_lease() {
         crate::execution::revoke_setup_location_lease(state, &lease)?;
+        if !executions.clear_setup_location_lease_after_revocation(&lease) {
+            return Err(safe_error(
+                "setup_location_lease_changed",
+                "Device-session authority changed during runtime restart. Check device status before retrying.",
+            ));
+        }
     }
 
     state
@@ -3519,6 +3531,40 @@ mod tests {
             plan_id: "plan-test".to_string(),
             plan_digest: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn app_session_reentry_and_restart_preserve_persisted_operation_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = reset_test_state(temp.path());
+        let fence_path = temp.path().join("active-device-operation.marker");
+        std::fs::write(&fence_path, b"unresolved operation\n").unwrap();
+        *state.executions.lock().unwrap() =
+            crate::execution::ExecutionHandleStore::with_durable_operation_fence(
+                fence_path.clone(),
+            );
+
+        reset_app_session(&state, true)
+            .expect("session reentry must preserve unresolved device-operation state");
+        {
+            let executions = state.executions.lock().unwrap();
+            assert!(executions.has_durable_operation_fence());
+            assert!(executions.real_in_flight());
+        }
+
+        let mut initialized = false;
+        let error = restart_runtime_with_initializer(&state, None, |_| initialized = true)
+            .expect_err("an unresolved operation fence must block runtime restart");
+
+        assert!(
+            error.contains("execution_quiescence_unconfirmed"),
+            "{error}"
+        );
+        assert!(!initialized);
+        assert!(fence_path.exists());
+        let executions = state.executions.lock().unwrap();
+        assert!(executions.has_durable_operation_fence());
+        assert!(executions.real_in_flight());
     }
 
     #[test]

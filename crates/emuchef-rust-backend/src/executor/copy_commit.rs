@@ -55,11 +55,12 @@ mod setup_location_lease_tests {
     #[test]
     fn revoked_setup_location_lease_denies_new_mutation_permits() {
         let lease = lease();
-        let permit = lease.acquire().expect("current session may mutate");
+        let mut permit = lease.acquire().expect("current session may mutate");
 
         lease.revoke().unwrap();
 
         assert!(lease.acquire().is_err());
+        permit.confirm_terminal();
         drop(permit);
         lease
             .wait_for_idle()
@@ -69,11 +70,12 @@ mod setup_location_lease_tests {
     #[test]
     fn revocation_waiter_finishes_after_the_active_mutation_releases_its_permit() {
         let lease = lease();
-        let permit = lease.acquire().expect("current session may mutate");
+        let mut permit = lease.acquire().expect("current session may mutate");
         lease.revoke().expect("revocation closes the mutation gate");
         let waiter_lease = Arc::clone(&lease);
         let waiter = std::thread::spawn(move || waiter_lease.wait_for_idle());
 
+        permit.confirm_terminal();
         drop(permit);
 
         waiter
@@ -1226,14 +1228,41 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                 .collect::<Vec<_>>()
                 .join("; ")
         );
+        let cleanup_remote_completion_uncertain = cleanup_errors.iter().any(|(_, device_error)| {
+            device_error.as_ref().is_some_and(|error| {
+                error.cleanup == Some(crate::owned_process::ProcessCleanup::Uncertain)
+                    || error.kind.may_have_unconfirmed_remote_completion()
+            })
+        });
         let cleanup_device_error = cleanup_errors
-            .into_iter()
-            .find_map(|(_, device_error)| device_error);
+            .iter()
+            .filter_map(|(_, device_error)| device_error.as_ref())
+            .find(|error| {
+                error.cleanup == Some(crate::owned_process::ProcessCleanup::Uncertain)
+                    || error.kind.may_have_unconfirmed_remote_completion()
+            })
+            .cloned()
+            .or_else(|| {
+                cleanup_errors
+                    .into_iter()
+                    .find_map(|(_, device_error)| device_error)
+            });
 
         match result {
             Ok(mut report) if report.succeeded => {
-                // Destination verification completed, so cleanup remains pending work only.
+                // Preserve a verified destination while exposing cleanup uncertainty.
                 report.staging_cleanup_error = Some(cleanup_message);
+                if request.destination_kind == CopyCommitDestinationKind::SetupLocation
+                    && cleanup_remote_completion_uncertain
+                {
+                    report.succeeded = false;
+                    report.outcome = CopyCommitOutcome::Uncertain;
+                    report.error = report.staging_cleanup_error.clone();
+                    report.internal_device_error = cleanup_device_error;
+                    if let Some(lease) = request.setup_location_lease.as_ref() {
+                        lease.mark_uncertain();
+                    }
+                }
                 Ok(report)
             }
             Ok(mut report) => {
@@ -1241,6 +1270,7 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                 if request.destination_kind != CopyCommitDestinationKind::SetupLocation
                     || report.destination_mutation_attempted != Some(true)
                     || report.outcome != CopyCommitOutcome::Partial
+                    || cleanup_remote_completion_uncertain
                 {
                     report.outcome = CopyCommitOutcome::Uncertain;
                 }
@@ -1248,7 +1278,14 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                 if report.error.is_none() {
                     report.error = Some(cleanup_message);
                 }
-                if report.internal_device_error.is_none() {
+                if request.destination_kind == CopyCommitDestinationKind::SetupLocation
+                    && cleanup_remote_completion_uncertain
+                {
+                    report.internal_device_error = cleanup_device_error;
+                    if let Some(lease) = request.setup_location_lease.as_ref() {
+                        lease.mark_uncertain();
+                    }
+                } else if report.internal_device_error.is_none() {
                     report.internal_device_error = cleanup_device_error;
                 }
                 Ok(report)
@@ -1287,7 +1324,7 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
             operation: request.operation,
             destination_identity: request.destination_identity.clone(),
             succeeded: false,
-            outcome: CopyCommitOutcome::Uncertain,
+            outcome: CopyCommitOutcome::NoChange,
             before_paths: manifest_paths(&request.destination_manifest),
             before_manifest: request.destination_manifest.clone(),
             after_paths: Vec::new(),
@@ -1352,7 +1389,13 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
         let cleanup_uncertain = internal_device_error
             .as_ref()
             .is_some_and(|error| error.cleanup == Some(ProcessCleanup::Uncertain));
-        let outcome = if cleanup_uncertain {
+        let remote_completion_uncertain = request.destination_kind
+            == CopyCommitDestinationKind::SetupLocation
+            && destination_mutation_attempted
+            && internal_device_error
+                .as_ref()
+                .is_some_and(|error| error.kind.may_have_unconfirmed_remote_completion());
+        let outcome = if cleanup_uncertain || remote_completion_uncertain {
             CopyCommitOutcome::Uncertain
         } else if destination_mutation_attempted
             && created_directories.is_empty()
@@ -1623,7 +1666,7 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                 let mutation = CopyCommitMutation::EnsureDirectory {
                     relative_path: component.clone(),
                 };
-                let mutation_permit = match mutation_lease.acquire() {
+                let mut mutation_permit = match mutation_lease.acquire() {
                     Ok(permit) => permit,
                     Err(_) => {
                         let failure = CopyCommitAttemptFailure::message(
@@ -1658,8 +1701,12 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                     "absent",
                     &mutation,
                 ) {
-                    if error.cleanup == Some(ProcessCleanup::Uncertain) {
-                        mutation_permit.mark_cleanup_uncertain();
+                    if error.cleanup == Some(ProcessCleanup::Uncertain)
+                        || error.kind.may_have_unconfirmed_remote_completion()
+                    {
+                        mutation_permit.mark_uncertain();
+                    } else {
+                        mutation_permit.confirm_terminal();
                     }
                     let mut report = self.setup_failure_after_destination_mutation(
                         request,
@@ -1675,6 +1722,7 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                     report.staging_verified = true;
                     return Ok(report);
                 }
+                mutation_permit.confirm_terminal();
                 let created_anchor = Path::new(&anchor).join(&component);
                 let created_anchor_string = created_anchor.to_string_lossy().into_owned();
                 let root = Path::new(&binding.mount_root);
@@ -1843,7 +1891,7 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                 }
                 // Keep the permit alive through the destination command. Uncertain
                 // child cleanup marks the lease before the permit is released.
-                let mutation_permit = request
+                let mut mutation_permit = request
                     .setup_location_lease
                     .as_ref()
                     .ok_or_else(|| {
@@ -1871,12 +1919,13 @@ impl<'a, D: AndroidCopyCommitDevice> AndroidCopyCommitAdapter<'a, D> {
                     expected_entry,
                     mutation,
                 );
-                if result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|error| error.cleanup == Some(ProcessCleanup::Uncertain))
-                {
-                    mutation_permit.mark_cleanup_uncertain();
+                if result.as_ref().err().is_some_and(|error| {
+                    error.cleanup == Some(ProcessCleanup::Uncertain)
+                        || error.kind.may_have_unconfirmed_remote_completion()
+                }) {
+                    mutation_permit.mark_uncertain();
+                } else {
+                    mutation_permit.confirm_terminal();
                 }
                 result.map_err(|error| (error, true))
             };
@@ -2908,7 +2957,7 @@ fn fake_post_mutation_report(
         && created_directories_verified
         && after_manifest.as_deref() == Some(request.destination_manifest.as_slice())
         && created_directories.is_empty();
-    let outcome = if observed_destination_change {
+    let outcome = if binding_verified && observed_destination_change {
         CopyCommitOutcome::Partial
     } else if verified_no_change {
         CopyCommitOutcome::NoChange
@@ -4824,11 +4873,12 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             verification_pause: None,
             revoke_lease_after_first_mutation: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -4876,11 +4926,12 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: true,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -4905,8 +4956,9 @@ mod tests {
         assert!(report.staging_cleanup_error.is_none());
     }
 
-    fn commit_with_uncertain_destination_cleanup(
+    fn commit_with_destination_mutation_timeout(
         create_missing_components: bool,
+        cleanup: crate::owned_process::ProcessCleanup,
     ) -> (CopyCommitReport, Arc<SetupLocationMutationLease>) {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -4930,11 +4982,12 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: true,
+            mutation_failure_cleanup: Some(cleanup),
             verification_pause: None,
             revoke_lease_after_first_mutation: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -4950,7 +5003,10 @@ mod tests {
 
     #[test]
     fn uncertain_process_cleanup_reports_uncertain_destination_outcome() {
-        let (report, _) = commit_with_uncertain_destination_cleanup(false);
+        let (report, _) = commit_with_destination_mutation_timeout(
+            false,
+            crate::owned_process::ProcessCleanup::Uncertain,
+        );
 
         assert_eq!(report.destination_mutation_attempted, Some(true));
         assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
@@ -4967,8 +5023,41 @@ mod tests {
     }
 
     #[test]
+    fn lost_setup_location_response_with_confirmed_local_cleanup_stays_uncertain() {
+        let (report, lease) = commit_with_destination_mutation_timeout(
+            false,
+            crate::owned_process::ProcessCleanup::Confirmed,
+        );
+
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert_eq!(report.after_manifest, Some(report.before_manifest.clone()));
+        assert!(report.staging_verified);
+        assert!(report.staging_cleanup_error.is_none());
+        assert_eq!(
+            report
+                .internal_device_error
+                .as_ref()
+                .and_then(|error| error.cleanup),
+            Some(crate::owned_process::ProcessCleanup::Confirmed)
+        );
+        assert!(
+            lease.acquire().is_err(),
+            "unconfirmed remote completion must close the lease to later writers"
+        );
+        lease.revoke().expect("revocation closes the lease gate");
+        assert!(
+            lease.wait_for_idle().is_err(),
+            "local child reaping cannot prove remote operation completion"
+        );
+    }
+
+    #[test]
     fn uncertain_process_cleanup_keeps_setup_location_revocation_unconfirmed() {
-        let (_, lease) = commit_with_uncertain_destination_cleanup(false);
+        let (_, lease) = commit_with_destination_mutation_timeout(
+            false,
+            crate::owned_process::ProcessCleanup::Uncertain,
+        );
 
         assert!(lease.acquire().is_err());
         lease.revoke().expect("revocation closes the mutation gate");
@@ -4978,7 +5067,10 @@ mod tests {
 
     #[test]
     fn uncertain_cleanup_during_setup_location_creation_keeps_revocation_unconfirmed() {
-        let (report, lease) = commit_with_uncertain_destination_cleanup(true);
+        let (report, lease) = commit_with_destination_mutation_timeout(
+            true,
+            crate::owned_process::ProcessCleanup::Uncertain,
+        );
 
         assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
         assert_eq!(report.destination_mutation_attempted, Some(true));
@@ -5006,11 +5098,12 @@ mod tests {
             fail_verification_at: 2,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -5025,6 +5118,7 @@ mod tests {
         assert_eq!(device.destination_mutations, 0);
         assert_eq!(device.setup_verifications, 2);
         assert_eq!(report.destination_mutation_attempted, Some(false));
+        assert_eq!(report.outcome, CopyCommitOutcome::NoChange);
         assert!(report.copied_paths.is_empty());
         assert!(report.deleted_paths.is_empty());
         assert!(report.staging_verified);
@@ -5034,6 +5128,74 @@ mod tests {
         assert_eq!(device.destination_inspections, 0);
         assert_eq!(device.unverified_destination_inspections, 0);
         assert!(report.error.is_some());
+    }
+
+    #[test]
+    fn setup_location_staging_cleanup_timeout_after_verified_copy_reports_uncertain() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let lease = active_setup_location_lease();
+        let request = setup_location_copy_request(&source, &fake_root, Arc::clone(&lease));
+        let expected_after_manifest = request.source_manifest.clone();
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            mutation_failure_cleanup: None,
+            verification_pause: None,
+            revoke_lease_after_first_mutation: None,
+            cleanup_paths: Vec::new(),
+            cleanup_fails: true,
+            cleanup_timeout: true,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+
+        let report = AndroidCopyCommitAdapter::new(&mut device)
+            .commit(&request)
+            .expect("cleanup timeout should produce a truthful report");
+
+        assert_eq!(
+            device.destination_mutations,
+            report.created_directories.len() + report.copied_paths.len()
+        );
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert!(!report.succeeded);
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert!(report
+            .after_manifest
+            .as_deref()
+            .is_some_and(|manifest| manifest_content_matches(manifest, &expected_after_manifest)));
+        assert_eq!(report.copied_paths, ["payload.bin"]);
+        assert!(report.staging_cleanup_error.is_some());
+        assert_eq!(
+            report
+                .internal_device_error
+                .as_ref()
+                .map(|error| error.kind),
+            Some(super::super::DeviceOperationKind::TimedOut)
+        );
+
+        let failure = super::super::copy_commit_report_failure(report);
+        assert_eq!(
+            failure.failure_kind,
+            Some(super::super::StepFailureKind::OperationTimedOut)
+        );
+        assert_eq!(
+            failure.outputs["copy_commit_report"].value["outcome"],
+            serde_json::to_value(CopyCommitOutcome::Uncertain).unwrap()
+        );
+        assert!(lease.wait_for_idle().is_err());
     }
 
     #[test]
@@ -5067,7 +5229,7 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: Some((
                 3,
@@ -5076,6 +5238,7 @@ mod tests {
             )),
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -5176,11 +5339,12 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: true,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -5193,6 +5357,7 @@ mod tests {
 
         assert_eq!(device.destination_mutations, 0);
         assert_eq!(report.destination_mutation_attempted, Some(false));
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
         assert!(report.copied_paths.is_empty());
         assert!(report.deleted_paths.is_empty());
         assert!(report.staging_verified);
@@ -5282,7 +5447,7 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: Some((
                 4,
@@ -5291,6 +5456,7 @@ mod tests {
             )),
             cleanup_paths: Vec::new(),
             cleanup_fails: true,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -5329,6 +5495,130 @@ mod tests {
             .staging_cleanup_error
             .as_deref()
             .is_some_and(|message| message.contains("injected staging cleanup failure")));
+    }
+
+    #[test]
+    fn setup_location_partial_copy_with_ambiguous_cleanup_reports_uncertain_and_keeps_lease() {
+        use crate::storage_targets::{
+            SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let fake_root = temp.path().join("device");
+        let legacy_target = selected_path(&fake_root, "/data/user/0/fixture/assets").unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&legacy_target).unwrap();
+        fs::create_dir_all(&fake_root).unwrap();
+        fs::write(source.join("payload.bin"), b"payload").unwrap();
+
+        let mut request = CopyCommitRequest::reviewed_directory(
+            &source,
+            &fake_root,
+            "/data/user/0/fixture/assets",
+            CopyCommitOperation::AddUpdate,
+        )
+        .unwrap();
+        request.destination_kind = CopyCommitDestinationKind::SetupLocation;
+        let lease_context = active_setup_location_lease().context().clone();
+        let registry = crate::execution_session::SetupLocationLeaseRegistry::default();
+        registry
+            .set_runtime_generation(lease_context.runtime_generation)
+            .unwrap();
+        let lease = registry.activate(lease_context.clone()).unwrap();
+        request.setup_location_lease = Some(Arc::clone(&lease));
+        request.destination_identity = "/storage/ABCD-1234/EmuChef/Games".to_string();
+        request.destination_manifest.clear();
+        request.reviewed_deletion_set.clear();
+        request.destination_binding = None;
+        request.setup_location_binding = Some(StorageTargetBinding {
+            id: "location-1".to_string(),
+            device_plan: "plan.test".to_string(),
+            session_epoch: 1,
+            name: "Games".to_string(),
+            relative_path: "EmuChef/Games".to_string(),
+            volume_handle: "1".repeat(32),
+            volume_kind: StorageTargetVolumeKind::RemovableSd,
+            mount_root: "/storage/ABCD-1234".to_string(),
+            volume_identity: "2".repeat(32),
+            volume_continuity: "3".repeat(32),
+            observation_token: "4".repeat(32),
+        });
+        request.setup_destination_precondition = Some(SetupDestinationPrecondition {
+            canonical_scope: "/storage/ABCD-1234/EmuChef/Games".to_string(),
+            existing_anchor_path: "/storage/ABCD-1234".to_string(),
+            existing_anchor_binding: "anchor-binding".to_string(),
+            missing_components: vec!["EmuChef".to_string(), "Games".to_string()],
+        });
+
+        let expected_staged_paths = manifest_paths(&request.source_manifest);
+        let tauri_session_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let verification_reached = Arc::new(std::sync::Barrier::new(2));
+        let resume_worker = Arc::new(std::sync::Barrier::new(2));
+        let mut device = SetupLocationVerificationFailureDevice {
+            stage_root: None,
+            setup_verifications: 0,
+            fail_verification_at: usize::MAX,
+            destination_mutations: 0,
+            fail_selected_mutation_before_change: false,
+            mutation_failure_cleanup: None,
+            revoke_lease_after_first_mutation: None,
+            verification_pause: Some((
+                4,
+                Arc::clone(&verification_reached),
+                Arc::clone(&resume_worker),
+            )),
+            cleanup_paths: Vec::new(),
+            cleanup_fails: true,
+            cleanup_timeout: true,
+            destination_inspections: 0,
+            fail_destination_inspection_at: None,
+            unverified_destination_inspections: 0,
+            destination_binding_changes_after_mutation: false,
+            destination_manifest: Vec::new(),
+        };
+        let worker = std::thread::spawn(move || {
+            let report = AndroidCopyCommitAdapter::new(&mut device)
+                .commit(&request)
+                .expect("revocation after one mutation should be reported");
+            (report, device)
+        });
+        verification_reached.wait();
+        registry
+            .revoke_session(&lease_context)
+            .expect("session revocation should close the gate between mutations");
+        tauri_session_epoch.store(2, std::sync::atomic::Ordering::SeqCst);
+        resume_worker.wait();
+        let (report, device) = worker.join().expect("copy worker should finish");
+
+        assert_eq!(
+            tauri_session_epoch.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(device.destination_mutations, 1);
+        assert_eq!(report.destination_mutation_attempted, Some(true));
+        assert_eq!(report.created_directories, vec!["EmuChef".to_string()]);
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert!(report
+            .error
+            .as_deref()
+            .is_some_and(|message| { message.contains("session authority expired") }));
+        assert!(report.staging_verified);
+        assert_eq!(report.staged_paths, expected_staged_paths);
+        assert!(report.staging_cleanup_error.is_some());
+        assert_eq!(
+            report
+                .internal_device_error
+                .as_ref()
+                .map(|error| error.kind),
+            Some(super::super::DeviceOperationKind::TimedOut)
+        );
+        let failure = super::super::copy_commit_report_failure(report);
+        assert_eq!(
+            failure.failure_kind,
+            Some(super::super::StepFailureKind::OperationTimedOut)
+        );
+        assert!(lease.wait_for_idle().is_err());
     }
 
     #[test]
@@ -5386,11 +5676,12 @@ mod tests {
                 fail_verification_at,
                 destination_mutations: 0,
                 fail_selected_mutation_before_change: false,
-                uncertain_mutation_cleanup: false,
+                mutation_failure_cleanup: None,
                 revoke_lease_after_first_mutation: None,
                 verification_pause: None,
                 cleanup_paths: Vec::new(),
                 cleanup_fails: false,
+                cleanup_timeout: false,
                 destination_inspections: 0,
                 fail_destination_inspection_at: None,
                 unverified_destination_inspections: 0,
@@ -5477,11 +5768,12 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: true,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: Some(2),
             unverified_destination_inspections: 0,
@@ -5559,11 +5851,12 @@ mod tests {
             fail_verification_at: usize::MAX,
             destination_mutations: 0,
             fail_selected_mutation_before_change: false,
-            uncertain_mutation_cleanup: false,
+            mutation_failure_cleanup: None,
             revoke_lease_after_first_mutation: None,
             verification_pause: None,
             cleanup_paths: Vec::new(),
             cleanup_fails: false,
+            cleanup_timeout: false,
             destination_inspections: 0,
             fail_destination_inspection_at: None,
             unverified_destination_inspections: 0,
@@ -5681,7 +5974,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn fake_post_mutation_report_returns_no_change_when_inspection_matches_review() {
+    fn fake_post_mutation_report_requires_verified_binding_to_report_change() {
         use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
 
         let temp = tempfile::tempdir().unwrap();
@@ -5705,7 +5998,7 @@ mod tests {
             volume_continuity: "3".repeat(32),
             observation_token: "4".repeat(32),
         };
-        let request = CopyCommitRequest::reviewed_fake_setup_directory(
+        let mut request = CopyCommitRequest::reviewed_fake_setup_directory(
             &source,
             &fake_root,
             binding,
@@ -5734,6 +6027,26 @@ mod tests {
             Some(request.destination_manifest.clone())
         );
         assert!(report.error.is_some());
+
+        let replacement_fake_root = temp.path().join("replacement-device");
+        fs::create_dir_all(&replacement_fake_root).unwrap();
+        request.fake_device_root = replacement_fake_root;
+        fs::write(destination.join("unexpected.bin"), b"unverified change").unwrap();
+
+        let report = fake_post_mutation_report(
+            &request,
+            &selected,
+            Vec::new(),
+            Vec::new(),
+            true,
+            &[],
+            true,
+            CopyCommitError::Io("injected post-mutation failure".to_string()),
+        );
+
+        assert_eq!(report.outcome, CopyCommitOutcome::Uncertain);
+        assert!(!report.destination_binding_verified);
+        assert!(report.after_manifest.is_some());
     }
 
     #[cfg(unix)]
@@ -5839,11 +6152,12 @@ mod tests {
         fail_verification_at: usize,
         destination_mutations: usize,
         fail_selected_mutation_before_change: bool,
-        uncertain_mutation_cleanup: bool,
+        mutation_failure_cleanup: Option<crate::owned_process::ProcessCleanup>,
         verification_pause: Option<(usize, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
         revoke_lease_after_first_mutation: Option<Arc<SetupLocationMutationLease>>,
         cleanup_paths: Vec<String>,
         cleanup_fails: bool,
+        cleanup_timeout: bool,
         destination_inspections: usize,
         fail_destination_inspection_at: Option<usize>,
         unverified_destination_inspections: usize,
@@ -5945,9 +6259,15 @@ mod tests {
         ) -> Result<(), super::super::DeviceOperationError> {
             self.cleanup_paths.push(path.to_string());
             if self.cleanup_fails && self.stage_root.as_deref() == Some(path) {
-                Err(super::super::DeviceOperationError::other(
-                    "injected staging cleanup failure",
-                ))
+                if self.cleanup_timeout {
+                    Err(super::super::DeviceOperationError::timed_out(
+                        crate::owned_process::ProcessCleanup::Uncertain,
+                    ))
+                } else {
+                    Err(super::super::DeviceOperationError::other(
+                        "injected staging cleanup failure",
+                    ))
+                }
             } else {
                 Ok(())
             }
@@ -5998,10 +6318,8 @@ mod tests {
             mutation: &CopyCommitMutation,
         ) -> Result<(), super::super::DeviceOperationError> {
             self.destination_mutations += 1;
-            if self.uncertain_mutation_cleanup {
-                return Err(super::super::DeviceOperationError::timed_out(
-                    crate::owned_process::ProcessCleanup::Uncertain,
-                ));
+            if let Some(cleanup) = self.mutation_failure_cleanup {
+                return Err(super::super::DeviceOperationError::timed_out(cleanup));
             }
             if self.fail_selected_mutation_before_change {
                 return Err(super::super::DeviceOperationError::other(

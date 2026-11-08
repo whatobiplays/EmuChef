@@ -149,9 +149,9 @@ pub(crate) struct SetupLocationMutationLease {
 struct SetupLocationMutationState {
     revoked: bool,
     active_mutations: usize,
-    // A destination command may still be running after uncertain cleanup.
-    // Keep later writes closed and lease retirement unconfirmed.
-    cleanup_uncertain: bool,
+    // Remote work or local cleanup may still be incomplete. Keep later
+    // writes closed and lease retirement unconfirmed.
+    mutation_uncertain: bool,
 }
 
 impl SetupLocationMutationLease {
@@ -185,7 +185,7 @@ impl SetupLocationMutationLease {
             .map_err(|_| "setup location session authority unavailable".to_string())?;
         if self.registry_poisoned.load(Ordering::Acquire)
             || state.revoked
-            || state.cleanup_uncertain
+            || state.mutation_uncertain
         {
             return Err("setup location session authority expired".to_string());
         }
@@ -193,7 +193,10 @@ impl SetupLocationMutationLease {
             .active_mutations
             .checked_add(1)
             .ok_or_else(|| "setup location session authority unavailable".to_string())?;
-        Ok(SetupLocationMutationPermit { lease: self })
+        Ok(SetupLocationMutationPermit {
+            lease: self,
+            terminal_confirmed: false,
+        })
     }
 
     /// Close the gate before waiting for a mutation already holding a permit.
@@ -217,26 +220,39 @@ impl SetupLocationMutationLease {
                 .wait(state)
                 .map_err(|_| "setup location session authority unavailable".to_string())?;
         }
-        if state.cleanup_uncertain {
-            return Err("setup location mutation cleanup is uncertain".to_string());
+        if state.mutation_uncertain {
+            return Err("setup location mutation completion is uncertain".to_string());
         }
         Ok(())
+    }
+
+    /// Permanently blocks lease reuse when device cleanup may still be active.
+    pub(crate) fn mark_uncertain(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.mutation_uncertain = true;
+        self.registry_poisoned.store(true, Ordering::Release);
     }
 }
 
 pub(crate) struct SetupLocationMutationPermit<'a> {
     lease: &'a SetupLocationMutationLease,
+    terminal_confirmed: bool,
 }
 
 impl SetupLocationMutationPermit<'_> {
-    /// Records that a destination command may still be running after cleanup.
-    pub(crate) fn mark_cleanup_uncertain(&self) {
-        let mut state = self
-            .lease
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.cleanup_uncertain = true;
+    /// Records that the destination command returned with a known terminal result.
+    pub(crate) fn confirm_terminal(&mut self) {
+        self.terminal_confirmed = true;
+    }
+
+    /// Permanently blocks this runtime registry when mutation completion is
+    /// not proven, even if the local child process was reaped.
+    pub(crate) fn mark_uncertain(&mut self) {
+        self.lease.mark_uncertain();
+        self.terminal_confirmed = true;
     }
 }
 
@@ -244,8 +260,15 @@ impl Drop for SetupLocationMutationPermit<'_> {
     fn drop(&mut self) {
         let mut state: MutexGuard<'_, SetupLocationMutationState> = match self.lease.state.lock() {
             Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(poisoned) => {
+                self.lease.registry_poisoned.store(true, Ordering::Release);
+                poisoned.into_inner()
+            }
         };
+        if !self.terminal_confirmed {
+            state.mutation_uncertain = true;
+            self.lease.registry_poisoned.store(true, Ordering::Release);
+        }
         state.active_mutations = state.active_mutations.saturating_sub(1);
         if state.active_mutations == 0 {
             self.lease.idle.notify_all();
@@ -413,6 +436,19 @@ mod setup_location_mutation_lease_tests {
 
         assert!(lease.acquire().is_err());
         assert!(lease.revoke().is_err());
+    }
+
+    #[test]
+    fn permit_drop_during_unwind_poisoned_mutation_authority() {
+        let lease = SetupLocationMutationLease::new(context());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = lease.acquire().unwrap();
+            panic!("injected panic after destination mutation permit acquisition");
+        }));
+
+        assert!(result.is_err());
+        assert!(lease.acquire().is_err());
+        assert!(lease.wait_for_idle().is_err());
     }
 
     #[test]

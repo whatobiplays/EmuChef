@@ -413,17 +413,17 @@ impl SetupLocationLeaseRegistry {
                 revocation_failed = true;
             }
         }
+        if was_poisoned || revocation_failed {
+            return Err(setup_location_lease_error(
+                "Setup Location authority is unavailable.",
+            ));
+        }
         state.leases.retain(|_, lease| {
             let lease_context = lease.context();
             lease_context.device_handle != context.device_handle
                 || lease_context.runtime_generation != context.runtime_generation
                 || lease_context.session_epoch > revoked_through
         });
-        if was_poisoned || revocation_failed {
-            return Err(setup_location_lease_error(
-                "Setup Location authority is unavailable.",
-            ));
-        }
         Ok(())
     }
 }
@@ -1640,6 +1640,36 @@ fn record_progress(
     );
 }
 
+fn copy_commit_report_confirms_quiescent_no_change(
+    step_record: &crate::executor::StepRunRecord,
+) -> bool {
+    if step_record
+        .failure_kind
+        .is_some_and(|kind| kind.may_have_unconfirmed_remote_completion())
+    {
+        return false;
+    }
+
+    let Some(report) = step_record
+        .outputs
+        .get("copy_commit_report")
+        .map(|output| &output.value)
+    else {
+        return false;
+    };
+
+    report.get("succeeded").and_then(Value::as_bool) == Some(false)
+        && report.get("outcome").and_then(Value::as_str) == Some("noChange")
+        && report
+            .get("destinationMutationAttempted")
+            .and_then(Value::as_bool)
+            == Some(false)
+        && report
+            .get("stagingCleanupError")
+            .map(Value::is_null)
+            .unwrap_or(true)
+}
+
 fn finish_attempt(
     state: &Arc<Mutex<ExecutionState>>,
     execution_id: &str,
@@ -1651,6 +1681,17 @@ fn finish_attempt(
     };
     record.report.resolved_releases = result.resolved_releases.clone();
     record.report.resolved_artifacts = result.resolved_artifacts.clone();
+    let uncertain_remote_failure = (record.report.mode == ExecutionMode::Real)
+        .then(|| {
+            result.steps.iter().find(|step_record| {
+                step_record.status == StepRunStatus::Failed
+                    && !copy_commit_report_confirms_quiescent_no_change(step_record)
+                    && step_record
+                        .failure_kind
+                        .is_some_and(|kind| kind.may_have_unconfirmed_remote_completion())
+            })
+        })
+        .flatten();
     for step_record in &result.steps {
         let recipe_id = record
             .report
@@ -1694,6 +1735,26 @@ fn finish_attempt(
             }
             StepRunStatus::Skipped | StepRunStatus::Cancelled => {}
         }
+    }
+    if let Some(step_record) = uncertain_remote_failure {
+        let recipe_id = record
+            .report
+            .recipes
+            .iter()
+            .find(|recipe| {
+                recipe
+                    .steps
+                    .iter()
+                    .any(|step| step.step_id == step_record.step_id)
+            })
+            .map(|recipe| recipe.recipe_id.clone());
+        record.report.errors.push(ExecutionIssue {
+            code: "execution_operation_uncertain".to_string(),
+            message: "EmuChef could not confirm that the remote device operation ended."
+                .to_string(),
+            recipe_id,
+            step_id: Some(step_record.step_id.clone()),
+        });
     }
     record.report.status = overall_status(&result, !record.report.warnings.is_empty());
     record.report.finished_at = Some(now());
@@ -1744,6 +1805,16 @@ fn finish_panicked(state: &Arc<Mutex<ExecutionState>>, execution_id: &str) {
     record.report.status = ExecutionStatus::Failed;
     record.report.finished_at = Some(now());
     record.report.errors.push(issue.clone());
+    if record.report.mode == ExecutionMode::Real {
+        record.report.errors.push(ExecutionIssue {
+            code: "execution_operation_uncertain".to_string(),
+            message:
+                "A real-device operation may still be active after the execution worker stopped."
+                    .to_string(),
+            recipe_id: None,
+            step_id: None,
+        });
+    }
     refresh_recipe_statuses(&mut record.report);
     append_event(
         record,
@@ -2184,6 +2255,27 @@ mod tests {
             selected_destination_mutations, 0,
             "an issued lease must not authorize destination mutation after registry failure"
         );
+    }
+
+    #[test]
+    fn uncertain_remote_setup_location_attempt_remains_registered_after_retirement_and_revocation()
+    {
+        let registry = SetupLocationLeaseRegistry::default();
+        registry.set_runtime_generation(7).unwrap();
+        let context = setup_location_lease_context(1, 4, 7);
+        let lease = registry.activate(context.clone()).unwrap();
+
+        let mut permit = lease.acquire().unwrap();
+        permit.mark_uncertain();
+        drop(permit);
+
+        assert!(registry.retire_attempt(&context).is_err());
+        assert_eq!(registry.state.lock().unwrap().leases.len(), 1);
+        assert!(registry.revoke_session(&context).is_err());
+        assert_eq!(registry.state.lock().unwrap().leases.len(), 1);
+        assert!(registry
+            .activate(setup_location_lease_context(2, 4, 7))
+            .is_err());
     }
 
     #[test]
@@ -3759,6 +3851,10 @@ mod tests {
             StepExecutionStatus::Pending
         );
         assert_eq!(report.recipes[0].status, RecipeExecutionStatus::Failed);
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.code == "execution_operation_uncertain"));
     }
 
     #[test]
@@ -4168,5 +4264,209 @@ mod tests {
             app_provenance: None,
         });
         plan
+    }
+
+    #[test]
+    fn finish_attempt_marks_real_timeout_as_unconfirmed_remote_completion() {
+        let plan = test_plan("finish-attempt-real-timeout");
+        let report = initial_report(
+            "execution-real-timeout",
+            &plan,
+            "review-digest",
+            ExecutionMode::Real,
+            None,
+        );
+        let state = Arc::new(Mutex::new(ExecutionState::default()));
+        lock(&state).records.insert(
+            "execution-real-timeout".to_string(),
+            ExecutionRecord {
+                report,
+                events: Vec::new(),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let result = ExecutionRunResult {
+            success: false,
+            cancelled: false,
+            total_steps: 1,
+            steps: vec![crate::executor::StepRunRecord {
+                step_id: "recipe.example/wait".to_string(),
+                status: StepRunStatus::Failed,
+                message: Some("ADB operation timed out".to_string()),
+                outputs: OrderedMap::new(),
+                failure_kind: Some(crate::executor::StepFailureKind::OperationTimedOut),
+                cleanup: None,
+            }],
+            resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
+        };
+
+        finish_attempt(&state, "execution-real-timeout", result);
+
+        let state = lock(&state);
+        let errors = &state.records["execution-real-timeout"].report.errors;
+        assert!(errors
+            .iter()
+            .any(|issue| issue.code == "operation_timed_out"));
+        assert!(errors
+            .iter()
+            .any(|issue| issue.code == "execution_operation_uncertain"));
+    }
+
+    #[test]
+    fn finish_attempt_does_not_mark_dry_run_timeout_as_remote_completion_uncertain() {
+        let plan = test_plan("finish-attempt-dry-run-timeout");
+        let report = initial_report(
+            "execution-dry-run-timeout",
+            &plan,
+            "review-digest",
+            ExecutionMode::DryRun,
+            None,
+        );
+        let state = Arc::new(Mutex::new(ExecutionState::default()));
+        lock(&state).records.insert(
+            "execution-dry-run-timeout".to_string(),
+            ExecutionRecord {
+                report,
+                events: Vec::new(),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let result = ExecutionRunResult {
+            success: false,
+            cancelled: false,
+            total_steps: 1,
+            steps: vec![crate::executor::StepRunRecord {
+                step_id: "recipe.example/wait".to_string(),
+                status: StepRunStatus::Failed,
+                message: Some("simulated operation timed out".to_string()),
+                outputs: OrderedMap::new(),
+                failure_kind: Some(crate::executor::StepFailureKind::OperationTimedOut),
+                cleanup: None,
+            }],
+            resolved_releases: Vec::new(),
+            resolved_artifacts: Vec::new(),
+        };
+
+        finish_attempt(&state, "execution-dry-run-timeout", result);
+
+        let state = lock(&state);
+        let errors = &state.records["execution-dry-run-timeout"].report.errors;
+        assert!(errors
+            .iter()
+            .any(|issue| issue.code == "operation_timed_out"));
+        assert!(!errors
+            .iter()
+            .any(|issue| issue.code == "execution_operation_uncertain"));
+    }
+
+    #[test]
+    fn finish_attempt_only_marks_uncertain_copy_when_mutation_or_cleanup_is_unresolved() {
+        let cases = [
+            (
+                "confirmed pre-write failure",
+                json!({
+                    "succeeded": false,
+                    "outcome": "noChange",
+                    "destinationMutationAttempted": false,
+                }),
+                crate::executor::StepFailureKind::OperationFailed,
+                false,
+            ),
+            (
+                "pre-write timeout may still be running",
+                json!({
+                    "succeeded": false,
+                    "outcome": "noChange",
+                    "destinationMutationAttempted": false,
+                }),
+                crate::executor::StepFailureKind::OperationTimedOut,
+                true,
+            ),
+            (
+                "staging cleanup pending",
+                json!({
+                    "succeeded": false,
+                    "outcome": "uncertain",
+                    "destinationMutationAttempted": false,
+                    "stagingCleanupError": "cleanup pending",
+                }),
+                crate::executor::StepFailureKind::OperationTimedOut,
+                true,
+            ),
+            (
+                "destination mutation may have started",
+                json!({
+                    "succeeded": false,
+                    "outcome": "uncertain",
+                    "destinationMutationAttempted": true,
+                }),
+                crate::executor::StepFailureKind::OperationTimedOut,
+                true,
+            ),
+        ];
+
+        for (case_name, copy_report, failure_kind, expects_uncertainty) in cases {
+            let execution_id = format!("finish-attempt-copy-{case_name}");
+            let report = initial_report(
+                &execution_id,
+                &test_plan(&execution_id),
+                "review-digest",
+                ExecutionMode::Real,
+                None,
+            );
+            let state = Arc::new(Mutex::new(ExecutionState::default()));
+            lock(&state).records.insert(
+                execution_id.clone(),
+                ExecutionRecord {
+                    report,
+                    events: Vec::new(),
+                    cancel_requested: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            let mut outputs = OrderedMap::new();
+            outputs.insert(
+                "copy_commit_report".to_string(),
+                RuntimeValue {
+                    type_name: "copy_commit_report".to_string(),
+                    value: copy_report,
+                    location: Some("device".to_string()),
+                },
+            );
+            let result = ExecutionRunResult {
+                success: false,
+                cancelled: false,
+                total_steps: 1,
+                steps: vec![StepRunRecord {
+                    step_id: "recipe.example/wait".to_string(),
+                    status: StepRunStatus::Failed,
+                    message: Some("device operation timed out".to_string()),
+                    outputs,
+                    failure_kind: Some(failure_kind),
+                    cleanup: None,
+                }],
+                resolved_releases: Vec::new(),
+                resolved_artifacts: Vec::new(),
+            };
+
+            finish_attempt(&state, &execution_id, result);
+
+            let state = lock(&state);
+            let errors = &state.records[&execution_id].report.errors;
+            assert_eq!(
+                errors
+                    .iter()
+                    .any(|issue| issue.code == "operation_timed_out"),
+                failure_kind == crate::executor::StepFailureKind::OperationTimedOut,
+                "timeout issue did not match failure kind for {case_name}"
+            );
+            assert_eq!(
+                errors
+                    .iter()
+                    .any(|issue| issue.code == "execution_operation_uncertain"),
+                expects_uncertainty,
+                "unexpected uncertainty classification for {case_name}"
+            );
+        }
     }
 }

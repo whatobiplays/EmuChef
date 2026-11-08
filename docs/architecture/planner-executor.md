@@ -60,7 +60,13 @@ reviewed effects. Conflicting file writes, destructive same-path/ancestor
 effects, and overlapping directory creations that would invalidate another
 writer's reviewed missing-path precondition fail before execution. An
 idempotent directory effect may coexist when the directory already exists at
-review time and no other effect conflicts.
+review time and no other effect conflicts. Implicit parent-directory creation
+by a legacy `file_path` copy targeting a directory is included in its reviewed
+effects and participates in these active-writer checks.
+These checks also follow execution order. If an earlier active writer would
+change any part of a later writer's reviewed whole-tree destination snapshot,
+preparation rejects the plan before execution. Disjoint effects outside that
+later scope may coexist when the remaining reviewed preconditions hold.
 
 T04's ten-second observation lifetime governs whether volume evidence is fresh
 enough to resolve or refresh a Setup Location. It does not expire an immutable
@@ -90,16 +96,7 @@ replayed or older sequences without retaining every completed attempt.
 Device inventory transitions revoke matching leases before advancing a session
 epoch; revocation closes the gate and waits for an active permit to finish. The
 worker does not request permission from Tauri, so start admission does not wait
-on a worker-to-Tauri permission round trip. Runtime loss permits authority reset
-only after sidecar cleanup is confirmed and no T05 lease remains outstanding. A
-rejected start retires its matching attempt and leaves the session epoch current
-for a later attempt sequence. Device and runtime transitions revoke matching
-leases before publishing invalidated authority. Tauri releases local authority
-after the corresponding retirement or revocation is acknowledged. An unknown
-execution mapping or uncertain terminal copy-commit outcome keeps the lease
-closed and blocks new starts until runtime recovery confirms authority.
-Runtime-process cleanup alone cannot clear the lease or reset device authority,
-so new execution starts remain blocked while mutation status is unresolved.
+on a worker-to-Tauri permission round trip. Runtime loss permits execution-authority reset only after sidecar cleanup is confirmed and no T05 lease remains and no real execution is active or unresolved. A rejected start retires its matching attempt and leaves the session epoch current for a later attempt sequence. Device and runtime transitions revoke matching leases before publishing invalidated authority. Tauri releases local authority after the corresponding retirement or revocation is acknowledged. An unknown execution mapping or uncertain terminal copy-commit outcome keeps the lease closed until matching trusted terminal evidence resolves it. If a real-start response is lost or unusable, the durable operation fence blocks restart and new real writes across store reset and app relaunch. T05 accepts this fail-closed state; automatic recovery and an Android-side operation-identity protocol are outside the requirement. A new device, session, runtime generation, or review does not resolve the old operation. Runtime-process cleanup alone cannot clear the lease or fence or reset execution authority while mutation status is unresolved.
 Revocation prevents later
 writes but does not roll back completed destination mutations; execution reports
 preserve staging, cleanup, and partial-result facts.
@@ -148,20 +145,22 @@ plan. Execution has no undo, rollback, inverse-step, backup, or restoration
 contract. The complete product protocol is documented in
 [Phase 0 End-User Runtime Contracts](../product/phase-0-runtime-contracts.md).
 
-Portable schema-v1 configurations store only an authored device-plan
-reference, recipe selection, and user bindings. They never store a generated
-execution plan or its digest. Reopening a configuration therefore always
-re-probes the selected current device and runs current validation, description,
-planning, and review before an execution can start.
+Portable schema-v1 configurations store the authored device-plan reference,
+recipe selection, and reusable user bindings. They exclude `setup_location_ref`
+values because each named location belongs to one device session and plan.
+Opening a saved configuration requires selecting a current location before
+review and execution. Configurations never store a generated execution plan or
+its digest; reopening one always re-probes the selected device and runs current
+validation, description, planning, and review before execution starts.
 
-Crash recovery uses the same portable-intent boundary without becoming a
-planner or executor input source. Tauri restores selected authored references
-and schema-permitted bindings into a fresh document session, after which the
-ordinary current-catalog description and planning path runs. Authored input
-`sensitive` metadata alone controls whether a binding value can enter the
-recovery record; omitted bindings produce a re-entry diagnostic before a fresh
-review can be created. No generated plan, digest, target, review, or execution
-state is reconstructed.
+Crash recovery uses the same portable-intent boundary and never becomes a
+planner or executor input source. Tauri restores authored references and
+permitted bindings into a fresh document session, then runs the current
+description and planning path. Sensitive and unclassified values remain
+omitted; `setup_location_ref` values are also omitted and must be selected again
+after restore. Omitted bindings produce a re-entry diagnostic before fresh
+review. No generated plan, digest, target, review, or execution state is
+reconstructed.
 
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the
 runtime/cache sandbox. The resolver owns compatible URL-based filenames,

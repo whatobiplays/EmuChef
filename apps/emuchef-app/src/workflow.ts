@@ -190,6 +190,10 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
           facts: null,
           match: null,
           description: null,
+        bindings: bindingsWithoutSetupLocationReferences(
+          state.description,
+          state.bindings,
+        ),
           review: null,
           execution: { kind: "idle" },
           unsupportedAcknowledged: false,
@@ -232,6 +236,12 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       return {
         ...state,
         devicePlan: action.devicePlan,
+        bindings: action.devicePlan === state.devicePlan
+          ? state.bindings
+          : bindingsWithoutSetupLocationReferences(
+              state.description,
+              state.bindings,
+            ),
         selectedRecipes: action.recipeSelection === "defaults"
           ? null
           : action.recipeSelection === "blank"
@@ -410,6 +420,10 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         facts: null,
         match: null,
         description: null,
+        bindings: bindingsWithoutSetupLocationReferences(
+          state.description,
+          state.bindings,
+        ),
         descriptionDirty: true,
         review: null,
         requestGeneration: state.requestGeneration + 1,
@@ -488,7 +502,10 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         executionGeneration: state.executionGeneration + 1,
         execution: { kind: "idle" },
         repairIntent: true,
-        bindings: action.bindings ?? state.bindings,
+        bindings: bindingsWithoutSetupLocationReferences(
+          state.description,
+          action.bindings ?? state.bindings,
+        ),
         requiredReentryBindings: action.requiredReentryBindings ?? state.requiredReentryBindings,
         unsupportedAcknowledged: false,
         requestGeneration: state.requestGeneration + 1,
@@ -501,6 +518,10 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         facts: null,
         match: null,
         description: null,
+        bindings: bindingsWithoutSetupLocationReferences(
+          state.description,
+          state.bindings,
+        ),
         descriptionDirty: true,
         review: null,
         executionGeneration: state.executionGeneration + 1,
@@ -542,6 +563,39 @@ export function filterRepairBindings(
     }
   }
   return result;
+}
+
+/** Omit device-scoped Setup Location IDs from bindings saved for later reuse. */
+export function bindingsForPersistence(
+  description: ConfigurationDescription | null,
+  bindings: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!description) return {};
+  return bindingsWithoutSetupLocationReferences(description, bindings);
+}
+
+export function savedBindingKeysToRemove(
+  existingBindings: Record<string, unknown>,
+  nextBindings: Record<string, unknown>,
+): string[] {
+  return Object.keys(existingBindings).filter(
+    (key) => !Object.hasOwn(nextBindings, key),
+  );
+}
+
+function bindingsWithoutSetupLocationReferences(
+  description: ConfigurationDescription | null,
+  bindings: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!description) return bindings;
+  const setupLocationKeys = new Set(
+    description.inputs
+      .filter((input) => input.type === "setup_location_ref")
+      .map((input) => input.key),
+  );
+  return Object.fromEntries(
+    Object.entries(bindings).filter(([key]) => !setupLocationKeys.has(key)),
+  );
 }
 
 function executionGenerationMatches(
@@ -597,8 +651,9 @@ export function deviceIsUnsupported(match: DeviceMatch): boolean {
 }
 
 /**
- * Projects portable binding values using only the current backend-authored
- * input sensitivity contract. Unknown keys and sensitive values fail closed.
+ * Projects bindings that can be reused across portable transitions. Setup
+ * Location references are omitted so each session needs a fresh selection.
+ * Unknown keys and sensitive values require reentry.
  */
 export function portableBindingsForTransition(
   description: ConfigurationDescription | null,
@@ -614,6 +669,7 @@ export function portableBindingsForTransition(
   const inputs = new Map((description?.inputs ?? []).map((input) => [input.key, input]));
   for (const [key, value] of Object.entries(bindings)) {
     const input = inputs.get(key);
+    if (input?.type === "setup_location_ref") continue;
     if (input?.sensitive === false) {
       projected[key] = value;
       continue;
