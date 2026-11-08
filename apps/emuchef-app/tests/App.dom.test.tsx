@@ -4957,6 +4957,64 @@ describe("Phase 5D input collection and repair", () => {
     expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
   });
 
+  test("allows saving a setup while its input values refresh", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/theme";
+    const description = descriptionWithTextInput({
+      key: inputKey,
+      inputId: "theme",
+      label: "Theme",
+      required: false,
+      sensitive: false,
+    });
+    const pendingDescription = deferred<ConfigurationDescription>();
+    mockApi.describeConfiguration.mockImplementation(async (request) => {
+      const currentDescription = {
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: request.bindings[input.key] ?? null,
+        })),
+      };
+      return request.bindings[inputKey] === "latest"
+        ? pendingDescription.promise
+        : currentDescription;
+    });
+
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Theme") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "latest" } });
+    await waitFor(() =>
+      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(
+        expect.objectContaining({ bindings: { [inputKey]: "latest" } }),
+      ),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() =>
+      expect(mockApi.createSavedConfiguration).toHaveBeenCalled(),
+    );
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalled();
+    expect((screen.getByLabelText("Theme") as HTMLInputElement).value).toBe("latest");
+
+    await act(async () => {
+      pendingDescription.resolve({
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: input.key === inputKey ? "latest" : input.value,
+        })),
+      });
+      await Promise.resolve();
+    });
+  });
+
   test("saving uses edits made while recovery persistence is pending", async () => {
     const user = userEvent.setup();
     const inputKey = "recipe.one/theme";

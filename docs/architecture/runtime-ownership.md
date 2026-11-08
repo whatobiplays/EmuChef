@@ -351,7 +351,21 @@ the mutation lease remains uncertain. Terminal cleanup failures with known
 completion remain cleanup warnings, and legacy destination behavior retains
 its existing T03 contract.
 
-An unresolved real operation retains a durable fence across execution-store reset, app-service restart, session reentry, and app relaunch. Startup rebuilds the fence from its generic marker, and a missing or unreadable marker also blocks execution. The fence blocks runtime restart and new real writes until proof resolves the operation. A new device, session, runtime generation, volume, or review identity alone does not prove that the previous operation stopped. T05 accepts this blocked state and does not require automatic recovery or an Android-side operation-identity protocol. Host cleanup may support invalidating volatile runtime observations, but it cannot clear an unresolved operation fence or authorize a new write.
+An unresolved real operation retains its durable fence across execution-store
+reset, app-service restart, session reentry, and app relaunch. EmuChef writes the
+marker before sending a real execution request and removes it only when the
+request is known not to have started or after authoritative terminal evidence;
+marker and parent-directory changes are synchronized. At startup, an existing
+marker blocks new device work, and an unreadable marker fails closed. On a first
+launch, a missing marker means no unresolved operation has been recorded. If a
+marker disappears outside EmuChef's managed resolution paths, startup cannot
+distinguish that history from a first launch; arbitrary external marker deletion
+is not detected. A new device, session, runtime generation, volume, or review
+identity alone does not prove that a previous operation stopped. T05 accepts
+this blocked state and does not require automatic recovery or an Android-side
+operation-identity protocol. Host cleanup may invalidate volatile runtime
+observations, but it cannot clear an unresolved-operation fence or authorize a
+new write.
 
 If sidecar state is locked or poisoned, cleanup is treated as unconfirmed rather
 than waiting for that state while execution-transition locks are held. Recovery

@@ -81,6 +81,7 @@ import {
 import {
   initialWorkflowState,
   bindingsForPersistence,
+  configurationDescriptionMatchesIntent,
   filterRepairBindings,
   deviceIsUnsupported,
   inputDiagnosticsForDisplay,
@@ -873,8 +874,11 @@ export function App({
       return null;
     const description = current.description;
     if (
-      !description ||
-      description.devicePlan !== current.devicePlan
+      !configurationDescriptionMatchesIntent(
+        description,
+        current.devicePlan,
+        current.selectedRecipes,
+      )
     ) return null;
     const bindings = bindingsForPersistence(description, current.bindings);
     const signature = portableIntentSignature({
@@ -1164,15 +1168,24 @@ export function App({
         setNotice("Choose a setup before saving.");
         return false;
       }
-      const persistenceDescription =
-        savedIntent.description &&
-        savedIntent.description.devicePlan === devicePlan
-          ? savedIntent.description
-          : null;
+      if (
+        !configurationDescriptionMatchesIntent(
+          savedIntent.description,
+          devicePlan,
+          savedIntent.selectedRecipes,
+        )
+      ) {
+        setNotice("Wait for setup validation to finish before saving.");
+        return false;
+      }
       const bindings = bindingsForPersistence(
-        persistenceDescription,
+        savedIntent.description,
         savedIntent.bindings,
       );
+      if (!bindings) {
+        setNotice("Wait for setup validation to finish before saving.");
+        return false;
+      }
       const result = await withNativeDialogFocus(() =>
         api.createSavedConfiguration({
           name,
@@ -1204,17 +1217,49 @@ export function App({
     await configurationMutationQueue.current;
     const current = savedConfigurationRef.current;
     if (!current) return createFromCurrentIntent();
+    const currentIntent = workflowRef.current;
+    if (
+      (currentIntent.portableIntentDirty || current.dirty) &&
+      !configurationDescriptionMatchesIntent(
+        currentIntent.description,
+        currentIntent.devicePlan,
+        currentIntent.selectedRecipes,
+      )
+    ) {
+      setNotice("Wait for setup validation to finish before saving.");
+      return false;
+    }
     try {
       await persistRecoveryNow(true);
+      await configurationMutationQueue.current;
+      const latestCurrent = savedConfigurationRef.current;
+      if (
+        !latestCurrent ||
+        latestCurrent.configurationHandle !== current.configurationHandle
+      ) return false;
+      const latestIntent = workflowRef.current;
+      if (
+        (latestIntent.portableIntentDirty || latestCurrent.dirty) &&
+        !configurationDescriptionMatchesIntent(
+          latestIntent.description,
+          latestIntent.devicePlan,
+          latestIntent.selectedRecipes,
+        )
+      ) {
+        setNotice("Wait for setup validation to finish before saving.");
+        return false;
+      }
       const saved = await api.saveSavedConfiguration(
-        current.configurationHandle,
+        latestCurrent.configurationHandle,
       );
       savedConfigurationRef.current = saved;
       setSavedConfiguration(saved);
-      dispatch({ type: "portable-intent-saved" });
-      recoveryRecordGenerationRef.current = null;
-      lastRecoverySignatureRef.current = null;
-      setRecoveredName(null);
+      if (workflowRef.current === latestIntent) {
+        dispatch({ type: "portable-intent-saved" });
+        recoveryRecordGenerationRef.current = null;
+        lastRecoverySignatureRef.current = null;
+        setRecoveredName(null);
+      }
       await refreshRecents();
       setNotice(`Saved ${saved.name}.`);
       return true;
@@ -1374,17 +1419,49 @@ export function App({
     const name = typeof nameResult === "string" ? nameResult.trim() : "";
     if (!name) return;
     try {
+      const currentIntent = workflowRef.current;
+      if (
+        (currentIntent.portableIntentDirty || current.dirty) &&
+        !configurationDescriptionMatchesIntent(
+          currentIntent.description,
+          currentIntent.devicePlan,
+          currentIntent.selectedRecipes,
+        )
+      ) {
+        setNotice("Wait for setup validation to finish before saving.");
+        return;
+      }
       await persistRecoveryNow(true);
+      await configurationMutationQueue.current;
+      const latestIntent = workflowRef.current;
+      const latestConfiguration = savedConfigurationRef.current;
+      if (
+        !latestConfiguration ||
+        latestConfiguration.configurationHandle !== current.configurationHandle
+      ) return;
+      if (
+        (latestIntent.portableIntentDirty || latestConfiguration.dirty) &&
+        !configurationDescriptionMatchesIntent(
+          latestIntent.description,
+          latestIntent.devicePlan,
+          latestIntent.selectedRecipes,
+        )
+      ) {
+        setNotice("Wait for setup validation to finish before saving.");
+        return;
+      }
       const result = await withNativeDialogFocus(() =>
-        api.saveSavedConfigurationAs(current.configurationHandle, name),
+        api.saveSavedConfigurationAs(latestConfiguration.configurationHandle, name),
       );
       if (result.outcome === "cancelled") return;
       savedConfigurationRef.current = result;
       setSavedConfiguration(result);
-      dispatch({ type: "portable-intent-saved" });
-      recoveryRecordGenerationRef.current = null;
-      lastRecoverySignatureRef.current = null;
-      setRecoveredName(null);
+      if (workflowRef.current === latestIntent) {
+        dispatch({ type: "portable-intent-saved" });
+        recoveryRecordGenerationRef.current = null;
+        lastRecoverySignatureRef.current = null;
+        setRecoveredName(null);
+      }
       await refreshRecents();
       setNotice(`Saved the new setup ${result.name}.`);
     } catch (error) {
@@ -1601,14 +1678,20 @@ export function App({
 
   const queueSavedMutation = (mutation: SavedConfigurationMutation) => {
     if (!savedConfigurationRef.current) return;
-  if (
-    mutation.kind === "binding" &&
-    workflowRef.current.description?.inputs.some(
-      (input) =>
-        input.key === mutation.key && input.type === "setup_location_ref",
-    )
-  )
-    return;
+    if (mutation.kind === "binding") {
+      const current = workflowRef.current;
+      if (
+        !configurationDescriptionMatchesIntent(
+          current.description,
+          current.devicePlan,
+          current.selectedRecipes,
+        )
+      ) return;
+      const input = current.description.inputs.find(
+        (candidate) => candidate.key === mutation.key,
+      );
+      if (!input || input.type === "setup_location_ref") return;
+    }
     const runtimeGeneration = runtimeGenerationRef.current;
     configurationMutationQueue.current = configurationMutationQueue.current
       .then(async () => {
@@ -1771,7 +1854,14 @@ export function App({
     description: ConfigurationDescription,
   ) => {
     const current = savedConfigurationRef.current;
-    if (!current || description.devicePlan !== devicePlan) return;
+    if (
+      !current ||
+      !configurationDescriptionMatchesIntent(
+        description,
+        devicePlan,
+        selectedRecipes,
+      )
+    ) return;
     const bindingsToSave = bindingsForPersistence(description, bindings);
     if (current.devicePlan !== devicePlan) {
       queueSavedMutation({ kind: "device_plan", value: devicePlan });

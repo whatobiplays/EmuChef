@@ -14,6 +14,25 @@ import type {
 export type WorkflowStep = "connect" | "device" | "setup" | "recipes" | "inputs" | "review" | "execution";
 export type ExecutionMode = "simulated" | "real";
 
+/**
+ * Confirms that a description still matches the active plan and recipe selection.
+ * A missing or stale description cannot classify bindings for persistence.
+ */
+export function configurationDescriptionMatchesIntent(
+  description: ConfigurationDescription | null,
+  devicePlan: string | null,
+  selectedRecipes: string[] | null,
+): description is ConfigurationDescription {
+  const selected = selectedRecipes ?? [];
+  return (
+    description !== null &&
+    devicePlan !== null &&
+    description.devicePlan === devicePlan &&
+    description.selectedRecipes.length === selected.length &&
+    description.selectedRecipes.every((recipe, index) => recipe === selected[index])
+  );
+}
+
 export type ExecutionWorkflowState =
   | { kind: "idle" }
   | { kind: "starting"; generation: number; mode: ExecutionMode }
@@ -565,12 +584,23 @@ export function filterRepairBindings(
   return result;
 }
 
-/** Omit device-scoped Setup Location IDs from bindings saved for later reuse. */
+/**
+ * Omits device-scoped Setup Location IDs from bindings saved for later reuse.
+ * Returns `null` when no description is available to classify the binding keys.
+ */
+export function bindingsForPersistence(
+  description: null,
+  bindings: Record<string, unknown>,
+): null;
+export function bindingsForPersistence(
+  description: ConfigurationDescription,
+  bindings: Record<string, unknown>,
+): Record<string, unknown>;
 export function bindingsForPersistence(
   description: ConfigurationDescription | null,
   bindings: Record<string, unknown>,
-): Record<string, unknown> {
-  if (!description) return {};
+): Record<string, unknown> | null {
+  if (!description) return null;
   return bindingsWithoutSetupLocationReferences(description, bindings);
 }
 

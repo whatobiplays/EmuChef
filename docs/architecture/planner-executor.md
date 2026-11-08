@@ -148,8 +148,10 @@ contract. The complete product protocol is documented in
 Portable schema-v1 configurations store the authored device-plan reference,
 recipe selection, and reusable user bindings. They exclude `setup_location_ref`
 values because each named location belongs to one device session and plan.
-Opening a saved configuration requires selecting a current location before
-review and execution. Configurations never store a generated execution plan or
+Opening a saved configuration requires a current Setup Location only when the
+selected workflow declares a required `setup_location_ref` input. The required
+input uses ordinary description validation before review and execution.
+Configurations never store a generated execution plan or
 its digest; reopening one always re-probes the selected device and runs current
 validation, description, planning, and review before execution starts.
 
@@ -158,8 +160,10 @@ planner or executor input source. Tauri restores authored references and
 permitted bindings into a fresh document session, then runs the current
 description and planning path. Sensitive and unclassified values remain
 omitted; `setup_location_ref` values are also omitted and must be selected again
-after restore. Omitted bindings produce a re-entry diagnostic before fresh
-review. No generated plan, digest, target, review, or execution state is
+when a required location input is validated. Recovery re-entry diagnostics are
+limited to sensitive or unclassified values recorded as required re-entry.
+Omitting a Setup Location reference uses ordinary input validation and does not
+create that recovery diagnostic. No generated plan, digest, target, review, or execution state is
 reconstructed.
 
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the

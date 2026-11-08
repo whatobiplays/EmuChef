@@ -454,6 +454,7 @@ fn sanitize_copy_destination_review(
                         action,
                         &snapshot.destination_identity,
                         snapshot.destination_binding.as_deref(),
+                        true,
                     )?;
                     sanitized_count += 1;
                 }
@@ -516,6 +517,7 @@ fn sanitize_unprotected_shared_copy_actions(mut review: Value) -> Result<Value, 
                             .as_deref()
                             .ok_or_else(setup_location_review_projection_error)?,
                         None,
+                        false,
                     )?;
                 } else if location_is_shared {
                     sanitize_shared_device_copy_action(
@@ -524,6 +526,7 @@ fn sanitize_unprotected_shared_copy_actions(mut review: Value) -> Result<Value, 
                             .as_deref()
                             .ok_or_else(setup_location_review_projection_error)?,
                         None,
+                        false,
                     )?;
                 }
             }
@@ -642,6 +645,7 @@ fn sanitize_shared_device_copy_action(
     action: &mut Value,
     destination_identity: &str,
     destination_binding: Option<&str>,
+    manifest_backed: bool,
 ) -> Result<(), ApiError> {
     let selected_boundary = action
         .pointer("/copyChanges/selectedBoundary")
@@ -665,24 +669,22 @@ fn sanitize_shared_device_copy_action(
     };
     let canonical_scope_text = canonical_scope.to_string_lossy().into_owned();
     scope_private_roots.extend(sanitized_shared_destination_boundary(&canonical_scope_text).1);
-    if action.get("copyChanges").is_none() {
-        action
-            .as_object_mut()
-            .ok_or_else(setup_location_review_projection_error)?
-            .insert("copyChanges".to_string(), json!({}));
-    }
-    let copy_changes = action
-        .get_mut("copyChanges")
-        .and_then(Value::as_object_mut)
+    let object = action
+        .as_object_mut()
         .ok_or_else(setup_location_review_projection_error)?;
-    copy_changes.insert(
-        "selectedBoundary".to_string(),
-        Value::String(public_boundary),
-    );
-    if let Some(object) = action.as_object_mut() {
+    if manifest_backed {
+        let copy_changes = object
+            .get_mut("copyChanges")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(setup_location_review_projection_error)?;
+        copy_changes.insert(
+            "selectedBoundary".to_string(),
+            Value::String(public_boundary),
+        );
         object.remove("deviceLocation");
     } else {
-        return Err(setup_location_review_projection_error());
+        object.remove("copyChanges");
+        object.insert("deviceLocation".to_string(), Value::String(public_boundary));
     }
 
     let serialized =
@@ -3325,7 +3327,11 @@ steps:
 
         let sanitized_mixed = sanitize_copy_destination_review(&plan, mixed_projection).unwrap();
         let mixed_actions = &sanitized_mixed["features"][0]["sections"][0]["actions"];
-        assert!(mixed_actions[1].get("deviceLocation").is_none());
+        assert_eq!(
+            mixed_actions[1]["deviceLocation"],
+            "Shared device storage /roms/legacy/settings.cfg"
+        );
+        assert!(mixed_actions[1].get("copyChanges").is_none());
         let serialized_mixed = serde_json::to_string(&sanitized_mixed).unwrap();
         assert!(!serialized_mixed.contains("/storage/EF56-789A"));
         assert!(!serialized_mixed.contains("EF56-789A"));
@@ -3454,12 +3460,10 @@ steps:
         let unsnapshotted_action =
             &sanitized_unsnapshotted["features"][0]["sections"][0]["actions"][0];
         assert_eq!(
-            unsnapshotted_action
-                .pointer("/copyChanges/selectedBoundary")
-                .and_then(Value::as_str),
-            Some("Shared device storage /roms/library/settings.cfg")
+            unsnapshotted_action["deviceLocation"],
+            "Shared device storage /roms/library/settings.cfg"
         );
-        assert!(unsnapshotted_action.get("deviceLocation").is_none());
+        assert!(unsnapshotted_action.get("copyChanges").is_none());
         let serialized_unsnapshotted = serde_json::to_string(unsnapshotted_action).unwrap();
         assert!(!serialized_unsnapshotted.contains("/storage/AB12-CD34"));
         assert!(!serialized_unsnapshotted.contains("AB12-CD34"));
@@ -3488,12 +3492,10 @@ steps:
         let actual_action =
             &response["result"]["review"]["features"][0]["sections"][0]["actions"][0];
         assert_eq!(
-            actual_action
-                .pointer("/copyChanges/selectedBoundary")
-                .and_then(Value::as_str),
-            Some("Shared device storage /roms/legacy/settings.cfg")
+            actual_action["deviceLocation"],
+            "Shared device storage /roms/legacy/settings.cfg"
         );
-        assert!(actual_action.get("deviceLocation").is_none());
+        assert!(actual_action.get("copyChanges").is_none());
         let actual_public_review = serde_json::to_string(actual_action).unwrap();
         assert!(!actual_public_review.contains("/storage/EF56-789A"));
         assert!(!actual_public_review.contains("EF56-789A"));
@@ -3564,12 +3566,10 @@ steps:
         let mixed_public_actions = &mixed_public_review["features"][0]["sections"][0]["actions"];
         assert_eq!(mixed_public_actions.as_array().unwrap().len(), 2);
         assert_eq!(
-            mixed_public_actions[1]
-                .pointer("/copyChanges/selectedBoundary")
-                .and_then(Value::as_str),
-            Some("Shared device storage /roms/legacy/settings.cfg")
+            mixed_public_actions[1]["deviceLocation"],
+            "Shared device storage /roms/legacy/settings.cfg"
         );
-        assert!(mixed_public_actions[1].get("deviceLocation").is_none());
+        assert!(mixed_public_actions[1].get("copyChanges").is_none());
         let mixed_public_text = serde_json::to_string(mixed_public_review).unwrap();
         let private_values = [
             "/storage/AB12-CD34".to_string(),

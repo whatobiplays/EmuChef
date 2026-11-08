@@ -20,7 +20,7 @@ use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 use async_io::{block_on, Timer};
-use async_process::{Child, ChildStderr, ChildStdout, Command};
+use async_process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use futures_lite::future::{self, poll_fn};
 use futures_lite::io::{AsyncRead, AsyncReadExt};
 
@@ -51,75 +51,79 @@ pub fn isolate_process_group(command: &mut std::process::Command) -> Option<Proc
     }
 }
 
-/// Handle for the local process group owned by one runtime generation.
+/// Owns a sidecar child and its private process group as one cleanup capability.
 ///
-/// The handle keeps the process-group identifier inside the process ownership
-/// boundary so callers can request cleanup without managing raw identifiers.
-#[derive(Clone, Copy, Debug)]
-/// Opaque handle to the local process group owned by one runtime generation.
-///
-/// This covers only processes that remain in the group. A descendant that
-/// starts a new session or process group is outside this handle's scope, and
-/// local cleanup does not prove that a remote Android command has completed.
+/// The child remains unreaped while the group termination signal is sent, so its
+/// process identifier cannot be recycled as an unrelated group identifier during
+/// that mutation. Cleanup consumes this owner; only a read-only group-emptiness
+/// check can occur after the exact child has been reaped.
 pub struct OwnedProcessGroup {
+    child: Child,
     #[cfg(unix)]
-    process_group: libc::pid_t,
+    process_group: Option<libc::pid_t>,
 }
 
 impl ProcessGroupConfig {
-    /// Associates the configured process group with the spawned child.
-    pub fn attach_to(self, child: &Child) -> Option<OwnedProcessGroup> {
+    /// Binds the configured group and spawned child into one cleanup owner.
+    pub fn attach_to(self, child: Child) -> OwnedProcessGroup {
         #[cfg(unix)]
-        {
-            let process_group = libc::pid_t::try_from(child.id()).ok()?;
-            (process_group > 0).then_some(OwnedProcessGroup { process_group })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = child;
-            None
+        let process_group = libc::pid_t::try_from(child.id())
+            .ok()
+            .filter(|process_group| *process_group > 0);
+        let _ = self;
+        OwnedProcessGroup {
+            child,
+            #[cfg(unix)]
+            process_group,
         }
     }
 }
 
 impl OwnedProcessGroup {
-    /// Sends SIGKILL to every process that remains in the owned group.
-    ///
-    /// Returns true when the signal was sent or the group was already empty.
-    pub fn terminate(&self) -> bool {
-        #[cfg(unix)]
-        {
-            // SAFETY: the group identifier came from the child configured by this module.
-            let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
-            result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        }
-        #[cfg(not(unix))]
-        {
-            false
+    /// Retains the child when the host cannot establish a process group.
+    pub fn without_group(child: Child) -> Self {
+        Self {
+            child,
+            #[cfg(unix)]
+            process_group: None,
         }
     }
 
-    /// Waits until the group disappears or the timeout expires.
+    /// Transfers the child's stdin to the sidecar request writer.
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    /// Transfers the child's stdout to the sidecar response reader.
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    /// Terminates and reaps the owned child and group within a bounded interval.
     ///
-    /// Returns false if the group remains or its emptiness cannot be proven.
-    pub fn wait_until_empty(&self, timeout: Duration) -> bool {
+    /// Returns false when group ownership was unavailable or termination and
+    /// emptiness could not both be confirmed. Cleanup consumes this value, so a
+    /// later caller cannot signal a recycled process-group identifier.
+    pub fn cleanup(mut self, timeout: Duration) -> bool {
         #[cfg(unix)]
         {
-            let started = Instant::now();
-            loop {
-                if !process_group_exists(self.process_group) {
-                    return true;
-                }
-                let remaining = timeout.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    return false;
-                }
-                block_on(Timer::after(remaining.min(Duration::from_millis(10))));
-            }
+            let Some(process_group) = self.process_group.take() else {
+                let _ = cleanup_child(&mut self.child, ProcessFailureKind::Wait);
+                return false;
+            };
+
+            // SAFETY: this owner retains the unreaped child whose PID was assigned
+            // as its process-group ID when the child was spawned.
+            let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+            let child_reaped = cleanup_child(&mut self.child, ProcessFailureKind::Wait).cleanup
+                == ProcessCleanup::Confirmed;
+            return child_reaped && wait_for_process_group_exit(process_group, timeout);
         }
+
         #[cfg(not(unix))]
         {
             let _ = timeout;
+            let _ = cleanup_child(&mut self.child, ProcessFailureKind::Wait);
             false
         }
     }
@@ -127,9 +131,25 @@ impl OwnedProcessGroup {
 
 #[cfg(unix)]
 fn process_group_exists(process_group: libc::pid_t) -> bool {
-    // SAFETY: signal zero only probes whether the owned process group exists.
+    // SAFETY: signal zero only probes group existence. No mutation uses this
+    // identifier after the child owner has been consumed and reaped.
     let result = unsafe { libc::kill(-process_group, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(process_group: libc::pid_t, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if !process_group_exists(process_group) {
+            return true;
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        block_on(Timer::after(remaining.min(Duration::from_millis(10))));
+    }
 }
 
 #[cfg(test)]

@@ -7,11 +7,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_io::{block_on, Timer};
-use async_process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use async_process::{ChildStdin, ChildStdout, Command, Stdio};
 #[cfg(test)]
 use emuchef_rust_backend::session::DocumentSessionManager;
 use emuchef_rust_backend::{isolate_process_group, OwnedProcessGroup};
-use futures_lite::future::{self, poll_fn};
+use futures_lite::future::poll_fn;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -522,8 +522,7 @@ struct StartProcessFailure {
 enum SidecarProcess {
     Child {
         generation: u64,
-        child: Child,
-        process_group: Option<OwnedProcessGroup>,
+        child: OwnedProcessGroup,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
     },
@@ -644,8 +643,7 @@ impl SidecarProcess {
     fn stop(self) -> SidecarCleanup {
         match self {
             Self::Child {
-                mut child,
-                process_group,
+                child,
                 stdin,
                 stdout,
                 ..
@@ -654,7 +652,7 @@ impl SidecarProcess {
                 // readers before the bounded child reap begins.
                 drop(stdin);
                 drop(stdout);
-                cleanup_child(&mut child, process_group.as_ref())
+                cleanup_child(child)
             }
             #[cfg(test)]
             Self::Scripted { observer, .. } => {
@@ -703,67 +701,8 @@ fn trim_frame(frame: &[u8]) -> &[u8] {
     frame.strip_suffix(b"\n").unwrap_or(frame)
 }
 
-trait CleanupProcess {
-    fn try_exit(&mut self) -> bool;
-    fn kill(&mut self) -> bool;
-    fn reap_with_deadline(&mut self) -> bool;
-}
-
-impl CleanupProcess for Child {
-    fn try_exit(&mut self) -> bool {
-        self.try_status().ok().flatten().is_some()
-    }
-
-    fn kill(&mut self) -> bool {
-        Child::kill(self).is_ok()
-    }
-
-    fn reap_with_deadline(&mut self) -> bool {
-        block_on(future::race(
-            async { Child::status(self).await.is_ok() },
-            async {
-                Timer::after(CLEANUP_TIMEOUT).await;
-                false
-            },
-        ))
-    }
-}
-
-/// Apply the bounded sidecar cleanup contract to any privately owned process.
-///
-/// A failed kill does not decide the result by itself: a later status check or
-/// bounded reap can still establish that the exact child exited. Dropping pipe
-/// handles is intentionally not treated as process termination evidence.
-fn cleanup_owned_process(process: &mut impl CleanupProcess) -> SidecarCleanup {
-    if process.try_exit() {
-        return SidecarCleanup::Confirmed;
-    }
-
-    let kill_succeeded = process.kill();
-    // A status check proves the exact child exited regardless of whether the
-    // termination request itself succeeded.
-    if process.try_exit() {
-        return SidecarCleanup::Confirmed;
-    }
-
-    let reaped = process.reap_with_deadline();
-    match (kill_succeeded, reaped) {
-        (true, true) | (false, true) => SidecarCleanup::Confirmed,
-        // A successful kill without exit/reap evidence is still uncertain.
-        (true, false) | (false, false) => SidecarCleanup::Uncertain,
-    }
-}
-
-fn cleanup_child(child: &mut Child, process_group: Option<&OwnedProcessGroup>) -> SidecarCleanup {
-    let Some(process_group) = process_group else {
-        let _ = cleanup_owned_process(child);
-        return SidecarCleanup::Uncertain;
-    };
-
-    let _ = process_group.terminate();
-    let child_cleanup = cleanup_owned_process(child);
-    if child_cleanup == SidecarCleanup::Confirmed && process_group.wait_until_empty(CLEANUP_TIMEOUT)
-    {
+fn cleanup_child(child: OwnedProcessGroup) -> SidecarCleanup {
+    if child.cleanup(CLEANUP_TIMEOUT) {
         SidecarCleanup::Confirmed
     } else {
         SidecarCleanup::Uncertain
@@ -788,27 +727,30 @@ fn start_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|_| StartProcessFailure {
+    let child = command.spawn().map_err(|_| StartProcessFailure {
         message: "The bundled Rust runtime could not be started.".to_string(),
         cleanup: SidecarCleanup::NotRequired,
     })?;
-    let process_group = process_group_config.and_then(|config| config.attach_to(&child));
-    let stdin = match child.stdin.take() {
+    let mut child = match process_group_config {
+        Some(config) => config.attach_to(child),
+        None => OwnedProcessGroup::without_group(child),
+    };
+    let stdin = match child.take_stdin() {
         Some(stdin) => stdin,
         None => {
-            drop(child.stdout.take());
-            let cleanup = cleanup_child(&mut child, process_group.as_ref());
+            drop(child.take_stdout());
+            let cleanup = cleanup_child(child);
             return Err(StartProcessFailure {
                 message: "Rust runtime stdin was unavailable.".to_string(),
                 cleanup,
             });
         }
     };
-    let stdout = match child.stdout.take() {
+    let stdout = match child.take_stdout() {
         Some(stdout) => stdout,
         None => {
             drop(stdin);
-            let cleanup = cleanup_child(&mut child, process_group.as_ref());
+            let cleanup = cleanup_child(child);
             return Err(StartProcessFailure {
                 message: "Rust runtime stdout was unavailable.".to_string(),
                 cleanup,
@@ -818,7 +760,6 @@ fn start_process(
     Ok(SidecarProcess::Child {
         generation,
         child,
-        process_group,
         stdin,
         stdout: BufReader::new(stdout),
     })
@@ -918,6 +859,31 @@ mod tests {
         )
     }
 
+    #[cfg(test)]
+    trait CleanupProcess {
+        fn try_exit(&mut self) -> bool;
+        fn kill(&mut self) -> bool;
+        fn reap_with_deadline(&mut self) -> bool;
+    }
+
+    #[cfg(test)]
+    fn cleanup_owned_process(process: &mut impl CleanupProcess) -> SidecarCleanup {
+        if process.try_exit() {
+            return SidecarCleanup::Confirmed;
+        }
+
+        let kill_succeeded = process.kill();
+        if process.try_exit() {
+            return SidecarCleanup::Confirmed;
+        }
+
+        match (kill_succeeded, process.reap_with_deadline()) {
+            (true, true) | (false, true) => SidecarCleanup::Confirmed,
+            (true, false) | (false, false) => SidecarCleanup::Uncertain,
+        }
+    }
+
+    #[cfg(test)]
     struct ScriptedCleanupProcess {
         status_results: Vec<bool>,
         status_index: usize,
@@ -927,6 +893,7 @@ mod tests {
         reap_calls: usize,
     }
 
+    #[cfg(test)]
     impl ScriptedCleanupProcess {
         fn new(status_results: &[bool], kill_result: bool, reap_result: bool) -> Self {
             Self {
@@ -940,6 +907,7 @@ mod tests {
         }
     }
 
+    #[cfg(test)]
     impl CleanupProcess for ScriptedCleanupProcess {
         fn try_exit(&mut self) -> bool {
             let result = self
@@ -1416,48 +1384,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_child_terminates_descendant_after_leader_exits() {
-        struct KillProcessGroupOnDrop(OwnedProcessGroup);
-
-        impl Drop for KillProcessGroupOnDrop {
-            fn drop(&mut self) {
-                let _ = self.0.terminate();
-            }
-        }
-
-        fn wait_for_group_exit(process_group: &OwnedProcessGroup) -> bool {
-            process_group.wait_until_empty(CLEANUP_TIMEOUT)
-        }
-
+    fn cleanup_child_terminates_descendants_before_reaping_its_leader() {
         let mut process = std::process::Command::new("/bin/sh");
-        process.args(["-c", "sleep 30 & echo child-started"]);
+        process.args(["-c", "sleep 30 >/dev/null 2>&1 & echo child-started"]);
         let process_group_config =
             isolate_process_group(&mut process).expect("Unix process groups are supported");
 
         let mut command = Command::from(process);
         command.stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = command.spawn().unwrap();
-        let process_group = process_group_config
-            .attach_to(&child)
-            .expect("the spawned child has an owned process group");
-        let _kill_on_drop = KillProcessGroupOnDrop(process_group);
+        let child = command.spawn().unwrap();
+        let mut child = process_group_config.attach_to(child);
 
-        let stdout = child.stdout.take().unwrap();
+        let stdout = child.take_stdout().unwrap();
         let mut reader = BufReader::new(stdout);
         let mut ready = String::new();
         block_on(reader.read_line(&mut ready)).unwrap();
         assert_eq!(ready.trim(), "child-started");
-        assert!(block_on(child.status()).unwrap().success());
-        assert!(
-            !process_group.wait_until_empty(Duration::ZERO),
-            "the descendant should remain after the leader exits"
-        );
+        let mut end_of_output = String::new();
+        assert_eq!(block_on(reader.read_line(&mut end_of_output)).unwrap(), 0);
+        drop(reader);
 
-        let cleanup = cleanup_child(&mut child, Some(&process_group));
-        assert!(
-            wait_for_group_exit(&process_group),
-            "cleanup was reported while a local descendant remained"
-        );
-        assert_eq!(cleanup, SidecarCleanup::Confirmed);
+        assert_eq!(cleanup_child(child), SidecarCleanup::Confirmed);
     }
 }

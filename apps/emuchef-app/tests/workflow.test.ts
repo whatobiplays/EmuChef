@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   bindingsForPersistence,
+  configurationDescriptionMatchesIntent,
   initialWorkflowState,
   filterRepairBindings,
   inputDiagnosticsForDisplay,
@@ -544,7 +545,39 @@ test("plan changes and unknown descriptions cannot persist Setup Location refere
     savedBindingKeysToRemove({ [locationKey]: "location-one" }, portableBindings),
     [locationKey],
   );
-  assert.deepEqual(bindingsForPersistence(null, bindings), {});
+  assert.equal(bindingsForPersistence(null, bindings), null);
+  assert.equal(
+    configurationDescriptionMatchesIntent(
+      description,
+      "plan.old",
+      ["recipe.one"],
+    ),
+    true,
+  );
+  assert.equal(
+    configurationDescriptionMatchesIntent(
+      null,
+      "plan.old",
+      ["recipe.one"],
+    ),
+    false,
+  );
+  assert.equal(
+    configurationDescriptionMatchesIntent(
+      description,
+      "plan.new",
+      ["recipe.one"],
+    ),
+    false,
+  );
+  assert.equal(
+    configurationDescriptionMatchesIntent(
+      description,
+      "plan.old",
+      [],
+    ),
+    false,
+  );
 });
 
 test("empty recipe selection prevents review", () => {
