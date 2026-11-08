@@ -1214,6 +1214,10 @@ export function App({
   };
 
   const saveCurrentConfiguration = async (): Promise<boolean> => {
+    if (repairPreparing) {
+      setNotice("Wait for setup repair to finish before saving.");
+      return false;
+    }
     await configurationMutationQueue.current;
     const current = savedConfigurationRef.current;
     if (!current) return createFromCurrentIntent();
@@ -1249,9 +1253,44 @@ export function App({
         setNotice("Wait for setup validation to finish before saving.");
         return false;
       }
+      if (latestIntent.portableIntentDirty || latestCurrent.dirty) {
+        if (!latestIntent.devicePlan || !latestIntent.description) {
+          setNotice("Wait for setup validation to finish before saving.");
+          return false;
+        }
+        const synchronized = await syncSavedIntent(
+          latestIntent.devicePlan,
+          latestIntent.selectedRecipes ?? [],
+          latestIntent.bindings,
+          latestIntent.description,
+        );
+        if (!synchronized) return false;
+        await configurationMutationQueue.current;
+        if (workflowRef.current !== latestIntent) {
+          setNotice("The setup changed while its saved choices were updating.");
+          return false;
+        }
+      }
+      const configurationToSave = savedConfigurationRef.current;
+      if (
+        !configurationToSave ||
+        configurationToSave.configurationHandle !== current.configurationHandle
+      ) {
+        setNotice("The active saved setup changed before saving completed.");
+        return false;
+      }
       const saved = await api.saveSavedConfiguration(
-        latestCurrent.configurationHandle,
+        configurationToSave.configurationHandle,
       );
+      if (
+        saved.configurationHandle !== configurationToSave.configurationHandle ||
+        savedConfigurationRef.current?.configurationHandle !==
+          configurationToSave.configurationHandle ||
+        workflowRef.current !== latestIntent
+      ) {
+        setNotice("The setup changed while it was being saved. Review and save again.");
+        return false;
+      }
       savedConfigurationRef.current = saved;
       setSavedConfiguration(saved);
       if (workflowRef.current === latestIntent) {
@@ -1676,52 +1715,99 @@ export function App({
     }
   };
 
-  const queueSavedMutation = (mutation: SavedConfigurationMutation) => {
-    if (!savedConfigurationRef.current) return;
+  const queueSavedMutation = (
+    mutation: SavedConfigurationMutation,
+    bindingContext?: {
+      description: ConfigurationDescription;
+      devicePlan: string;
+      selectedRecipes: string[];
+    },
+    expectedConfigurationHandle?: string,
+  ): Promise<boolean> => {
+    const saved = savedConfigurationRef.current;
+    if (!saved) return Promise.resolve(false);
+    const configurationHandle =
+      expectedConfigurationHandle ?? saved.configurationHandle;
+    if (saved.configurationHandle !== configurationHandle) {
+      setNotice("The active saved setup changed before its update could run.");
+      return Promise.resolve(false);
+    }
     if (mutation.kind === "binding") {
-      const current = workflowRef.current;
+      const current = bindingContext ?? workflowRef.current;
       if (
         !configurationDescriptionMatchesIntent(
           current.description,
           current.devicePlan,
           current.selectedRecipes,
         )
-      ) return;
+      ) {
+        setNotice("Wait for setup validation to finish before saving.");
+        return Promise.resolve(false);
+      }
       const input = current.description.inputs.find(
         (candidate) => candidate.key === mutation.key,
       );
-      if (!input || input.type === "setup_location_ref") return;
+      const persistable = bindingsForPersistence(current.description, {
+        [mutation.key]: mutation.value,
+      });
+      if (
+        !input ||
+        input.type === "setup_location_ref" ||
+        !persistable ||
+        !Object.hasOwn(persistable, mutation.key)
+      ) {
+        setNotice("This setup input cannot be saved as a portable binding.");
+        return Promise.resolve(false);
+      }
     }
     const runtimeGeneration = runtimeGenerationRef.current;
-    configurationMutationQueue.current = configurationMutationQueue.current
+    const queuedMutation = configurationMutationQueue.current
       .then(async () => {
-        if (runtimeGenerationRef.current !== runtimeGeneration) return;
+        if (runtimeGenerationRef.current !== runtimeGeneration) return false;
         const current = savedConfigurationRef.current;
-        if (!current) return;
+        if (!current || current.configurationHandle !== configurationHandle) {
+          if (runtimeGenerationRef.current === runtimeGeneration)
+            setNotice(
+              "The active saved setup changed before its update could run.",
+            );
+          return false;
+        }
         const updated = await api.updateSavedConfiguration(
           current.configurationHandle,
           current.revision,
           mutation,
         );
-        if (runtimeGenerationRef.current !== runtimeGeneration) return;
+        if (runtimeGenerationRef.current !== runtimeGeneration) return false;
         if (
           savedConfigurationRef.current?.configurationHandle !==
-          updated.configurationHandle
-        )
-          return;
+            configurationHandle ||
+          updated.configurationHandle !== configurationHandle
+        ) {
+          setNotice("The active saved setup changed during its update.");
+          return false;
+        }
         savedConfigurationRef.current = updated;
         setSavedConfiguration(updated);
+        return true;
       })
       .catch((error) => {
-        if (runtimeGenerationRef.current === runtimeGeneration)
+        if (
+          runtimeGenerationRef.current === runtimeGeneration &&
+          savedConfigurationRef.current?.configurationHandle ===
+            configurationHandle
+        )
           setNotice(errorMessage(error));
+        return false;
       });
+    configurationMutationQueue.current = queuedMutation.then(() => undefined);
+    return queuedMutation;
   };
 
   const updateDevicePlanIntent = (
     devicePlan: string,
     recipeSelection: "defaults" | "blank" = "defaults",
   ) => {
+    if (rejectSetupActionDuringRepair()) return;
     if (qualificationLocksIntent) {
       setNotice(
         "The qualification session owns the device setup and recipe intent.",
@@ -1736,6 +1822,7 @@ export function App({
   };
 
   const updateRecipeIntent = (selectedRecipes: string[]) => {
+    if (rejectSetupActionDuringRepair()) return;
     if (qualificationLocksIntent) {
       setNotice(
         "The qualification session owns the device setup and recipe intent.",
@@ -1787,6 +1874,7 @@ export function App({
   }, [qualification.session, queueSavedMutation]);
 
   const updateBindingIntent = (key: string, value: unknown) => {
+    if (rejectSetupActionDuringRepair()) return;
     setTouchedInputKeys((current) => {
       if (current.has(key)) return current;
       const next = new Set(current);
@@ -1798,6 +1886,7 @@ export function App({
   };
 
   const clearBindingIntent = (key: string) => {
+    if (rejectSetupActionDuringRepair()) return;
     setTouchedInputKeys((current) => {
       if (current.has(key)) return current;
       const next = new Set(current);
@@ -1806,6 +1895,12 @@ export function App({
     });
     dispatch({ type: "remove-binding", key });
     queueSavedMutation({ kind: "remove_binding", key });
+  };
+
+  const rejectSetupActionDuringRepair = (): boolean => {
+    if (!repairPreparing) return false;
+    setNotice("Wait for setup repair to finish before continuing.");
+    return true;
   };
 
   const applyDescriptionValidation = (
@@ -1852,40 +1947,74 @@ export function App({
     selectedRecipes: string[],
     bindings: Record<string, unknown>,
     description: ConfigurationDescription,
-  ) => {
+  ): Promise<boolean> => {
     const current = savedConfigurationRef.current;
+    if (!current) return Promise.resolve(true);
     if (
-      !current ||
       !configurationDescriptionMatchesIntent(
         description,
         devicePlan,
         selectedRecipes,
       )
-    ) return;
-    const bindingsToSave = bindingsForPersistence(description, bindings);
-    if (current.devicePlan !== devicePlan) {
-      queueSavedMutation({ kind: "device_plan", value: devicePlan });
+    ) {
+      setNotice("Wait for setup validation to finish before saving.");
+      return Promise.resolve(false);
     }
+    const bindingsToSave = bindingsForPersistence(description, bindings);
+    if (!bindingsToSave) {
+      setNotice("The refreshed setup contains bindings that cannot be saved.");
+      return Promise.resolve(false);
+    }
+    const setupLocationKeys = new Set(
+      description.inputs
+        .filter((input) => input.type === "setup_location_ref")
+        .map((input) => input.key),
+    );
+    if (
+      Object.keys(bindings).some(
+        (key) =>
+          !setupLocationKeys.has(key) &&
+          !Object.hasOwn(bindingsToSave, key),
+      )
+    ) {
+      setNotice("The refreshed setup contains an unsupported saved input.");
+      return Promise.resolve(false);
+    }
+    const bindingContext = { description, devicePlan, selectedRecipes };
+    const configurationHandle = current.configurationHandle;
+    const mutations: SavedConfigurationMutation[] = [];
+    if (current.devicePlan !== devicePlan)
+      mutations.push({ kind: "device_plan", value: devicePlan });
     if (
       JSON.stringify(current.selectedRecipes) !==
       JSON.stringify(selectedRecipes)
-    ) {
-      queueSavedMutation({ kind: "selected_recipes", value: selectedRecipes });
-    }
+    )
+      mutations.push({ kind: "selected_recipes", value: selectedRecipes });
     for (const key of savedBindingKeysToRemove(
       current.bindings,
       bindingsToSave,
-    )) {
-      queueSavedMutation({ kind: "remove_binding", key });
-    }
+    ))
+      mutations.push({ kind: "remove_binding", key });
     for (const [key, value] of Object.entries(bindingsToSave)) {
       if (
         !Object.hasOwn(current.bindings, key) ||
         current.bindings[key] !== value
-      ) {
-        queueSavedMutation({ kind: "binding", key, value });
-      }
+      )
+        mutations.push({ kind: "binding", key, value });
     }
+    return (async () => {
+      for (const mutation of mutations) {
+        if (
+          !(await queueSavedMutation(
+            mutation,
+            bindingContext,
+            configurationHandle,
+          ))
+        )
+          return false;
+      }
+      return true;
+    })();
   };
 
   const restartRuntime = async (
@@ -3277,6 +3406,7 @@ active.devicePlan === devicePlan
     deviceHandle: string,
     invoker: HTMLElement | null = null,
   ) => {
+if (rejectSetupActionDuringRepair()) return;
     if (qualification.deviceSelectionLocked) {
       setNotice("The qualification session is bound to the current device.");
       return;
@@ -3372,6 +3502,7 @@ active.devicePlan === devicePlan
   };
 
   const describe = async () => {
+    if (rejectSetupActionDuringRepair()) return;
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
     setValidationRequested(true);
     setBusy(true);
@@ -3429,6 +3560,7 @@ active.devicePlan === devicePlan
   };
 
   const continueToInputs = async () => {
+    if (rejectSetupActionDuringRepair()) return;
     if (
       !workflow.deviceHandle ||
       !workflow.devicePlan ||
@@ -3521,6 +3653,7 @@ active.devicePlan === devicePlan
   ]);
 
   const generateReview = async () => {
+    if (rejectSetupActionDuringRepair()) return;
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
     setValidationRequested(true);
     if (!reviewReady(workflow)) {
@@ -3686,12 +3819,14 @@ active.devicePlan === devicePlan
         selectedRecipes: description.selectedRecipes,
         bindings,
       });
-      syncSavedIntent(
+      const savedIntentSynchronized = await syncSavedIntent(
         devicePlan,
         description.selectedRecipes,
         bindings,
         description,
       );
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (!savedIntentSynchronized) return;
       setNotice(
         "Setup refreshed. Resolve any remaining issues, then create and review a new plan.",
       );
@@ -3889,16 +4024,16 @@ active.devicePlan === devicePlan
           })),
       ].filter((diagnostic) => diagnostic.severity === "error")
     : [];
+  const setupIntentBusy = busy || repairPreparing;
   const configurationActionsLocked =
     !startupReady ||
-    busy ||
-    repairPreparing ||
+    setupIntentBusy ||
     qualificationLocksIntent ||
     platformToolsBusy ||
     workflow.execution.kind === "active" ||
     workflow.execution.kind === "starting";
   const saveDisabled =
-    busy ||
+    setupIntentBusy ||
     platformToolsBusy ||
     !workflow.devicePlan ||
     (!workflow.portableIntentDirty &&
@@ -4637,7 +4772,7 @@ active.devicePlan === devicePlan
                             workflow.devicePlan === plan.planId &&
                             workflow.selectedRecipes?.length !== 0
                           }
-                          disabled={qualificationLocksIntent}
+                          disabled={qualificationLocksIntent || repairPreparing}
                           onChange={() =>
                             updateDevicePlanIntent(plan.planId, "defaults")
                           }
@@ -4657,7 +4792,7 @@ active.devicePlan === devicePlan
                             workflow.devicePlan === plan.planId &&
                             workflow.selectedRecipes?.length === 0
                           }
-                          disabled={qualificationLocksIntent}
+                          disabled={qualificationLocksIntent || repairPreparing}
                           onChange={() =>
                             updateDevicePlanIntent(plan.planId, "blank")
                           }
@@ -4679,21 +4814,23 @@ active.devicePlan === devicePlan
                   </button>
                   <button
                     aria-describedby={
-                      !workflow.devicePlan || savedPlanUnavailable || busy
+                      !workflow.devicePlan || savedPlanUnavailable || setupIntentBusy
                         ? "setup-continue-reason"
                         : undefined
                     }
                     disabled={
-                      !workflow.devicePlan || savedPlanUnavailable || busy
+                      !workflow.devicePlan || savedPlanUnavailable || setupIntentBusy
                     }
                     onClick={describe}
                   >
                     Continue
                   </button>
                 </div>
-                {(!workflow.devicePlan || savedPlanUnavailable || busy) && (
+                {(!workflow.devicePlan || savedPlanUnavailable || setupIntentBusy) && (
                   <p className="disabled-reason" id="setup-continue-reason">
-                    {busy
+                    {repairPreparing
+                      ? "Setup repair is in progress."
+                      : busy
                       ? "Device validation is in progress."
                       : savedPlanUnavailable
                         ? "Choose an available setup explicitly."
@@ -4804,6 +4941,7 @@ active.devicePlan === devicePlan
                         type="checkbox"
                         disabled={
                           qualificationLocksIntent ||
+                          setupIntentBusy ||
                           recipeSelectionDisabled(recipe)
                         }
                         checked={
@@ -4932,19 +5070,21 @@ active.devicePlan === devicePlan
                   </button>
                   <button
                     aria-describedby={
-                      !workflow.selectedRecipes?.length || busy
+                      !workflow.selectedRecipes?.length || setupIntentBusy
                         ? "recipes-continue-reason"
                         : undefined
                     }
-                    disabled={!workflow.selectedRecipes?.length || busy}
+                    disabled={!workflow.selectedRecipes?.length || setupIntentBusy}
                     onClick={continueToInputs}
                   >
                     Continue
                   </button>
                 </div>
-                {(!workflow.selectedRecipes?.length || busy) && (
+                {(!workflow.selectedRecipes?.length || setupIntentBusy) && (
                   <p className="disabled-reason" id="recipes-continue-reason">
-                    {busy
+                    {repairPreparing
+                      ? "Setup repair is in progress."
+                      : busy
                       ? "Recipe validation is in progress."
                       : "Select at least one recipe to continue."}
                   </p>
@@ -4955,7 +5095,7 @@ active.devicePlan === devicePlan
             {workflow.step === "inputs" && workflow.description && (
               <InputsStep
                 bindings={workflow.bindings}
-                busy={busy || workflow.descriptionDirty}
+                busy={setupIntentBusy || workflow.descriptionDirty}
                 description={workflow.description}
                 setupLocations={setupLocations}
                 setupLocationListStatus={setupLocationListStatus}

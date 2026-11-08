@@ -859,77 +859,6 @@ mod tests {
         )
     }
 
-    #[cfg(test)]
-    trait CleanupProcess {
-        fn try_exit(&mut self) -> bool;
-        fn kill(&mut self) -> bool;
-        fn reap_with_deadline(&mut self) -> bool;
-    }
-
-    #[cfg(test)]
-    fn cleanup_owned_process(process: &mut impl CleanupProcess) -> SidecarCleanup {
-        if process.try_exit() {
-            return SidecarCleanup::Confirmed;
-        }
-
-        let kill_succeeded = process.kill();
-        if process.try_exit() {
-            return SidecarCleanup::Confirmed;
-        }
-
-        match (kill_succeeded, process.reap_with_deadline()) {
-            (true, true) | (false, true) => SidecarCleanup::Confirmed,
-            (true, false) | (false, false) => SidecarCleanup::Uncertain,
-        }
-    }
-
-    #[cfg(test)]
-    struct ScriptedCleanupProcess {
-        status_results: Vec<bool>,
-        status_index: usize,
-        kill_result: bool,
-        reap_result: bool,
-        kill_calls: usize,
-        reap_calls: usize,
-    }
-
-    #[cfg(test)]
-    impl ScriptedCleanupProcess {
-        fn new(status_results: &[bool], kill_result: bool, reap_result: bool) -> Self {
-            Self {
-                status_results: status_results.to_vec(),
-                status_index: 0,
-                kill_result,
-                reap_result,
-                kill_calls: 0,
-                reap_calls: 0,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    impl CleanupProcess for ScriptedCleanupProcess {
-        fn try_exit(&mut self) -> bool {
-            let result = self
-                .status_results
-                .get(self.status_index)
-                .copied()
-                .unwrap_or(false);
-            self.status_index += 1;
-            result
-        }
-
-        fn kill(&mut self) -> bool {
-            self.kill_calls += 1;
-            self.kill_result
-        }
-
-        fn reap_with_deadline(&mut self) -> bool {
-            self.reap_calls += 1;
-            self.reap_result
-        }
-    }
-
     fn negotiate(payload: Value, request_id: &str) -> Value {
         let request = json!({
             "id": request_id,
@@ -1279,52 +1208,36 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn cleanup_confirms_a_child_that_already_exited_without_killing_it() {
-        let mut process = ScriptedCleanupProcess::new(&[true], true, false);
+    fn cleanup_child_reports_uncertainty_when_process_group_ownership_is_unavailable() {
+        let mut process = Command::new("/bin/sleep");
+        process.arg("30").stdout(Stdio::piped());
+        let mut child = process
+            .spawn()
+            .expect("the isolated sleep child should start");
+        let child_stdout = child
+            .stdout
+            .take()
+            .expect("the isolated sleep child should have a stdout pipe");
 
         assert_eq!(
-            cleanup_owned_process(&mut process),
-            SidecarCleanup::Confirmed
-        );
-        assert_eq!(process.kill_calls, 0);
-        assert_eq!(process.reap_calls, 0);
-    }
-
-    #[test]
-    fn cleanup_confirms_successful_kill_and_bounded_reap() {
-        let mut process = ScriptedCleanupProcess::new(&[false, false], true, true);
-
-        assert_eq!(
-            cleanup_owned_process(&mut process),
-            SidecarCleanup::Confirmed
-        );
-        assert_eq!(process.kill_calls, 1);
-        assert_eq!(process.reap_calls, 1);
-    }
-
-    #[test]
-    fn cleanup_confirms_exit_after_kill_failure_when_status_proves_termination() {
-        let mut process = ScriptedCleanupProcess::new(&[false, true], false, false);
-
-        assert_eq!(
-            cleanup_owned_process(&mut process),
-            SidecarCleanup::Confirmed
-        );
-        assert_eq!(process.kill_calls, 1);
-        assert_eq!(process.reap_calls, 0);
-    }
-
-    #[test]
-    fn cleanup_is_uncertain_when_bounded_reap_does_not_complete() {
-        let mut process = ScriptedCleanupProcess::new(&[false, false], true, false);
-
-        assert_eq!(
-            cleanup_owned_process(&mut process),
+            cleanup_child(OwnedProcessGroup::without_group(child)),
             SidecarCleanup::Uncertain
         );
-        assert_eq!(process.kill_calls, 1);
-        assert_eq!(process.reap_calls, 1);
+        let mut stdout_closed = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&child_stdout),
+            events: libc::POLLHUP,
+            revents: 0,
+        };
+        // SAFETY: this is the read end of the owned child stdout pipe.
+        let ready = unsafe { libc::poll(&mut stdout_closed, 1, 0) };
+        assert_eq!(ready, 1, "cleanup should close the owned child stdout pipe");
+        assert_ne!(
+            stdout_closed.revents & libc::POLLHUP,
+            0,
+            "the direct child should exit even though process-group ownership is uncertain"
+        );
     }
 
     #[test]
