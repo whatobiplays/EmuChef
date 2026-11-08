@@ -1,0 +1,62 @@
+apps/emuchef-app/tests/App.dom.test.tsx
+  s_16b2fb77cc379a::t_a719aa550f9c54 4961-4963,4969-4971,4982,4984-4987,4991,4993,4995-4998,5000-5004,5006,5015
+  s_16b2fb77cc379a::t_c6376e7254f8c0 4983,4999,5017
+  s_16b2fb77cc379a::t_f8a80787e927e6 4992,5005
+  s_16b2fb77cc379a::t_4983b8a19432b3 4960
+  s_16b2fb77cc379a::t_db717647bd9a37 4964-4968,4972-4981,4988-4990,4994,5007-5014,5016
+docs/architecture/planner-executor.md
+  s_16b2fb77cc379a::t_6511248d0672ae 151-154,163-166
+apps/emuchef-app/tests/workflow.test.ts
+  s_16b2fb77cc379a::t_e953e1240a4c35 559,563
+  s_16b2fb77cc379a::t_e1817ceea13435 6,549-558,560-562,564-580
+  s_16b2fb77cc379a::t_b463a03ff624ce 548
+apps/emuchef-app/tests/ReviewStep.dom.test.tsx
+  s_16b2fb77cc379a::t_99e8683d3b539f 91-132
+docs/architecture/runtime-ownership.md
+  s_16b2fb77cc379a::t_08c6b87b44af5d 354-368
+apps/emuchef-app/src/App.tsx
+  s_16b2fb77cc379a::t_1ad79d3cd41eb7 1681-1694
+  s_16b2fb77cc379a::t_28bbb2f122b11a 1220-1231,1234-1251,1253,1257-1262
+  s_16b2fb77cc379a::t_3e5f75f2cd96e1 1857-1864
+  s_16b2fb77cc379a::t_d859f5f2ee27f4 1171-1180,1182,1185-1188
+  s_16b2fb77cc379a::t_9c1e2ab57418cd 84,877-881
+  s_16b2fb77cc379a::t_7facea25cb958c 1422-1433,1435-1452,1454,1459-1464
+apps/emuchef-app/src-tauri/src/sidecar.rs
+  s_16b2fb77cc379a::t_2d03b2c12defd1 704,736
+  s_16b2fb77cc379a::t_6ff7cb16283a28 1387,1389,1395-1396,1398,1403-1405,1407
+  s_16b2fb77cc379a::t_7b3de21d8266e6 525,646,655,862-866,869-873,875-883,886,896,910
+  s_16b2fb77cc379a::t_e601ed37e93adf 730,734-735,737-738,741-742,749,753
+  s_16b2fb77cc379a::t_fc7977811775a2 14
+  s_16b2fb77cc379a::t_64ccb4675bb0c3 867-868,874,884-885
+  s_16b2fb77cc379a::t_9aa9f83295fd79 10
+  s_16b2fb77cc379a::t_a8b4ee60765d2b 705
+crates/emuchef-rust-backend/src/owned_process.rs
+  s_16b2fb77cc379a::t_2d03b2c12defd1 68,74
+  s_16b2fb77cc379a::t_cba83bb6140941 23
+  s_16b2fb77cc379a::t_4a52145ec10202 54,56-59,61,63,67,70-73,75-77,83-88,92-102,104-107,110-120,122,126,134-135,140-152
+  s_16b2fb77cc379a::t_379dafff593c1f 153-154
+apps/emuchef-app/src/workflow.ts
+  s_16b2fb77cc379a::t_18d7eb6bdd5852 591-598
+  s_16b2fb77cc379a::t_e035488a04fc48 21-35,602-603
+  s_16b2fb77cc379a::t_46c8b170548ba7 17-20,587-590
+crates/emuchef-rust-backend/src/request.rs
+  s_16b2fb77cc379a::t_77673694502655 457,648,672-673,675-683,686-687
+  s_16b2fb77cc379a::t_b463a03ff624ce 3330-3334,3463-3464,3466,3495-3496,3498,3569-3570,3572
+  s_16b2fb77cc379a::t_0fb8311a9388aa 520,529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c5a558e2cb111a5246748580fb8c1467560ae3e2",
+  "prompts": {},
+  "sessions": {
+    "s_16b2fb77cc379a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a026-93e8-7c60-a7d9-924c4d99b49f",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
