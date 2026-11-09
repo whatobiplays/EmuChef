@@ -1211,6 +1211,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cleanup_child_reports_uncertainty_when_process_group_ownership_is_unavailable() {
+        const TEST_PIPE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
         let mut process = Command::new("/bin/sleep");
         process.arg("30").stdout(Stdio::piped());
         let mut child = process
@@ -1225,19 +1227,49 @@ mod tests {
             cleanup_child(OwnedProcessGroup::without_group(child)),
             SidecarCleanup::Uncertain
         );
-        let mut stdout_closed = libc::pollfd {
-            fd: std::os::fd::AsRawFd::as_raw_fd(&child_stdout),
-            events: libc::POLLHUP,
-            revents: 0,
-        };
-        // SAFETY: this is the read end of the owned child stdout pipe.
-        let ready = unsafe { libc::poll(&mut stdout_closed, 1, 0) };
-        assert_eq!(ready, 1, "cleanup should close the owned child stdout pipe");
-        assert_ne!(
-            stdout_closed.revents & libc::POLLHUP,
-            0,
-            "the direct child should exit even though process-group ownership is uncertain"
-        );
+
+        // This observes the test-owned pipe only. It does not prove
+        // Android-side quiescence or when the child itself was reaped.
+        let deadline = std::time::Instant::now() + TEST_PIPE_CLOSE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                panic!(
+                    "cleanup did not close the owned child stdout pipe within {TEST_PIPE_CLOSE_TIMEOUT:?}"
+                );
+            }
+            let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+            let mut stdout_closed = libc::pollfd {
+                fd: std::os::fd::AsRawFd::as_raw_fd(&child_stdout),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: this is the live read end of the owned child stdout pipe.
+            let ready = unsafe { libc::poll(&mut stdout_closed, 1, timeout_ms) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("polling the owned child stdout pipe failed: {error}");
+            }
+            if ready == 0 {
+                panic!(
+                    "cleanup did not close the owned child stdout pipe within {TEST_PIPE_CLOSE_TIMEOUT:?}"
+                );
+            }
+            assert_eq!(
+                ready, 1,
+                "poll reported an unexpected readiness count for one child stdout pipe"
+            );
+            assert_ne!(
+                stdout_closed.revents & libc::POLLHUP,
+                0,
+                "child stdout became ready without a hangup; revents={:#x}",
+                stdout_closed.revents
+            );
+            break;
+        }
     }
 
     #[test]
