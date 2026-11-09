@@ -165,21 +165,15 @@ static void verify_shared_storage_alias_chain(void) {
     close(shared_root);
 }
 
-static void verify_binding_canonical_path(const char *binding, const char *expected) {
-    const char *separator = strchr(binding, '|');
-    if (separator == NULL) {
-        errno = EINVAL;
-        fail("reviewed destination binding validation");
-    }
-    size_t length = (size_t)(separator - binding);
-    if (length != strlen(expected) || strncmp(binding, expected, length) != 0) {
+static void verify_binding_canonical_path(const char *canonical_path, const char *expected) {
+    if (strcmp(canonical_path, expected) != 0) {
         errno = ESTALE;
         fail("reviewed canonical destination changed");
     }
 }
 
 /* Resolve only the reviewed Android shared-storage aliases; descendants stay no-follow. */
-static int open_reviewed_selected_root(const char *path, const char *binding) {
+static int open_reviewed_selected_root(const char *path, const char *canonical_path) {
     static const char sdcard_prefix[] = "/sdcard/";
     static const char primary_prefix[] = "/storage/self/primary/";
     static const char emulated_prefix[] = "/storage/emulated/0/";
@@ -194,7 +188,7 @@ static int open_reviewed_selected_root(const char *path, const char *binding) {
                strcmp(path, "/storage/self/primary") == 0) {
         suffix = "";
     } else {
-        verify_binding_canonical_path(binding, path);
+        verify_binding_canonical_path(canonical_path, path);
         if (strcmp(path, canonical_base) == 0 ||
             strncmp(path, emulated_prefix, sizeof(emulated_prefix) - 1) == 0) {
             verify_shared_storage_alias_chain();
@@ -211,7 +205,7 @@ static int open_reviewed_selected_root(const char *path, const char *binding) {
         errno = ENAMETOOLONG;
         fail("reviewed canonical destination validation");
     }
-    verify_binding_canonical_path(binding, expected);
+    verify_binding_canonical_path(canonical_path, expected);
 
     int shared_root = open_absolute_directory(canonical_base);
     if (suffix[0] == '\0') {
@@ -236,13 +230,7 @@ static int open_relative_parent(int root_fd, struct path_parts *path) {
     return open_relative_directory(root_fd, path, path->count - 1, false);
 }
 
-static void verify_selected_identity(int root_fd, const char *binding) {
-    const char *selected = strstr(binding, "|selected:");
-    if (selected == NULL) {
-        errno = EINVAL;
-        fail("reviewed destination binding validation");
-    }
-    selected += strlen("|selected:");
+static void verify_selected_identity(int root_fd, const char *selected) {
     char *separator = strchr(selected, ':');
     if (separator == NULL) {
         errno = EINVAL;
@@ -593,24 +581,25 @@ static void publish_file(int root_fd, const char *stage_root, const char *relati
     free(path.storage);
 }
 
+/* Keep canonical path and selected identity in separate argv entries. */
 int main(int argc, char **argv) {
-    if ((argc != 7 && argc != 8) ||
-        (argc == 8 && strcmp(argv[4], "publish") != 0) ||
-        (argc == 7 && strcmp(argv[4], "publish") == 0)) {
-        fprintf(stderr, "usage: helper ROOT BINDING STAGE_ROOT ACTION RELATIVE_PATH PRECONDITION [SOURCE_SHA256]\n");
+    if ((argc != 8 && argc != 9) ||
+        (argc == 9 && strcmp(argv[5], "publish") != 0) ||
+        (argc == 8 && strcmp(argv[5], "publish") == 0)) {
+        fprintf(stderr, "usage: helper ROOT CANONICAL_PATH SELECTED_IDENTITY STAGE_ROOT ACTION RELATIVE_PATH PRECONDITION [SOURCE_SHA256]\n");
         return 64;
     }
     int selected_root_fd = open_reviewed_selected_root(argv[1], argv[2]);
-    verify_selected_identity(selected_root_fd, argv[2]);
+    verify_selected_identity(selected_root_fd, argv[3]);
 
-    if (strcmp(argv[4], "ensure-dir") == 0) {
-        ensure_directory(selected_root_fd, argv[5], argv[6]);
-    } else if (strcmp(argv[4], "remove-file") == 0) {
-        remove_entry(selected_root_fd, argv[5], false, argv[6]);
-    } else if (strcmp(argv[4], "remove-dir") == 0) {
-        remove_entry(selected_root_fd, argv[5], true, argv[6]);
-    } else if (strcmp(argv[4], "publish") == 0) {
-        publish_file(selected_root_fd, argv[3], argv[5], argv[6], argv[7]);
+    if (strcmp(argv[5], "ensure-dir") == 0) {
+        ensure_directory(selected_root_fd, argv[6], argv[7]);
+    } else if (strcmp(argv[5], "remove-file") == 0) {
+        remove_entry(selected_root_fd, argv[6], false, argv[7]);
+    } else if (strcmp(argv[5], "remove-dir") == 0) {
+        remove_entry(selected_root_fd, argv[6], true, argv[7]);
+    } else if (strcmp(argv[5], "publish") == 0) {
+        publish_file(selected_root_fd, argv[4], argv[6], argv[7], argv[8]);
     } else {
         fprintf(stderr, "selected-root helper rejected unsupported action\n");
         close(selected_root_fd);

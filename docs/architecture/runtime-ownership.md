@@ -115,12 +115,15 @@ strict DTO; it cannot choose the recovery path or submit device, review,
 execution, dialog, cache, diagnostics, or sidecar authority. Atomic writes and
 request, draft, and record generations prevent stale replacement or clearing.
 
-Binding persistence is controlled only by trusted authored `sensitive`
-metadata from the sidecar description. Sensitive and unclassified values are
-omitted and represented by key-only re-entry requirements. The source saved
-configuration is referenced by its embedded identity rather than a React
-handle or path. Restore creates fresh document authority and leaves every
-device, plan, review, execution, confirmation, and launch association invalid.
+Binding persistence follows trusted authored input descriptors. Sensitive and
+unclassified values are omitted and represented by key-only re-entry
+requirements. `setup_location_ref` values are also omitted because each
+reference belongs to one device session and plan; restore requires a fresh
+location selection. Other explicitly non-sensitive values follow existing
+saved-configuration rules. The source saved configuration is referenced by its
+embedded identity rather than a React handle or path. Restore creates fresh
+document authority and leaves every device, plan, review, execution,
+confirmation, and launch association invalid.
 
 Deferred recovery disposition is independent of current-session dirty state.
 Not now survives clean shutdown and is offered on the next launch; explicit
@@ -190,8 +193,11 @@ legacy and three-field AOSP shell volume lines. Repeated VolumeInfo or DiskInfo
 records are accepted while the fields used for classification agree; a repeat
 that changes only fields EmuChef does not classify stays accepted. Contradictory
 classification evidence and conflicting primary-storage declarations fail
-closed. Raw filesystem UUIDs, mount paths, disk identifiers, and serials remain
-sidecar-owned. An adopted primary volume resolves the stacked emulated volume
+closed. Raw filesystem UUIDs, disk identifiers, and ADB reports remain
+sidecar-owned. The private Rust response includes a verified setup mount root
+and eligible setup kind for Tauri; Tauri retains those values only in native
+storage state. Neither physical roots nor device evidence digests enter the
+React projection. An adopted primary volume resolves the stacked emulated volume
 through the private volume's disk identity, without relying on the private
 volume's mount user. A sole emulated volume with no positive user evidence uses
 the assumed-user compatibility fallback. A volume positively associated with a
@@ -250,3 +256,156 @@ projection and any newer selection. A mounted volume does not imply writability,
 application access, or execution eligibility. A read-only mount stays visible in
 the non-destination list with its mount detail. The selection never participates
 in planning, review, execution, or real-device authority.
+
+## Setup Location boundary
+
+Setup Locations are named destinations retained by Tauri for a device session
+and setup plan. Each location resolves independently from fresh
+`listDeviceVolumes` evidence and an opaque volume handle; it does not read or
+write T04's single selected-volume slot. The sidecar's setup root and eligible
+volume kind are private inputs to Tauri's trusted resolver; the public T04
+projection and Setup Location interface omit the physical root. Rust derives
+the actual root from the reported visible mount path and accepts only the positively associated system
+emulated root `/storage/emulated/0` or a corroborated removable-SD root at
+`/storage/<safe-volume-id>`. It never derives a destination from `internalPath`.
+The volume must be mounted read-write and accessible to the executor. This also
+preserves the existing T04 classification for a physical-primary volume while
+binding its setup destination as removable SD.
+
+A refresh keeps a location resolved only when its volume kind, root, identity,
+continuity evidence, session, runtime generation, and Platform-Tools revision
+still match. A mismatch, read-only or unavailable volume, failed probe, or
+authority/session invalidation marks the location unresolved (or clears it
+with the invalidated device session); it cannot be used to plan or execute.
+The ten-second T04 observation lifetime applies to resolving and refreshing
+locations. A retained immutable review remains digest-bound after that cache
+entry expires, but mutation requires a fresh matching observation.
+
+The typed Recipe reference `setup_location_ref` is accepted only as
+`copy_files.dest` for a host directory to device directory copy using `merge`,
+`replace`, or directory-style `sync`. Other destination-writing consumers fail
+closed. Existing Recipe formats, App Target behavior, and legacy destination
+semantics remain unchanged. The plan digest binds each active location's
+trusted volume identity and continuity, root, and relative path. The retained
+review binds canonical destination scope and reviewed destination preconditions.
+Setup Location writers with runtime step-output sources fail review because
+their source snapshot cannot be bound before earlier steps execute.
+Public review exposes only a Setup Location's name, volume category, relative
+path, and effects. Legacy shared-path writers receive a sanitized shared-storage
+label and relative suffix when that suffix is known, with a generic label when
+it cannot be resolved safely. Physical paths, serials, UUIDs, and
+identity/continuity details stay in trusted Rust/Tauri state.
+
+Recipe input description and named-location listing are separate reads. Inputs
+announce loading, unavailable, and successfully empty list states and associate
+the current state with the Setup Location selector. A location-list failure
+does not block Recipe input description or become an empty-list result.
+
+Only active destination writers participate in collision checks: Setup Location
+writers and legacy shared-path writers are compared using canonical resolved
+scopes and reviewed effects, including when distinct location IDs resolve to
+the same or nested directories. Conflicting file or destructive effects fail
+closed. Shared directory creation also fails when it would invalidate another
+writer's reviewed missing-path precondition; an already-existing directory
+effect may be shared when the remaining effects do not conflict. Unused named
+locations may overlap.
+Checks also follow plan order. If an earlier active writer would change any part
+of a later writer's reviewed destination snapshot, planning rejects the plan
+before execution. This keeps the later whole-tree precondition fresh when its
+step starts; effects outside that scope may coexist when other reviewed
+preconditions remain valid.
+Initially absent destination suffixes are eligible only below an existing,
+verified directory. Review records each planned directory creation, and
+execution rechecks volume continuity, access, confinement, the existing anchor,
+and the exact missing suffix before creating one component at a time with the
+no-follow directory helper. If a required guard or helper is unavailable,
+execution stops before selected-destination mutation. Staging and cleanup are
+reported separately, and failures after authorized mutations retain T03's
+truthful partial-result semantics. A failed write is reported as `noChange`
+only when fresh inspection confirms the destination tree is unchanged and no
+directories were created. The sidecar retains one Tauri-issued attempt-sequence
+high-water mark per runtime and rejects replay without keeping an unbounded
+set of completed attempts. A rejected start retires its matching attempt and
+leaves the current session epoch available for a later sequence. Device-session
+transitions revoke matching leases before advancing the epoch. Tauri releases
+local authority after the corresponding retirement or revocation is
+acknowledged. A sidecar restart revokes retained leases through the current
+generation before initialization advances it. If that acknowledgement is
+missing, Tauri retains the lease and rejects the restart. An unknown execution
+mapping, an uncertain terminal copy-commit outcome, or a lost ADB completion
+response keeps mutation authority closed until a proven rejection or matching
+trusted terminal evidence resolves it. A confirmed local sidecar or ADB child
+exit proves host-process termination only; it does not prove that the Android
+command stopped. The current request path has no remote operation identity or
+completion acknowledgement, and a timeout, closed pipe, or host cleanup cannot
+retire authority.
+
+The copy report's `noChange` outcome describes the selected destination; it
+does not by itself prove that a timed-out remote operation is quiescent. When
+the typed device failure may outlive the local call, execution retains
+operation uncertainty and its durable fence even if the destination report
+shows no mutation. If a Setup Location destination is verified but staging or
+helper cleanup has ambiguous remote completion, the overall copy result is
+`uncertain`; it retains the verified after-manifest and cleanup details, and
+the mutation lease remains uncertain. Terminal cleanup failures with known
+completion remain cleanup warnings, and legacy destination behavior retains
+its existing T03 contract.
+
+An unresolved real operation retains its durable fence across execution-store
+reset, app-service restart, session reentry, and app relaunch. EmuChef writes the
+marker before sending a real execution request and removes it only when the
+request is known not to have started or after authoritative terminal evidence;
+marker and parent-directory changes are synchronized. At startup, an existing
+marker blocks new device work, and an unreadable marker fails closed. On a first
+launch, a missing marker means no unresolved operation has been recorded. If a
+marker disappears outside EmuChef's managed resolution paths, startup cannot
+distinguish that history from a first launch; arbitrary external marker deletion
+is not detected. A new device, session, runtime generation, volume, or review
+identity alone does not prove that a previous operation stopped. T05 accepts
+this blocked state and does not require automatic recovery or an Android-side
+operation-identity protocol. Host cleanup may invalidate volatile runtime
+observations, but it cannot clear an unresolved-operation fence or authorize a
+new write.
+
+If sidecar state is locked or poisoned, cleanup is treated as unconfirmed rather
+than waiting for that state while execution-transition locks are held. Recovery
+returns an error without invalidating device or review authority and retains
+any unresolved-start fence or Setup Location lease.
+
+The T05 threat model excludes independent, uncooperative processes that
+concurrently modify the same destination. EmuChef orders its reviewed
+mutations, verifies destination preconditions through the supported adapter,
+and rejects drift detected by those checks. Global filesystem exclusivity and
+atomic compare-and-mutate behavior against unrelated writers are outside this
+guarantee. A concurrent external change can race a checked unlinkat or
+renameat. Session-lease revocation, volume identity verification, destination
+confinement, no-follow traversal, and reviewed destructive-effect bounds
+remain required.
+### Lost-start admission fence
+
+Before Tauri sends a real execution request, it retains a private operation identity bound to the runtime generation, attempt sequence, device handle, and reviewed plan digest. It also creates and syncs a fixed marker in app data. The marker contains generic state text only; it stores no device handle, plan digest, destination path, or volume identity. A valid execution identity replaces the unresolved-start fence with the normal active execution mapping.
+
+An authoritative session check that fails before Tauri sends `startExecution` clears only the matching unrequested marker and releases the reserved start. A mismatched marker, active worker or lease, or durable-marker removal failure keeps the fence in place. An explicit rejection that proves the request was not accepted also clears the marker. A trusted terminal report clears it only when the report has a known terminal status and no uncertain device operation. Store resets preserve unresolved state. At app startup, a marker or an inability to inspect it blocks new execution. If a start response is lost or lacks a usable identity, Tauri invalidates device and review evidence while retaining the unresolved-operation fence and any in-memory mutation lease. The current ADB path has no remote operation-status query, so an uncertain Android operation remains blocked without automatic recovery.
+
+### Process-group boundary for lost Android operations
+
+A host process group can terminate local EmuChef descendants that remain in
+the group. It cannot establish that an Android command has stopped. In the
+inspected AOSP shell service, the remote command child calls `setsid`; when its
+protocol connection is lost, `adbd` sends `SIGHUP` to the child PID and closes
+the streams. This path returns no operation identity or completion
+acknowledgement to Tauri. Host process cleanup and runtime-generation ownership
+cannot prove Android-side completion after an uncertain remote operation. T05
+provides no remote completion query or automatic recovery. Keep the old lease
+and generation fenced until the earlier operation is known quiescent; if that
+cannot be established, new real runs remain blocked. See [the AOSP shell child setup](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/daemon/shell_service.cpp#341)
+and [protocol-loss handling](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/daemon/shell_service.cpp#583).
+
+The backend invokes the configured ADB client without assigning a dedicated
+EmuChef host-server endpoint. An ADB client can start a host server when none
+is running or reuse one that is already running. A newly started server enters
+its own session; a reused server is outside the runtime process group. Group
+cleanup therefore proves only that local processes still in the owned group
+have exited. It does not prove that the ADB server or Android command has
+completed, so an uncertain Setup Location lease remains retained until trusted
+completion evidence is available.

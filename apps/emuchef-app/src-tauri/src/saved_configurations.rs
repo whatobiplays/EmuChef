@@ -2056,6 +2056,14 @@ fn filter_binding_values(
     bindings: &Map<String, Value>,
     description: &Value,
 ) -> (Map<String, Value>, Vec<String>, Vec<String>) {
+    let setup_location_keys = description
+        .get("inputs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|input| input.get("type").and_then(Value::as_str) == Some("setup_location_ref"))
+        .filter_map(|input| input.get("key").and_then(Value::as_str).map(str::to_string))
+        .collect::<HashSet<_>>();
     let contracts = description
         .get("inputs")
         .and_then(Value::as_array)
@@ -2073,6 +2081,7 @@ fn filter_binding_values(
     let mut sensitive_omitted = Vec::new();
     for (key, value) in bindings {
         match contracts.get(key) {
+            Some(false) if setup_location_keys.contains(key) => omitted.push(key.clone()),
             Some(false) => {
                 safe.insert(key.clone(), value.clone());
             }
@@ -2516,11 +2525,17 @@ mod tests {
             ("recipe/safe".to_string(), json!("portable")),
             ("recipe/secret".to_string(), json!("DO_NOT_PROJECT")),
             ("recipe/inactive".to_string(), json!("DO_NOT_PROJECT")),
+            ("recipe/destination".to_string(), json!("location-one")),
         ]);
         let description = json!({
             "inputs": [
                 { "key": "recipe/safe", "sensitive": false },
-                { "key": "recipe/secret", "sensitive": true }
+                { "key": "recipe/secret", "sensitive": true },
+                {
+                    "key": "recipe/destination",
+                    "type": "setup_location_ref",
+                    "sensitive": false
+                }
             ]
         });
         let (safe, omitted, sensitive) = filter_binding_values(&bindings, &description);
@@ -2528,7 +2543,10 @@ mod tests {
             safe,
             Map::from_iter([("recipe/safe".to_string(), json!("portable"))])
         );
-        assert_eq!(omitted, vec!["recipe/inactive", "recipe/secret"]);
+        assert_eq!(
+            omitted,
+            vec!["recipe/destination", "recipe/inactive", "recipe/secret"]
+        );
         assert_eq!(sensitive, vec!["recipe/secret"]);
         let serialized = serde_json::to_string(&safe).unwrap();
         assert!(!serialized.contains("DO_NOT_PROJECT"));

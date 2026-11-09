@@ -7,8 +7,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_io::{block_on, Timer};
-use async_process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use futures_lite::future::{self, poll_fn};
+use async_process::{ChildStdin, ChildStdout, Command, Stdio};
+#[cfg(test)]
+use emuchef_rust_backend::session::DocumentSessionManager;
+use emuchef_rust_backend::{isolate_process_group, OwnedProcessGroup};
+use futures_lite::future::poll_fn;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -28,6 +31,8 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "getExecution",
     "getExecutionEvents",
     "cancelExecution",
+    "revokeSetupLocationLease",
+    "retireSetupLocationLeaseAttempt",
     "launchExecutionApp",
     "openUserConfiguration",
     "createUserConfiguration",
@@ -104,7 +109,7 @@ impl SidecarState {
         client.generation = 1;
         client.initialize_with_process(SidecarProcess::InProcessBackend {
             generation: 1,
-            config,
+            sessions: DocumentSessionManager::with_runtime_config(config),
         });
         Self {
             inner: Mutex::new(client),
@@ -113,7 +118,6 @@ impl SidecarState {
 
     pub fn initialize(&self) {
         let mut client = self.inner.lock().expect("sidecar mutex poisoned");
-        client.generation = client.generation.saturating_add(1).max(1);
         client.initialize();
     }
 
@@ -139,8 +143,8 @@ impl SidecarState {
     }
 
     /// Report whether the current process generation lost its protocol
-    /// session after startup. Callers use this to discard all authority that
-    /// depended on the terminated in-memory runtime.
+    /// session. Callers check cleanup confirmation before discarding device
+    /// authority derived from that runtime.
     pub(crate) fn runtime_session_was_lost(&self) -> bool {
         self.inner
             .lock()
@@ -155,6 +159,32 @@ impl SidecarState {
             .unwrap_or(false)
     }
 
+    /// Returns whether cleanup confirmed that the owned runtime process stopped.
+    ///
+    /// Contention and poisoned state both fail closed. Recovery may query this
+    /// while holding execution-transition locks, so the observation must never
+    /// wait for the sidecar client to finish process cleanup.
+    pub(crate) fn runtime_process_cleanup_confirmed(&self) -> bool {
+        self.inner
+            .try_lock()
+            .map(|client| client.last_cleanup != SidecarCleanup::Uncertain)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_runtime_session_lost_with_uncertain_cleanup(&self) {
+        let mut client = self.inner.lock().unwrap();
+        client.session_lost = true;
+        client.last_cleanup = SidecarCleanup::Uncertain;
+        client.status = RuntimeStatusDto::Failed {
+            error: RuntimeErrorDto {
+                code: "runtime_session_lost",
+                message: "The local app service stopped responding.".to_string(),
+                actions: vec!["retry"],
+            },
+        };
+    }
+
     /// Fail the current in-memory runtime session because a successful
     /// protocol response was structurally unusable for the caller.
     ///
@@ -164,8 +194,8 @@ impl SidecarState {
     /// worker cannot be allowed to keep mutating behind the app's ownership
     /// model. This applies the same fail-and-stop behavior used for broken
     /// protocol responses: the status becomes a stable
-    /// `runtime_session_lost` failure, the owned child is stopped, and every
-    /// later request in this generation stays lost.
+    /// `runtime_session_lost` failure, records the child cleanup result, and
+    /// keeps every later request in this generation lost.
     pub(crate) fn invalidate_runtime_session(&self) {
         let mut client = self.inner.lock().expect("sidecar mutex poisoned");
         client.fail_runtime_session();
@@ -230,7 +260,20 @@ impl SidecarClient {
     }
 
     fn initialize(&mut self) {
-        self.stop();
+        if self.stop() == SidecarCleanup::Uncertain {
+            // A new runtime cannot safely replace a process that may still
+            // own the previous session's work.
+            self.status = RuntimeStatusDto::Failed {
+                error: RuntimeErrorDto {
+                    code: "runtime_session_lost",
+                    message: "The local app service stopped responding.".to_string(),
+                    actions: vec!["retry"],
+                },
+            };
+            self.session_lost = true;
+            return;
+        }
+        self.generation = self.generation.saturating_add(1).max(1);
         // A new generation starts with no cleanup obligation. Any process
         // created below will replace this evidence if startup later fails.
         self.last_cleanup = SidecarCleanup::NotRequired;
@@ -296,7 +339,7 @@ impl SidecarClient {
 
     fn negotiate_existing_process(&mut self) -> Result<u64, StartFailure> {
         let hello = self
-            .raw_request("hello", json!({}))
+            .raw_request("hello", json!({ "runtimeGeneration": self.generation }))
             .map_err(StartFailure::SessionLost)?;
         let result = startup_result(&hello)?;
         let protocol_version = result
@@ -337,7 +380,18 @@ impl SidecarClient {
 
     #[cfg(test)]
     fn initialize_with_process(&mut self, process: SidecarProcess) {
-        self.stop();
+        if self.stop() == SidecarCleanup::Uncertain {
+            self.status = RuntimeStatusDto::Failed {
+                error: RuntimeErrorDto {
+                    code: "runtime_session_lost",
+                    message: "The local app service stopped responding.".to_string(),
+                    actions: vec!["retry"],
+                },
+            };
+            self.session_lost = true;
+            let _ = process.stop();
+            return;
+        }
         self.last_cleanup = SidecarCleanup::NotRequired;
         self.session_lost = false;
         self.status = RuntimeStatusDto::Starting;
@@ -383,9 +437,9 @@ impl SidecarClient {
 
     fn fail_runtime_session(&mut self) -> String {
         // A broken or structurally invalid response proves this in-memory
-        // protocol session cannot answer future requests. Stop the child and
-        // retain a stable failure code for every later request in this process
-        // generation so all dependent native authority can be invalidated.
+        // protocol session cannot answer future requests. Request child
+        // shutdown and retain its cleanup result so callers can decide whether
+        // dependent native authority is safe to invalidate.
         self.status = RuntimeStatusDto::Failed {
             error: RuntimeErrorDto {
                 code: "runtime_session_lost",
@@ -468,7 +522,7 @@ struct StartProcessFailure {
 enum SidecarProcess {
     Child {
         generation: u64,
-        child: Child,
+        child: OwnedProcessGroup,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
     },
@@ -482,7 +536,7 @@ enum SidecarProcess {
     #[cfg(test)]
     InProcessBackend {
         generation: u64,
-        config: emuchef_rust_backend::execution_session::SidecarRuntimeConfig,
+        sessions: DocumentSessionManager,
     },
 }
 
@@ -568,13 +622,20 @@ impl SidecarProcess {
                 Ok(frame)
             }
             #[cfg(test)]
-            Self::InProcessBackend { config, .. } => {
+            Self::InProcessBackend { sessions, .. } => {
                 let input = std::str::from_utf8(request)
                     .map_err(|_| "Rust runtime request was not valid UTF-8.".to_string())?;
-                Ok(
-                    emuchef_rust_backend::jsonl::process_jsonl_with_config(input, config.clone())
-                        .into_bytes(),
-                )
+                let request = serde_json::from_str(input)
+                    .map_err(|_| "Rust runtime request was not valid JSON.".to_string())?;
+                let response =
+                    emuchef_rust_backend::request::handle_sidecar_value(request, sessions);
+                let mut frame = serde_json::to_vec(&response)
+                    .map_err(|_| "Rust runtime response could not be encoded.".to_string())?;
+                frame.push(b'\n');
+                if frame.len() > MAX_FRAME_BYTES {
+                    return Err("Rust runtime response exceeded its frame limit.".to_string());
+                }
+                Ok(frame)
             }
         }
     }
@@ -582,7 +643,7 @@ impl SidecarProcess {
     fn stop(self) -> SidecarCleanup {
         match self {
             Self::Child {
-                mut child,
+                child,
                 stdin,
                 stdout,
                 ..
@@ -591,7 +652,7 @@ impl SidecarProcess {
                 // readers before the bounded child reap begins.
                 drop(stdin);
                 drop(stdout);
-                cleanup_child(&mut child)
+                cleanup_child(child)
             }
             #[cfg(test)]
             Self::Scripted { observer, .. } => {
@@ -640,59 +701,12 @@ fn trim_frame(frame: &[u8]) -> &[u8] {
     frame.strip_suffix(b"\n").unwrap_or(frame)
 }
 
-trait CleanupProcess {
-    fn try_exit(&mut self) -> bool;
-    fn kill(&mut self) -> bool;
-    fn reap_with_deadline(&mut self) -> bool;
-}
-
-impl CleanupProcess for Child {
-    fn try_exit(&mut self) -> bool {
-        self.try_status().ok().flatten().is_some()
+fn cleanup_child(child: OwnedProcessGroup) -> SidecarCleanup {
+    if child.cleanup(CLEANUP_TIMEOUT) {
+        SidecarCleanup::Confirmed
+    } else {
+        SidecarCleanup::Uncertain
     }
-
-    fn kill(&mut self) -> bool {
-        Child::kill(self).is_ok()
-    }
-
-    fn reap_with_deadline(&mut self) -> bool {
-        block_on(future::race(
-            async { Child::status(self).await.is_ok() },
-            async {
-                Timer::after(CLEANUP_TIMEOUT).await;
-                false
-            },
-        ))
-    }
-}
-
-/// Apply the bounded sidecar cleanup contract to any privately owned process.
-///
-/// A failed kill does not decide the result by itself: a later status check or
-/// bounded reap can still establish that the exact child exited. Dropping pipe
-/// handles is intentionally not treated as process termination evidence.
-fn cleanup_owned_process(process: &mut impl CleanupProcess) -> SidecarCleanup {
-    if process.try_exit() {
-        return SidecarCleanup::Confirmed;
-    }
-
-    let kill_succeeded = process.kill();
-    // A status check proves the exact child exited regardless of whether the
-    // termination request itself succeeded.
-    if process.try_exit() {
-        return SidecarCleanup::Confirmed;
-    }
-
-    let reaped = process.reap_with_deadline();
-    match (kill_succeeded, reaped) {
-        (true, true) | (false, true) => SidecarCleanup::Confirmed,
-        // A successful kill without exit/reap evidence is still uncertain.
-        (true, false) | (false, false) => SidecarCleanup::Uncertain,
-    }
-}
-
-fn cleanup_child(child: &mut Child) -> SidecarCleanup {
-    cleanup_owned_process(child)
 }
 
 fn start_process(
@@ -707,26 +721,36 @@ fn start_process(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let mut child = command.spawn().map_err(|_| StartProcessFailure {
+    let process_group_config = isolate_process_group(&mut command);
+    let mut command = Command::from(command);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = command.spawn().map_err(|_| StartProcessFailure {
         message: "The bundled Rust runtime could not be started.".to_string(),
         cleanup: SidecarCleanup::NotRequired,
     })?;
-    let stdin = match child.stdin.take() {
+    let mut child = match process_group_config {
+        Some(config) => config.attach_to(child),
+        None => OwnedProcessGroup::without_group(child),
+    };
+    let stdin = match child.take_stdin() {
         Some(stdin) => stdin,
         None => {
-            drop(child.stdout.take());
-            let cleanup = cleanup_child(&mut child);
+            drop(child.take_stdout());
+            let cleanup = cleanup_child(child);
             return Err(StartProcessFailure {
                 message: "Rust runtime stdin was unavailable.".to_string(),
                 cleanup,
             });
         }
     };
-    let stdout = match child.stdout.take() {
+    let stdout = match child.take_stdout() {
         Some(stdout) => stdout,
         None => {
             drop(stdin);
-            let cleanup = cleanup_child(&mut child);
+            let cleanup = cleanup_child(child);
             return Err(StartProcessFailure {
                 message: "Rust runtime stdout was unavailable.".to_string(),
                 cleanup,
@@ -741,15 +765,9 @@ fn start_process(
     })
 }
 
-fn sidecar_command(program: &Path, cache_root: &Path) -> Command {
-    let mut command = Command::new(program);
-    command
-        .arg("--sidecar")
-        .arg("--cache-root")
-        .arg(cache_root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+fn sidecar_command(program: &Path, cache_root: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.arg("--sidecar").arg("--cache-root").arg(cache_root);
     command
 }
 
@@ -841,50 +859,6 @@ mod tests {
         )
     }
 
-    struct ScriptedCleanupProcess {
-        status_results: Vec<bool>,
-        status_index: usize,
-        kill_result: bool,
-        reap_result: bool,
-        kill_calls: usize,
-        reap_calls: usize,
-    }
-
-    impl ScriptedCleanupProcess {
-        fn new(status_results: &[bool], kill_result: bool, reap_result: bool) -> Self {
-            Self {
-                status_results: status_results.to_vec(),
-                status_index: 0,
-                kill_result,
-                reap_result,
-                kill_calls: 0,
-                reap_calls: 0,
-            }
-        }
-    }
-
-    impl CleanupProcess for ScriptedCleanupProcess {
-        fn try_exit(&mut self) -> bool {
-            let result = self
-                .status_results
-                .get(self.status_index)
-                .copied()
-                .unwrap_or(false);
-            self.status_index += 1;
-            result
-        }
-
-        fn kill(&mut self) -> bool {
-            self.kill_calls += 1;
-            self.kill_result
-        }
-
-        fn reap_with_deadline(&mut self) -> bool {
-            self.reap_calls += 1;
-            self.reap_result
-        }
-    }
-
     fn negotiate(payload: Value, request_id: &str) -> Value {
         let request = json!({
             "id": request_id,
@@ -914,6 +888,8 @@ mod tests {
                 "getExecution",
                 "getExecutionEvents",
                 "cancelExecution",
+                "revokeSetupLocationLease",
+                "retireSetupLocationLeaseAttempt",
                 "launchExecutionApp",
                 "openUserConfiguration",
                 "createUserConfiguration",
@@ -959,6 +935,28 @@ mod tests {
             observer.transport_accesses.load(Ordering::SeqCst),
             accesses_after_loss
         );
+    }
+
+    #[test]
+    fn uncertain_process_cleanup_blocks_reinitializing_the_runtime() {
+        let mut client = SidecarClient::new(PathBuf::from("unused-test-cache"));
+        client.generation = 7;
+        client.status = RuntimeStatusDto::Ready {
+            protocol_version: 1,
+            catalog_version: None,
+        };
+        let (process, _) = scripted_process_with_cleanup(None, SidecarCleanup::Uncertain);
+        client.process = Some(process);
+        let _ = client.fail_runtime_session();
+
+        let (replacement, observer) = scripted_process(None);
+        client.initialize_with_process(replacement);
+
+        assert_eq!(observer.transport_accesses.load(Ordering::SeqCst), 0);
+        assert!(observer.stopped.load(Ordering::SeqCst));
+        assert_eq!(client.last_cleanup, SidecarCleanup::Uncertain);
+        assert_eq!(client.generation, 7);
+        assert!(client.session_lost);
     }
 
     #[test]
@@ -1157,7 +1155,7 @@ mod tests {
         );
         assert_eq!(
             payload["requiredCapabilities"].as_array().unwrap().len(),
-            26
+            28
         );
         assert_eq!(payload["optionalCapabilities"], json!([]));
         assert!(payload.get("required").is_none());
@@ -1171,7 +1169,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            26
+            28
         );
 
         let mut missing_execution = payload;
@@ -1210,52 +1208,68 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn cleanup_confirms_a_child_that_already_exited_without_killing_it() {
-        let mut process = ScriptedCleanupProcess::new(&[true], true, false);
+    fn cleanup_child_reports_uncertainty_when_process_group_ownership_is_unavailable() {
+        const TEST_PIPE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let mut process = Command::new("/bin/sleep");
+        process.arg("30").stdout(Stdio::piped());
+        let mut child = process
+            .spawn()
+            .expect("the isolated sleep child should start");
+        let child_stdout = child
+            .stdout
+            .take()
+            .expect("the isolated sleep child should have a stdout pipe");
 
         assert_eq!(
-            cleanup_owned_process(&mut process),
-            SidecarCleanup::Confirmed
-        );
-        assert_eq!(process.kill_calls, 0);
-        assert_eq!(process.reap_calls, 0);
-    }
-
-    #[test]
-    fn cleanup_confirms_successful_kill_and_bounded_reap() {
-        let mut process = ScriptedCleanupProcess::new(&[false, false], true, true);
-
-        assert_eq!(
-            cleanup_owned_process(&mut process),
-            SidecarCleanup::Confirmed
-        );
-        assert_eq!(process.kill_calls, 1);
-        assert_eq!(process.reap_calls, 1);
-    }
-
-    #[test]
-    fn cleanup_confirms_exit_after_kill_failure_when_status_proves_termination() {
-        let mut process = ScriptedCleanupProcess::new(&[false, true], false, false);
-
-        assert_eq!(
-            cleanup_owned_process(&mut process),
-            SidecarCleanup::Confirmed
-        );
-        assert_eq!(process.kill_calls, 1);
-        assert_eq!(process.reap_calls, 0);
-    }
-
-    #[test]
-    fn cleanup_is_uncertain_when_bounded_reap_does_not_complete() {
-        let mut process = ScriptedCleanupProcess::new(&[false, false], true, false);
-
-        assert_eq!(
-            cleanup_owned_process(&mut process),
+            cleanup_child(OwnedProcessGroup::without_group(child)),
             SidecarCleanup::Uncertain
         );
-        assert_eq!(process.kill_calls, 1);
-        assert_eq!(process.reap_calls, 1);
+
+        // This observes the test-owned pipe only. It does not prove
+        // Android-side quiescence or when the child itself was reaped.
+        let deadline = std::time::Instant::now() + TEST_PIPE_CLOSE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                panic!(
+                    "cleanup did not close the owned child stdout pipe within {TEST_PIPE_CLOSE_TIMEOUT:?}"
+                );
+            }
+            let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+            let mut stdout_closed = libc::pollfd {
+                fd: std::os::fd::AsRawFd::as_raw_fd(&child_stdout),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: this is the live read end of the owned child stdout pipe.
+            let ready = unsafe { libc::poll(&mut stdout_closed, 1, timeout_ms) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                panic!("polling the owned child stdout pipe failed: {error}");
+            }
+            if ready == 0 {
+                panic!(
+                    "cleanup did not close the owned child stdout pipe within {TEST_PIPE_CLOSE_TIMEOUT:?}"
+                );
+            }
+            assert_eq!(
+                ready, 1,
+                "poll reported an unexpected readiness count for one child stdout pipe"
+            );
+            assert_ne!(
+                stdout_closed.revents & libc::POLLHUP,
+                0,
+                "child stdout became ready without a hangup; revents={:#x}",
+                stdout_closed.revents
+            );
+            break;
+        }
     }
 
     #[test]
@@ -1311,5 +1325,30 @@ mod tests {
             json!({ "code": "runtime_start_failed", "actions": ["retry"] })
         );
         assert!(!diagnostics.to_string().contains("/Users/alice"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_child_terminates_descendants_before_reaping_its_leader() {
+        let mut process = std::process::Command::new("/bin/sh");
+        process.args(["-c", "sleep 30 >/dev/null 2>&1 & echo child-started"]);
+        let process_group_config =
+            isolate_process_group(&mut process).expect("Unix process groups are supported");
+
+        let mut command = Command::from(process);
+        command.stdout(Stdio::piped()).stderr(Stdio::null());
+        let child = command.spawn().unwrap();
+        let mut child = process_group_config.attach_to(child);
+
+        let stdout = child.take_stdout().unwrap();
+        let mut reader = BufReader::new(stdout);
+        let mut ready = String::new();
+        block_on(reader.read_line(&mut ready)).unwrap();
+        assert_eq!(ready.trim(), "child-started");
+        let mut end_of_output = String::new();
+        assert_eq!(block_on(reader.read_line(&mut end_of_output)).unwrap(), 0);
+        drop(reader);
+
+        assert_eq!(cleanup_child(child), SidecarCleanup::Confirmed);
     }
 }

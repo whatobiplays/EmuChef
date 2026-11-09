@@ -1,11 +1,21 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ConfigurationDescription,
   DeviceVolumesProjection,
+  ExecutionSnapshot,
   ExecutionCapabilities,
   RuntimeStatus,
+  SavedConfigurationDocument,
   SupportSnapshot,
 } from "../src/types";
 
@@ -32,12 +42,16 @@ const mockApi = vi.hoisted(() => ({
   matchDevice: vi.fn(),
   prepareExecutionReview: vi.fn(),
   discardReview: vi.fn(),
+  startSimulatedExecution: vi.fn(),
   pickInputPath: vi.fn(),
   pickPlatformToolsZip: vi.fn(),
   pollDevices: vi.fn(),
   probeDevice: vi.fn(),
   deviceVolumes: vi.fn(),
   selectDeviceVolume: vi.fn(),
+  listSetupLocations: vi.fn(),
+  saveSetupLocation: vi.fn(),
+  removeSetupLocation: vi.fn(),
   removePlatformTools: vi.fn(),
   restartRuntime: vi.fn(),
   supportSnapshot: vi.fn(),
@@ -51,6 +65,7 @@ const mockApi = vi.hoisted(() => ({
   stageRecoveryDraft: vi.fn(),
   restoreRecoveryDraft: vi.fn(),
   updateSavedConfigurationMenu: vi.fn(),
+  updateSavedConfiguration: vi.fn(),
   previewSavedConfiguration: vi.fn(),
   previewRecentConfiguration: vi.fn(),
   confirmSavedConfigurationPreview: vi.fn(),
@@ -131,16 +146,20 @@ const supportedMatch = {
   confidence: "exact",
   recommendedPlanId: "plan.supported",
   requiresExplicitChoice: false,
-  candidates: [{ ...safePlan, planId: "plan.supported", name: "Supported setup" }],
+  candidates: [
+    { ...safePlan, planId: "plan.supported", name: "Supported setup" },
+  ],
   safeGenericPlans: [],
   blocked: false,
   blockReason: null,
 };
 
-function supportSnapshot(options: {
-  serviceFailure?: boolean;
-  platformActions?: boolean;
-} = {}): SupportSnapshot {
+function supportSnapshot(
+  options: {
+    serviceFailure?: boolean;
+    platformActions?: boolean;
+  } = {},
+): SupportSnapshot {
   return {
     presentationRevision: 1,
     overallSeverity: options.serviceFailure ? "warning" : "healthy",
@@ -152,17 +171,28 @@ function supportSnapshot(options: {
         id: "service",
         label: "App service",
         severity: options.serviceFailure ? "failure" : "healthy",
-        summary: options.serviceFailure ? "The local app service could not start." : "The local app service is ready.",
-        consequence: options.serviceFailure ? "Planning is unavailable." : "Planning is available.",
-        supportCode: options.serviceFailure ? "EMUCHEF-SERVICE-START-FAILED" : null,
-        actions: options.serviceFailure ? [{
-          label: "Restart app service",
-          consequence: "Portable setup intent is preserved; transient authority is refreshed.",
-          available: true,
-          unavailableReason: null,
-          destructive: false,
-          action: { kind: "restart_service", serviceGeneration: 3 },
-        }] : [],
+        summary: options.serviceFailure
+          ? "The local app service could not start."
+          : "The local app service is ready.",
+        consequence: options.serviceFailure
+          ? "Planning is unavailable."
+          : "Planning is available.",
+        supportCode: options.serviceFailure
+          ? "EMUCHEF-SERVICE-START-FAILED"
+          : null,
+        actions: options.serviceFailure
+          ? [
+              {
+                label: "Restart app service",
+                consequence:
+                  "Portable setup intent is preserved; transient authority is refreshed.",
+                available: true,
+                unavailableReason: null,
+                destructive: false,
+                action: { kind: "restart_service", serviceGeneration: 3 },
+              },
+            ]
+          : [],
       },
       {
         id: "platform_tools",
@@ -171,24 +201,32 @@ function supportSnapshot(options: {
         summary: "Platform-Tools are ready.",
         consequence: "Device detection is available.",
         supportCode: null,
-        actions: options.platformActions ? [
-          {
-            label: "Replace managed Platform-Tools",
-            consequence: "Device authority will be refreshed.",
-            available: true,
-            unavailableReason: null,
-            destructive: false,
-            action: { kind: "replace_managed_platform_tools", platformToolsRevision: 7 },
-          },
-          {
-            label: "Remove managed Platform-Tools",
-            consequence: "Device detection will stop.",
-            available: true,
-            unavailableReason: null,
-            destructive: true,
-            action: { kind: "remove_managed_platform_tools", platformToolsRevision: 7 },
-          },
-        ] : [],
+        actions: options.platformActions
+          ? [
+              {
+                label: "Replace managed Platform-Tools",
+                consequence: "Device authority will be refreshed.",
+                available: true,
+                unavailableReason: null,
+                destructive: false,
+                action: {
+                  kind: "replace_managed_platform_tools",
+                  platformToolsRevision: 7,
+                },
+              },
+              {
+                label: "Remove managed Platform-Tools",
+                consequence: "Device detection will stop.",
+                available: true,
+                unavailableReason: null,
+                destructive: true,
+                action: {
+                  kind: "remove_managed_platform_tools",
+                  platformToolsRevision: 7,
+                },
+              },
+            ]
+          : [],
       },
     ],
     cacheInventory: {
@@ -229,34 +267,86 @@ function descriptionWithTextInput(input: {
     devicePlan: "plan.supported",
     selectedRecipes: ["recipe.one"],
     expandedRecipes: ["recipe.one"],
-    recipeOptions: [{
-      id: "recipe.one",
-      name: "Recipe One",
-      description: null,
-      selected: true,
-      recommended: true,
-      dependencyRequired: false,
-      available: true,
-      unavailableCapabilities: [],
-    }],
-    inputs: [{
-      ...input,
-      recipeId: "recipe.one",
-      type: "string",
-      description: null,
-      presentationCategory: "Other",
-      presentationKind: "Text",
-      value: null,
-      valueSource: null,
-      diagnostics: [],
-    }],
+    recipeOptions: [
+      {
+        id: "recipe.one",
+        name: "Recipe One",
+        description: null,
+        selected: true,
+        recommended: true,
+        dependencyRequired: false,
+        available: true,
+        unavailableCapabilities: [],
+      },
+    ],
+    inputs: [
+      {
+        ...input,
+        recipeId: "recipe.one",
+        type: "string",
+        description: null,
+        presentationCategory: "Other",
+        presentationKind: "Text",
+        value: null,
+        valueSource: null,
+        diagnostics: [],
+      },
+    ],
     diagnostics: [],
   };
 }
 
+function descriptionWithSetupLocationRef(): ConfigurationDescription {
+  const description = descriptionWithTextInput({
+    key: "recipe.one/destination",
+    inputId: "destination",
+    label: "Install destination",
+    required: true,
+    sensitive: false,
+  });
+  description.inputs[0].type = "setup_location_ref";
+  return description;
+}
+
+function failedSimulationSnapshot(): ExecutionSnapshot {
+  return {
+    executionHandle: "execution-opaque",
+    reviewHandle: "review-opaque",
+    simulated: true,
+    verificationScope: "simulation_only",
+    status: "failed",
+    startedAt: "2026-11-08T12:00:00Z",
+    finishedAt: "2026-11-08T12:00:01Z",
+    latestSequence: 1,
+    terminal: true,
+    recipes: [],
+    warnings: [],
+    errors: [],
+    progress: { currentFeature: null, currentAction: null },
+    completion: {
+      classification: "failed",
+      counts: {
+        total: 1,
+        completed: 0,
+        skipped: 0,
+        blocked: 0,
+        failed: 1,
+        cancelled: 0,
+        pending: 0,
+      },
+      warningCount: 0,
+      partialChangesPossible: false,
+      features: [],
+    },
+};
+}
+
 function resetApi(): void {
   vi.clearAllMocks();
-  mockApi.beginUpdateInteractionSession.mockResolvedValue({ sessionId: "update-session", generation: 0 });
+  mockApi.beginUpdateInteractionSession.mockResolvedValue({
+    sessionId: "update-session",
+    generation: 0,
+  });
   mockApi.setUpdateInteractionState.mockResolvedValue(undefined);
   mockApi.endUpdateInteractionSession.mockResolvedValue(undefined);
   mockApi.beginAppSession.mockResolvedValue({
@@ -264,7 +354,11 @@ function resetApi(): void {
     interruptedSession: false,
     recovery: { state: "none" },
   });
-  mockApi.runtimeStatus.mockResolvedValue({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
+  mockApi.runtimeStatus.mockResolvedValue({
+    status: "ready",
+    protocolVersion: 1,
+    catalogVersion: "test",
+  });
   mockApi.adbStatus.mockResolvedValue(readyAdb);
   mockApi.executionCapabilities.mockResolvedValue({
     realExecutionCompiled: false,
@@ -336,6 +430,9 @@ function resetApi(): void {
     selectedVolumeHandle: null,
     selectionNotice: null,
   });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockResolvedValue([]);
+  mockApi.removeSetupLocation.mockResolvedValue([]);
   mockApi.matchDevice.mockResolvedValue(supportedMatch);
   mockApi.pickInputPath.mockResolvedValue(null);
   mockApi.describeConfiguration.mockResolvedValue({
@@ -346,10 +443,17 @@ function resetApi(): void {
     inputs: [],
     diagnostics: [],
   });
-  mockApi.pickPlatformToolsZip.mockResolvedValue({ outcome: "selected", selectionHandle: "selection-opaque" });
+  mockApi.pickPlatformToolsZip.mockResolvedValue({
+    outcome: "selected",
+    selectionHandle: "selection-opaque",
+  });
   mockApi.installPlatformToolsSelection.mockResolvedValue(readyAdb);
   mockApi.removePlatformTools.mockResolvedValue(missingAdb);
-  mockApi.restartRuntime.mockResolvedValue({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
+  mockApi.restartRuntime.mockResolvedValue({
+    status: "ready",
+    protocolVersion: 1,
+    catalogVersion: "test",
+  });
   mockApi.supportSnapshot.mockResolvedValue(supportSnapshot());
   mockApi.exportSupportDiagnostics.mockResolvedValue({ outcome: "saved" });
   mockApi.getUpdateStatus.mockResolvedValue({ state: "unconfigured" });
@@ -360,12 +464,17 @@ function resetApi(): void {
     message: "There are no current setup choices to compare.",
   });
   mockApi.removeRecentConfiguration.mockResolvedValue(undefined);
-  mockApi.stageRecoveryDraft.mockImplementation(async (request: { requestGeneration: number; draftGeneration: number }) => ({
-    requestGeneration: request.requestGeneration,
-    draftGeneration: request.draftGeneration,
-    recordGeneration: request.draftGeneration,
-    omittedBindings: [],
-  }));
+  mockApi.stageRecoveryDraft.mockImplementation(
+    async (request: {
+      requestGeneration: number;
+      draftGeneration: number;
+    }) => ({
+      requestGeneration: request.requestGeneration,
+      draftGeneration: request.draftGeneration,
+      recordGeneration: request.draftGeneration,
+      omittedBindings: [],
+    }),
+  );
 }
 
 async function renderReadyApp(): Promise<void> {
@@ -373,16 +482,1829 @@ async function renderReadyApp(): Promise<void> {
   await screen.findByRole("heading", { name: "Choose an Android device" });
 }
 
-async function advanceToInputs(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+async function advanceToInputs(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<void> {
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
   await screen.findByRole("heading", { name: "Example Handheld" });
   await user.click(screen.getByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Choose what to install" });
   await user.click(screen.getByRole("button", { name: "Continue" }));
-  await screen.findByRole("heading", { name: "Provide required files and options" });
+  await screen.findByRole("heading", {
+    name: "Provide required files and options",
+  });
 }
+
+test("an inventory poll disables Setup Locations until current readiness is reloaded", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd",
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  };
+  mockApi.describeConfiguration.mockResolvedValue({
+    devicePlan: "plan.supported",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    inputs: [
+      {
+        key: "recipe.one/destination",
+        recipeId: "recipe.one",
+        inputId: "destination",
+        type: "setup_location_ref",
+        label: "Install destination",
+        description: "Choose a named destination.",
+        required: true,
+        sensitive: false,
+        value: "location-opaque",
+        valueSource: "explicit",
+        diagnostics: [],
+      },
+    ],
+    diagnostics: [],
+  });
+  mockApi.listSetupLocations
+    .mockResolvedValueOnce([readyLocation])
+    .mockResolvedValueOnce([
+      {
+        ...readyLocation,
+        ready: false,
+        detail: "Refresh storage options to verify this location.",
+      },
+    ]);
+
+  await advanceToInputs(user);
+  const locationOption = await screen.findByRole("option", {
+    name: /Games · games · SD card/,
+  });
+  expect((locationOption as HTMLOptionElement).disabled).toBe(false);
+
+  await act(async () => {
+    triggerDevicePoll();
+  });
+
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("option", {
+          name: /Games · games · SD card/,
+        }) as HTMLOptionElement
+      ).disabled,
+    ).toBe(true),
+  );
+  expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(2);
+});
+
+test("a superseded committed inventory poll clears stale volume choices when the latest poll fails", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const volumeHandle = "11111111111111111111111111111111";
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: volumeHandle,
+        volumeHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  });
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await screen.findByRole("radio", { name: "Internal storage" });
+
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2),
+  );
+
+  await act(async () => {
+    olderPoll.resolve([availableDevice]);
+    await olderPoll.promise;
+  });
+  await act(async () => {
+    newerPoll.reject(
+      new Error("The newer inventory request failed before commit."),
+    );
+    await flushPendingPromises();
+  });
+
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("radio", { name: "Internal storage" }),
+    ).toBeNull(),
+  );
+});
+
+test("a superseded committed inventory invalidates Setup Location readiness when the latest poll fails", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd",
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  };
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.describeConfiguration.mockResolvedValue({
+    devicePlan: "plan.supported",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    inputs: [
+      {
+        key: "recipe.one/destination",
+        recipeId: "recipe.one",
+        inputId: "destination",
+        type: "setup_location_ref",
+        label: "Install destination",
+        description: "Choose a named destination.",
+        required: true,
+        sensitive: false,
+        value: "location-opaque",
+        valueSource: "explicit",
+        diagnostics: [],
+      },
+    ],
+    diagnostics: [],
+  });
+  mockApi.listSetupLocations.mockResolvedValue([readyLocation]);
+
+  await advanceToInputs(user);
+  expect(
+    (
+      (await screen.findByRole("option", {
+        name: /Games · games · SD card/,
+      })) as HTMLOptionElement
+    ).disabled,
+  ).toBe(false);
+
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2),
+  );
+
+  await act(async () => {
+    olderPoll.resolve([availableDevice]);
+    await olderPoll.promise;
+  });
+  await act(async () => {
+    newerPoll.reject(
+      new Error("The newer inventory request failed before commit."),
+    );
+    await flushPendingPromises();
+  });
+
+  expect(
+    (
+      screen.getByRole("option", {
+        name: /Games · games · SD card/,
+      }) as HTMLOptionElement
+    ).disabled,
+  ).toBe(true);
+});
+
+test("saves a Setup Location for the active plan without changing the T04 selection", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockResolvedValue([
+    {
+      id: "location-opaque",
+      name: "Games",
+      relativePath: "games",
+      volumeKind: "removableSd",
+      volumeLabel: "SD card",
+      ready: true,
+      detail: "Available.",
+    },
+  ]);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      "plan.supported",
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByLabelText(
+          "Storage volume for Setup Location",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false),
+  );
+
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    sdHandle,
+  );
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  expect(
+    (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+  ).toBe("Games");
+  expect(
+    (screen.getByLabelText("Relative folder") as HTMLInputElement).value,
+  ).toBe("games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+
+  expect(mockApi.saveSetupLocation).toHaveBeenCalledWith(
+    availableDevice.deviceHandle,
+    "plan.supported",
+    observationToken,
+    sdHandle,
+    undefined,
+    "Games",
+    "games",
+  );
+  expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
+  expect(screen.getByText("Ready for recipe selection.")).toBeTruthy();
+});
+
+test.each([
+  [
+    "Storage options changed. Refresh and choose a volume again.",
+    "Storage options changed. Refresh and choose a volume again.",
+  ],
+  ["unknown_device_handle", "unknown_device_handle"],
+  [
+    "That Setup Location is no longer available.",
+    "That Setup Location is no longer available.",
+  ],
+])(
+  "a stale Setup Location removal (%s) refreshes readiness and preserves the edited form",
+  async (failureMessage, expectedFailure) => {
+    const user = userEvent.setup();
+    const volumeHandle = "22222222222222222222222222222222";
+    const readyLocation = {
+      id: "location-opaque",
+      name: "Games",
+      relativePath: "games",
+      volumeKind: "removableSd",
+      volumeLabel: "SD card",
+      ready: true,
+      detail: "Available.",
+    };
+    const staleLocation = {
+      ...readyLocation,
+      ready: false,
+      detail: "Refresh storage options to verify this location.",
+    };
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.deviceVolumes.mockResolvedValue({
+      deviceHandle: availableDevice.deviceHandle,
+      sessionEpoch: 1,
+      observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+      discoveryStatus: "observed",
+      evidence: "live",
+      volumes: [
+        {
+          presentationKey: volumeHandle,
+          volumeHandle,
+          kind: "removableSd",
+          label: "SD card",
+          status: "available",
+          selectable: true,
+          detail: "Mounted.",
+        },
+      ],
+      selectedVolumeHandle: null,
+      selectionNotice: null,
+    });
+    mockApi.listSetupLocations.mockResolvedValue([readyLocation]);
+    mockApi.removeSetupLocation.mockRejectedValue(new Error(failureMessage));
+
+    await renderReadyApp();
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
+    await screen.findByRole("heading", { name: "Example Handheld" });
+    await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+    await waitFor(() =>
+      expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+        availableDevice.deviceHandle,
+        true,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByLabelText(
+            "Storage volume for Setup Location",
+          ) as HTMLSelectElement
+        ).disabled,
+      ).toBe(false),
+    );
+    await user.click(await screen.findByRole("button", { name: "Edit Games" }));
+    expect(
+      screen.getByRole("button", { name: "Update Setup Location" }),
+    ).not.toBeNull();
+    const locationLoadsBeforeRemove =
+      mockApi.listSetupLocations.mock.calls.length;
+    mockApi.listSetupLocations.mockResolvedValueOnce([staleLocation]);
+
+    await user.click(screen.getByRole("button", { name: "Remove Games" }));
+
+    await waitFor(() =>
+      expect(mockApi.removeSetupLocation).toHaveBeenCalledWith(
+        availableDevice.deviceHandle,
+        "plan.supported",
+        "location-opaque",
+      ),
+    );
+    await waitFor(() =>
+      expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+        locationLoadsBeforeRemove + 1,
+      ),
+    );
+    const setupLocations = within(
+      screen.getByRole("group", { name: "Named Setup Locations" }),
+    );
+    expect(setupLocations.getByRole("alert").textContent).toContain(
+      expectedFailure,
+    );
+    expect(
+      setupLocations.getByRole("button", { name: "Update Setup Location" }),
+    ).not.toBeNull();
+    expect(
+      (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+    ).toBe("Games");
+    expect(
+      (screen.getByLabelText("Relative folder") as HTMLInputElement).value,
+    ).toBe("games");
+    expect(setupLocations.getByText(staleLocation.detail)).not.toBeNull();
+  },
+);
+
+test("a superseded poll queues the stale Setup Location refresh while removal is pending", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const volumeHandle = "22222222222222222222222222222222";
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd" as const,
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  };
+  const staleLocation = {
+    ...readyLocation,
+    ready: false,
+    detail: "Refresh storage options to verify this location.",
+  };
+  const removal = deferred<Array<typeof readyLocation>>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: volumeHandle,
+        volumeHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  });
+  mockApi.describeConfiguration.mockResolvedValue({
+    devicePlan: "plan.supported",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    inputs: [
+      {
+        key: "recipe.one/destination",
+        recipeId: "recipe.one",
+        inputId: "destination",
+        type: "setup_location_ref",
+        label: "Install destination",
+        description: "Choose a named destination.",
+        required: true,
+        sensitive: false,
+        value: "location-opaque",
+        valueSource: "explicit",
+        diagnostics: [],
+      },
+    ],
+    diagnostics: [],
+  });
+  mockApi.listSetupLocations.mockResolvedValue([readyLocation]);
+  mockApi.removeSetupLocation.mockReturnValue(removal.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  const locationLoadsBeforeStorageRefresh =
+    mockApi.listSetupLocations.mock.calls.length;
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationLoadsBeforeStorageRefresh + 1,
+    ),
+  );
+  await user.click(await screen.findByRole("button", { name: "Edit Games" }));
+  const locationLoadsBeforeRemove =
+    mockApi.listSetupLocations.mock.calls.length;
+  mockApi.listSetupLocations.mockResolvedValue([staleLocation]);
+  await user.click(screen.getByRole("button", { name: "Remove Games" }));
+  await waitFor(() =>
+    expect(mockApi.removeSetupLocation).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      "plan.supported",
+      "location-opaque",
+    ),
+  );
+
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2),
+  );
+  await act(async () => {
+    olderPoll.resolve([availableDevice]);
+    await olderPoll.promise;
+  });
+  await act(async () => {
+    newerPoll.reject(
+      new Error("The newer inventory request failed before commit."),
+    );
+    await flushPendingPromises();
+  });
+  await act(async () => {
+    removal.reject(new Error("That Setup Location is no longer available."));
+    await flushPendingPromises();
+  });
+  const setupLocations = within(
+    screen.getByRole("group", { name: "Named Setup Locations" }),
+  );
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations.mock.calls.length).toBeGreaterThan(
+      locationLoadsBeforeRemove,
+    ),
+  );
+  await waitFor(() =>
+    expect(setupLocations.getByText(staleLocation.detail)).not.toBeNull(),
+  );
+});
+
+test("a same-handle session epoch change clears edited state and ignores a stale removal failure", async () => {
+  const user = userEvent.setup();
+  const volumeHandle = "22222222222222222222222222222222";
+  const removalResponse = deferred<(typeof readyLocation)[]>();
+  const firstProjection: DeviceVolumesProjection = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: volumeHandle,
+        volumeHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  const nextProjection: DeviceVolumesProjection = {
+    ...firstProjection,
+    sessionEpoch: 2,
+    observationToken: "eeeeeeeeffffffff0000000011111111",
+  };
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "removableSd" as const,
+    volumeLabel: "SD card",
+    ready: true,
+    detail: "Available.",
+  };
+  const staleLocation = {
+    ...readyLocation,
+    ready: false,
+    detail: "Refresh storage options to verify this location.",
+  };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(firstProjection);
+  mockApi.listSetupLocations.mockResolvedValue([readyLocation]);
+  mockApi.removeSetupLocation.mockReturnValue(removalResponse.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  const editLocation = await screen.findByRole("button", {
+    name: "Edit Games",
+  });
+  await user.click(editLocation);
+  expect(
+    (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+  ).toBe("Games");
+  const volumeReadsBeforeSessionChange =
+    mockApi.deviceVolumes.mock.calls.length;
+  const locationLoadsBeforeSessionChange =
+    mockApi.listSetupLocations.mock.calls.length;
+  await user.click(screen.getByRole("button", { name: "Remove Games" }));
+  await waitFor(() =>
+    expect(mockApi.removeSetupLocation).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      "plan.supported",
+      "location-opaque",
+    ),
+  );
+
+  mockApi.deviceVolumes.mockResolvedValueOnce(nextProjection);
+  mockApi.listSetupLocations.mockResolvedValueOnce([staleLocation]);
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledTimes(
+      volumeReadsBeforeSessionChange + 1,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+    ).toBe(""),
+  );
+  expect(mockApi.deviceVolumes).toHaveBeenLastCalledWith(
+    availableDevice.deviceHandle,
+    true,
+  );
+  mockApi.deviceVolumes.mockResolvedValue(nextProjection);
+
+  await act(async () => {
+    removalResponse.reject(
+      new Error("the old Setup Location session is no longer current"),
+    );
+    await flushPendingPromises();
+  });
+  expect(
+    screen.queryByText("the old Setup Location session is no longer current"),
+  ).toBeNull();
+  expect(
+    (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+  ).toBe("");
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations.mock.calls.length).toBeGreaterThan(
+      locationLoadsBeforeSessionChange,
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.getByText(staleLocation.detail)).not.toBeNull(),
+  );
+});
+
+test("a generic Setup Location save failure refreshes readiness and preserves its error", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const pendingRefresh = deferred<DeviceVolumesProjection>();
+  const volumeProjection: DeviceVolumesProjection = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "internalShared" as const,
+    volumeLabel: "Internal storage",
+    ready: true,
+    detail: "Available.",
+  };
+  let explicitRefreshCount = 0;
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockImplementation((_deviceHandle, refresh) => {
+    if (!refresh) return Promise.resolve(volumeProjection);
+    explicitRefreshCount += 1;
+    return explicitRefreshCount === 1
+      ? Promise.resolve(volumeProjection)
+      : pendingRefresh.promise;
+  });
+  mockApi.listSetupLocations.mockResolvedValue([readyLocation]);
+  mockApi.saveSetupLocation.mockRejectedValueOnce(
+    new Error("Storage write failed."),
+  );
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() => expect(explicitRefreshCount).toBe(1));
+  await user.click(await screen.findByRole("button", { name: "Edit Games" }));
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    internalHandle,
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Update Setup Location" }),
+  );
+
+  await waitFor(() => expect(explicitRefreshCount).toBe(2));
+  const setupLocations = within(
+    screen.getByRole("group", { name: "Named Setup Locations" }),
+  );
+  expect(setupLocations.getByRole("alert").textContent).toContain(
+    "Storage write failed.",
+  );
+  expect(
+    (
+      setupLocations.getByRole("button", {
+        name: "Update Setup Location",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+
+  const locationLoadsBeforeRefresh =
+    mockApi.listSetupLocations.mock.calls.length;
+  pendingRefresh.resolve(volumeProjection);
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationLoadsBeforeRefresh + 1,
+    ),
+  );
+  expect(setupLocations.getByRole("alert").textContent).toContain(
+    "Storage write failed.",
+  );
+});
+
+test("a stale Setup Location save forces a fresh T04 observation before retry", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const freshObservationToken = "eeeeeeeeffffffff0000000011111111";
+  const pendingRefresh = deferred<DeviceVolumesProjection>();
+  const volumeProjection: DeviceVolumesProjection = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  };
+  let explicitRefreshCount = 0;
+  const readyLocation = {
+    id: "location-opaque",
+    name: "Games",
+    relativePath: "games",
+    volumeKind: "internalShared" as const,
+    volumeLabel: "Internal storage",
+    ready: true,
+    detail: "Available.",
+  };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockImplementation((_deviceHandle, refresh) => {
+    if (!refresh) return Promise.resolve(volumeProjection);
+    explicitRefreshCount += 1;
+    return explicitRefreshCount === 1
+      ? Promise.resolve(volumeProjection)
+      : pendingRefresh.promise;
+  });
+  mockApi.listSetupLocations.mockResolvedValue([readyLocation]);
+  mockApi.saveSetupLocation
+    .mockRejectedValueOnce(
+      new Error("Storage options changed. Refresh and choose a volume again."),
+    )
+    .mockResolvedValue([readyLocation]);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await user.click(await screen.findByRole("button", { name: "Edit Games" }));
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    internalHandle,
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Update Setup Location" }),
+  );
+
+  await waitFor(() => expect(explicitRefreshCount).toBe(2));
+  const setupLocations = within(
+    screen.getByRole("group", { name: "Named Setup Locations" }),
+  );
+  expect(setupLocations.getByRole("alert").textContent).toContain(
+    "Storage options changed. Refresh and choose a volume again.",
+  );
+  expect(
+    (
+      setupLocations.getByRole("button", {
+        name: "Update Setup Location",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+
+  const locationLoadsBeforeRefresh =
+    mockApi.listSetupLocations.mock.calls.length;
+  pendingRefresh.resolve({
+    ...volumeProjection,
+    observationToken: freshObservationToken,
+  });
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationLoadsBeforeRefresh + 1,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        setupLocations.getByRole("button", {
+          name: "Update Setup Location",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  expect(setupLocations.getByRole("alert").textContent).toContain(
+    "Storage options changed. Refresh and choose a volume again.",
+  );
+
+  await user.click(
+    setupLocations.getByRole("button", { name: "Update Setup Location" }),
+  );
+  await waitFor(() =>
+    expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(2),
+  );
+  expect(mockApi.saveSetupLocation.mock.calls[1][2]).toBe(
+    freshObservationToken,
+  );
+});
+
+test("a stale Setup Location save failure for an old plan does not affect the newly selected plan", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const save = deferred<[]>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.matchDevice.mockResolvedValue({
+    ...supportedMatch,
+    candidates: [
+      supportedMatch.candidates[0],
+      { ...safePlan, planId: "plan.alternate", name: "Alternate setup" },
+    ],
+  });
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(save.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByLabelText(
+          "Storage volume for Setup Location",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false),
+  );
+
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    sdHandle,
+  );
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalled());
+
+  await user.click(screen.getByRole("radio", { name: /Alternate setup/ }));
+  save.reject("Storage options changed. Refresh and choose a volume again.");
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      "plan.alternate",
+    ),
+  );
+
+  expect(
+    screen.queryByText(
+      "Storage options changed. Refresh and choose a volume again.",
+    ),
+  ).toBeNull();
+});
+
+test("a Setup Location save queues refresh for the selected plan after a plan change", async () => {
+  const user = userEvent.setup();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const savedLocations = [
+    {
+      id: "location-opaque",
+      name: "Games",
+      relativePath: "games",
+      volumeKind: "removableSd",
+      volumeLabel: "SD card",
+      ready: true,
+      detail: "Available.",
+    },
+  ];
+  const save = deferred<typeof savedLocations>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.matchDevice.mockResolvedValue({
+    ...supportedMatch,
+    candidates: [
+      supportedMatch.candidates[0],
+      { ...safePlan, planId: "plan.alternate", name: "Alternate setup" },
+    ],
+  });
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(save.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByLabelText(
+          "Storage volume for Setup Location",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false),
+  );
+
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    sdHandle,
+  );
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1));
+  const locationLoadsBeforePlanSwitch = mockApi.listSetupLocations.mock.calls.length;
+  await user.click(screen.getByRole("radio", { name: /Alternate setup/ }));
+  await waitFor(() =>
+    expect(
+      (screen.getByRole("radio", { name: /Alternate setup/ }) as HTMLInputElement)
+        .checked,
+    ).toBe(true),
+  );
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+    ).toBe(""),
+  );
+  expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+    locationLoadsBeforePlanSwitch,
+  );
+  await act(async () => save.resolve(savedLocations));
+
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+    ).toBe(""),
+  );
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationLoadsBeforePlanSwitch + 1,
+    ),
+  );
+  expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
+    availableDevice.deviceHandle,
+    "plan.alternate",
+  );
+});
+
+test("a stale Setup Location save success is ignored after a same-handle session epoch change", async () => {
+const user = userEvent.setup();
+const volumeHandle = "22222222222222222222222222222222";
+const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+const savedLocations = [
+{
+id: "location-opaque",
+name: "Games",
+relativePath: "games",
+volumeKind: "removableSd",
+volumeLabel: "SD card",
+ready: true,
+detail: "Available.",
+},
+];
+const projection = {
+deviceHandle: availableDevice.deviceHandle,
+sessionEpoch: 1,
+observationToken,
+discoveryStatus: "observed" as const,
+evidence: "live" as const,
+volumes: [
+{
+presentationKey: volumeHandle,
+volumeHandle,
+kind: "removableSd" as const,
+label: "SD card",
+status: "available" as const,
+selectable: true,
+detail: "Mounted.",
+},
+],
+selectedVolumeHandle: null,
+selectionNotice: null,
+};
+const refreshedProjection = {
+...projection,
+sessionEpoch: 2,
+observationToken: "eeeeeeeeffffffffgggggggghhhhhhhh",
+volumes: [
+{
+...projection.volumes[0],
+label: "SD card after session change",
+},
+],
+};
+const sessionRefresh = deferred<typeof projection>();
+const save = deferred<typeof savedLocations>();
+const freshLocations = deferred<typeof savedLocations>();
+mockApi.pollDevices.mockResolvedValue([availableDevice]);
+mockApi.deviceVolumes.mockResolvedValue(projection);
+mockApi.listSetupLocations.mockResolvedValue([]);
+mockApi.saveSetupLocation.mockReturnValue(save.promise);
+await renderReadyApp();
+await user.click(
+await screen.findByRole("button", {
+name: /Supported Handheld.*Connected/,
+}),
+);
+await screen.findByRole("heading", { name: "Example Handheld" });
+await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+await waitFor(() =>
+expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
+availableDevice.deviceHandle,
+"plan.supported",
+),
+);
+await waitFor(() =>
+expect(
+(
+screen.getByLabelText(
+"Storage volume for Setup Location",
+) as HTMLSelectElement
+).disabled,
+).toBe(false),
+);
+await user.selectOptions(
+screen.getByLabelText("Storage volume for Setup Location"),
+volumeHandle,
+);
+await user.type(screen.getByLabelText("Setup Location name"), "Games");
+await user.type(screen.getByLabelText("Relative folder"), "games");
+await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1));
+const locationLoadsBeforeSessionChange = mockApi.listSetupLocations.mock.calls.length;
+const volumeReadsBeforeSessionChange = mockApi.deviceVolumes.mock.calls.length;
+mockApi.listSetupLocations.mockReturnValue(freshLocations.promise);
+mockApi.deviceVolumes.mockReturnValue(sessionRefresh.promise);
+await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+await waitFor(() =>
+expect(mockApi.deviceVolumes).toHaveBeenCalledTimes(
+volumeReadsBeforeSessionChange + 1,
+),
+);
+await act(async () => {
+sessionRefresh.resolve(refreshedProjection);
+await sessionRefresh.promise;
+});
+expect(
+await screen.findByRole("radio", { name: "SD card after session change" }),
+).toBeTruthy();
+expect(mockApi.deviceVolumes).toHaveBeenLastCalledWith(
+availableDevice.deviceHandle,
+true,
+);
+expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+locationLoadsBeforeSessionChange,
+);
+
+await act(async () => {
+save.resolve(savedLocations);
+await save.promise;
+});
+await waitFor(() =>
+expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+locationLoadsBeforeSessionChange + 1,
+),
+);
+expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
+availableDevice.deviceHandle,
+"plan.supported",
+);
+expect(screen.queryByText("Games")).toBeNull();
+await act(async () => {
+freshLocations.resolve([]);
+await freshLocations.promise;
+});
+});
+
+test("a same-handle inventory poll suppresses a stale Setup Location save error", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const volumeHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const failureMessage = "The storage session changed before the save completed.";
+  const saveResponse = deferred<never>();
+
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: volumeHandle,
+        volumeHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(saveResponse.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByLabelText(
+          "Storage volume for Setup Location",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false),
+  );
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    volumeHandle,
+  );
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() => expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1));
+
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  const qualificationCallsBefore = mockApi.deviceQualification.mock.calls.length;
+  const volumeCallsBefore = mockApi.deviceVolumes.mock.calls.length;
+  mockApi.deviceVolumes.mockResolvedValueOnce({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 2,
+    observationToken: "eeeeeeeeffffffffgggggggghhhhhhhh",
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: volumeHandle,
+        volumeHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: null,
+    selectionNotice: null,
+  });
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 1),
+  );
+  await waitFor(() =>
+    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+      qualificationCallsBefore + 1,
+    ),
+  );
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledTimes(volumeCallsBefore + 1),
+  );
+
+  await act(async () => {
+    saveResponse.reject(new Error(failureMessage));
+    await saveResponse.promise.catch(() => undefined);
+  });
+
+  expect(screen.queryByText(failureMessage)).toBeNull();
+});
+
+test("an inventory poll preserves an in-flight Setup Location save", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const savedLocations = [
+    {
+      id: "location-opaque",
+      name: "Games",
+      relativePath: "games",
+      volumeKind: "removableSd",
+      volumeLabel: "SD card",
+      ready: true,
+      detail: "Available.",
+    },
+  ];
+  const saveResponse = deferred<typeof savedLocations>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(saveResponse.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByLabelText(
+          "Storage volume for Setup Location",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false),
+  );
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    sdHandle,
+  );
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() =>
+    expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1),
+  );
+  const pollCallsBeforeRefresh = mockApi.pollDevices.mock.calls.length;
+  const locationListCallsBeforePoll =
+    mockApi.listSetupLocations.mock.calls.length;
+  const qualificationCallsBeforeRefresh =
+    mockApi.deviceQualification.mock.calls.length;
+
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(
+      pollCallsBeforeRefresh + 1,
+    ),
+  );
+  await waitFor(() =>
+    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+      qualificationCallsBeforeRefresh + 1,
+    ),
+  );
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Save Setup Location",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+
+  await act(async () => {
+    saveResponse.resolve(savedLocations);
+  });
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+    ).toBe(""),
+  );
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationListCallsBeforePoll + 1,
+    ),
+  );
+  expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
+    availableDevice.deviceHandle,
+    "plan.supported",
+  );
+  expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
+});
+
+test("a superseded inventory poll cannot invalidate an in-flight Setup Location save", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+  const savedLocations = [
+    {
+      id: "location-opaque",
+      name: "Games",
+      relativePath: "games",
+      volumeKind: "removableSd",
+      volumeLabel: "SD card",
+      ready: true,
+      detail: "Available.",
+    },
+  ];
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  const saveResponse = deferred<typeof savedLocations>();
+  const refreshedLocations = deferred<typeof savedLocations>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue({
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken,
+    discoveryStatus: "observed",
+    evidence: "live",
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared",
+        label: "Internal storage",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd",
+        label: "SD card",
+        status: "available",
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: internalHandle,
+    selectionNotice: null,
+  });
+  mockApi.listSetupLocations.mockResolvedValue([]);
+  mockApi.saveSetupLocation.mockReturnValue(saveResponse.promise);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+  await waitFor(() =>
+    expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+      true,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByLabelText(
+          "Storage volume for Setup Location",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false),
+  );
+  await user.selectOptions(
+    screen.getByLabelText("Storage volume for Setup Location"),
+    sdHandle,
+  );
+  await user.type(screen.getByLabelText("Setup Location name"), "Games");
+  await user.type(screen.getByLabelText("Relative folder"), "games");
+  expect(
+    (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+  ).toBe("Games");
+  expect(
+    (screen.getByLabelText("Relative folder") as HTMLInputElement).value,
+  ).toBe("games");
+  await user.click(screen.getByRole("button", { name: "Save Setup Location" }));
+  await waitFor(() =>
+    expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1),
+  );
+
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  const qualificationCallsBefore =
+    mockApi.deviceQualification.mock.calls.length;
+  const locationListCallsBefore = mockApi.listSetupLocations.mock.calls.length;
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2),
+  );
+
+  await act(async () => {
+    newerPoll.resolve([availableDevice]);
+  });
+  await waitFor(() =>
+    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+      qualificationCallsBefore + 1,
+    ),
+  );
+  await act(async () => {
+    olderPoll.resolve([]);
+    await flushPendingPromises();
+  });
+  expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+    qualificationCallsBefore + 1,
+  );
+  mockApi.listSetupLocations.mockReturnValue(refreshedLocations.promise);
+
+  await act(async () => {
+    saveResponse.resolve(savedLocations);
+  });
+  await waitFor(() =>
+    expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+      locationListCallsBefore + 1,
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("list", { name: "Saved Setup Locations" }),
+      ).getByText("Games"),
+    ).not.toBeNull(),
+  );
+  await act(async () => {
+    refreshedLocations.resolve(savedLocations);
+    await refreshedLocations.promise;
+  });
+  await waitFor(() =>
+    expect(
+      (screen.getByLabelText("Setup Location name") as HTMLInputElement).value,
+    ).toBe(""),
+  );
+});
+
+test.each(["save", "remove"] as const)(
+  "a queued Setup Location refresh preserves a failed %s alert",
+  async (operation) => {
+    const user = userEvent.setup();
+    const triggerDevicePoll = captureDevicePollTick();
+    const internalHandle = "11111111111111111111111111111111";
+    const sdHandle = "22222222222222222222222222222222";
+    const observationToken = "aaaaaaaabbbbbbbbccccccccdddddddd";
+    const savedLocations = [
+      {
+        id: "location-opaque",
+        name: "Games",
+        relativePath: "games",
+        volumeKind: "removableSd",
+        volumeLabel: "SD card",
+        ready: true,
+        detail: "Available.",
+      },
+    ];
+    const mutationResponse = deferred<typeof savedLocations>();
+    const refreshedLocations = deferred<typeof savedLocations>();
+    const failureMessage =
+      operation === "save"
+        ? "stale_observation: storage evidence expired"
+        : `${operation} failed`;
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.deviceVolumes.mockResolvedValue({
+      deviceHandle: availableDevice.deviceHandle,
+      sessionEpoch: 1,
+      observationToken,
+      discoveryStatus: "observed",
+      evidence: "live",
+      volumes: [
+        {
+          presentationKey: internalHandle,
+          volumeHandle: internalHandle,
+          kind: "internalShared",
+          label: "Internal storage",
+          status: "available",
+          selectable: true,
+          detail: "Mounted.",
+        },
+        {
+          presentationKey: sdHandle,
+          volumeHandle: sdHandle,
+          kind: "removableSd",
+          label: "SD card",
+          status: "available",
+          selectable: true,
+          detail: "Mounted.",
+        },
+      ],
+      selectedVolumeHandle: internalHandle,
+      selectionNotice: null,
+    });
+    mockApi.listSetupLocations.mockResolvedValue(savedLocations);
+    if (operation === "save") {
+      mockApi.saveSetupLocation.mockReturnValue(mutationResponse.promise);
+    } else {
+      mockApi.removeSetupLocation.mockReturnValue(mutationResponse.promise);
+    }
+
+    await renderReadyApp();
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
+    await screen.findByRole("heading", { name: "Example Handheld" });
+    if (operation === "save") {
+      await user.click(screen.getByRole("button", { name: "Refresh storage" }));
+      await waitFor(() =>
+        expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
+          availableDevice.deviceHandle,
+          true,
+        ),
+      );
+      await waitFor(() =>
+        expect(
+          (
+            screen.getByLabelText(
+              "Storage volume for Setup Location",
+            ) as HTMLSelectElement
+          ).disabled,
+        ).toBe(false),
+      );
+      await user.selectOptions(
+        screen.getByLabelText("Storage volume for Setup Location"),
+        sdHandle,
+      );
+      await user.type(screen.getByLabelText("Setup Location name"), "Games");
+      await user.type(screen.getByLabelText("Relative folder"), "games");
+      await user.click(
+        screen.getByRole("button", { name: "Save Setup Location" }),
+      );
+      await waitFor(() =>
+        expect(mockApi.saveSetupLocation).toHaveBeenCalledTimes(1),
+      );
+      mockApi.listSetupLocations.mockReturnValueOnce(
+        refreshedLocations.promise,
+      );
+    } else {
+      await user.click(
+        await screen.findByRole("button", { name: "Remove Games" }),
+      );
+      await waitFor(() =>
+        expect(mockApi.removeSetupLocation).toHaveBeenCalledWith(
+          availableDevice.deviceHandle,
+          "plan.supported",
+          "location-opaque",
+        ),
+      );
+    }
+
+    const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+    const qualificationCallsBefore =
+      mockApi.deviceQualification.mock.calls.length;
+    const locationListCallsBefore =
+      mockApi.listSetupLocations.mock.calls.length;
+    if (operation === "remove") {
+      await act(async () => {
+        triggerDevicePoll();
+      });
+      await waitFor(() =>
+        expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 1),
+      );
+      await waitFor(() =>
+        expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+          qualificationCallsBefore + 1,
+        ),
+      );
+      expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+        locationListCallsBefore,
+      );
+    }
+
+    await act(async () => {
+      mutationResponse.reject(new Error(failureMessage));
+      await flushPendingPromises();
+    });
+    await waitFor(() =>
+      expect(mockApi.listSetupLocations).toHaveBeenCalledTimes(
+        locationListCallsBefore + 1,
+      ),
+    );
+    if (operation === "save") {
+      expect(
+        screen.getByText("Refresh storage options to verify this location."),
+      ).toBeTruthy();
+      await act(async () => {
+        refreshedLocations.resolve(savedLocations);
+        await flushPendingPromises();
+      });
+      expect(screen.getByText("Ready for recipe selection.")).toBeTruthy();
+    }
+    await flushPendingPromises();
+    expect(screen.getByText(failureMessage)).toBeTruthy();
+  },
+);
 
 test("a successful storage selection announces once in the shell live region", async () => {
   const user = userEvent.setup();
@@ -424,8 +2346,16 @@ test("a successful storage selection announces once in the shell live region", a
   });
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   const liveRegions = screen.getByLabelText("Application notifications");
   const announcements: string[] = [];
   const observer = new MutationObserver((records) => {
@@ -444,12 +2374,16 @@ test("a successful storage selection announces once in the shell live region", a
   try {
     await user.click(sd);
     await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
-    await waitFor(() => expect(announcements).toEqual([
-      "polite:SD card is selected for this device.",
-    ]));
+    await waitFor(() =>
+      expect(announcements).toEqual([
+        "polite:SD card is selected for this device.",
+      ]),
+    );
     const statuses = within(liveRegions).getAllByRole("status");
     expect(statuses).toHaveLength(1);
-    expect(statuses[0].textContent).toBe("SD card is selected for this device.");
+    expect(statuses[0].textContent).toBe(
+      "SD card is selected for this device.",
+    );
     const alerts = within(liveRegions).getAllByRole("alert");
     expect(alerts).toHaveLength(1);
     expect(alerts[0].textContent).toBe("");
@@ -496,11 +2430,21 @@ test("a storage selection reports selection-specific busy text", async () => {
   mockApi.selectDeviceVolume.mockReturnValue(selection.promise);
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   await user.click(sd);
 
-  expect(await screen.findByRole("button", { name: "Selecting storage…" })).toBeTruthy();
+  expect(
+    await screen.findByRole("button", { name: "Selecting storage…" }),
+  ).toBeTruthy();
   expect(screen.queryByText("Refreshing storage options…")).toBeNull();
 
   await act(async () => {
@@ -543,18 +2487,28 @@ test("a failed storage refresh clears the chosen volume and live evidence", asyn
   };
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
   let failStorageReads = false;
-  mockApi.deviceVolumes.mockImplementation((_deviceHandle: string, refresh: boolean) =>
-    failStorageReads || refresh
-      ? Promise.reject(new Error("storage probe failed"))
-      : Promise.resolve(observed));
+  mockApi.deviceVolumes.mockImplementation(
+    (_deviceHandle: string, refresh: boolean) =>
+      failStorageReads || refresh
+        ? Promise.reject(new Error("storage probe failed"))
+        : Promise.resolve(observed),
+  );
   mockApi.selectDeviceVolume.mockResolvedValue({
     ...observed,
     selectedVolumeHandle: sdHandle,
   });
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   await user.click(sd);
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
   expect(mockApi.selectDeviceVolume).toHaveBeenCalledWith(
@@ -562,21 +2516,33 @@ test("a failed storage refresh clears the chosen volume and live evidence", asyn
     sdHandle,
     observed.observationToken,
   );
-  expect(screen.getByText("Showing a storage report read from the device just now.")).toBeTruthy();
+  expect(
+    screen.getByText("Showing a storage report read from the device just now."),
+  ).toBeTruthy();
 
   failStorageReads = true;
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
 
-  await waitFor(() => expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull());
+  await waitFor(() =>
+    expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull(),
+  );
   expect(
-    within(screen.getByRole("group", { name: "Storage options" })).queryByRole("radio", {
-      checked: true,
-    }),
+    within(screen.getByRole("group", { name: "Storage options" })).queryByRole(
+      "radio",
+      {
+        checked: true,
+      },
+    ),
   ).toBeNull();
-  expect(screen.queryByText("Showing a storage report read from the device just now.")).toBeNull();
   expect(
-    screen.getAllByText("Storage options could not be read. Refresh storage options to try again.")
-      .length,
+    screen.queryByText(
+      "Showing a storage report read from the device just now.",
+    ),
+  ).toBeNull();
+  expect(
+    screen.getAllByText(
+      "Storage options could not be read. Refresh storage options to try again.",
+    ).length,
   ).toBeGreaterThan(0);
 });
 
@@ -614,20 +2580,35 @@ test("a device poll during a storage selection clears the stale choice and live 
     selectedVolumeHandle: sdHandle,
     selectionNotice: null,
   };
-  const fresh = { ...observed, sessionEpoch: 2, selectedVolumeHandle: internalHandle };
+  const fresh = {
+    ...observed,
+    sessionEpoch: 2,
+    selectedVolumeHandle: internalHandle,
+  };
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
   mockApi.deviceVolumes.mockResolvedValue(observed);
   let releaseSelection!: () => void;
-  mockApi.selectDeviceVolume.mockImplementation(() => new Promise((resolve) => {
-    releaseSelection = () => resolve(fresh);
-  }));
+  mockApi.selectDeviceVolume.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        releaseSelection = () => resolve(fresh);
+      }),
+  );
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
   await act(async () => {
     triggerDevicePoll();
   });
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
 
   await user.click(screen.getByRole("radio", { name: "Internal storage" }));
@@ -639,19 +2620,35 @@ test("a device poll during a storage selection clears the stale choice and live 
   await act(async () => {
     triggerDevicePoll();
   });
-  await waitFor(() => expect(
-    within(screen.getByRole("group", { name: "Storage options" })).queryByRole("radio", {
-      checked: true,
-    }),
-  ).toBeNull());
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("group", { name: "Storage options" }),
+      ).queryByRole("radio", {
+        checked: true,
+      }),
+    ).toBeNull(),
+  );
   expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull();
-  expect(screen.queryByText("Showing a storage report read from the device just now.")).toBeNull();
+  expect(
+    screen.queryByText(
+      "Showing a storage report read from the device just now.",
+    ),
+  ).toBeNull();
 
   releaseSelection();
-  await waitFor(() => expect(
-    (screen.getByRole("radio", { name: "Internal storage" }) as HTMLInputElement).checked,
-  ).toBe(true));
-  expect(screen.getByText("Showing a storage report read from the device just now.")).toBeTruthy();
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("radio", {
+          name: "Internal storage",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true),
+  );
+  expect(
+    screen.getByText("Showing a storage report read from the device just now."),
+  ).toBeTruthy();
 });
 
 test("a qualification failure after committed inventory discards stale storage state", async () => {
@@ -691,39 +2688,141 @@ test("a qualification failure after committed inventory discards stale storage s
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
   mockApi.deviceVolumes.mockResolvedValue(observed);
   let releaseSelection!: () => void;
-  mockApi.selectDeviceVolume.mockImplementation(() => new Promise((resolve) => {
-    releaseSelection = () => resolve({ ...observed, selectedVolumeHandle: internalHandle });
-  }));
+  mockApi.selectDeviceVolume.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        releaseSelection = () =>
+          resolve({ ...observed, selectedVolumeHandle: internalHandle });
+      }),
+  );
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
   await act(async () => {
     triggerDevicePoll();
   });
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(true));
 
   await user.click(screen.getByRole("radio", { name: "Internal storage" }));
   expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
 
   mockApi.pollDevices.mockResolvedValue([]);
-  mockApi.deviceQualification.mockRejectedValueOnce(new Error("The device service is unavailable."));
+  mockApi.deviceQualification.mockRejectedValueOnce(
+    new Error("The device service is unavailable."),
+  );
   await act(async () => {
     triggerDevicePoll();
   });
-  await waitFor(() => expect(
-    within(screen.getByRole("group", { name: "Storage options" })).queryByRole("radio", {
-      checked: true,
-    }),
-  ).toBeNull());
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("group", { name: "Storage options" }),
+      ).queryByRole("radio", {
+        checked: true,
+      }),
+    ).toBeNull(),
+  );
   expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull();
   expect(screen.queryByRole("radio", { name: "Internal storage" })).toBeNull();
   expect(screen.queryByText("Selecting storage…")).toBeNull();
-  expect(screen.getAllByText(/device service is unavailable/i).length).toBeGreaterThan(0);
+  expect(
+    screen.getAllByText(/device service is unavailable/i).length,
+  ).toBeGreaterThan(0);
 
   releaseSelection();
-  await waitFor(() => expect(screen.queryByText("Selecting storage…")).toBeNull());
+  await waitFor(() =>
+    expect(screen.queryByText("Selecting storage…")).toBeNull(),
+  );
   expect(screen.queryByRole("radio", { name: "Internal storage" })).toBeNull();
+});
+
+test("a committed device poll removes old volume choices while qualification is pending", async () => {
+  const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
+  const internalHandle = "11111111111111111111111111111111";
+  const sdHandle = "22222222222222222222222222222222";
+  const observed = {
+    deviceHandle: availableDevice.deviceHandle,
+    sessionEpoch: 1,
+    observationToken: "aaaaaaaabbbbbbbbccccccccdddddddd",
+    discoveryStatus: "observed" as const,
+    evidence: "live" as const,
+    volumes: [
+      {
+        presentationKey: internalHandle,
+        volumeHandle: internalHandle,
+        kind: "internalShared" as const,
+        label: "Internal storage",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+      {
+        presentationKey: sdHandle,
+        volumeHandle: sdHandle,
+        kind: "removableSd" as const,
+        label: "SD card",
+        status: "available" as const,
+        selectable: true,
+        detail: "Mounted.",
+      },
+    ],
+    selectedVolumeHandle: sdHandle,
+    selectionNotice: null,
+  };
+  const pendingQualification =
+    deferred<Awaited<ReturnType<typeof mockApi.deviceQualification>>>();
+  const pendingVolumes =
+    deferred<Awaited<ReturnType<typeof mockApi.deviceVolumes>>>();
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.deviceVolumes.mockResolvedValue(observed);
+
+  await renderReadyApp();
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await screen.findByRole("radio", { name: "SD card" });
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  const qualificationCallsBefore =
+    mockApi.deviceQualification.mock.calls.length;
+
+  mockApi.deviceQualification.mockReturnValueOnce(pendingQualification.promise);
+  mockApi.deviceVolumes.mockReturnValueOnce(pendingVolumes.promise);
+  await act(async () => {
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 1),
+  );
+  await waitFor(() =>
+    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(
+      qualificationCallsBefore + 1,
+    ),
+  );
+
+  expect(screen.queryByRole("radio", { name: "SD card" })).toBeNull();
+  expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
+
+  await act(async () => {
+    pendingQualification.resolve(
+      await mockApi.deviceQualification.mock.results[0].value,
+    );
+    pendingVolumes.resolve(observed);
+  });
 });
 
 test("a failed device poll clears a fenced storage action's loading state", async () => {
@@ -764,36 +2863,63 @@ test("a failed device poll clears a fenced storage action's loading state", asyn
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
   mockApi.deviceVolumes.mockResolvedValue(observed);
   let releaseSelection!: () => void;
-  mockApi.selectDeviceVolume.mockImplementation(() => new Promise((resolve) => {
-    releaseSelection = () => resolve({ ...observed, selectedVolumeHandle: sdHandle });
-  }));
+  mockApi.selectDeviceVolume.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        releaseSelection = () =>
+          resolve({ ...observed, selectedVolumeHandle: sdHandle });
+      }),
+  );
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
   await act(async () => {
     triggerDevicePoll();
   });
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   await waitFor(() => expect((sd as HTMLInputElement).checked).toBe(false));
 
   await user.click(sd);
   expect(screen.getAllByText("Selecting storage…")).toHaveLength(2);
-  expect((screen.getByRole("button", { name: "Selecting storage…" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Selecting storage…",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
 
-  mockApi.pollDevices.mockRejectedValueOnce(new Error("The device service is unavailable."));
+  mockApi.pollDevices.mockRejectedValueOnce(
+    new Error("The device service is unavailable."),
+  );
   await act(async () => {
     triggerDevicePoll();
   });
 
-  await waitFor(() => expect(screen.queryByText("Selecting storage…")).toBeNull());
-  const refresh = screen.getByRole("button", { name: "Refresh storage" }) as HTMLButtonElement;
+  await waitFor(() =>
+    expect(screen.queryByText("Selecting storage…")).toBeNull(),
+  );
+  const refresh = screen.getByRole("button", {
+    name: "Refresh storage",
+  }) as HTMLButtonElement;
   expect(refresh.disabled).toBe(false);
 
   releaseSelection();
   await act(async () => {
     await flushPendingPromises();
   });
-  expect((screen.getByRole("radio", { name: "SD card" }) as HTMLInputElement).checked).toBe(false);
+  expect(
+    (screen.getByRole("radio", { name: "SD card" }) as HTMLInputElement)
+      .checked,
+  ).toBe(false);
 });
 
 test("a stale observation selection keeps the current projection and shows one alert", async () => {
@@ -830,14 +2956,25 @@ test("a stale observation selection keeps the current projection and shows one a
   };
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
   mockApi.deviceVolumes.mockResolvedValue(observed);
-  mockApi.selectDeviceVolume.mockRejectedValue(JSON.stringify({
-    code: "stale_observation",
-    message: "The storage report changed. Refresh storage options and choose again.",
-  }));
+  mockApi.selectDeviceVolume.mockRejectedValue(
+    JSON.stringify({
+      code: "stale_observation",
+      message:
+        "The storage report changed. Refresh storage options and choose again.",
+    }),
+  );
 
   await renderReadyApp();
-  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-  const sd = await screen.findByRole("radio", { name: "SD card" }, { timeout: 5000 });
+  await user.click(
+    await screen.findByRole("button", {
+      name: /Supported Handheld.*Connected/,
+    }),
+  );
+  const sd = await screen.findByRole(
+    "radio",
+    { name: "SD card" },
+    { timeout: 5000 },
+  );
   await user.click(sd);
 
   const storageOptions = screen.getByRole("group", { name: "Storage options" });
@@ -845,7 +2982,11 @@ test("a stale observation selection keeps the current projection and shows one a
   expect(alert.textContent).toContain("storage report changed");
   expect(screen.getByRole("radio", { name: "SD card" })).toBeTruthy();
   expect(within(storageOptions).getAllByRole("alert")).toHaveLength(1);
-  expect(screen.queryByText("Storage options could not be read. Refresh storage options to try again.")).toBeNull();
+  expect(
+    screen.queryByText(
+      "Storage options could not be read. Refresh storage options to try again.",
+    ),
+  ).toBeNull();
 });
 
 async function openSupportAction(
@@ -855,10 +2996,16 @@ async function openSupportAction(
 ): Promise<HTMLButtonElement> {
   mockApi.supportSnapshot.mockResolvedValue(snapshot);
   await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
-  const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
+  const dialog = await screen.findByRole("dialog", {
+    name: "Troubleshooting and app storage",
+  });
   const action = within(dialog).queryByRole("button", { name });
   if (action) return action as HTMLButtonElement;
-  await user.click(within(dialog).getByText("View all troubleshooting status and maintenance actions"));
+  await user.click(
+    within(dialog).getByText(
+      "View all troubleshooting status and maintenance actions",
+    ),
+  );
   return within(dialog).getByRole("button", { name }) as HTMLButtonElement;
 }
 
@@ -893,17 +3040,20 @@ async function flushPendingPromises(): Promise<void> {
  * without depending on wall-clock time.
  */
 function captureDevicePollTick(): () => void {
-  const realSetInterval = window.setInterval.bind(window) as typeof window.setInterval;
+  const realSetInterval = window.setInterval.bind(
+    window,
+  ) as typeof window.setInterval;
   let tick: (() => void) | null = null;
-  vi.spyOn(window, "setInterval").mockImplementation(
-    ((handler: TimerHandler, timeout?: number) => {
-      if (timeout === 2500) {
-        tick = handler as () => void;
-        return 0;
-      }
-      return realSetInterval(handler, timeout);
-    }) as unknown as typeof window.setInterval,
-  );
+  vi.spyOn(window, "setInterval").mockImplementation(((
+    handler: TimerHandler,
+    timeout?: number,
+  ) => {
+    if (timeout === 2500) {
+      tick = handler as () => void;
+      return 0;
+    }
+    return realSetInterval(handler, timeout);
+  }) as unknown as typeof window.setInterval);
   return () => {
     if (!tick) throw new Error("The device poll interval was not registered.");
     tick();
@@ -938,7 +3088,9 @@ describe("Phase 6A execution capability reporting", () => {
 
     const status = document.querySelector(".status-panel");
     expect(status?.textContent).toContain("Device qualificationNot applicable");
-    expect(status?.textContent).not.toContain("Real-device qualification is not compiled in this build.");
+    expect(status?.textContent).not.toContain(
+      "Real-device qualification is not compiled in this build.",
+    );
     expect(mockApi.deviceQualification).toHaveBeenCalledWith(null);
   });
 
@@ -962,9 +3114,15 @@ describe("Phase 6A execution capability reporting", () => {
     });
 
     await renderReadyApp();
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
 
-    const qualification = await screen.findByRole("heading", { name: "Device qualification" });
+    const qualification = await screen.findByRole("heading", {
+      name: "Device qualification",
+    });
     const section = qualification.closest("section");
     expect(section).not.toBeNull();
     expect(section?.textContent).toContain("Supported");
@@ -975,7 +3133,9 @@ describe("Phase 6A execution capability reporting", () => {
     expect(section?.textContent).toContain("Root access was not checked.");
     expect(section?.textContent).not.toContain("device-identity-opaque");
     await user.click(screen.getByRole("button", { name: "Check root access" }));
-    await waitFor(() => expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"));
+    await waitFor(() =>
+      expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"),
+    );
     expect(section?.textContent).toContain("Root accessGranted");
   });
 
@@ -1005,7 +3165,9 @@ describe("Phase 6A execution capability reporting", () => {
 
     const status = document.querySelector(".status-panel");
     expect(status?.textContent).toContain("Device qualificationUnsupported");
-    expect(document.body.textContent).not.toContain("device-authority-must-remain-opaque");
+    expect(document.body.textContent).not.toContain(
+      "device-authority-must-remain-opaque",
+    );
     expect(document.body.textContent).not.toContain("qualificationRevision");
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
   });
@@ -1013,7 +3175,12 @@ describe("Phase 6A execution capability reporting", () => {
   test("blocks every device and explains eligibility when multiple devices are connected", async () => {
     mockApi.pollDevices.mockResolvedValue([
       availableDevice,
-      { ...availableDevice, deviceHandle: "device-opaque-two", displayName: "Second Handheld", maskedSerial: "••••5678" },
+      {
+        ...availableDevice,
+        deviceHandle: "device-opaque-two",
+        displayName: "Second Handheld",
+        maskedSerial: "••••5678",
+      },
     ]);
     mockApi.deviceQualification.mockResolvedValue({
       state: "insufficientlyQualified",
@@ -1033,15 +3200,29 @@ describe("Phase 6A execution capability reporting", () => {
 
     await renderReadyApp();
 
-    expect(await screen.findByText("No device can be selected while multiple Android devices are connected.")).toBeTruthy();
-    expect(screen.getByText("Disconnect all but one device, then refresh discovery.")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "No device can be selected while multiple Android devices are connected.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Disconnect all but one device, then refresh discovery.",
+      ),
+    ).toBeTruthy();
     const deviceButtons = [
-      await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }),
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
       screen.getByRole("button", { name: /Second Handheld.*Connected/ }),
     ];
     expect(deviceButtons).toHaveLength(2);
-    expect(deviceButtons.every((button) => button.hasAttribute("disabled"))).toBe(true);
-    expect(document.querySelector(".status-panel")?.textContent).toContain("Device qualificationQualification incomplete");
+    expect(
+      deviceButtons.every((button) => button.hasAttribute("disabled")),
+    ).toBe(true);
+    expect(document.querySelector(".status-panel")?.textContent).toContain(
+      "Device qualificationQualification incomplete",
+    );
   });
 
   test("shows the backend-provided feature-enabled capability without starting execution", async () => {
@@ -1066,34 +3247,44 @@ describe("Phase 6A execution capability reporting", () => {
     ["notFound", "Not found"],
     ["invalid", "Invalid"],
     ["checkFailed", "Check failed"],
-  ] as const)("renders the Rust-authored Platform Tools state %s", async (platformToolsStatus, label) => {
-    mockApi.executionCapabilities.mockResolvedValue({
-      realExecutionCompiled: true,
-      platformToolsStatus,
-      executorReadiness: "ready",
-    } satisfies ExecutionCapabilities);
+  ] as const)(
+    "renders the Rust-authored Platform Tools state %s",
+    async (platformToolsStatus, label) => {
+      mockApi.executionCapabilities.mockResolvedValue({
+        realExecutionCompiled: true,
+        platformToolsStatus,
+        executorReadiness: "ready",
+      } satisfies ExecutionCapabilities);
 
-    await renderReadyApp();
+      await renderReadyApp();
 
-    expect(document.querySelector(".status-panel")?.textContent).toContain(`Platform Tools${label}`);
-  });
+      expect(document.querySelector(".status-panel")?.textContent).toContain(
+        `Platform Tools${label}`,
+      );
+    },
+  );
 
   test.each([
     ["notCompiled", "Not compiled"],
     ["ready", "Ready"],
     ["blocked", "Blocked"],
     ["unknown", "Unknown"],
-  ] as const)("renders the Rust-authored executor-readiness state %s", async (executorReadiness, label) => {
-    mockApi.executionCapabilities.mockResolvedValue({
-      realExecutionCompiled: true,
-      platformToolsStatus: "ready",
-      executorReadiness,
-    } satisfies ExecutionCapabilities);
+  ] as const)(
+    "renders the Rust-authored executor-readiness state %s",
+    async (executorReadiness, label) => {
+      mockApi.executionCapabilities.mockResolvedValue({
+        realExecutionCompiled: true,
+        platformToolsStatus: "ready",
+        executorReadiness,
+      } satisfies ExecutionCapabilities);
 
-    await renderReadyApp();
+      await renderReadyApp();
 
-    expect(document.querySelector(".status-panel")?.textContent).toContain(`Executor readiness${label}`);
-  });
+      expect(document.querySelector(".status-panel")?.textContent).toContain(
+        `Executor readiness${label}`,
+      );
+    },
+  );
 
   test("retains the previous valid result while refresh is pending and marks refresh failure separately", async () => {
     const user = userEvent.setup();
@@ -1108,8 +3299,12 @@ describe("Phase 6A execution capability reporting", () => {
       .mockReturnValueOnce(refresh.promise);
 
     render(<App />);
-    await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
-    await user.click(screen.getByRole("button", { name: "Select Platform-Tools ZIP…" }));
+    await screen.findByRole("heading", {
+      name: "Set up Android Platform-Tools",
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Select Platform-Tools ZIP…" }),
+    );
     const status = await waitFor(() => {
       const panel = document.querySelector(".status-panel");
       expect(panel?.textContent).toContain("Platform ToolsRefreshing…");
@@ -1118,19 +3313,29 @@ describe("Phase 6A execution capability reporting", () => {
     });
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
 
-    await act(async () => refresh.reject(new Error("capability IPC unavailable")));
+    await act(async () =>
+      refresh.reject(new Error("capability IPC unavailable")),
+    );
 
-    await waitFor(() => expect(status.textContent).toContain("Platform ToolsStatus unavailable"));
-    expect(status.textContent).toContain("Executor readinessStatus unavailable");
+    await waitFor(() =>
+      expect(status.textContent).toContain("Platform ToolsStatus unavailable"),
+    );
+    expect(status.textContent).toContain(
+      "Executor readinessStatus unavailable",
+    );
     expect(status.textContent).toContain("Real-device executionNot compiled");
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
   });
 
   test("does not report not compiled when capability IPC fails", async () => {
-    mockApi.executionCapabilities.mockRejectedValue(new Error("capability IPC unavailable"));
+    mockApi.executionCapabilities.mockRejectedValue(
+      new Error("capability IPC unavailable"),
+    );
 
     render(<App />);
-    await waitFor(() => expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(1),
+    );
 
     expect(document.body.textContent).not.toContain("Not compiled");
     expect(document.querySelector(".status-panel")).toBeNull();
@@ -1161,40 +3366,70 @@ describe("Phase 5H product polish", () => {
     expect(status?.textContent).toContain("App serviceReady");
     expect(status?.textContent).toContain("Platform ToolsNot applicable");
     expect(status?.textContent).toContain("Setup catalogReady");
-    expect(document.querySelector(".configuration-bar")?.textContent).toContain("Unsaved setup");
-    expect(document.body.textContent).not.toMatch(/phase-internal-catalog|internal-source-id|internal-digest|Rust runtime|protocol/i);
+    expect(document.querySelector(".configuration-bar")?.textContent).toContain(
+      "Unsaved setup",
+    );
+    expect(document.body.textContent).not.toMatch(
+      /phase-internal-catalog|internal-source-id|internal-digest|Rust runtime|protocol/i,
+    );
   });
 
   test("explains Platform-Tools setup without developer-oriented implementation details", async () => {
     mockApi.adbStatus.mockResolvedValue(missingAdb);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Set up Android Platform-Tools" })).toBeTruthy();
-    expect(screen.getByText(/lets EmuChef find and communicate with your Android device/)).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", {
+        name: "Set up Android Platform-Tools",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /lets EmuChef find and communicate with your Android device/,
+      ),
+    ).toBeTruthy();
     expect(screen.getByText(/Setup is normally needed only once/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Open Google download page" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Select Platform-Tools ZIP…" })).toBeTruthy();
-    expect(document.body.textContent).not.toMatch(/\bADB\b|local validation|app bundle|repository|checksum|architecture/i);
+    expect(
+      screen.getByRole("button", { name: "Open Google download page" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Select Platform-Tools ZIP…" }),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(
+      /\bADB\b|local validation|app bundle|repository|checksum|architecture/i,
+    );
   });
 
   test("keeps unsaved setup actions in an explicit safe-to-destructive order", async () => {
     const user = userEvent.setup();
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/option",
-      inputId: "option",
-      label: "Optional setting",
-      required: false,
-      sensitive: false,
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/option",
+        inputId: "option",
+        label: "Optional setting",
+        required: false,
+        sensitive: false,
+      }),
+    );
     await advanceToInputs(user);
     await user.type(screen.getByLabelText("Optional setting"), "chosen");
-    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
     await user.click(screen.getByRole("button", { name: "New" }));
 
-    const dialog = await screen.findByRole("alertdialog", { name: "Save edits before continuing?" });
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Save edits before continuing?",
+    });
     const actions = within(dialog).getAllByRole("button");
-    expect(actions.map((button) => button.textContent)).toEqual(["Cancel", "Save", "Discard edits"]);
-    expect(actions[0].parentElement?.classList.contains("dialog-actions")).toBe(true);
+    expect(actions.map((button) => button.textContent)).toEqual([
+      "Cancel",
+      "Save",
+      "Discard edits",
+    ]);
+    expect(actions[0].parentElement?.classList.contains("dialog-actions")).toBe(
+      true,
+    );
   });
 });
 
@@ -1210,31 +3445,52 @@ describe("Phase 5B workflow surfaces", () => {
     mockApi.matchDevice.mockResolvedValue({
       ...supportedMatch,
       candidates: [
-        { ...safePlan, planId: "plan.supported", name: "Supported setup", confidence: "exact" },
+        {
+          ...safePlan,
+          planId: "plan.supported",
+          name: "Supported setup",
+          confidence: "exact",
+        },
       ],
       safeGenericPlans: [
-        { ...safePlan, planId: "generic.safe", name: "Conservative generic setup" },
+        {
+          ...safePlan,
+          planId: "generic.safe",
+          name: "Conservative generic setup",
+        },
       ],
-      blankSetupPlans: [{
-        ...safePlan,
-        planId: "plan.supported",
-        name: "Start from scratch",
-        description: "Choose recipes manually.",
-        selectionMode: "blank",
-      }],
+      blankSetupPlans: [
+        {
+          ...safePlan,
+          planId: "plan.supported",
+          name: "Start from scratch",
+          description: "Choose recipes manually.",
+          selectionMode: "blank",
+        },
+      ],
     });
     await renderReadyApp();
 
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-    expect(await screen.findByRole("radio", { name: /Supported setup/ })).toBeTruthy();
-    expect(screen.getByRole("radio", { name: /Conservative generic setup/ })).toBeTruthy();
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
+    expect(
+      await screen.findByRole("radio", { name: /Supported setup/ }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("radio", { name: /Conservative generic setup/ }),
+    ).toBeTruthy();
     const blank = screen.getByRole("radio", { name: /Start from scratch/ });
     await user.click(blank);
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(mockApi.describeConfiguration).toHaveBeenCalledWith(expect.objectContaining({
-      devicePlan: "plan.supported",
-      selectedRecipes: [],
-    }));
+    expect(mockApi.describeConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: [],
+      }),
+    );
   });
 
   test("searches and filters backend-authored recipes while summarizing selection", async () => {
@@ -1282,7 +3538,8 @@ describe("Phase 5B workflow surfaces", () => {
         {
           id: "recipe.optional-root-enhancement",
           name: "Optional root enhancement",
-          description: "Apply optional enhancements when root access is available.",
+          description:
+            "Apply optional enhancements when root access is available.",
           selected: false,
           recommended: false,
           dependencyRequired: false,
@@ -1295,51 +3552,77 @@ describe("Phase 5B workflow surfaces", () => {
     });
     await renderReadyApp();
 
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
     await user.click(await screen.findByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
 
     expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
-    expect(screen.getByText("RetroArch", { selector: ".recipe-selection-summary p" })).toBeTruthy();
+    expect(
+      screen.getByText("RetroArch", {
+        selector: ".recipe-selection-summary p",
+      }),
+    ).toBeTruthy();
     expect(screen.getByText("Recipes · 4 of 4 shown")).toBeTruthy();
     expect(screen.getByText("Also includes: Copy BIOS files")).toBeTruthy();
     expect(screen.getByText("Downloads files")).toBeTruthy();
-    const optionalRootRecipe = screen.getByRole("checkbox", { name: /Optional root enhancement/ }) as HTMLInputElement;
+    const optionalRootRecipe = screen.getByRole("checkbox", {
+      name: /Optional root enhancement/,
+    }) as HTMLInputElement;
     expect(optionalRootRecipe.disabled).toBe(false);
-    expect(optionalRootRecipe.getAttribute("aria-describedby"))
-      .not.toContain("recipe.optional-root-enhancement-blockers");
+    expect(optionalRootRecipe.getAttribute("aria-describedby")).not.toContain(
+      "recipe.optional-root-enhancement-blockers",
+    );
     expect(screen.queryByText("Possible blockers: Root access")).toBeNull();
 
     const search = screen.getByRole("searchbox", { name: "Search recipes" });
     await user.type(search, "firmware");
-    expect(screen.getByRole("checkbox", { name: /Copy BIOS files/ })).toBeTruthy();
+    expect(
+      screen.getByRole("checkbox", { name: /Copy BIOS files/ }),
+    ).toBeTruthy();
     expect(screen.getByText("BIOS files required")).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: /RetroArch/ })).toBeNull();
     expect(screen.getByText("Recipes · 1 of 4 shown")).toBeTruthy();
 
     await user.clear(search);
     await user.click(screen.getByRole("radio", { name: "Unavailable" }));
-    const blockedRecipe = screen.getByRole("checkbox", { name: /Root tools/ }) as HTMLInputElement;
+    const blockedRecipe = screen.getByRole("checkbox", {
+      name: /Root tools/,
+    }) as HTMLInputElement;
     expect(blockedRecipe.disabled).toBe(true);
-    const blockedDescriptionIds = blockedRecipe.getAttribute("aria-describedby")?.split(/\s+/) ?? [];
+    const blockedDescriptionIds =
+      blockedRecipe.getAttribute("aria-describedby")?.split(/\s+/) ?? [];
     const blockedDescription = blockedDescriptionIds
       .map((id) => document.getElementById(id)?.textContent ?? "")
       .join(" ");
     expect(blockedDescription).toContain("Unavailable on this device");
-    expect(blockedDescription).toContain("Possible blockers: Root access, App data access");
+    expect(blockedDescription).toContain(
+      "Possible blockers: Root access, App data access",
+    );
     expect(screen.getByText("APK file required")).toBeTruthy();
     expect(screen.getByText("ROM or content folder required")).toBeTruthy();
-    expect(screen.getByText("Possible blockers: Root access, App data access")).toBeTruthy();
+    expect(
+      screen.getByText("Possible blockers: Root access, App data access"),
+    ).toBeTruthy();
     expect(screen.queryByText("root_shell")).toBeNull();
-    expect(screen.queryByRole("checkbox", { name: /Optional root enhancement/ })).toBeNull();
-    expect(screen.queryByRole("checkbox", { name: /Copy BIOS files/ })).toBeNull();
+    expect(
+      screen.queryByRole("checkbox", { name: /Optional root enhancement/ }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("checkbox", { name: /Copy BIOS files/ }),
+    ).toBeNull();
 
     await user.click(screen.getByRole("radio", { name: "Selected" }));
     const selectedRecipe = screen.getByRole("checkbox", { name: /RetroArch/ });
     await user.click(selectedRecipe);
     expect(screen.getByRole("heading", { name: "0 selected" })).toBeTruthy();
     expect(screen.getByText("No recipes selected.")).toBeTruthy();
-    expect(screen.getByText("No recipes match the current search and filter.")).toBeTruthy();
+    expect(
+      screen.getByText("No recipes match the current search and filter."),
+    ).toBeTruthy();
   });
 
   test("selects only available backend-recommended recipes and revalidates them", async () => {
@@ -1408,38 +3691,95 @@ describe("Phase 5B workflow surfaces", () => {
       .mockResolvedValueOnce(initialDescription)
       .mockResolvedValueOnce({
         ...initialDescription,
-        selectedRecipes: ["recipe.frontend", "recipe.shader-pack", "recipe.dependency"],
-        expandedRecipes: ["recipe.frontend", "recipe.shader-pack", "recipe.dependency"],
+        selectedRecipes: [
+          "recipe.frontend",
+          "recipe.shader-pack",
+          "recipe.dependency",
+        ],
+        expandedRecipes: [
+          "recipe.frontend",
+          "recipe.shader-pack",
+          "recipe.dependency",
+        ],
         recipeOptions: initialDescription.recipeOptions.map((recipe) => ({
           ...recipe,
-          selected: ["recipe.frontend", "recipe.shader-pack", "recipe.dependency"].includes(recipe.id),
+          selected: [
+            "recipe.frontend",
+            "recipe.shader-pack",
+            "recipe.dependency",
+          ].includes(recipe.id),
         })),
       });
     await renderReadyApp();
 
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
     await user.click(await screen.findByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
 
-    const recommended = screen.getByRole("button", { name: "Select recommended setup" });
+    const recommended = screen.getByRole("button", {
+      name: "Select recommended setup",
+    });
     expect((recommended as HTMLButtonElement).disabled).toBe(false);
     await user.click(recommended);
 
     await vi.waitFor(() => {
-      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({
-        devicePlan: "plan.supported",
-        selectedRecipes: ["recipe.frontend", "recipe.shader-pack"],
-      }));
+      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          devicePlan: "plan.supported",
+          selectedRecipes: ["recipe.frontend", "recipe.shader-pack"],
+        }),
+      );
     });
 
     await vi.waitFor(() => {
-      expect((screen.getByRole("checkbox", { name: /Frontend/ }) as HTMLInputElement).checked).toBe(true);
-      expect((screen.getByRole("checkbox", { name: /Shader pack/ }) as HTMLInputElement).checked).toBe(true);
-      expect((screen.getByRole("checkbox", { name: /Custom tools/ }) as HTMLInputElement).checked).toBe(false);
-      expect((screen.getByRole("checkbox", { name: /Shared dependency/ }) as HTMLInputElement).checked).toBe(true);
-      expect(screen.getByText("Added automatically because another selected recipe requires it.")).toBeTruthy();
-      expect((screen.getByRole("checkbox", { name: /Root enhancement/ }) as HTMLInputElement).checked).toBe(false);
-      expect((screen.getByRole("button", { name: "Recommended setup selected" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(
+        (screen.getByRole("checkbox", { name: /Frontend/ }) as HTMLInputElement)
+          .checked,
+      ).toBe(true);
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /Shader pack/,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(true);
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /Custom tools/,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(false);
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /Shared dependency/,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(true);
+      expect(
+        screen.getByText(
+          "Added automatically because another selected recipe requires it.",
+        ),
+      ).toBeTruthy();
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /Root enhancement/,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(false);
+      expect(
+        (
+          screen.getByRole("button", {
+            name: "Recommended setup selected",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(true);
     });
   });
 
@@ -1465,7 +3805,9 @@ describe("Phase 5B workflow surfaces", () => {
     });
     await renderReadyApp();
 
-    const unauthorized = await screen.findByRole("button", { name: /Authorization pending.*Authorization required/ });
+    const unauthorized = await screen.findByRole("button", {
+      name: /Authorization pending.*Authorization required/,
+    });
     expect((unauthorized as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/accept the USB debugging prompt/i)).toBeTruthy();
     expect(screen.getByText("Customize")).toBeTruthy();
@@ -1473,17 +3815,31 @@ describe("Phase 5B workflow surfaces", () => {
     mockApi.pollDevices.mockResolvedValue([availableDevice]);
     await user.click(screen.getByRole("button", { name: "Refresh devices" }));
 
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-    await screen.findByRole("heading", { name: "This device is not officially supported" });
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
+    await screen.findByRole("heading", {
+      name: "This device is not officially supported",
+    });
     expect(screen.queryByText(safePlan.name)).toBeNull();
 
-    const continueButton = screen.getByRole("button", { name: "Show safe generic setups" });
+    const continueButton = screen.getByRole("button", {
+      name: "Show safe generic setups",
+    });
     expect((continueButton as HTMLButtonElement).disabled).toBe(true);
-    await user.click(screen.getByRole("checkbox", { name: /not officially supported.*not device-specific/i }));
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /not officially supported.*not device-specific/i,
+      }),
+    );
     expect(screen.queryByText(safePlan.name)).toBeNull();
     await user.click(continueButton);
 
-    const planRadio = await screen.findByRole("radio", { name: /Backend Safe Generic/ });
+    const planRadio = await screen.findByRole("radio", {
+      name: /Backend Safe Generic/,
+    });
     expect((planRadio as HTMLInputElement).checked).toBe(false);
   });
 
@@ -1495,16 +3851,36 @@ describe("Phase 5B workflow surfaces", () => {
     mockApi.pickPlatformToolsZip.mockReturnValue(picker.promise);
     mockApi.installPlatformToolsSelection.mockReturnValue(installation.promise);
     render(<App />);
-    await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
+    await screen.findByRole("heading", {
+      name: "Set up Android Platform-Tools",
+    });
 
-    const importButton = screen.getByRole("button", { name: "Select Platform-Tools ZIP…" });
+    const importButton = screen.getByRole("button", {
+      name: "Select Platform-Tools ZIP…",
+    });
     await user.click(importButton);
     expect(screen.getByRole("button", { name: "Choosing ZIP…" })).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Choosing ZIP…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Choosing ZIP…",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
 
-    await act(async () => picker.resolve({ outcome: "selected", selectionHandle: "selection-opaque" }));
-    expect(await screen.findByRole("button", { name: "Checking and installing…" })).toBeTruthy();
-    expect(mockApi.installPlatformToolsSelection).toHaveBeenCalledWith("selection-opaque", undefined);
+    await act(async () =>
+      picker.resolve({
+        outcome: "selected",
+        selectionHandle: "selection-opaque",
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Checking and installing…" }),
+    ).toBeTruthy();
+    expect(mockApi.installPlatformToolsSelection).toHaveBeenCalledWith(
+      "selection-opaque",
+      undefined,
+    );
 
     await act(async () => installation.resolve(readyAdb));
     await screen.findByRole("heading", { name: "Choose an Android device" });
@@ -1515,17 +3891,39 @@ describe("Phase 5B workflow surfaces", () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
-    await user.click(await openSupportAction(user, "Remove managed Platform-Tools", supportSnapshot({ platformActions: true })));
-    const firstDialog = screen.getByRole("alertdialog", { name: "Remove Platform-Tools?" });
-    await user.click(within(firstDialog).getByRole("button", { name: "Cancel" }));
+    await user.click(
+      await openSupportAction(
+        user,
+        "Remove managed Platform-Tools",
+        supportSnapshot({ platformActions: true }),
+      ),
+    );
+    const firstDialog = screen.getByRole("alertdialog", {
+      name: "Remove Platform-Tools?",
+    });
+    await user.click(
+      within(firstDialog).getByRole("button", { name: "Cancel" }),
+    );
     expect(mockApi.removePlatformTools).not.toHaveBeenCalled();
 
-    await user.click(await openSupportAction(user, "Remove managed Platform-Tools", supportSnapshot({ platformActions: true })));
-    const secondDialog = screen.getByRole("alertdialog", { name: "Remove Platform-Tools?" });
+    await user.click(
+      await openSupportAction(
+        user,
+        "Remove managed Platform-Tools",
+        supportSnapshot({ platformActions: true }),
+      ),
+    );
+    const secondDialog = screen.getByRole("alertdialog", {
+      name: "Remove Platform-Tools?",
+    });
     expect(secondDialog.textContent).not.toMatch(/authority|handle/i);
-    await user.click(within(secondDialog).getByRole("button", { name: "Remove" }));
+    await user.click(
+      within(secondDialog).getByRole("button", { name: "Remove" }),
+    );
     expect(mockApi.removePlatformTools).toHaveBeenCalledWith(7);
-    await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
+    await screen.findByRole("heading", {
+      name: "Set up Android Platform-Tools",
+    });
     expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
   });
 
@@ -1536,16 +3934,25 @@ describe("Phase 5B workflow surfaces", () => {
     await renderReadyApp();
 
     vi.useFakeTimers();
-    const refreshButton = screen.getByRole("button", { name: "Refresh devices" });
+    const refreshButton = screen.getByRole("button", {
+      name: "Refresh devices",
+    });
     fireEvent.click(refreshButton);
-    expect((screen.getByRole("button", { name: "Refreshing…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Refreshing…" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Refreshing…" }));
     expect(mockApi.pollDevices).toHaveBeenCalledTimes(2);
 
     await act(async () => refresh.resolve([availableDevice]));
-    expect(screen.getAllByText("Refresh complete. 1 device found.")).toHaveLength(2);
+    expect(
+      screen.getAllByText("Refresh complete. 1 device found."),
+    ).toHaveLength(2);
     act(() => vi.advanceTimersByTime(5000));
-    expect(screen.getAllByText("Refresh complete. 1 device found.")).toHaveLength(1);
+    expect(
+      screen.getAllByText("Refresh complete. 1 device found."),
+    ).toHaveLength(1);
     vi.useRealTimers();
   });
 
@@ -1553,17 +3960,25 @@ describe("Phase 5B workflow surfaces", () => {
     const user = userEvent.setup();
     await renderReadyApp();
     const runtimeReads = mockApi.runtimeStatus.mock.calls.length;
-    mockApi.pollDevices.mockRejectedValueOnce(JSON.stringify({
-      code: "runtime_session_lost",
-      message: "The execution runtime session is no longer available.",
-    }));
+    mockApi.pollDevices.mockRejectedValueOnce(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
 
     await user.click(screen.getByRole("button", { name: "Refresh devices" }));
 
     expect(
-      await screen.findAllByText("The execution runtime session is no longer available."),
+      await screen.findAllByText(
+        "The execution runtime session is no longer available.",
+      ),
     ).not.toHaveLength(0);
-    await waitFor(() => expect(mockApi.runtimeStatus.mock.calls.length).toBeGreaterThan(runtimeReads));
+    await waitFor(() =>
+      expect(mockApi.runtimeStatus.mock.calls.length).toBeGreaterThan(
+        runtimeReads,
+      ),
+    );
     expect(document.body.textContent).not.toMatch(/runtime_session_lost/);
   });
 
@@ -1571,12 +3986,24 @@ describe("Phase 5B workflow surfaces", () => {
     const user = userEvent.setup();
     mockApi.pollDevices.mockResolvedValue([availableDevice]);
     await renderReadyApp();
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
     await screen.findByRole("heading", { name: "Example Handheld" });
 
-    await user.click(await openSupportAction(user, "Replace managed Platform-Tools", supportSnapshot({ platformActions: true })));
+    await user.click(
+      await openSupportAction(
+        user,
+        "Replace managed Platform-Tools",
+        supportSnapshot({ platformActions: true }),
+      ),
+    );
     expect(
-      await within(screen.getByRole("main")).findByText(/Your device was rediscovered/),
+      await within(screen.getByRole("main")).findByText(
+        /Your device was rediscovered/,
+      ),
     ).toBeTruthy();
     expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/selected device disconnected/i)).toBeNull();
@@ -1586,13 +4013,25 @@ describe("Phase 5B workflow surfaces", () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
-    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
+    await user.click(
+      await openSupportAction(
+        user,
+        "Restart app service",
+        supportSnapshot({ serviceFailure: true }),
+      ),
+    );
 
-    await waitFor(() => expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1),
+    );
     expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
     expect(mockApi.stageRecoveryDraft).not.toHaveBeenCalled();
-    expect(screen.queryByRole("alertdialog", { name: "Restart the app service?" })).toBeNull();
-    expect(screen.getByRole("heading", { name: "Choose an Android device" })).toBeTruthy();
+    expect(
+      screen.queryByRole("alertdialog", { name: "Restart the app service?" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "Choose an Android device" }),
+    ).toBeTruthy();
   });
 
   test("rejects a device refresh response from before a runtime restart", async () => {
@@ -1605,47 +4044,64 @@ describe("Phase 5B workflow surfaces", () => {
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Refresh devices" }));
-    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
+    await user.click(
+      await openSupportAction(
+        user,
+        "Restart app service",
+        supportSnapshot({ serviceFailure: true }),
+      ),
+    );
     await screen.findByRole("heading", { name: "Choose an Android device" });
     await act(async () => staleRefresh.resolve([availableDevice]));
 
-    expect(screen.queryByRole("button", { name: /Supported Handheld.*Connected/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Supported Handheld.*Connected/ }),
+    ).toBeNull();
     expect(screen.queryByText("Refresh complete. 1 device found.")).toBeNull();
   });
 
   test("restart confirmation exposes only friendly labels for backend-omitted values", async () => {
     const user = userEvent.setup();
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/token",
-      inputId: "token",
-      label: "Account token",
-      required: true,
-      sensitive: true,
-    }));
-    mockApi.stageRecoveryDraft.mockImplementation(async (request: { requestGeneration: number; draftGeneration: number }) => ({
-      requestGeneration: request.requestGeneration,
-      draftGeneration: request.draftGeneration,
-      recordGeneration: request.draftGeneration,
-      omittedBindings: ["recipe.one/token"],
-    }));
-    mockApi.restoreRecoveryDraft.mockImplementation(async (
-      _sessionGeneration: number,
-      draftGeneration: number,
-      requestGeneration: number,
-    ) => ({
-      requestGeneration,
-      draftGeneration,
-      displayName: null,
-      sourceStatus: "unsaved",
-      document: null,
-      intent: {
-        dirty: true,
-        devicePlan: "plan.supported",
-        selectedRecipes: ["recipe.one"],
-        bindings: {},
-        requiredReentryBindings: ["recipe.one/token"],
-      },
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/token",
+        inputId: "token",
+        label: "Account token",
+        required: true,
+        sensitive: true,
+      }),
+    );
+    mockApi.stageRecoveryDraft.mockImplementation(
+      async (request: {
+        requestGeneration: number;
+        draftGeneration: number;
+      }) => ({
+        requestGeneration: request.requestGeneration,
+        draftGeneration: request.draftGeneration,
+        recordGeneration: request.draftGeneration,
+        omittedBindings: ["recipe.one/token"],
+      }),
+    );
+    mockApi.restoreRecoveryDraft.mockImplementation(
+      async (
+        _sessionGeneration: number,
+        draftGeneration: number,
+        requestGeneration: number,
+      ) => ({
+        requestGeneration,
+        draftGeneration,
+        displayName: null,
+        sourceStatus: "unsaved",
+        document: null,
+        intent: {
+          dirty: true,
+          devicePlan: "plan.supported",
+          selectedRecipes: ["recipe.one"],
+          bindings: {},
+          requiredReentryBindings: ["recipe.one/token"],
+        },
+      }),
+    );
     await advanceToInputs(user);
     expect(screen.getByRole("heading", { name: "Other" })).toBeTruthy();
     expect(screen.getByText("Required")).toBeTruthy();
@@ -1653,128 +4109,264 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByText("Not saved")).toBeTruthy();
     await user.type(screen.getByLabelText("Account token"), "do-not-display");
 
-    const restartButton = await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true }));
+    const restartButton = await openSupportAction(
+      user,
+      "Restart app service",
+      supportSnapshot({ serviceFailure: true }),
+    );
     await user.click(restartButton);
-    const dialog = await screen.findByRole("alertdialog", { name: "Restart the app service?" });
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Restart the app service?",
+    });
     expect(dialog.textContent).toMatch(/Affected fields: Account token/);
     expect(dialog.textContent).not.toMatch(/do-not-display|recipe\.one\/token/);
-    await user.click(within(dialog).getByRole("button", { name: "Restart app service" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "Restart app service" }),
+    );
 
     expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1);
     await screen.findByRole("heading", { name: "Choose an Android device" });
-    expect(await screen.findByText("Setup restored after restart")).toBeTruthy();
-    expect(await screen.findAllByText(/Your setup choices were restored, but they have not been saved/i)).toHaveLength(2);
-    expect(screen.queryByText(/recovered intent|source until you save/i)).toBeNull();
-    expect(await screen.findAllByText(/Re-enter 1 sensitive input/)).toHaveLength(2);
-    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(expect.objectContaining({
-      devicePlan: "plan.supported",
-      selectedRecipes: ["recipe.one"],
-      bindings: { "recipe.one/token": "do-not-display" },
-      dirty: true,
-    }));
+    expect(
+      await screen.findByText("Setup restored after restart"),
+    ).toBeTruthy();
+    expect(
+      await screen.findAllByText(
+        /Your setup choices were restored, but they have not been saved/i,
+      ),
+    ).toHaveLength(2);
+    expect(
+      screen.queryByText(/recovered intent|source until you save/i),
+    ).toBeNull();
+    expect(
+      await screen.findAllByText(/Re-enter 1 sensitive input/),
+    ).toHaveLength(2);
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.one"],
+        bindings: { "recipe.one/token": "do-not-display" },
+        dirty: true,
+      }),
+    );
   });
 
   test("cancelling a restart with omitted values preserves dirty workflow state and focus", async () => {
     const user = userEvent.setup();
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/token",
-      inputId: "token",
-      label: "Account token",
-      required: true,
-      sensitive: true,
-    }));
-    mockApi.stageRecoveryDraft.mockImplementation(async (request: { requestGeneration: number; draftGeneration: number }) => ({
-      requestGeneration: request.requestGeneration,
-      draftGeneration: request.draftGeneration,
-      recordGeneration: request.draftGeneration,
-      omittedBindings: ["recipe.one/token"],
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/token",
+        inputId: "token",
+        label: "Account token",
+        required: true,
+        sensitive: true,
+      }),
+    );
+    mockApi.stageRecoveryDraft.mockImplementation(
+      async (request: {
+        requestGeneration: number;
+        draftGeneration: number;
+      }) => ({
+        requestGeneration: request.requestGeneration,
+        draftGeneration: request.draftGeneration,
+        recordGeneration: request.draftGeneration,
+        omittedBindings: ["recipe.one/token"],
+      }),
+    );
     await advanceToInputs(user);
     const input = screen.getByLabelText("Account token") as HTMLInputElement;
     await user.type(input, "keep-current-value");
-    const supportButton = screen.getByRole("button", { name: "Troubleshooting" });
-    vi.spyOn(supportButton, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
-    const restartButton = await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true }));
+    const supportButton = screen.getByRole("button", {
+      name: "Troubleshooting",
+    });
+    vi.spyOn(supportButton, "getClientRects").mockReturnValue([
+      {},
+    ] as unknown as DOMRectList);
+    const restartButton = await openSupportAction(
+      user,
+      "Restart app service",
+      supportSnapshot({ serviceFailure: true }),
+    );
 
     await user.click(restartButton);
-    const dialog = await screen.findByRole("alertdialog", { name: "Restart the app service?" });
-    expect(dialog.textContent).not.toMatch(/keep-current-value|recipe\.one\/token/);
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Restart the app service?",
+    });
+    expect(dialog.textContent).not.toMatch(
+      /keep-current-value|recipe\.one\/token/,
+    );
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
     expect(mockApi.restartRuntime).not.toHaveBeenCalled();
     expect(input.value).toBe("keep-current-value");
-    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+    expect(
+      screen.getByRole("heading", {
+        name: "Provide required files and options",
+      }),
+    ).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(supportButton));
   });
 
   test("successful restart restores nonsensitive portable intent without prompting", async () => {
     const user = userEvent.setup();
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/theme",
-      inputId: "theme",
-      label: "Theme",
-      required: false,
-      sensitive: false,
-    }));
-    mockApi.restoreRecoveryDraft.mockImplementation(async (
-      _sessionGeneration: number,
-      draftGeneration: number,
-      requestGeneration: number,
-    ) => ({
-      requestGeneration,
-      draftGeneration,
-      displayName: null,
-      sourceStatus: "unsaved",
-      document: null,
-      intent: {
-        dirty: true,
-        devicePlan: "plan.supported",
-        selectedRecipes: ["recipe.one"],
-        bindings: { "recipe.one/theme": "dark" },
-        requiredReentryBindings: [],
-      },
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/theme",
+        inputId: "theme",
+        label: "Theme",
+        required: false,
+        sensitive: false,
+      }),
+    );
+    mockApi.restoreRecoveryDraft.mockImplementation(
+      async (
+        _sessionGeneration: number,
+        draftGeneration: number,
+        requestGeneration: number,
+      ) => ({
+        requestGeneration,
+        draftGeneration,
+        displayName: null,
+        sourceStatus: "unsaved",
+        document: null,
+        intent: {
+          dirty: true,
+          devicePlan: "plan.supported",
+          selectedRecipes: ["recipe.one"],
+          bindings: { "recipe.one/theme": "dark" },
+          requiredReentryBindings: [],
+        },
+      }),
+    );
     await advanceToInputs(user);
     await user.type(screen.getByLabelText("Theme"), "dark");
 
-    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
+    await user.click(
+      await openSupportAction(
+        user,
+        "Restart app service",
+        supportSnapshot({ serviceFailure: true }),
+      ),
+    );
 
-    expect(screen.queryByRole("alertdialog", { name: "Restart the app service?" })).toBeNull();
-    expect(await screen.findByText("Setup restored after restart")).toBeTruthy();
-    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(expect.objectContaining({
-      devicePlan: "plan.supported",
-      selectedRecipes: ["recipe.one"],
-      bindings: { "recipe.one/theme": "dark" },
-      dirty: true,
-    }));
+    expect(
+      screen.queryByRole("alertdialog", { name: "Restart the app service?" }),
+    ).toBeNull();
+    expect(
+      await screen.findByText("Setup restored after restart"),
+    ).toBeTruthy();
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.one"],
+        bindings: { "recipe.one/theme": "dark" },
+        dirty: true,
+      }),
+    );
     expect(mockApi.restoreRecoveryDraft).toHaveBeenCalledTimes(1);
+  });
+
+  test("restart stops when setup changes during recovery persistence", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/theme",
+        inputId: "theme",
+        label: "Theme",
+        required: false,
+        sensitive: false,
+      }),
+    );
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Theme") as HTMLInputElement;
+    await user.type(input, "before");
+    await waitFor(() => expect(mockApi.stageRecoveryDraft).toHaveBeenCalled());
+    mockApi.stageRecoveryDraft.mockClear();
+
+    let resolveRecovery: (() => void) | null = null;
+    mockApi.stageRecoveryDraft.mockImplementation((request) =>
+      new Promise((resolve) => {
+        resolveRecovery = () =>
+          resolve({
+            requestGeneration: request.requestGeneration,
+            draftGeneration: request.draftGeneration,
+            recordGeneration: request.draftGeneration,
+            omittedBindings: [],
+          });
+      }),
+    );
+    await user.click(
+      await openSupportAction(
+        user,
+        "Restart app service",
+        supportSnapshot({ serviceFailure: true }),
+      ),
+    );
+    await waitFor(() => expect(resolveRecovery).not.toBeNull());
+
+    fireEvent.change(input, { target: { value: "latest" } });
+    await act(async () => {
+      resolveRecovery?.();
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByText(
+        "Setup changed while the app service restart was preparing. Review the latest setup before restarting.",
+      ),
+    ).toBeTruthy();
+    expect(mockApi.restartRuntime).not.toHaveBeenCalled();
+    expect(input.value).toBe("latest");
   });
 
   test("restart failure preserves the active portable workflow and settles its guard", async () => {
     const user = userEvent.setup();
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/theme",
-      inputId: "theme",
-      label: "Theme",
-      required: false,
-      sensitive: false,
-    }));
-    mockApi.restartRuntime.mockRejectedValue(JSON.stringify({
-      code: "runtime_restart_failed",
-      message: "The app service could not restart. Try again.",
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/theme",
+        inputId: "theme",
+        label: "Theme",
+        required: false,
+        sensitive: false,
+      }),
+    );
+    mockApi.restartRuntime.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_restart_failed",
+        message: "The app service could not restart. Try again.",
+      }),
+    );
     await advanceToInputs(user);
     const input = screen.getByLabelText("Theme") as HTMLInputElement;
     await user.type(input, "dark");
 
-    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
+    await user.click(
+      await openSupportAction(
+        user,
+        "Restart app service",
+        supportSnapshot({ serviceFailure: true }),
+      ),
+    );
 
-    expect(await screen.findAllByText("The app service could not restart. Try again.")).not.toHaveLength(0);
+    expect(
+      await screen.findAllByText(
+        "The app service could not restart. Try again.",
+      ),
+    ).not.toHaveLength(0);
     expect(input.value).toBe("dark");
-    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
-    await waitFor(() => expect(
-      (screen.getByRole("button", { name: "Troubleshooting" }) as HTMLButtonElement).disabled,
-    ).toBe(false));
+    expect(
+      screen.getByRole("heading", {
+        name: "Provide required files and options",
+      }),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole("button", {
+            name: "Troubleshooting",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
     expect(document.body.textContent).not.toMatch(/runtime_restart_failed/);
   });
 });
@@ -1830,21 +4422,32 @@ describe("device qualification controller integration", () => {
 
     await renderReadyApp();
 
-    expect(await screen.findByRole("heading", { name: "Select the registered device to resume qualification" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", {
+        name: "Select the registered device to resume qualification",
+      }),
+    ).toBeTruthy();
     const connectedDevice = await screen.findByRole("button", {
       name: /Supported Handheld.*Connected/,
     });
     expect((connectedDevice as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole("button", { name: "Begin qualification session" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Begin qualification session" }),
+    ).toBeNull();
 
     await user.click(connectedDevice);
-    await waitFor(() => expect(mockApi.probeDevice).toHaveBeenCalledWith(availableDevice.deviceHandle));
-    expect(mockApi.matchDevice).toHaveBeenCalledWith(availableDevice.deviceHandle);
+    await waitFor(() =>
+      expect(mockApi.probeDevice).toHaveBeenCalledWith(
+        availableDevice.deviceHandle,
+      ),
+    );
+    expect(mockApi.matchDevice).toHaveBeenCalledWith(
+      availableDevice.deviceHandle,
+    );
     expect(mockApi.beginQualificationSession).not.toHaveBeenCalled();
     expect(mockApi.recordQualificationCheckpoint).not.toHaveBeenCalled();
     expect(mockApi.abandonQualificationSession).not.toHaveBeenCalled();
   });
-
 
   test("an explicit root check reloads qualification status and releases its locks", async () => {
     const user = userEvent.setup();
@@ -1860,27 +4463,31 @@ describe("device qualification controller integration", () => {
         qualificationContract: 2,
       },
       runtimeContract: "runtime-contract-2",
-      workflows: [{
-        id: "workflow.one",
-        version: 1,
-        purpose: "Workflow one",
-        productionRecipes: ["recipe.one"],
-        requiredCapabilities: [],
-        prerequisites: [],
-        humanCheckpoints: [],
-      }],
-      targets: [{
-        id: "target.one",
-        profileId: "profile.one",
-        manufacturer: "Example",
-        model: "Handheld",
-        androidVersion: "14",
-        androidApi: 34,
-        abiSocClass: "arm64",
-        rootState: "non_root",
-        connectionType: "usb3",
-        firmwareBuild: "firmware-opaque",
-      }],
+      workflows: [
+        {
+          id: "workflow.one",
+          version: 1,
+          purpose: "Workflow one",
+          productionRecipes: ["recipe.one"],
+          requiredCapabilities: [],
+          prerequisites: [],
+          humanCheckpoints: [],
+        },
+      ],
+      targets: [
+        {
+          id: "target.one",
+          profileId: "profile.one",
+          manufacturer: "Example",
+          model: "Handheld",
+          androidVersion: "14",
+          androidApi: 34,
+          abiSocClass: "arm64",
+          rootState: "non_root",
+          connectionType: "usb3",
+          firmwareBuild: "firmware-opaque",
+        },
+      ],
       deviceSelectionLocked: false,
       resumableCandidates: [],
       lifecycleRevision: 1,
@@ -1947,35 +4554,49 @@ describe("device qualification controller integration", () => {
         deviceIdentity: "device-opaque",
       };
     });
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/option",
-      inputId: "option",
-      label: "Optional setting",
-      required: false,
-      sensitive: false,
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/option",
+        inputId: "option",
+        label: "Optional setting",
+        required: false,
+        sensitive: false,
+      }),
+    );
 
     await advanceToInputs(user);
-    const beginSession = screen.getByRole("button", { name: "Begin qualification session" });
-    await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
+    const beginSession = screen.getByRole("button", {
+      name: "Begin qualification session",
+    });
+    await waitFor(() =>
+      expect((beginSession as HTMLButtonElement).disabled).toBe(false),
+    );
     await user.click(beginSession);
-    await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
+    await screen.findByRole("heading", {
+      name: "Normal workflow intent is locked",
+    });
 
     await user.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
     expect(
-      (screen.getByRole("checkbox", { name: /Recipe One/ }) as HTMLInputElement).disabled,
+      (screen.getByRole("checkbox", { name: /Recipe One/ }) as HTMLInputElement)
+        .disabled,
     ).toBe(true);
 
     await user.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Example Handheld" });
-    const statusCallsBeforeCheck = mockApi.deviceQualificationModeStatus.mock.calls.length;
+    const statusCallsBeforeCheck =
+      mockApi.deviceQualificationModeStatus.mock.calls.length;
     const pollsBeforeCheck = mockApi.pollDevices.mock.calls.length;
     await user.click(screen.getByRole("button", { name: "Check root access" }));
-    await waitFor(() => expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"));
-    await waitFor(() => expect(
-      mockApi.deviceQualificationModeStatus.mock.calls.length,
-    ).toBeGreaterThan(statusCallsBeforeCheck));
+    await waitFor(() =>
+      expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"),
+    );
+    await waitFor(() =>
+      expect(
+        mockApi.deviceQualificationModeStatus.mock.calls.length,
+      ).toBeGreaterThan(statusCallsBeforeCheck),
+    );
     // The lifecycle reload needed no device poll: the explicit root command
     // is the only signal that changed.
     expect(mockApi.pollDevices.mock.calls.length).toBe(pollsBeforeCheck);
@@ -1986,16 +4607,24 @@ describe("device qualification controller integration", () => {
     const connectedDevice = await screen.findByRole("button", {
       name: /Supported Handheld.*Connected/,
     });
-    await waitFor(() => expect((connectedDevice as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() =>
+      expect((connectedDevice as HTMLButtonElement).disabled).toBe(false),
+    );
 
     // Walking forward proves the recipe intent lock is released as well.
     await user.click(connectedDevice);
     await screen.findByRole("heading", { name: "Example Handheld" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
-    await waitFor(() => expect(
-      (screen.getByRole("checkbox", { name: /Recipe One/ }) as HTMLInputElement).disabled,
-    ).toBe(false));
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /Recipe One/,
+          }) as HTMLInputElement
+        ).disabled,
+      ).toBe(false),
+    );
 
     // Only the explicit root command caused the reload: no review replacement
     // or execution progress signal was involved.
@@ -2031,15 +4660,26 @@ describe("device qualification controller integration", () => {
     });
 
     await renderReadyApp();
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-    const section = (await screen.findByRole("heading", { name: "Device qualification" })).closest("section");
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
+    const section = (
+      await screen.findByRole("heading", { name: "Device qualification" })
+    ).closest("section");
     expect(section?.textContent).toContain("Root accessNot checked");
-    const statusCallsBeforeCheck = mockApi.deviceQualificationModeStatus.mock.calls.length;
+    const statusCallsBeforeCheck =
+      mockApi.deviceQualificationModeStatus.mock.calls.length;
     await user.click(screen.getByRole("button", { name: "Check root access" }));
-    await waitFor(() => expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"));
-    await waitFor(() => expect(
-      mockApi.deviceQualificationModeStatus.mock.calls.length,
-    ).toBeGreaterThan(statusCallsBeforeCheck));
+    await waitFor(() =>
+      expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"),
+    );
+    await waitFor(() =>
+      expect(
+        mockApi.deviceQualificationModeStatus.mock.calls.length,
+      ).toBeGreaterThan(statusCallsBeforeCheck),
+    );
     expect(section?.textContent).toContain("Root accessNot checked");
   });
 
@@ -2057,27 +4697,31 @@ describe("device qualification controller integration", () => {
         qualificationContract: 2,
       },
       runtimeContract: "runtime-contract-2",
-      workflows: [{
-        id: "workflow.one",
-        version: 1,
-        purpose: "Workflow one",
-        productionRecipes: ["recipe.one"],
-        requiredCapabilities: [],
-        prerequisites: [],
-        humanCheckpoints: [],
-      }],
-      targets: [{
-        id: "target.one",
-        profileId: "profile.one",
-        manufacturer: "Example",
-        model: "Handheld",
-        androidVersion: "14",
-        androidApi: 34,
-        abiSocClass: "arm64",
-        rootState: "non_root",
-      connectionType: "usb3",
-      firmwareBuild: "firmware-opaque",
-      }],
+      workflows: [
+        {
+          id: "workflow.one",
+          version: 1,
+          purpose: "Workflow one",
+          productionRecipes: ["recipe.one"],
+          requiredCapabilities: [],
+          prerequisites: [],
+          humanCheckpoints: [],
+        },
+      ],
+      targets: [
+        {
+          id: "target.one",
+          profileId: "profile.one",
+          manufacturer: "Example",
+          model: "Handheld",
+          androidVersion: "14",
+          androidApi: 34,
+          abiSocClass: "arm64",
+          rootState: "non_root",
+          connectionType: "usb3",
+          firmwareBuild: "firmware-opaque",
+        },
+      ],
       deviceSelectionLocked: false,
       resumableCandidates: [],
       lifecycleRevision: 1,
@@ -2118,13 +4762,15 @@ describe("device qualification controller integration", () => {
       return beginSessionSnapshot;
     });
     mockApi.pollDevices.mockResolvedValue([availableDevice]);
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/option",
-      inputId: "option",
-      label: "Optional setting",
-      required: false,
-      sensitive: false,
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/option",
+        inputId: "option",
+        label: "Optional setting",
+        required: false,
+        sensitive: false,
+      }),
+    );
     mockApi.prepareExecutionReview.mockResolvedValue({
       reviewHandle: "review-opaque",
       setup: { name: "Reviewed setup" },
@@ -2138,24 +4784,38 @@ describe("device qualification controller integration", () => {
 
     await advanceToInputs(user);
 
-    expect(await screen.findByRole("heading", { name: "Device qualification mode" })).toBeTruthy();
-    const beginSession = screen.getByRole("button", { name: "Begin qualification session" });
-    await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
+    expect(
+      await screen.findByRole("heading", { name: "Device qualification mode" }),
+    ).toBeTruthy();
+    const beginSession = screen.getByRole("button", {
+      name: "Begin qualification session",
+    });
+    await waitFor(() =>
+      expect((beginSession as HTMLButtonElement).disabled).toBe(false),
+    );
     await user.click(beginSession);
-    await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
+    await screen.findByRole("heading", {
+      name: "Normal workflow intent is locked",
+    });
     expect(mockApi.prepareExecutionReview).not.toHaveBeenCalled();
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await waitFor(() => expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(1));
-    expect(mockApi.prepareExecutionReview).toHaveBeenCalledWith(expect.objectContaining({
-      devicePlan: "plan.supported",
-      selectedRecipes: ["recipe.one"],
-    }));
+    await waitFor(() =>
+      expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(1),
+    );
+    expect(mockApi.prepareExecutionReview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.one"],
+      }),
+    );
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Back" }));
-    await screen.findByRole("heading", { name: "Provide required files and options" });
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
     await user.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
     await user.click(screen.getByRole("button", { name: "Back" }));
@@ -2177,6 +4837,1272 @@ describe("device qualification controller integration", () => {
 });
 
 describe("Phase 5D input collection and repair", () => {
+  test("selected Setup Location references reach the active plan review", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/destination";
+    const description = descriptionWithSetupLocationRef();
+    mockApi.describeConfiguration.mockImplementation(
+      async (request: { bindings: Record<string, unknown> }) => ({
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: request.bindings[input.key] ?? null,
+        })),
+      }),
+    );
+    mockApi.listSetupLocations.mockResolvedValue([
+      {
+        id: "location-one",
+        name: "Games",
+        relativePath: "games",
+        volumeKind: "internalShared",
+        volumeLabel: "Internal storage",
+        ready: true,
+        detail: "Available.",
+      },
+      {
+        id: "location-two",
+        name: "Archive",
+        relativePath: "archive",
+        volumeKind: "removableSd",
+        volumeLabel: "SD card",
+        ready: true,
+        detail: "Available.",
+      },
+    ]);
+    mockApi.prepareExecutionReview.mockResolvedValue({
+      reviewHandle: "review-opaque",
+      setup: { name: "Reviewed setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    });
+
+    await advanceToInputs(user);
+    await user.selectOptions(
+      screen.getByLabelText("Install destination"),
+      "location-two",
+    );
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls.some(
+          ([request]) => request.bindings[inputKey] === "location-two",
+        ),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Review plan" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await waitFor(() =>
+      expect(mockApi.prepareExecutionReview).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bindings: { [inputKey]: "location-two" },
+        }),
+      ),
+    );
+  });
+
+  test("Setup Location references stay out of recovery and saved configuration writes", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/destination";
+    const description = descriptionWithSetupLocationRef();
+    mockApi.describeConfiguration.mockImplementation(
+      async (request: { bindings: Record<string, unknown> }) => ({
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: request.bindings[input.key] ?? null,
+        })),
+      }),
+    );
+    mockApi.listSetupLocations.mockResolvedValue([
+      {
+        id: "location-one",
+        name: "Games",
+        relativePath: "games",
+        volumeKind: "internalShared",
+        volumeLabel: "Internal storage",
+        ready: true,
+        detail: "Available.",
+      },
+      {
+        id: "location-two",
+        name: "Archive",
+        relativePath: "archive",
+        volumeKind: "removableSd",
+        volumeLabel: "SD card",
+        ready: true,
+        detail: "Available.",
+      },
+    ]);
+    mockApi.createSavedConfiguration.mockResolvedValue({
+      outcome: "saved",
+      configurationHandle: "configuration-opaque",
+      name: "My EmuChef setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 0,
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+    bindings: {},
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    });
+
+    await advanceToInputs(user);
+    await user.selectOptions(
+      screen.getByLabelText("Install destination"),
+      "location-two",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
+
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalled();
+    expect(
+      mockApi.stageRecoveryDraft.mock.calls.every(
+        ([request]) => !Object.hasOwn(request.bindings, inputKey),
+      ),
+    ).toBe(true);
+    expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({ bindings: {} }),
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("Install destination"),
+      "location-one",
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
+  });
+
+  test("repair persists only current portable bindings through the saved mutation queue", async () => {
+    const user = userEvent.setup();
+    const recipeIds = ["recipe.one", "recipe.removed"];
+    const themeKey = "recipe.one/theme";
+    const accountKey = "recipe.one/account";
+    const destinationKey = "recipe.one/destination";
+    const removedKey = "recipe.removed/obsolete";
+    const defaultRecipes = ["recipe.one", "recipe.removed"];
+    const makeDescription = (
+      devicePlan: string,
+      selectedRecipes: string[],
+      bindings: Record<string, unknown>,
+    ): ConfigurationDescription => {
+      const portableInputs = [
+        descriptionWithTextInput({
+          key: themeKey,
+          inputId: "theme",
+          label: "Theme",
+          required: false,
+          sensitive: false,
+        }).inputs[0],
+        descriptionWithTextInput({
+          key: accountKey,
+          inputId: "account",
+          label: "Account name",
+          required: false,
+          sensitive: false,
+        }).inputs[0],
+      ];
+      const destination = descriptionWithSetupLocationRef().inputs[0];
+      const obsolete = descriptionWithTextInput({
+        key: removedKey,
+        inputId: "obsolete",
+        label: "Removed recipe option",
+        required: false,
+        sensitive: false,
+      }).inputs[0];
+      const availableInputs = [
+        ...(selectedRecipes.includes("recipe.one")
+          ? [...portableInputs, destination]
+          : []),
+        ...(selectedRecipes.includes("recipe.removed") ? [obsolete] : []),
+      ];
+      return {
+        devicePlan,
+        selectedRecipes,
+        expandedRecipes: selectedRecipes,
+        recipeOptions: recipeIds.map((id) => ({
+          id,
+          name: id === "recipe.one" ? "Recipe One" : "Removed Recipe",
+          description: null,
+          selected: selectedRecipes.includes(id),
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        })),
+        inputs: availableInputs.map((input) => ({
+          ...input,
+          value: bindings[input.key] ?? null,
+        })),
+        diagnostics: [],
+      };
+    };
+    let resolveFreshRepairDescription:
+      | ((description: ConfigurationDescription) => void)
+      | undefined;
+    const freshRepairDescription = new Promise<ConfigurationDescription>(
+      (resolve) => {
+        resolveFreshRepairDescription = resolve;
+      },
+    );
+    mockApi.catalog.mockResolvedValue({
+      catalog: {
+        sourceKind: "bundled",
+        sourceId: "test",
+        version: "test",
+        contentDigest: { algorithm: "sha256", value: "digest" },
+      },
+      recipes: recipeIds.map((id) => ({
+        id,
+        name: id === "recipe.one" ? "Recipe One" : "Removed Recipe",
+        description: null,
+      })),
+    });
+    mockApi.listSetupLocations.mockResolvedValue([
+      {
+        id: "location-one",
+        name: "Games",
+        relativePath: "games",
+        volumeKind: "internalShared",
+        volumeLabel: "Internal storage",
+        ready: true,
+        detail: "Available.",
+      },
+    ]);
+    mockApi.describeConfiguration.mockImplementation(async (request) => {
+      const selectedRecipes = request.selectedRecipes ?? defaultRecipes;
+      const description = makeDescription(
+        request.devicePlan,
+        selectedRecipes,
+        request.bindings,
+      );
+      if (
+        request.devicePlan === "generic.safe" &&
+        Object.hasOwn(request.bindings, themeKey)
+      )
+        return freshRepairDescription;
+      return description;
+    });
+
+    let returnChangedHandleOnNextUpdate = false;
+    let holdNextSavedMutation = false;
+    let releaseHeldSavedMutation: (() => void) | undefined;
+    let signalHeldSavedMutationStarted: (() => void) | undefined;
+    const heldSavedMutationStarted = new Promise<void>((resolve) => {
+      signalHeldSavedMutationStarted = resolve;
+    });
+    let persisted: SavedConfigurationDocument = {
+      outcome: "saved" as const,
+      configurationHandle: "configuration-repair",
+      name: "My EmuChef setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 7,
+      devicePlan: "plan.supported",
+      selectedRecipes: defaultRecipes,
+      bindings: {
+        [themeKey]: "saved-old-theme",
+        [removedKey]: "saved-obsolete-value",
+      },
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    };
+    mockApi.createSavedConfiguration.mockResolvedValue(persisted);
+    mockApi.updateSavedConfiguration.mockImplementation(
+      async (
+        configurationHandle: string,
+        revision: number,
+        mutation: { kind: string; key?: string; value?: unknown },
+      ) => {
+        expect(configurationHandle).toBe("configuration-repair");
+        expect(revision).toBe(persisted.revision);
+        if (
+          holdNextSavedMutation &&
+          mutation.kind === "device_plan" &&
+          mutation.value === "generic.safe"
+        ) {
+          holdNextSavedMutation = false;
+          signalHeldSavedMutationStarted?.();
+          await new Promise<void>((resolve) => {
+            releaseHeldSavedMutation = resolve;
+          });
+        }
+        if (returnChangedHandleOnNextUpdate) {
+          returnChangedHandleOnNextUpdate = false;
+          return {
+            ...persisted,
+            configurationHandle: "configuration-replaced",
+            revision: revision + 1,
+            dirty: true,
+            devicePlan: mutation.value as string,
+          };
+        }
+        let bindings = { ...persisted.bindings };
+        let devicePlan = persisted.devicePlan;
+        let selectedRecipes = persisted.selectedRecipes;
+        if (mutation.kind === "device_plan")
+          devicePlan = mutation.value as string;
+        else if (mutation.kind === "selected_recipes")
+          selectedRecipes = mutation.value as string[];
+        else if (mutation.kind === "remove_binding" && mutation.key)
+          delete bindings[mutation.key];
+        else if (mutation.kind === "binding" && mutation.key)
+          bindings[mutation.key] = mutation.value;
+        persisted = {
+          ...persisted,
+          revision: revision + 1,
+          dirty: true,
+          devicePlan,
+          selectedRecipes,
+          bindings,
+        };
+        return persisted;
+      },
+    );
+    mockApi.saveSavedConfiguration.mockImplementation(async () => ({
+      ...persisted,
+      dirty: false,
+    }));
+    mockApi.prepareExecutionReview.mockResolvedValue({
+      reviewHandle: "review-opaque",
+      setup: { name: "Reviewed setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    });
+    mockApi.discardReview.mockResolvedValue(undefined);
+    mockApi.startSimulatedExecution.mockResolvedValue(
+      failedSimulationSnapshot(),
+    );
+
+    await advanceToInputs(user);
+    await waitFor(() => expect(screen.getByLabelText("Theme")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Theme"), {
+      target: { value: "current-theme" },
+    });
+    fireEvent.change(screen.getByLabelText("Account name"), {
+      target: { value: "current-account" },
+    });
+    await user.selectOptions(
+      screen.getByLabelText("Install destination"),
+      "location-one",
+    );
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls.some(
+          ([request]) =>
+            request.bindings[themeKey] === "current-theme" &&
+            request.bindings[accountKey] === "current-account" &&
+            request.bindings[destinationKey] === "location-one",
+        ),
+      ).toBe(true),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
+    expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bindings: {
+          [themeKey]: "current-theme",
+          [accountKey]: "current-account",
+        },
+      }),
+    );
+    expect(
+      JSON.stringify(mockApi.createSavedConfiguration.mock.calls),
+    ).not.toContain(destinationKey);
+
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await waitFor(() =>
+      expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(1),
+    );
+    await screen.findByRole("button", { name: "Start simulation" });
+    await user.click(screen.getByRole("button", { name: "Start simulation" }));
+    await waitFor(() =>
+      expect(mockApi.startSimulatedExecution).toHaveBeenCalledWith(
+        "review-opaque",
+      ),
+    );
+    await screen.findByRole("button", { name: "Repair setup" });
+
+    mockApi.catalog.mockResolvedValue({
+      catalog: {
+        sourceKind: "bundled",
+        sourceId: "test",
+        version: "test",
+        contentDigest: { algorithm: "sha256", value: "digest" },
+      },
+      recipes: [
+        { id: "recipe.one", name: "Recipe One", description: null },
+      ],
+    });
+    mockApi.matchDevice.mockResolvedValue({
+      ...supportedMatch,
+      recommendedPlanId: "generic.safe",
+      candidates: [safePlan],
+    });
+    const catalogCallsBeforeRepair = mockApi.catalog.mock.calls.length;
+    const repairButton = screen.getByRole("button", { name: "Repair setup" });
+    expect((repairButton as HTMLButtonElement).disabled).toBe(false);
+    await user.click(repairButton);
+    await waitFor(() =>
+      expect(mockApi.discardReview).toHaveBeenCalledWith("review-opaque"),
+    );
+    await waitFor(() =>
+      expect(mockApi.catalog.mock.calls.length).toBeGreaterThan(
+        catalogCallsBeforeRepair,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls.some(
+          ([request]) => request.devicePlan === "generic.safe",
+        ),
+      ).toBe(true),
+    );
+    expect(
+      mockApi.describeConfiguration.mock.calls
+        .filter(([request]) => request.devicePlan === "generic.safe")
+        .map(([request]) => ({
+          selectedRecipes: request.selectedRecipes,
+          bindings: request.bindings,
+        })),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          bindings: expect.objectContaining({
+            [themeKey]: "current-theme",
+            [accountKey]: "current-account",
+          }),
+        }),
+      ]),
+    );
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls.some(
+          ([request]) =>
+            request.devicePlan === "generic.safe" &&
+            request.bindings[themeKey] === "current-theme" &&
+            request.bindings[accountKey] === "current-account",
+        ),
+      ).toBe(true),
+    );
+    holdNextSavedMutation = true;
+    await act(async () => {
+      resolveFreshRepairDescription?.(
+        makeDescription("generic.safe", ["recipe.one"], {
+          [themeKey]: "current-theme",
+          [accountKey]: "current-account",
+          [destinationKey]: "location-one",
+        }),
+      );
+      await freshRepairDescription;
+    });
+    await heldSavedMutationStarted;
+    const themeInput = screen.getByLabelText("Theme") as HTMLInputElement;
+    const descriptionsBeforeBlockedEdit =
+      mockApi.describeConfiguration.mock.calls.length;
+    await user.clear(themeInput);
+    await user.type(themeInput, "edited-during-repair");
+    await screen.findByText("Wait for setup repair to finish before continuing.");
+    await waitFor(() => expect(themeInput.value).toBe("current-theme"));
+    expect(mockApi.describeConfiguration).toHaveBeenCalledTimes(
+      descriptionsBeforeBlockedEdit,
+    );
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      releaseHeldSavedMutation?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(5),
+    );
+    expect(
+      mockApi.updateSavedConfiguration.mock.calls.map(([, revision, mutation]) => [
+        revision,
+        mutation.kind,
+        mutation.key ?? null,
+        mutation.value ?? null,
+      ]),
+    ).toEqual([
+      [7, "device_plan", null, "generic.safe"],
+      [8, "selected_recipes", null, ["recipe.one"]],
+      [9, "remove_binding", removedKey, null],
+      [10, "binding", themeKey, "current-theme"],
+      [11, "binding", accountKey, "current-account"],
+    ]);
+    expect(persisted).toMatchObject({
+      revision: 12,
+      devicePlan: "generic.safe",
+      selectedRecipes: ["recipe.one"],
+      bindings: {
+        [themeKey]: "current-theme",
+        [accountKey]: "current-account",
+      },
+    });
+    expect(Object.hasOwn(persisted.bindings, destinationKey)).toBe(false);
+    expect(Object.hasOwn(persisted.bindings, removedKey)).toBe(false);
+    expect(screen.getByLabelText("Theme")).toHaveProperty(
+      "value",
+      "current-theme",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockApi.saveSavedConfiguration).toHaveBeenCalledWith(
+        "configuration-repair",
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await waitFor(() =>
+      expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(2),
+    );
+    expect(mockApi.prepareExecutionReview).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        devicePlan: "generic.safe",
+        selectedRecipes: ["recipe.one"],
+        bindings: expect.objectContaining({
+          [themeKey]: "current-theme",
+          [accountKey]: "current-account",
+          [destinationKey]: "location-one",
+        }),
+      }),
+    );
+
+    await screen.findByRole("button", { name: "Start simulation" });
+    await user.click(screen.getByRole("button", { name: "Start simulation" }));
+    await waitFor(() =>
+      expect(mockApi.startSimulatedExecution).toHaveBeenCalledTimes(2),
+    );
+    await screen.findByRole("button", { name: "Repair setup" });
+    const updatesBeforeUnchangedRepair =
+      mockApi.updateSavedConfiguration.mock.calls.length;
+    const descriptionsBeforeUnchangedRepair =
+      mockApi.describeConfiguration.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Repair setup" }));
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls
+          .slice(descriptionsBeforeUnchangedRepair)
+          .some(
+            ([request]) =>
+              request.devicePlan === "generic.safe" &&
+              request.bindings[themeKey] === "current-theme",
+          ),
+      ).toBe(true),
+    );
+    await screen.findByText(
+      "Setup refreshed. Resolve any remaining issues, then create and review a new plan.",
+    );
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(
+      updatesBeforeUnchangedRepair,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await screen.findByRole("button", { name: "Start simulation" });
+    await user.click(screen.getByRole("button", { name: "Start simulation" }));
+    await waitFor(() =>
+      expect(mockApi.startSimulatedExecution).toHaveBeenCalledTimes(3),
+    );
+    await screen.findByRole("button", { name: "Repair setup" });
+    const nextPlan = {
+      ...safePlan,
+      planId: "generic.next",
+      name: "Next safe setup",
+    };
+    mockApi.matchDevice.mockResolvedValue({
+      ...supportedMatch,
+      recommendedPlanId: nextPlan.planId,
+      candidates: [nextPlan],
+    });
+    const updatesBeforeChangedHandle =
+      mockApi.updateSavedConfiguration.mock.calls.length;
+    returnChangedHandleOnNextUpdate = true;
+    await user.click(screen.getByRole("button", { name: "Repair setup" }));
+    await screen.findByText(
+      "The active saved setup changed during its update.",
+    );
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(
+      updatesBeforeChangedHandle + 1,
+    );
+    expect(mockApi.updateSavedConfiguration).toHaveBeenLastCalledWith(
+      "configuration-repair",
+      persisted.revision,
+      { kind: "device_plan", value: "generic.next" },
+    );
+  });
+
+  test("repair write failure stays visible and explicit save retries the portable mutation", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/theme";
+    const description = descriptionWithTextInput({
+      key: inputKey,
+      inputId: "theme",
+      label: "Theme",
+      required: false,
+      sensitive: false,
+    });
+    let persisted: SavedConfigurationDocument = {
+      outcome: "saved" as const,
+      configurationHandle: "configuration-retry",
+      name: "My EmuChef setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 4,
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      bindings: { [inputKey]: "saved-old-theme" },
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    };
+    let failFirstUpdate = true;
+    mockApi.catalog.mockResolvedValue({
+      catalog: {
+        sourceKind: "bundled",
+        sourceId: "test",
+        version: "test",
+        contentDigest: { algorithm: "sha256", value: "digest" },
+      },
+      recipes: [{ id: "recipe.one", name: "Recipe One", description: null }],
+    });
+    mockApi.describeConfiguration.mockImplementation(async (request) => ({
+      ...description,
+      devicePlan: request.devicePlan,
+      selectedRecipes: request.selectedRecipes ?? ["recipe.one"],
+      inputs: description.inputs.map((input) => ({
+        ...input,
+        value: request.bindings[input.key] ?? null,
+      })),
+    }));
+    mockApi.createSavedConfiguration.mockResolvedValue(persisted);
+    mockApi.updateSavedConfiguration.mockImplementation(
+      async (
+        _configurationHandle: string,
+        revision: number,
+        mutation: { kind: string; key?: string; value?: unknown },
+      ) => {
+        if (failFirstUpdate) {
+          failFirstUpdate = false;
+          throw new Error("Saved setup update failed.");
+        }
+        const bindings = { ...persisted.bindings };
+        if (mutation.kind === "binding" && mutation.key)
+          bindings[mutation.key] = mutation.value;
+        persisted = {
+          ...persisted,
+          revision: revision + 1,
+          dirty: true,
+          bindings,
+        };
+        return persisted;
+      },
+    );
+    mockApi.saveSavedConfiguration.mockImplementation(async () => {
+      persisted = { ...persisted, dirty: false };
+      return persisted;
+    });
+    mockApi.prepareExecutionReview.mockResolvedValue({
+      reviewHandle: "review-opaque",
+      setup: { name: "Reviewed setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    });
+    mockApi.discardReview.mockResolvedValue(undefined);
+    mockApi.startSimulatedExecution.mockResolvedValue(
+      failedSimulationSnapshot(),
+    );
+
+    await advanceToInputs(user);
+    fireEvent.change(screen.getByLabelText("Theme"), {
+      target: { value: "current-theme" },
+    });
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls.some(
+          ([request]) => request.bindings[inputKey] === "current-theme",
+        ),
+      ).toBe(true),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await screen.findByRole("button", { name: "Start simulation" });
+    await user.click(screen.getByRole("button", { name: "Start simulation" }));
+    await waitFor(() =>
+      expect(mockApi.startSimulatedExecution).toHaveBeenCalledTimes(1),
+    );
+    await screen.findByRole("button", { name: "Repair setup" });
+    await user.click(screen.getByRole("button", { name: "Repair setup" }));
+    await screen.findByText("Saved setup update failed.");
+    expect(
+      screen.queryByText(
+        "Setup refreshed. Resolve any remaining issues, then create and review a new plan.",
+      ),
+    ).toBeNull();
+    expect(persisted.bindings[inputKey]).toBe("saved-old-theme");
+    expect(mockApi.saveSavedConfiguration).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(2),
+    );
+    expect(mockApi.updateSavedConfiguration).toHaveBeenLastCalledWith(
+      "configuration-retry",
+      4,
+      { kind: "binding", key: inputKey, value: "current-theme" },
+    );
+    await waitFor(() =>
+      expect(mockApi.saveSavedConfiguration).toHaveBeenCalledWith(
+        "configuration-retry",
+      ),
+    );
+    expect(persisted).toMatchObject({
+      dirty: false,
+      revision: 5,
+      bindings: { [inputKey]: "current-theme" },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await waitFor(() =>
+      expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(2),
+    );
+    expect(mockApi.prepareExecutionReview).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.one"],
+        bindings: { [inputKey]: "current-theme" },
+      }),
+    );
+  });
+
+  test("repair discards a delayed response after runtime generation changes", async () => {
+    const user = userEvent.setup();
+    const triggerDevicePoll = captureDevicePollTick();
+    const inputKey = "recipe.one/theme";
+    const description = descriptionWithTextInput({
+      key: inputKey,
+      inputId: "theme",
+      label: "Theme",
+      required: false,
+      sensitive: false,
+    });
+    const pendingCatalog = deferred<{
+      catalog: {
+        sourceKind: "bundled";
+        sourceId: string;
+        version: string;
+        contentDigest: { algorithm: "sha256"; value: string };
+      };
+      recipes: Array<{ id: string; name: string; description: null }>;
+    }>();
+    const pendingRepairPoll = deferred<Array<typeof availableDevice>>();
+    mockApi.catalog.mockResolvedValue({
+      catalog: {
+        sourceKind: "bundled",
+        sourceId: "test",
+        version: "test",
+        contentDigest: { algorithm: "sha256", value: "digest" },
+      },
+      recipes: [{ id: "recipe.one", name: "Recipe One", description: null }],
+    });
+    mockApi.describeConfiguration.mockImplementation(async (request) => ({
+      ...description,
+      devicePlan: request.devicePlan,
+      selectedRecipes: request.selectedRecipes ?? ["recipe.one"],
+      inputs: description.inputs.map((input) => ({
+        ...input,
+        value: request.bindings[input.key] ?? null,
+      })),
+    }));
+    mockApi.createSavedConfiguration.mockResolvedValue({
+      outcome: "saved",
+      configurationHandle: "configuration-runtime-fence",
+      name: "My EmuChef setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 0,
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      bindings: { [inputKey]: "before-save-theme" },
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    });
+    mockApi.prepareExecutionReview.mockResolvedValue({
+      reviewHandle: "review-opaque",
+      setup: { name: "Reviewed setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    });
+    mockApi.discardReview.mockResolvedValue(undefined);
+    mockApi.startSimulatedExecution.mockResolvedValue(
+      failedSimulationSnapshot(),
+    );
+
+    await advanceToInputs(user);
+    fireEvent.change(screen.getByLabelText("Theme"), {
+      target: { value: "before-save-theme" },
+    });
+    await waitFor(() =>
+      expect(
+        mockApi.describeConfiguration.mock.calls.some(
+          ([request]) => request.bindings[inputKey] === "before-save-theme",
+        ),
+      ).toBe(true),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await screen.findByRole("button", { name: "Start simulation" });
+    await user.click(screen.getByRole("button", { name: "Start simulation" }));
+    await waitFor(() =>
+      expect(mockApi.startSimulatedExecution).toHaveBeenCalledTimes(1),
+    );
+    await screen.findByRole("button", { name: "Repair setup" });
+
+    const catalogCallsBeforeRepair = mockApi.catalog.mock.calls.length;
+    const descriptionCallsBeforeRepair =
+      mockApi.describeConfiguration.mock.calls.length;
+    const savedUpdatesBeforeRepair =
+      mockApi.updateSavedConfiguration.mock.calls.length;
+    const pollCallsBeforeRepair = mockApi.pollDevices.mock.calls.length;
+    mockApi.catalog.mockReturnValueOnce(pendingCatalog.promise);
+    mockApi.pollDevices.mockReturnValueOnce(pendingRepairPoll.promise);
+    await user.click(screen.getByRole("button", { name: "Repair setup" }));
+    await waitFor(() =>
+      expect(mockApi.catalog.mock.calls.length).toBeGreaterThan(
+          catalogCallsBeforeRepair,
+        ),
+    );
+    await waitFor(() =>
+      expect(mockApi.pollDevices.mock.calls.length).toBeGreaterThan(
+        pollCallsBeforeRepair,
+      ),
+    );
+    const runtimeReads = mockApi.runtimeStatus.mock.calls.length;
+    mockApi.pollDevices.mockRejectedValueOnce(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
+    await act(async () => {
+      triggerDevicePoll();
+      await flushPendingPromises();
+    });
+    await screen.findAllByText(
+      "The execution runtime session is no longer available.",
+    );
+    await waitFor(() =>
+      expect(mockApi.runtimeStatus.mock.calls.length).toBeGreaterThan(
+        runtimeReads,
+      ),
+    );
+    await screen.findByRole("heading", { name: "Choose an Android device" });
+
+    await act(async () => {
+      pendingCatalog.resolve({
+        catalog: {
+          sourceKind: "bundled",
+          sourceId: "test",
+          version: "test",
+          contentDigest: { algorithm: "sha256", value: "digest" },
+        },
+        recipes: [{ id: "recipe.one", name: "Recipe One", description: null }],
+      });
+      pendingRepairPoll.resolve([availableDevice]);
+      await pendingCatalog.promise;
+      await pendingRepairPoll.promise;
+    });
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(
+      savedUpdatesBeforeRepair,
+    );
+    expect(mockApi.describeConfiguration).toHaveBeenCalledTimes(
+      descriptionCallsBeforeRepair,
+    );
+    expect(
+      screen.queryByText(
+        "Setup refreshed. Resolve any remaining issues, then create and review a new plan.",
+      ),
+    ).toBeNull();
+  });
+
+  test("allows saving a setup while its input values refresh", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/theme";
+    const description = descriptionWithTextInput({
+      key: inputKey,
+      inputId: "theme",
+      label: "Theme",
+      required: false,
+      sensitive: false,
+    });
+    const pendingDescription = deferred<ConfigurationDescription>();
+    mockApi.describeConfiguration.mockImplementation(async (request) => {
+      const currentDescription = {
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: request.bindings[input.key] ?? null,
+        })),
+      };
+      return request.bindings[inputKey] === "latest"
+        ? pendingDescription.promise
+        : currentDescription;
+    });
+
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Theme") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "latest" } });
+    await waitFor(() =>
+      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(
+        expect.objectContaining({ bindings: { [inputKey]: "latest" } }),
+      ),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() =>
+      expect(mockApi.createSavedConfiguration).toHaveBeenCalled(),
+    );
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalled();
+    expect((screen.getByLabelText("Theme") as HTMLInputElement).value).toBe("latest");
+
+    await act(async () => {
+      pendingDescription.resolve({
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: input.key === inputKey ? "latest" : input.value,
+        })),
+      });
+      await Promise.resolve();
+    });
+  });
+
+  test("saving uses edits made while recovery persistence is pending", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/theme";
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: inputKey,
+        inputId: "theme",
+        label: "Theme",
+        required: false,
+        sensitive: false,
+      }),
+    );
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Theme") as HTMLInputElement;
+    await user.type(input, "before");
+    await waitFor(() => expect(mockApi.stageRecoveryDraft).toHaveBeenCalled());
+    mockApi.stageRecoveryDraft.mockClear();
+
+    let resolveRecovery: (() => void) | null = null;
+    mockApi.stageRecoveryDraft.mockImplementation((request) =>
+      new Promise((resolve) => {
+        resolveRecovery = () =>
+          resolve({
+            requestGeneration: request.requestGeneration,
+            draftGeneration: request.draftGeneration,
+            recordGeneration: request.draftGeneration,
+            omittedBindings: [],
+          });
+      }),
+    );
+    mockApi.createSavedConfiguration.mockResolvedValue({
+      outcome: "saved",
+      configurationHandle: "configuration-latest",
+      name: "My EmuChef setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 0,
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      bindings: {},
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(resolveRecovery).not.toBeNull());
+
+    fireEvent.change(input, { target: { value: "latest" } });
+    await act(async () => {
+      resolveRecovery?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(
+        expect.objectContaining({
+          devicePlan: "plan.supported",
+          selectedRecipes: ["recipe.one"],
+          bindings: { [inputKey]: "latest" },
+        }),
+      ),
+    );
+  });
+
+  test("saving leaves newer edits dirty when native creation is still pending", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/theme";
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: inputKey,
+        inputId: "theme",
+        label: "Theme",
+        required: false,
+        sensitive: false,
+      }),
+    );
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Theme") as HTMLInputElement;
+    await user.type(input, "before");
+    await waitFor(() => expect(mockApi.stageRecoveryDraft).toHaveBeenCalled());
+    mockApi.stageRecoveryDraft.mockClear();
+
+    let resolveCreate: ((result: unknown) => void) | null = null;
+    mockApi.createSavedConfiguration.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(mockApi.createSavedConfiguration).toHaveBeenCalled());
+
+    fireEvent.change(input, { target: { value: "latest" } });
+    await waitFor(() => expect(input.value).toBe("latest"));
+    await act(async () => {
+      resolveCreate?.({
+        outcome: "saved",
+        configurationHandle: "configuration-before",
+        name: "My EmuChef setup",
+        schemaVersion: 2,
+        dirty: false,
+        revision: 0,
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.one"],
+        bindings: { [inputKey]: "before" },
+        pendingSanitationCount: 0,
+        compatibility: { baselineState: "unchanged" },
+        validation: { state: "valid", diagnostics: [] },
+      });
+      await Promise.resolve();
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "New" }));
+    expect(
+      await screen.findByRole("alertdialog", {
+        name: "Save edits before continuing?",
+      }),
+    ).toBeTruthy();
+  });
+
+  test("recovery waits for the current plan description before staging intent", async () => {
+    const user = userEvent.setup();
+    const inputKey = "recipe.one/destination";
+    const pendingDescription = deferred<
+      ReturnType<typeof descriptionWithSetupLocationRef>
+    >();
+    const description = descriptionWithSetupLocationRef();
+    mockApi.matchDevice.mockResolvedValue({
+      ...supportedMatch,
+      candidates: [
+        ...supportedMatch.candidates,
+        { ...safePlan, planId: "plan.alternate", name: "Alternate setup" },
+      ],
+    });
+    mockApi.describeConfiguration.mockImplementation(async (request) => {
+      if (request.devicePlan === "plan.alternate")
+        return pendingDescription.promise;
+      return {
+        ...description,
+        inputs: description.inputs.map((input) => ({
+          ...input,
+          value: request.bindings[input.key] ?? null,
+        })),
+      };
+    });
+    mockApi.listSetupLocations.mockResolvedValue([
+      {
+        id: "location-one",
+        name: "Games",
+        relativePath: "games",
+        volumeKind: "internalShared",
+        volumeLabel: "Internal storage",
+        ready: true,
+        detail: "Available.",
+      },
+    ]);
+
+    await advanceToInputs(user);
+    await user.selectOptions(
+      screen.getByLabelText("Install destination"),
+      "location-one",
+    );
+    await waitFor(() =>
+      expect(mockApi.stageRecoveryDraft).toHaveBeenCalled(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    const stagedBeforePlanChange = mockApi.stageRecoveryDraft.mock.calls.length;
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("radio", { name: /Alternate setup/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({ devicePlan: "plan.alternate" }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(350);
+    });
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledTimes(
+      stagedBeforePlanChange,
+    );
+
+    mockApi.supportSnapshot.mockResolvedValue(
+      supportSnapshot({ serviceFailure: true }),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Troubleshooting" }));
+      await Promise.resolve();
+    });
+    const troubleshooting = screen.getByRole("dialog", {
+      name: "Troubleshooting and app storage",
+    });
+    if (
+      !within(troubleshooting).queryByRole("button", {
+        name: "Restart app service",
+      })
+    ) {
+      fireEvent.click(
+        within(troubleshooting).getByText(
+          "View all troubleshooting status and maintenance actions",
+        ),
+      );
+    }
+    await act(async () => {
+      fireEvent.click(
+        within(troubleshooting).getByRole("button", {
+          name: "Restart app service",
+        }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockApi.restartRuntime).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        "Wait for setup validation to finish before restarting the app service.",
+      ),
+    ).toBeTruthy();
+
+    await act(async () => {
+      pendingDescription.resolve({
+        ...description,
+        devicePlan: "plan.alternate",
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(350);
+    });
+
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledTimes(
+      stagedBeforePlanChange + 1,
+    );
+    expect(mockApi.stageRecoveryDraft).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.alternate",
+        bindings: expect.not.objectContaining({ [inputKey]: "location-one" }),
+      }),
+    );
+  });
+
   test("new required inputs stay neutral until validation is requested", async () => {
     const user = userEvent.setup();
     const description = descriptionWithTextInput({
@@ -2186,25 +6112,36 @@ describe("Phase 5D input collection and repair", () => {
       required: true,
       sensitive: false,
     });
-    description.inputs[0].description = "Enter the account name used by this setup.";
-    description.inputs[0].diagnostics = [{
-      key: "recipe.one/account",
-      code: "binding_missing",
-      message: "Account name is required.",
-      severity: "error",
-    }];
+    description.inputs[0].description =
+      "Enter the account name used by this setup.";
+    description.inputs[0].diagnostics = [
+      {
+        key: "recipe.one/account",
+        code: "binding_missing",
+        message: "Account name is required.",
+        severity: "error",
+      },
+    ];
     mockApi.describeConfiguration.mockResolvedValue(description);
     await advanceToInputs(user);
 
-    expect(screen.queryByRole("heading", { name: /Resolve .* configuration error/ })).toBeNull();
-    expect(screen.getByText("Enter the account name used by this setup.")).toBeTruthy();
-    expect(screen.getByLabelText("Account name requirements").textContent).toContain("Required");
+    expect(
+      screen.queryByRole("heading", { name: /Resolve .* configuration error/ }),
+    ).toBeNull();
+    expect(
+      screen.getByText("Enter the account name used by this setup."),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText("Account name requirements").textContent,
+    ).toContain("Required");
 
     await user.click(screen.getByRole("button", { name: "Review plan" }));
     const summaryHeading = await screen.findByRole("heading", {
       name: "Resolve 1 configuration error",
     });
-    expect(summaryHeading.parentElement?.textContent).toContain("Account name is required.");
+    expect(summaryHeading.parentElement?.textContent).toContain(
+      "Account name is required.",
+    );
     expect(document.body.textContent).not.toContain("binding_missing");
   });
 
@@ -2225,36 +6162,47 @@ describe("Phase 5D input collection and repair", () => {
       devicePlan: "plan.supported",
       selectedRecipes: ["recipe.one"],
       expandedRecipes: ["recipe.one"],
-      recipeOptions: [{
-        id: "recipe.one", name: "Recipe One", description: null, selected: true,
-        recommended: true, dependencyRequired: false, available: true,
-        unavailableCapabilities: [],
-      }],
-      inputs: [{
-        key: bindingKey,
-        recipeId: "app.xaniteog.install",
-        inputId: "xaniteog_apk",
-        type: "file",
-        label: "XaniteOG APK",
-        description: "Choose the XaniteOG Android application package.",
-        required: true,
-        multiple: false,
-        sensitive: false,
-        pathKind: "file",
-        acceptedExtensions: ["apk"],
-        presentationCategory: "Applications",
-        presentationKind: "Single file",
-        value: "/selected/missing-xaniteog.apk",
-        valueSource: "explicit",
-        entries: [{
-          index: 0,
-          displayName: "missing-xaniteog.apk",
-          displayPath: "/selected/missing-xaniteog.apk",
-          state: "error",
+      recipeOptions: [
+        {
+          id: "recipe.one",
+          name: "Recipe One",
+          description: null,
+          selected: true,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+      ],
+      inputs: [
+        {
+          key: bindingKey,
+          recipeId: "app.xaniteog.install",
+          inputId: "xaniteog_apk",
+          type: "file",
+          label: "XaniteOG APK",
+          description: "Choose the XaniteOG Android application package.",
+          required: true,
+          multiple: false,
+          sensitive: false,
+          pathKind: "file",
+          acceptedExtensions: ["apk"],
+          presentationCategory: "Applications",
+          presentationKind: "Single file",
+          value: "/selected/missing-xaniteog.apk",
+          valueSource: "explicit",
+          entries: [
+            {
+              index: 0,
+              displayName: "missing-xaniteog.apk",
+              displayPath: "/selected/missing-xaniteog.apk",
+              state: "error",
+              diagnostics: [diagnostic],
+            },
+          ],
           diagnostics: [diagnostic],
-        }],
-        diagnostics: [diagnostic],
-      }],
+        },
+      ],
       diagnostics: [],
     });
     mockApi.prepareExecutionReview.mockReturnValue(review.promise);
@@ -2280,110 +6228,227 @@ describe("Phase 5D input collection and repair", () => {
       devicePlan: "plan.supported",
       selectedRecipes: ["recipe.one"],
       expandedRecipes: ["recipe.one"],
-      recipeOptions: [{
-        id: "recipe.one", name: "Recipe One", description: null, selected: true,
-        recommended: true, dependencyRequired: false, available: true,
-        contentRequirements: ["rom_content"], unavailableCapabilities: [],
-      }],
-      inputs: [{
-        key: "recipe.one/files", recipeId: "recipe.one", inputId: "files", type: "file",
-        label: "Game files", description: "Choose game files to copy.", required: true,
-        multiple: true, sensitive: false, pathKind: "file", acceptedExtensions: ["rom"],
-        presentationCategory: "Games and content", presentationKind: "Multiple files",
-        value: ["/selected/one.rom", "/moved/two.rom"], valueSource: "explicit",
-        entries: [
-          { index: 0, displayName: "one.rom", displayPath: "/selected/one.rom", state: "valid", diagnostics: [] },
-          {
-            index: 1, displayName: "two.rom", displayPath: "/moved/two.rom", state: "error",
-            diagnostics: [{
-              key: "recipe.one/files", code: "binding_path_missing",
-              message: "Game files could not be found. Select it again.", severity: "error", entryIndex: 1,
-            }],
-          },
-        ],
-        diagnostics: [{
-          key: "recipe.one/files", code: "binding_path_missing",
-          message: "Game files could not be found. Select it again.", severity: "error", entryIndex: 1,
-        }],
-      }],
+      recipeOptions: [
+        {
+          id: "recipe.one",
+          name: "Recipe One",
+          description: null,
+          selected: true,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          contentRequirements: ["rom_content"],
+          unavailableCapabilities: [],
+        },
+      ],
+      inputs: [
+        {
+          key: "recipe.one/files",
+          recipeId: "recipe.one",
+          inputId: "files",
+          type: "file",
+          label: "Game files",
+          description: "Choose game files to copy.",
+          required: true,
+          multiple: true,
+          sensitive: false,
+          pathKind: "file",
+          acceptedExtensions: ["rom"],
+          presentationCategory: "Games and content",
+          presentationKind: "Multiple files",
+          value: ["/selected/one.rom", "/moved/two.rom"],
+          valueSource: "explicit",
+          entries: [
+            {
+              index: 0,
+              displayName: "one.rom",
+              displayPath: "/selected/one.rom",
+              state: "valid",
+              diagnostics: [],
+            },
+            {
+              index: 1,
+              displayName: "two.rom",
+              displayPath: "/moved/two.rom",
+              state: "error",
+              diagnostics: [
+                {
+                  key: "recipe.one/files",
+                  code: "binding_path_missing",
+                  message: "Game files could not be found. Select it again.",
+                  severity: "error",
+                  entryIndex: 1,
+                },
+              ],
+            },
+          ],
+          diagnostics: [
+            {
+              key: "recipe.one/files",
+              code: "binding_path_missing",
+              message: "Game files could not be found. Select it again.",
+              severity: "error",
+              entryIndex: 1,
+            },
+          ],
+        },
+      ],
       diagnostics: [],
     };
     mockApi.describeConfiguration.mockResolvedValue(description);
     mockApi.pickInputPath.mockResolvedValue([
-      "/selected/one.rom", "/moved/two.rom", "/selected/three.rom",
+      "/selected/one.rom",
+      "/moved/two.rom",
+      "/selected/three.rom",
     ]);
     await advanceToInputs(user);
 
     expect(screen.getByText("Accepted file types: rom")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Relink…" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Add files…" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Remove one.rom from Game files" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove one.rom from Game files" }),
+    ).toBeTruthy();
     expect(document.body.textContent).not.toContain("binding_path_missing");
 
     await user.click(screen.getByRole("button", { name: "Add files…" }));
-    expect(mockApi.pickInputPath).toHaveBeenCalledWith(expect.objectContaining({
-      inputKey: "recipe.one/files",
-      mode: "append",
-      entryIndex: null,
-    }));
-    expect((await screen.findAllByText("/selected/three.rom")).length).toBeGreaterThan(0);
+    expect(mockApi.pickInputPath).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputKey: "recipe.one/files",
+        mode: "append",
+        entryIndex: null,
+      }),
+    );
+    expect(
+      (await screen.findAllByText("/selected/three.rom")).length,
+    ).toBeGreaterThan(0);
   });
 
   test("picker cancellation settles and a response after leaving Inputs is ignored", async () => {
     const user = userEvent.setup();
     const picker = deferred<unknown | null>();
     mockApi.describeConfiguration.mockResolvedValue({
-      devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], expandedRecipes: ["recipe.one"],
-      recipeOptions: [{
-        id: "recipe.one", name: "Recipe One", description: null, selected: true,
-        recommended: true, dependencyRequired: false, available: true, unavailableCapabilities: [],
-      }],
-      inputs: [{
-        key: "recipe.one/file", recipeId: "recipe.one", inputId: "file", type: "file",
-        label: "Setup file", description: "Choose a setup file.", required: false, multiple: false,
-        sensitive: false, pathKind: "file", acceptedExtensions: ["cfg"],
-        presentationCategory: "Other", presentationKind: "Single file", value: null,
-        valueSource: null, entries: [], diagnostics: [],
-      }], diagnostics: [],
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [
+        {
+          id: "recipe.one",
+          name: "Recipe One",
+          description: null,
+          selected: true,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+      ],
+      inputs: [
+        {
+          key: "recipe.one/file",
+          recipeId: "recipe.one",
+          inputId: "file",
+          type: "file",
+          label: "Setup file",
+          description: "Choose a setup file.",
+          required: false,
+          multiple: false,
+          sensitive: false,
+          pathKind: "file",
+          acceptedExtensions: ["cfg"],
+          presentationCategory: "Other",
+          presentationKind: "Single file",
+          value: null,
+          valueSource: null,
+          entries: [],
+          diagnostics: [],
+        },
+      ],
+      diagnostics: [],
     });
     mockApi.pickInputPath.mockReturnValue(picker.promise);
     await advanceToInputs(user);
     await user.click(screen.getByRole("button", { name: "Choose file…" }));
-    expect((screen.getByRole("button", { name: "Choose file…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Choose file…",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
     await user.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
     await act(async () => picker.resolve("/selected/stale.cfg"));
     expect(screen.queryByText("/selected/stale.cfg")).toBeNull();
-    expect(await screen.findAllByText("An outdated file selection was ignored.")).not.toHaveLength(0);
+    expect(
+      await screen.findAllByText("An outdated file selection was ignored."),
+    ).not.toHaveLength(0);
   });
 
   test("device destinations stay textual and sensitive values use concealed controls", async () => {
     const user = userEvent.setup();
     mockApi.describeConfiguration.mockResolvedValue({
-      devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], expandedRecipes: ["recipe.one"],
-      recipeOptions: [{
-        id: "recipe.one", name: "Recipe One", description: null, selected: true,
-        recommended: true, dependencyRequired: false, available: true, unavailableCapabilities: [],
-      }],
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [
+        {
+          id: "recipe.one",
+          name: "Recipe One",
+          description: null,
+          selected: true,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+      ],
       inputs: [
         {
-          key: "recipe.one/destination", recipeId: "recipe.one", inputId: "destination",
-          type: "device_path", label: "Device folder", description: "Folder on the Android device.",
-          required: true, multiple: false, sensitive: false, presentationCategory: "Destination",
-          presentationKind: "Device folder", value: "/sdcard/Games", valueSource: "recipe_default", diagnostics: [],
+          key: "recipe.one/destination",
+          recipeId: "recipe.one",
+          inputId: "destination",
+          type: "device_path",
+          label: "Device folder",
+          description: "Folder on the Android device.",
+          required: true,
+          multiple: false,
+          sensitive: false,
+          presentationCategory: "Destination",
+          presentationKind: "Device folder",
+          value: "/sdcard/Games",
+          valueSource: "recipe_default",
+          diagnostics: [],
         },
         {
-          key: "recipe.one/token", recipeId: "recipe.one", inputId: "token", type: "string",
-          label: "Account token", description: "Token used for this setup.", required: true,
-          multiple: false, sensitive: true, presentationCategory: "Other", presentationKind: "Text",
-          value: null, valueSource: null, diagnostics: [],
+          key: "recipe.one/token",
+          recipeId: "recipe.one",
+          inputId: "token",
+          type: "string",
+          label: "Account token",
+          description: "Token used for this setup.",
+          required: true,
+          multiple: false,
+          sensitive: true,
+          presentationCategory: "Other",
+          presentationKind: "Text",
+          value: null,
+          valueSource: null,
+          diagnostics: [],
         },
-      ], diagnostics: [],
+      ],
+      diagnostics: [],
     });
     await advanceToInputs(user);
-    expect((screen.getByLabelText("Device folder") as HTMLInputElement).value).toBe("/sdcard/Games");
-    expect(screen.queryByRole("button", { name: /Choose folder|Browse/i })).toBeNull();
-    expect((screen.getByLabelText("Account token") as HTMLInputElement).type).toBe("password");
+    expect(
+      (screen.getByLabelText("Device folder") as HTMLInputElement).value,
+    ).toBe("/sdcard/Games");
+    expect(
+      screen.queryByRole("button", { name: /Choose folder|Browse/i }),
+    ).toBeNull();
+    expect(
+      (screen.getByLabelText("Account token") as HTMLInputElement).type,
+    ).toBe("password");
     expect(screen.getByText("Not saved")).toBeTruthy();
   });
 });
@@ -2392,10 +6457,18 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
   test("keeps persistent maintenance controls out of the primary workflow", async () => {
     await renderReadyApp();
 
-    expect(screen.queryByRole("button", { name: "Restart app service" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Replace managed Platform-Tools" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Remove managed Platform-Tools" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Troubleshooting" })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Restart app service" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Replace managed Platform-Tools" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Remove managed Platform-Tools" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Troubleshooting" }),
+    ).toBeTruthy();
   });
 
   test("renders a concise healthy summary and keeps subsystem detail collapsed", async () => {
@@ -2403,28 +6476,54 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
-    const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
-    expect(within(dialog).getByText("EmuChef is ready. No troubleshooting issues were found.")).toBeTruthy();
-    expect(dialog.querySelectorAll("#troubleshooting-heading ~ article")).toHaveLength(0);
-    const details = within(dialog).getByText("View all troubleshooting status and maintenance actions").closest("details");
+    const dialog = await screen.findByRole("dialog", {
+      name: "Troubleshooting and app storage",
+    });
+    expect(
+      within(dialog).getByText(
+        "EmuChef is ready. No troubleshooting issues were found.",
+      ),
+    ).toBeTruthy();
+    expect(
+      dialog.querySelectorAll("#troubleshooting-heading ~ article"),
+    ).toHaveLength(0);
+    const details = within(dialog)
+      .getByText("View all troubleshooting status and maintenance actions")
+      .closest("details");
     expect(details?.open).toBe(false);
   });
 
   test("copies only the stable public support code for an affected subsystem", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    mockApi.supportSnapshot.mockResolvedValue(supportSnapshot({ serviceFailure: true }));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    mockApi.supportSnapshot.mockResolvedValue(
+      supportSnapshot({ serviceFailure: true }),
+    );
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
-    const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
-    expect(within(dialog).getAllByText("The local app service could not start.").length).toBeGreaterThan(0);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Troubleshooting and app storage",
+    });
+    expect(
+      within(dialog).getAllByText("The local app service could not start.")
+        .length,
+    ).toBeGreaterThan(0);
     expect(dialog.textContent).not.toMatch(/sidecar|runtime handle|internal_/i);
-    await user.click(within(dialog).getByRole("button", { name: "Copy support code" }));
+    await user.click(
+      within(dialog).getByRole("button", { name: "Copy support code" }),
+    );
 
     expect(writeText).toHaveBeenCalledWith("EMUCHEF-SERVICE-START-FAILED");
-    expect(await screen.findByText("Support code EMUCHEF-SERVICE-START-FAILED copied.")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "Support code EMUCHEF-SERVICE-START-FAILED copied.",
+      ),
+    ).toBeTruthy();
   });
 
   test("discloses local-only diagnostics and disables empty cache cleanup", async () => {
@@ -2432,66 +6531,252 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
-    const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
-    expect(within(dialog).getByText(/stays on this Mac until you choose to share it/i)).toBeTruthy();
-    expect(within(dialog).getByText(/exporting never uploads anything/i)).toBeTruthy();
-    expect(within(dialog).getByText(/The app-owned cache is empty/)).toBeTruthy();
-    expect(within(dialog).getByText("There are no unused removable cache entries.")).toBeTruthy();
-    expect((within(dialog).getByRole("button", { name: "Clear unused" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((within(dialog).getByRole("button", { name: "Clear all removable" }) as HTMLButtonElement).disabled).toBe(true);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Troubleshooting and app storage",
+    });
+    expect(
+      within(dialog).getByText(
+        /stays on this Mac until you choose to share it/i,
+      ),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText(/exporting never uploads anything/i),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText(/The app-owned cache is empty/),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText("There are no unused removable cache entries."),
+    ).toBeTruthy();
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Clear unused",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Clear all removable",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
   });
 
   test("requires category-specific confirmation before resetting Recents", async () => {
     const user = userEvent.setup();
     const snapshot = supportSnapshot();
-    snapshot.resetCategories = [{
-      resetHandle: "reset-recents-opaque",
-      id: "recents",
-      label: "Clear Recents",
-      description: "Remove the app-owned list of recently opened setup files.",
-      consequence: "Saved setup files, the active setup, and portable intent remain unchanged.",
-      affectedScope: "Recent setup index only",
-      available: true,
-      unavailableReason: null,
-      confirmationRequired: true,
-      restartRequired: false,
-      itemCount: 2,
-      totalSizeBytes: null,
-    }];
+    snapshot.resetCategories = [
+      {
+        resetHandle: "reset-recents-opaque",
+        id: "recents",
+        label: "Clear Recents",
+        description:
+          "Remove the app-owned list of recently opened setup files.",
+        consequence:
+          "Saved setup files, the active setup, and portable intent remain unchanged.",
+        affectedScope: "Recent setup index only",
+        available: true,
+        unavailableReason: null,
+        confirmationRequired: true,
+        restartRequired: false,
+        itemCount: 2,
+        totalSizeBytes: null,
+      },
+    ];
     mockApi.supportSnapshot.mockResolvedValue(snapshot);
     mockApi.resetLocalAppState.mockResolvedValue({
-      outcome: { summary: "Recent setup history was cleared. Saved setup files were preserved." },
+      outcome: {
+        summary:
+          "Recent setup history was cleared. Saved setup files were preserved.",
+      },
       snapshot: { ...snapshot, resetCategories: [] },
     });
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
-    await user.click(await screen.findByRole("button", { name: "Clear Recents" }));
-    const confirmation = screen.getByRole("alertdialog", { name: "Clear Recents?" });
-    expect(confirmation.textContent).toContain("Saved setup files, the active setup, and portable intent remain unchanged.");
+    await user.click(
+      await screen.findByRole("button", { name: "Clear Recents" }),
+    );
+    const confirmation = screen.getByRole("alertdialog", {
+      name: "Clear Recents?",
+    });
+    expect(confirmation.textContent).toContain(
+      "Saved setup files, the active setup, and portable intent remain unchanged.",
+    );
     expect(confirmation.textContent).toContain("Recent setup index only");
     expect(mockApi.resetLocalAppState).not.toHaveBeenCalled();
-    await user.click(within(confirmation).getByRole("button", { name: "Confirm reset" }));
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Confirm reset" }),
+    );
 
-    await waitFor(() => expect(mockApi.resetLocalAppState).toHaveBeenCalledWith("reset-recents-opaque"));
+    await waitFor(() =>
+      expect(mockApi.resetLocalAppState).toHaveBeenCalledWith(
+        "reset-recents-opaque",
+      ),
+    );
   });
 
   test("fails closed when an unknown corrective-action variant reaches dispatch", async () => {
     const user = userEvent.setup();
     const snapshot = supportSnapshot({ serviceFailure: true });
-    snapshot.subsystems[0].actions[0].action = { kind: "future_untrusted_action" } as never;
+    snapshot.subsystems[0].actions[0].action = {
+      kind: "future_untrusted_action",
+    } as never;
     mockApi.supportSnapshot.mockResolvedValue(snapshot);
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
-    await user.click(await screen.findByRole("button", { name: "Restart app service" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Restart app service" }),
+    );
 
-    expect(await screen.findByText("This troubleshooting action is not supported by this version of EmuChef.")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "This troubleshooting action is not supported by this version of EmuChef.",
+      ),
+    ).toBeTruthy();
     expect(mockApi.restartRuntime).not.toHaveBeenCalled();
   });
 });
 
 describe("Phase 5F saved setup management", () => {
+  test("a queued saved binding update does not cross to a replacement handle", async () => {
+    const user = userEvent.setup();
+    const firstKey = "recipe.one/first";
+    const secondKey = "recipe.one/second";
+    const firstDescription = descriptionWithTextInput({
+      key: firstKey,
+      inputId: "first",
+      label: "First option",
+      required: false,
+      sensitive: false,
+    });
+    const secondDescription = descriptionWithTextInput({
+      key: secondKey,
+      inputId: "second",
+      label: "Second option",
+      required: false,
+      sensitive: false,
+    });
+    mockApi.catalog.mockResolvedValue({
+      catalog: {
+        sourceKind: "bundled",
+        sourceId: "test",
+        version: "test",
+        contentDigest: { algorithm: "sha256", value: "digest" },
+      },
+      recipes: [{ id: "recipe.one", name: "Recipe One", description: null }],
+    });
+    mockApi.describeConfiguration.mockResolvedValue({
+      ...firstDescription,
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [
+        {
+          id: "recipe.one",
+          name: "Recipe One",
+          description: null,
+          selected: true,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+      ],
+      inputs: [
+        { ...firstDescription.inputs[0], value: null },
+        { ...secondDescription.inputs[0], value: null },
+      ],
+    });
+    await advanceToInputs(user);
+    await user.type(screen.getByLabelText("First option"), "first-old");
+    await user.type(screen.getByLabelText("Second option"), "second-old");
+
+    const original: SavedConfigurationDocument = {
+      outcome: "saved",
+      configurationHandle: "configuration-original",
+      name: "Original setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 0,
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      bindings: { [firstKey]: "first-old", [secondKey]: "second-old" },
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    };
+    mockApi.createSavedConfiguration.mockResolvedValue(original);
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
+
+    const saveAs = deferred<SavedConfigurationDocument>();
+    mockApi.saveSavedConfigurationAs.mockReturnValue(saveAs.promise);
+    const firstUpdate = deferred<SavedConfigurationDocument>();
+    const firstUpdateStarted = deferred<void>();
+    mockApi.updateSavedConfiguration.mockImplementation(async () => {
+      firstUpdateStarted.resolve(undefined);
+      return firstUpdate.promise;
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save As…" }));
+    await screen.findByRole("heading", { name: "Name the new setup" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() =>
+      expect(mockApi.saveSavedConfigurationAs).toHaveBeenCalledWith(
+        "configuration-original",
+        expect.any(String),
+      ),
+    );
+
+    fireEvent.change(screen.getByLabelText("First option"), {
+      target: { value: "first-new" },
+    });
+    await firstUpdateStarted.promise;
+    fireEvent.change(screen.getByLabelText("Second option"), {
+      target: { value: "second-new" },
+    });
+
+    const replacement: SavedConfigurationDocument = {
+      ...original,
+      configurationHandle: "configuration-replacement",
+      name: "Replacement setup",
+    };
+    await act(async () => {
+      saveAs.resolve(replacement);
+      await saveAs.promise;
+    });
+    await act(async () => {
+      firstUpdate.resolve({
+        ...original,
+        revision: 1,
+        dirty: true,
+        bindings: { [firstKey]: "first-new" },
+      });
+      await firstUpdate.promise;
+    });
+    await screen.findByText(
+      "The active saved setup changed before its update could run.",
+    );
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1);
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledWith(
+      "configuration-original",
+      0,
+      { kind: "binding", key: firstKey, value: "first-new" },
+    );
+  });
+
   test("reviews a sanitized V1 compatibility summary before opening", async () => {
     const user = userEvent.setup();
     mockApi.previewSavedConfiguration.mockResolvedValue({
@@ -2519,31 +6804,43 @@ describe("Phase 5F saved setup management", () => {
     });
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
     expect(screen.getByRole("heading", { name: "Saved setups" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "New" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save As…" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import…" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Open…" }));
-    expect(await screen.findByRole("heading", { name: "Review Travel setup" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Review Travel setup" }),
+    ).toBeTruthy();
     expect(screen.getByText("Supported setup")).toBeTruthy();
-    expect(screen.getByText(/next explicit save will record current compatibility information/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        /next explicit save will record current compatibility information/,
+      ),
+    ).toBeTruthy();
     expect(screen.getByText("No setup is currently in progress.")).toBeTruthy();
-    expect(document.body.textContent).not.toMatch(/Schema 1|current catalog|pending_first_v2_save/);
+    expect(document.body.textContent).not.toMatch(
+      /Schema 1|current catalog|pending_first_v2_save/,
+    );
     expect(document.body.textContent).not.toContain("/Users/");
     expect(mockApi.confirmSavedConfigurationPreview).not.toHaveBeenCalled();
   });
 
   test("uses concrete save disclosure and preserves the Inputs stage after Save", async () => {
     const user = userEvent.setup();
-    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-      key: "recipe.one/option",
-      inputId: "option",
-      label: "Optional setting",
-      required: false,
-      sensitive: false,
-    }));
+    mockApi.describeConfiguration.mockResolvedValue(
+      descriptionWithTextInput({
+        key: "recipe.one/option",
+        inputId: "option",
+        label: "Optional setting",
+        required: false,
+        sensitive: false,
+      }),
+    );
     await advanceToInputs(user);
     await user.type(screen.getByLabelText("Optional setting"), "chosen");
     mockApi.createSavedConfiguration.mockResolvedValue({
@@ -2561,29 +6858,57 @@ describe("Phase 5F saved setup management", () => {
       validation: { state: "valid", diagnostics: [] },
     });
 
-    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByRole("heading", { name: "Name this setup" })).toBeTruthy();
-    expect(screen.getByText(/selected setup, features, and reusable input references/)).toBeTruthy();
-    expect(screen.getByText(/does not save the connected device, generated plan, execution progress, or results/)).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Name this setup" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /selected setup, features, and reusable input references/,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /does not save the connected device, generated plan, execution progress, or results/,
+      ),
+    ).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    expect(await screen.findByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
-    expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(expect.objectContaining({
-      devicePlan: "plan.supported",
-    }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "Provide required files and options",
+      }),
+    ).toBeTruthy();
+    expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+      }),
+    );
 
     mockApi.duplicateSavedConfiguration.mockResolvedValue({
       outcome: "saved",
       name: "My EmuChef setup copy",
       fileLabel: "My-EmuChef-setup-copy.yaml",
     });
-    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
     await user.click(screen.getByRole("button", { name: "Duplicate…" }));
-    expect(await screen.findByRole("heading", { name: "Name the duplicate setup" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Name the duplicate setup" }),
+    ).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(mockApi.duplicateSavedConfiguration).toHaveBeenCalled());
-    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+    await waitFor(() =>
+      expect(mockApi.duplicateSavedConfiguration).toHaveBeenCalled(),
+    );
+    expect(
+      screen.getByRole("heading", {
+        name: "Provide required files and options",
+      }),
+    ).toBeTruthy();
 
     mockApi.exportSavedConfiguration.mockResolvedValue({
       outcome: "saved",
@@ -2591,10 +6916,18 @@ describe("Phase 5F saved setup management", () => {
       fileLabel: "My-EmuChef-setup-export.yaml",
     });
     await user.click(screen.getByRole("button", { name: "Export…" }));
-    expect(await screen.findByRole("heading", { name: "Name the exported setup" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Name the exported setup" }),
+    ).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(mockApi.exportSavedConfiguration).toHaveBeenCalled());
-    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+    await waitFor(() =>
+      expect(mockApi.exportSavedConfiguration).toHaveBeenCalled(),
+    );
+    expect(
+      screen.getByRole("heading", {
+        name: "Provide required files and options",
+      }),
+    ).toBeTruthy();
   });
 
   test("ignores a preview response after the management surface is cancelled", async () => {
@@ -2603,7 +6936,9 @@ describe("Phase 5F saved setup management", () => {
     mockApi.previewSavedConfiguration.mockReturnValue(preview.promise);
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(
+      screen.getByRole("button", { name: "Manage saved setups…" }),
+    );
     await user.click(screen.getByRole("button", { name: "Open…" }));
     await user.click(screen.getByRole("button", { name: "Close" }));
     preview.resolve({
@@ -2625,9 +6960,13 @@ describe("Phase 5F saved setup management", () => {
       },
       repairActions: [],
     });
-    await act(async () => { await preview.promise; });
+    await act(async () => {
+      await preview.promise;
+    });
 
-    expect(screen.queryByRole("heading", { name: "Review Stale setup" })).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "Review Stale setup" }),
+    ).toBeNull();
     expect(mockApi.compareSavedConfigurationPreview).not.toHaveBeenCalled();
   });
 });
@@ -2635,19 +6974,24 @@ test("a superseded runtime re-read cannot restore the lost runtime projection", 
   await renderReadyApp();
 
   const pendingRuntimeReads: Array<(status: RuntimeStatus) => void> = [];
-  mockApi.runtimeStatus.mockImplementation(() => new Promise<RuntimeStatus>((resolve) => {
-    pendingRuntimeReads.push(resolve);
-  }));
+  mockApi.runtimeStatus.mockImplementation(
+    () =>
+      new Promise<RuntimeStatus>((resolve) => {
+        pendingRuntimeReads.push(resolve);
+      }),
+  );
   // Reject only the poll started by each explicit refresh. Automatic inventory
   // polls keep succeeding so an unrelated tick cannot add a runtime re-read.
   let rejectNextPoll = false;
   mockApi.pollDevices.mockImplementation(() => {
     if (!rejectNextPoll) return Promise.resolve([]);
     rejectNextPoll = false;
-    return Promise.reject(JSON.stringify({
-      code: "runtime_session_lost",
-      message: "The execution runtime session is no longer available.",
-    }));
+    return Promise.reject(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
   });
 
   const refreshButton = screen.getByRole("button", { name: "Refresh devices" });
@@ -2662,21 +7006,34 @@ test("a superseded runtime re-read cannot restore the lost runtime projection", 
   await act(async () => {
     pendingRuntimeReads[1]({
       status: "failed",
-      error: { code: "runtime_unavailable", message: "The app service is unavailable." },
+      error: {
+        code: "runtime_unavailable",
+        message: "The app service is unavailable.",
+      },
     });
   });
   expect(
-    await screen.findByRole("heading", { name: "EmuChef could not start its app service" }),
+    await screen.findByRole("heading", {
+      name: "EmuChef could not start its app service",
+    }),
   ).toBeTruthy();
 
   // The superseded re-read returns a ready snapshot afterwards and must be
   // discarded instead of restoring dead-process device and workflow state.
   await act(async () => {
-    pendingRuntimeReads[0]({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
+    pendingRuntimeReads[0]({
+      status: "ready",
+      protocolVersion: 1,
+      catalogVersion: "test",
+    });
   });
-  expect(screen.queryByRole("heading", { name: "Choose an Android device" })).toBeNull();
   expect(
-    screen.getByRole("heading", { name: "EmuChef could not start its app service" }),
+    screen.queryByRole("heading", { name: "Choose an Android device" }),
+  ).toBeNull();
+  expect(
+    screen.getByRole("heading", {
+      name: "EmuChef could not start its app service",
+    }),
   ).toBeTruthy();
 });
 
@@ -2685,29 +7042,43 @@ test("runtime-loss recovery presents the failed app service when device qualific
   await renderReadyApp();
 
   const unhandledRejections: unknown[] = [];
-  const captureUnhandled = (reason: unknown) => unhandledRejections.push(reason);
+  const captureUnhandled = (reason: unknown) =>
+    unhandledRejections.push(reason);
   process.on("unhandledRejection", captureUnhandled);
   try {
     mockApi.runtimeStatus.mockResolvedValueOnce({
       status: "failed",
-      error: { code: "runtime_unavailable", message: "The app service is unavailable." },
+      error: {
+        code: "runtime_unavailable",
+        message: "The app service is unavailable.",
+      },
     });
     // Sidecar-backed projections can no longer answer once the runtime session
     // is gone. The failed runtime status must still be presented so the
     // app-service recovery controls remain reachable.
-    mockApi.deviceQualification.mockRejectedValueOnce(new Error("The device service is unavailable."));
-    mockApi.executionCapabilities.mockRejectedValueOnce(new Error("The app service is unavailable."));
-    mockApi.pollDevices.mockRejectedValue(JSON.stringify({
-      code: "runtime_session_lost",
-      message: "The execution runtime session is no longer available.",
-    }));
+    mockApi.deviceQualification.mockRejectedValueOnce(
+      new Error("The device service is unavailable."),
+    );
+    mockApi.executionCapabilities.mockRejectedValueOnce(
+      new Error("The app service is unavailable."),
+    );
+    mockApi.pollDevices.mockRejectedValue(
+      JSON.stringify({
+        code: "runtime_session_lost",
+        message: "The execution runtime session is no longer available.",
+      }),
+    );
 
     await user.click(screen.getByRole("button", { name: "Refresh devices" }));
 
     expect(
-      await screen.findByRole("heading", { name: "EmuChef could not start its app service" }),
+      await screen.findByRole("heading", {
+        name: "EmuChef could not start its app service",
+      }),
     ).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Choose an Android device" })).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "Choose an Android device" }),
+    ).toBeNull();
 
     // The fire-and-forget recovery re-read must never leave a rejection behind.
     await act(async () => {
@@ -2723,6 +7094,7 @@ test("runtime-loss recovery presents the failed app service when device qualific
 
 test("an authoritative inventory poll reloads qualification status without a manual refresh", async () => {
   const user = userEvent.setup();
+  const triggerDevicePoll = captureDevicePollTick();
   const qualificationStatus = {
     enabled: true,
     recordable: true,
@@ -2735,27 +7107,31 @@ test("an authoritative inventory poll reloads qualification status without a man
       qualificationContract: 2,
     },
     runtimeContract: "runtime-contract-2",
-    workflows: [{
-      id: "workflow.one",
-      version: 1,
-      purpose: "Workflow one",
-      productionRecipes: ["recipe.one"],
-      requiredCapabilities: [],
-      prerequisites: [],
-      humanCheckpoints: [],
-    }],
-    targets: [{
-      id: "target.one",
-      profileId: "profile.one",
-      manufacturer: "Example",
-      model: "Handheld",
-      androidVersion: "14",
-      androidApi: 34,
-      abiSocClass: "arm64",
-      rootState: "non_root",
-      connectionType: "usb3",
-      firmwareBuild: "firmware-opaque",
-    }],
+    workflows: [
+      {
+        id: "workflow.one",
+        version: 1,
+        purpose: "Workflow one",
+        productionRecipes: ["recipe.one"],
+        requiredCapabilities: [],
+        prerequisites: [],
+        humanCheckpoints: [],
+      },
+    ],
+    targets: [
+      {
+        id: "target.one",
+        profileId: "profile.one",
+        manufacturer: "Example",
+        model: "Handheld",
+        androidVersion: "14",
+        androidApi: 34,
+        abiSocClass: "arm64",
+        rootState: "non_root",
+        connectionType: "usb3",
+        firmwareBuild: "firmware-opaque",
+      },
+    ],
     deviceSelectionLocked: false,
     resumableCandidates: [],
     lifecycleRevision: 1,
@@ -2796,13 +7172,15 @@ test("an authoritative inventory poll reloads qualification status without a man
     return sessionSnapshot;
   });
   mockApi.pollDevices.mockResolvedValue([availableDevice]);
-  mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
-    key: "recipe.one/option",
-    inputId: "option",
-    label: "Optional setting",
-    required: false,
-    sensitive: false,
-  }));
+  mockApi.describeConfiguration.mockResolvedValue(
+    descriptionWithTextInput({
+      key: "recipe.one/option",
+      inputId: "option",
+      label: "Optional setting",
+      required: false,
+      sensitive: false,
+    }),
+  );
   mockApi.prepareExecutionReview.mockResolvedValue({
     reviewHandle: "review-opaque",
     setup: { name: "Reviewed setup" },
@@ -2815,24 +7193,68 @@ test("an authoritative inventory poll reloads qualification status without a man
   });
 
   await advanceToInputs(user);
-  expect(await screen.findByRole("heading", { name: "Device qualification mode" })).toBeTruthy();
-  const beginSession = screen.getByRole("button", { name: "Begin qualification session" });
-  await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
+  expect(
+    await screen.findByRole("heading", { name: "Device qualification mode" }),
+  ).toBeTruthy();
+  const beginSession = screen.getByRole("button", {
+    name: "Begin qualification session",
+  });
+  await waitFor(() =>
+    expect((beginSession as HTMLButtonElement).disabled).toBe(false),
+  );
   await user.click(beginSession);
-  await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
+  await screen.findByRole("heading", {
+    name: "Normal workflow intent is locked",
+  });
 
   const statusReads = mockApi.deviceQualificationModeStatus.mock.calls.length;
-  // Rust closes the attempt while reconciling the next authoritative
-  // inventory. The public device list stays identical, so only the committed
-  // inventory transition can tell the presentation layer to re-read status.
-  activeSession = null;
+  const pollCallsBefore = mockApi.pollDevices.mock.calls.length;
+  const statusRefresh = deferred<typeof qualificationStatus>();
+  mockApi.deviceQualificationModeStatus.mockImplementationOnce(async () => {
+    const refreshedStatus = await statusRefresh.promise;
+    return {
+      ...refreshedStatus,
+      deviceSelectionLocked: activeSession !== null,
+      resumableSession: activeSession,
+    };
+  });
+  const olderPoll = deferred<Array<typeof availableDevice>>();
+  const newerPoll = deferred<Array<typeof availableDevice>>();
+  mockApi.pollDevices
+    .mockReturnValueOnce(olderPoll.promise)
+    .mockReturnValueOnce(newerPoll.promise);
 
-  await waitFor(
-    () => expect(mockApi.deviceQualificationModeStatus.mock.calls.length).toBeGreaterThan(statusReads),
-    { timeout: 6000, interval: 50 },
+  await act(async () => {
+    triggerDevicePoll();
+    triggerDevicePoll();
+  });
+  await waitFor(() =>
+    expect(mockApi.pollDevices).toHaveBeenCalledTimes(pollCallsBefore + 2),
   );
-  await waitFor(
-    () => expect(screen.queryByRole("heading", { name: "Normal workflow intent is locked" })).toBeNull(),
-    { timeout: 6000, interval: 50 },
+
+  await act(async () => {
+    newerPoll.reject(
+      new Error("The newer inventory request failed before commit."),
+    );
+    await flushPendingPromises();
+  });
+
+  // The older request's inventory commit still closes the native attempt,
+  // although its stale UI generation must not replace device presentation.
+  activeSession = null;
+  await act(async () => {
+    olderPoll.resolve([availableDevice]);
+    await flushPendingPromises();
+  });
+
+  expect(mockApi.deviceQualificationModeStatus).toHaveBeenCalledTimes(
+    statusReads + 1,
   );
+  await act(async () => {
+    statusRefresh.resolve(qualificationStatus);
+    await statusRefresh.promise;
+  });
+  expect(
+    screen.queryByRole("heading", { name: "Normal workflow intent is locked" }),
+  ).toBeNull();
 });

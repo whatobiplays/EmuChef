@@ -4,6 +4,7 @@ import { diagnosticIsBlocking, groupedInputs } from "./app-helpers";
 import type {
   ConfigurationDescription,
   InputDescriptor,
+  SetupLocationProjection,
   ValidationDiagnostic,
 } from "./types";
 import { inputDiagnosticsForDisplay, pageDiagnosticsForDisplay } from "./workflow";
@@ -26,6 +27,8 @@ function valueSourceLabel(source: NonNullable<InputDescriptor["valueSource"]>): 
 
 interface InputsStepProps {
   description: ConfigurationDescription;
+  setupLocations: SetupLocationProjection[];
+  setupLocationListStatus: "loading" | "unavailable" | "ready";
   bindings: Record<string, unknown>;
   busy: boolean;
   touchedInputKeys: Set<string>;
@@ -47,6 +50,8 @@ interface InputsStepProps {
 
 export function InputsStep({
   description,
+  setupLocations,
+  setupLocationListStatus,
   bindings,
   busy,
   touchedInputKeys,
@@ -106,6 +111,14 @@ export function InputsStep({
             const descriptionId = `${inputId}-description`;
             const extensionsId = `${inputId}-extensions`;
             const sourceId = `${inputId}-source`;
+            const setupLocationStatusId = `${inputId}-location-list-status`;
+            const setupLocationStatusMessage = setupLocationListStatus === "loading"
+              ? "Loading saved Setup Locations…"
+              : setupLocationListStatus === "unavailable"
+                ? "Saved Setup Locations could not be loaded. Refresh device storage to retry."
+                : setupLocationListStatus === "ready" && setupLocations.length === 0
+                  ? "No named Setup Locations are available for this device plan. Define one in device setup."
+                  : null;
             const diagnostics = inputDiagnosticsForDisplay(input).filter((diagnostic) =>
               diagnosticIsBlocking(
                 diagnostic.code,
@@ -158,6 +171,43 @@ export function InputsStep({
                     onChange={(event) => onBindingChange(input.key, event.target.checked)}
                     type="checkbox"
                   />
+                ) : input.type === "setup_location_ref" ? (
+                  <>
+                    <select
+                      aria-describedby={describedBy(
+                        input.description && descriptionId,
+                        input.valueSource && sourceId,
+                        setupLocationStatusMessage ? setupLocationStatusId : undefined,
+                        ...diagnosticIds,
+                      )}
+                      aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
+                      id={inputId}
+                      onChange={(event) => onBindingChange(input.key, event.target.value)}
+                      value={String(bindings[input.key] ?? input.value ?? "")}
+                    >
+                      <option value="">Choose a Setup Location…</option>
+                      {typeof currentValue === "string"
+                        && currentValue
+                        && !setupLocations.some((location) => location.id === currentValue) && (
+                          <option disabled value={currentValue}>Unavailable Setup Location</option>
+                        )}
+                      {setupLocations.map((location) => (
+                        <option disabled={!location.ready} key={location.id} value={location.id}>
+                          {location.name} · {location.relativePath} · {location.volumeLabel}
+                          {!location.ready ? ` · ${location.detail}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {setupLocationStatusMessage && (
+                      <small
+                        aria-live="polite"
+                        id={setupLocationStatusId}
+                        role="status"
+                      >
+                        {setupLocationStatusMessage}
+                      </small>
+                    )}
+                  </>
                 ) : input.options?.length ? (
                   <select
                     aria-describedby={describedBy(

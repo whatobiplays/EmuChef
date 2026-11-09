@@ -34,10 +34,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use emuchef_rust_backend::storage_targets::{
+    validate_relative_location_path, validate_setup_location_name, StorageTargetBinding,
+    StorageTargetVolumeKind, MAX_SETUP_LOCATIONS,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::State;
+use uuid::Uuid;
 
 use crate::commands::{current_adb_runtime_snapshot, safe_error, AppState};
 use crate::handles::{DeviceRecord, SessionHandles};
@@ -174,6 +179,8 @@ pub(crate) struct ObservedVolume {
     kind: ObservedVolumeKind,
     status: ObservedVolumeStatus,
     mount_state: ObservedMountState,
+    setup_location_kind: Option<ObservedVolumeKind>,
+    mount_root: Option<String>,
 }
 
 impl ObservedVolume {
@@ -185,6 +192,13 @@ impl ObservedVolume {
                 ObservedVolumeKind::InternalShared | ObservedVolumeKind::RemovableSd
             )
     }
+
+    fn is_setup_location_available(&self) -> bool {
+        self.setup_location_kind.is_some()
+            && self.mount_root.is_some()
+            && self.status == ObservedVolumeStatus::Available
+            && self.mount_state == ObservedMountState::MountedRw
+    }
 }
 
 /// One explicit storage intent for a device session.
@@ -194,6 +208,25 @@ pub(crate) struct VolumeSelection {
     volume_handle: String,
     identity_token: String,
     continuity_token: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SetupLocationRecord {
+    binding: StorageTargetBinding,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    resolved: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetupLocationProjection {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) relative_path: String,
+    pub(crate) volume_kind: String,
+    pub(crate) volume_label: String,
+    pub(crate) ready: bool,
+    pub(crate) detail: String,
 }
 
 /// Retained handle from an earlier observation, used only to classify a stale
@@ -213,6 +246,7 @@ struct RetiredHandle {
 pub(crate) struct DeviceStorageState {
     observations: HashMap<String, VolumeObservation>,
     selections: HashMap<String, VolumeSelection>,
+    setup_locations: HashMap<(String, String), Vec<SetupLocationRecord>>,
     in_flight: HashMap<String, u64>,
     sequences: HashMap<String, u64>,
     notices: HashMap<String, String>,
@@ -239,6 +273,8 @@ impl DeviceStorageState {
     pub(crate) fn clear_device_after_authority_loss(&mut self, device_handle: &str) {
         self.retire_observation(device_handle);
         self.selections.remove(device_handle);
+        self.setup_locations
+            .retain(|(device, _), _| device != device_handle);
         self.in_flight.remove(device_handle);
         self.notices.remove(device_handle);
     }
@@ -251,6 +287,7 @@ impl DeviceStorageState {
             self.retire_observation(&device);
         }
         self.selections.clear();
+        self.setup_locations.clear();
         self.in_flight.clear();
         self.notices.clear();
     }
@@ -268,6 +305,8 @@ impl DeviceStorageState {
         for device in stale {
             self.retire_observation(&device);
             self.selections.remove(&device);
+            self.setup_locations
+                .retain(|(setup_device, _), _| setup_device != &device);
             self.in_flight.remove(&device);
         }
         let orphaned = self
@@ -281,6 +320,268 @@ impl DeviceStorageState {
         }
         self.selection_requests
             .retain(|device, _| epochs.contains_key(device));
+        self.setup_locations
+            .retain(|(device, _), _| epochs.contains_key(device));
+    }
+
+    fn mark_setup_locations_unresolved(&mut self, device: &str) {
+        for ((location_device, _), locations) in &mut self.setup_locations {
+            if location_device == device {
+                for location in locations {
+                    location.resolved = false;
+                }
+            }
+        }
+    }
+
+    fn reconcile_setup_locations(&mut self, device: &str) {
+        let Some(observation) = self.observations.get(device) else {
+            self.mark_setup_locations_unresolved(device);
+            return;
+        };
+        for ((location_device, _), locations) in &mut self.setup_locations {
+            if location_device != device {
+                continue;
+            }
+            for location in locations {
+                let matching_volume = observation.volumes.iter().find(|volume| {
+                    volume.identity_token == location.binding.volume_identity
+                        && volume.continuity_token == location.binding.volume_continuity
+                        && volume.mount_root.as_deref()
+                            == Some(location.binding.mount_root.as_str())
+                        && storage_target_kind(volume.setup_location_kind)
+                            == Some(location.binding.volume_kind)
+                        && volume.is_setup_location_available()
+                });
+                location.resolved = location.binding.session_epoch == observation.session_epoch
+                    && location.runtime_generation == observation.runtime_generation
+                    && location.platform_tools_revision == observation.platform_tools_revision
+                    && matching_volume.is_some();
+                if location.resolved {
+                    location.binding.observation_token = observation.observation_token.clone();
+                    location.binding.volume_handle = volume_handle(
+                        device,
+                        observation.session_epoch,
+                        &location.binding.volume_identity,
+                    );
+                }
+            }
+        }
+    }
+
+    fn save_setup_location(
+        &mut self,
+        device: &str,
+        device_plan: &str,
+        session_epoch: u64,
+        runtime_generation: u64,
+        platform_tools_revision: u64,
+        observation_token: &str,
+        volume_handle: &str,
+        existing_id: Option<&str>,
+        name: &str,
+        relative_path: &str,
+        now: Instant,
+    ) -> Result<Vec<SetupLocationProjection>, String> {
+        let name = validate_setup_location_name(name)
+            .map_err(|_| "Enter a valid name for this Setup Location.".to_string())?;
+        let relative_path = validate_relative_location_path(relative_path).map_err(|_| {
+            "Enter a safe relative folder path for this Setup Location.".to_string()
+        })?;
+        let observation = self.observations.get(device).cloned().ok_or_else(|| {
+            "Refresh storage options and choose a volume for this Setup Location.".to_string()
+        })?;
+        if !observation.matches_provenance(
+            session_epoch,
+            runtime_generation,
+            platform_tools_revision,
+        ) || observation.discovery_status != DiscoveryStatus::Observed
+            || now.saturating_duration_since(observation.fetched_at) >= CACHE_TTL
+            || observation.observation_token != observation_token
+        {
+            return Err("Storage options changed. Refresh and choose a volume again.".to_string());
+        }
+        let volume = observation
+            .volumes
+            .iter()
+            .find(|volume| {
+                volume_handle == volume_handle_for(device, observation.session_epoch, volume)
+            })
+            .filter(|volume| volume.is_setup_location_available())
+            .ok_or_else(|| "That volume cannot be used for a Setup Location.".to_string())?;
+        let volume_kind = storage_target_kind(volume.setup_location_kind)
+            .ok_or_else(|| "That volume cannot be used for a Setup Location.".to_string())?;
+        let mount_root = volume
+            .mount_root
+            .clone()
+            .ok_or_else(|| "That volume does not have a trusted storage root.".to_string())?;
+        let scope = (device.to_string(), device_plan.to_string());
+        let locations = self.setup_locations.entry(scope).or_default();
+        if let Some(existing_id) = existing_id {
+            if !locations
+                .iter()
+                .any(|location| location.binding.id == existing_id)
+            {
+                return Err("That Setup Location is no longer available.".to_string());
+            }
+        } else if locations.len() >= MAX_SETUP_LOCATIONS {
+            return Err(
+                "This setup already has the maximum number of Setup Locations.".to_string(),
+            );
+        }
+        if locations.iter().any(|location| {
+            Some(location.binding.id.as_str()) != existing_id
+                && location.binding.name.to_lowercase() == name.to_lowercase()
+        }) {
+            return Err(
+                "Choose a different name; Setup Location names must be unique.".to_string(),
+            );
+        }
+        let id = existing_id
+            .map(ToString::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        let binding = StorageTargetBinding {
+            id: id.clone(),
+            device_plan: device_plan.to_string(),
+            session_epoch,
+            name,
+            relative_path,
+            volume_handle: volume_handle_for(device, session_epoch, volume),
+            volume_kind,
+            mount_root,
+            volume_identity: volume.identity_token.clone(),
+            volume_continuity: volume.continuity_token.clone(),
+            observation_token: observation.observation_token.clone(),
+        };
+        binding
+            .validate()
+            .map_err(|_| "That volume and path cannot form a safe Setup Location.".to_string())?;
+        let record = SetupLocationRecord {
+            binding,
+            runtime_generation,
+            platform_tools_revision,
+            resolved: true,
+        };
+        if let Some(existing_id) = existing_id {
+            let location = locations
+                .iter_mut()
+                .find(|location| location.binding.id == existing_id)
+                .expect("existing location was checked above");
+            *location = record;
+        } else {
+            locations.push(record);
+        }
+        Ok(project_setup_location_records(
+            locations,
+            Some(&observation),
+            now,
+        ))
+    }
+
+    fn delete_setup_location(&mut self, device: &str, device_plan: &str, id: &str) -> bool {
+        let Some(locations) = self
+            .setup_locations
+            .get_mut(&(device.to_string(), device_plan.to_string()))
+        else {
+            return false;
+        };
+        let before = locations.len();
+        locations.retain(|location| location.binding.id != id);
+        locations.len() != before
+    }
+
+    fn project_setup_locations(
+        &self,
+        device: &str,
+        device_plan: &str,
+        session_epoch: u64,
+        runtime_generation: u64,
+        platform_tools_revision: u64,
+        now: Instant,
+    ) -> Vec<SetupLocationProjection> {
+        let Some(locations) = self
+            .setup_locations
+            .get(&(device.to_string(), device_plan.to_string()))
+        else {
+            return Vec::new();
+        };
+        let observation = self.observations.get(device).filter(|observation| {
+            observation.matches_provenance(
+                session_epoch,
+                runtime_generation,
+                platform_tools_revision,
+            ) && now.saturating_duration_since(observation.fetched_at) < CACHE_TTL
+        });
+        project_setup_location_records(locations, observation, now)
+    }
+
+    fn setup_location_bindings(
+        &self,
+        device: &str,
+        device_plan: &str,
+        session_epoch: u64,
+        runtime_generation: u64,
+        platform_tools_revision: u64,
+        ids: &[String],
+        now: Instant,
+    ) -> Result<Vec<StorageTargetBinding>, String> {
+        let observation = self
+            .observations
+            .get(device)
+            .ok_or_else(|| "Refresh storage options before reviewing this setup.".to_string())?;
+        if !observation.matches_provenance(
+            session_epoch,
+            runtime_generation,
+            platform_tools_revision,
+        ) || observation.discovery_status != DiscoveryStatus::Observed
+            || now.saturating_duration_since(observation.fetched_at) >= CACHE_TTL
+        {
+            return Err(
+                "Storage options are stale. Refresh and review this setup again.".to_string(),
+            );
+        }
+        let locations = self
+            .setup_locations
+            .get(&(device.to_string(), device_plan.to_string()))
+            .ok_or_else(|| "Choose a Setup Location for each storage destination.".to_string())?;
+        let mut unique_ids = ids.to_vec();
+        unique_ids.sort();
+        unique_ids.dedup();
+        unique_ids
+            .iter()
+            .map(|id| {
+                let location = locations
+                    .iter()
+                    .find(|location| location.binding.id == *id)
+                    .filter(|location| {
+                        location.resolved
+                            && location.binding.session_epoch == session_epoch
+                            && location.runtime_generation == runtime_generation
+                            && location.platform_tools_revision == platform_tools_revision
+                    })
+                    .ok_or_else(|| {
+                        "A selected Setup Location needs a refreshed volume choice. Review again after selecting storage.".to_string()
+                    })?;
+                let volume = observation.volumes.iter().find(|volume| {
+                    volume.identity_token == location.binding.volume_identity
+                        && volume.continuity_token == location.binding.volume_continuity
+                        && volume.mount_root.as_deref()
+                            == Some(location.binding.mount_root.as_str())
+                        && storage_target_kind(volume.setup_location_kind)
+                            == Some(location.binding.volume_kind)
+                        && volume.is_setup_location_available()
+                });
+                if volume.is_none() {
+                    return Err("A selected volume changed. Choose storage again and create a new review.".to_string());
+                }
+                let mut binding = location.binding.clone();
+                binding.observation_token = observation.observation_token.clone();
+                binding.validate().map_err(|_| {
+                    "A selected Setup Location no longer has valid storage evidence.".to_string()
+                })?;
+                Ok(binding)
+            })
+            .collect()
     }
 
     fn next_sequence(&mut self, device: &str) -> u64 {
@@ -405,6 +706,7 @@ impl DeviceStorageState {
             },
         );
         self.reconcile_selection(device, now);
+        self.reconcile_setup_locations(device);
         ProbeOutcome::Committed
     }
 
@@ -437,6 +739,7 @@ impl DeviceStorageState {
         self.in_flight.remove(device);
         self.retire_observation(device);
         self.selections.remove(device);
+        self.mark_setup_locations_unresolved(device);
         self.notices.insert(device.to_string(), notice.to_string());
         ProbeOutcome::Committed
     }
@@ -445,6 +748,7 @@ impl DeviceStorageState {
         self.in_flight.remove(device);
         self.retire_observation(device);
         self.selections.remove(device);
+        self.mark_setup_locations_unresolved(device);
         self.notices.insert(device.to_string(), notice.to_string());
     }
 
@@ -1020,6 +1324,118 @@ pub(crate) fn project_device_volumes(
     ))
 }
 
+#[tauri::command]
+pub(crate) fn list_setup_locations(
+    state: tauri::State<'_, AppState>,
+    device_handle: &str,
+    device_plan: &str,
+) -> Result<Vec<SetupLocationProjection>, String> {
+    let context = volume_probe_context(&state, device_handle)?;
+    let mut guard = lock_handles(&state)?;
+    let record = guard
+        .device(device_handle)
+        .map_err(|_| unknown_device_error())?;
+    if record.session_epoch != context.session_epoch {
+        return Err(stale_device_session_error());
+    }
+    Ok(guard.device_storage_mut().project_setup_locations(
+        device_handle,
+        device_plan,
+        context.session_epoch,
+        context.runtime_generation,
+        context.platform_tools_revision,
+        Instant::now(),
+    ))
+}
+
+#[tauri::command]
+pub(crate) fn save_setup_location(
+    state: tauri::State<'_, AppState>,
+    device_handle: &str,
+    device_plan: &str,
+    observation_token: &str,
+    volume_handle: &str,
+    existing_id: Option<&str>,
+    name: &str,
+    relative_path: &str,
+) -> Result<Vec<SetupLocationProjection>, String> {
+    let context = volume_probe_context(&state, device_handle)?;
+    let mut guard = lock_handles(&state)?;
+    let record = guard
+        .device(device_handle)
+        .map_err(|_| unknown_device_error())?;
+    if record.session_epoch != context.session_epoch {
+        return Err(stale_device_session_error());
+    }
+    guard.device_storage_mut().save_setup_location(
+        device_handle,
+        device_plan,
+        context.session_epoch,
+        context.runtime_generation,
+        context.platform_tools_revision,
+        observation_token,
+        volume_handle,
+        existing_id,
+        name,
+        relative_path,
+        Instant::now(),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn remove_setup_location(
+    state: tauri::State<'_, AppState>,
+    device_handle: &str,
+    device_plan: &str,
+    id: &str,
+) -> Result<Vec<SetupLocationProjection>, String> {
+    let context = volume_probe_context(&state, device_handle)?;
+    let mut guard = lock_handles(&state)?;
+    let record = guard
+        .device(device_handle)
+        .map_err(|_| unknown_device_error())?;
+    if record.session_epoch != context.session_epoch {
+        return Err(stale_device_session_error());
+    }
+    let storage = guard.device_storage_mut();
+    if !storage.delete_setup_location(device_handle, device_plan, id) {
+        return Err("That Setup Location is no longer available.".to_string());
+    }
+    Ok(storage.project_setup_locations(
+        device_handle,
+        device_plan,
+        context.session_epoch,
+        context.runtime_generation,
+        context.platform_tools_revision,
+        Instant::now(),
+    ))
+}
+
+pub(crate) fn setup_location_bindings(
+    state: &AppState,
+    device_handle: &str,
+    device_plan: &str,
+    ids: &[String],
+) -> Result<Vec<StorageTargetBinding>, String> {
+    let context = volume_probe_context(state, device_handle)?;
+    let mut guard = lock_handles(state)?;
+    let record = guard
+        .device(device_handle)
+        .map_err(|_| unknown_device_error())?;
+    if record.session_epoch != context.session_epoch {
+        return Err(stale_device_session_error());
+    }
+    guard.device_storage_mut().setup_location_bindings(
+        device_handle,
+        device_plan,
+        context.session_epoch,
+        context.runtime_generation,
+        context.platform_tools_revision,
+        ids,
+        Instant::now(),
+    )
+}
+
 fn kind_name(kind: ObservedVolumeKind) -> &'static str {
     match kind {
         ObservedVolumeKind::InternalShared => "internalShared",
@@ -1054,6 +1470,64 @@ fn volume_label(kind: ObservedVolumeKind, sd_index: usize, sd_total: usize) -> S
         ObservedVolumeKind::Usb => "USB storage".to_string(),
         ObservedVolumeKind::Unknown => "Unknown storage".to_string(),
     }
+}
+
+fn storage_target_kind(kind: Option<ObservedVolumeKind>) -> Option<StorageTargetVolumeKind> {
+    match kind? {
+        ObservedVolumeKind::InternalShared => Some(StorageTargetVolumeKind::InternalShared),
+        ObservedVolumeKind::RemovableSd => Some(StorageTargetVolumeKind::RemovableSd),
+        _ => None,
+    }
+}
+
+fn volume_handle_for(device: &str, session_epoch: u64, volume: &ObservedVolume) -> String {
+    volume_handle(device, session_epoch, &volume.identity_token)
+}
+
+fn project_setup_location_records(
+    locations: &[SetupLocationRecord],
+    observation: Option<&VolumeObservation>,
+    now: Instant,
+) -> Vec<SetupLocationProjection> {
+    locations
+        .iter()
+        .map(|location| {
+            let observation_is_fresh = observation.is_some_and(|observation| {
+                now.saturating_duration_since(observation.fetched_at) < CACHE_TTL
+                    && observation.session_epoch == location.binding.session_epoch
+                    && observation.observation_token == location.binding.observation_token
+            });
+            let volume_is_current = observation.is_some_and(|observation| {
+                observation.volumes.iter().any(|volume| {
+                    volume.identity_token == location.binding.volume_identity
+                        && volume.continuity_token == location.binding.volume_continuity
+                        && volume.mount_root.as_deref()
+                            == Some(location.binding.mount_root.as_str())
+                        && storage_target_kind(volume.setup_location_kind)
+                            == Some(location.binding.volume_kind)
+                        && volume.is_setup_location_available()
+                })
+            });
+            let ready = location.resolved && observation_is_fresh && volume_is_current;
+            let (volume_kind, volume_label) = match location.binding.volume_kind {
+                StorageTargetVolumeKind::InternalShared => ("internalShared", "Internal storage"),
+                StorageTargetVolumeKind::RemovableSd => ("removableSd", "SD card"),
+            };
+            SetupLocationProjection {
+                id: location.binding.id.clone(),
+                name: location.binding.name.clone(),
+                relative_path: location.binding.relative_path.clone(),
+                volume_kind: volume_kind.to_string(),
+                volume_label: volume_label.to_string(),
+                ready,
+                detail: if ready {
+                    "Available for this setup.".to_string()
+                } else {
+                    "Refresh storage and choose this volume again before review.".to_string()
+                },
+            }
+        })
+        .collect()
 }
 
 fn volume_detail(
@@ -1143,8 +1617,8 @@ fn decode_observation(value: &Value) -> Option<DecodedObservation> {
         "offline" => DiscoveryStatus::Offline,
         _ => return None,
     };
-    let observation_token = value.get("observationToken")?.as_str()?;
-    if !is_opaque_token(observation_token) {
+    let evidence_token = value.get("observationToken")?.as_str()?;
+    if !is_opaque_token(evidence_token) {
         return None;
     }
     let raw_volumes = value.get("volumes")?.as_array()?;
@@ -1168,12 +1642,34 @@ fn decode_observation(value: &Value) -> Option<DecodedObservation> {
         {
             return None;
         }
+        let setup_location_kind = match raw.get("setupLocationKind") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(ObservedVolumeKind::parse(value)?),
+            _ => return None,
+        };
+        let mount_root = match raw.get("mountRoot") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(value.clone()),
+            _ => return None,
+        };
+        if !valid_setup_location_evidence(
+            kind,
+            status,
+            mount_state,
+            setup_location_kind,
+            mount_root.as_deref(),
+            reasons.iter().filter_map(Value::as_str),
+        ) {
+            return None;
+        }
         volumes.push(ObservedVolume {
             identity_token: identity_token.to_string(),
             continuity_token: continuity_token.to_string(),
             kind,
             status,
             mount_state,
+            setup_location_kind,
+            mount_root,
         });
     }
     if discovery_status != DiscoveryStatus::Observed && !volumes.is_empty() {
@@ -1181,9 +1677,47 @@ fn decode_observation(value: &Value) -> Option<DecodedObservation> {
     }
     Some(DecodedObservation {
         discovery_status,
-        observation_token: observation_token.to_string(),
+        observation_token: uuid::Uuid::new_v4().simple().to_string(),
         volumes,
     })
+}
+
+fn valid_setup_location_evidence<'a>(
+    kind: ObservedVolumeKind,
+    status: ObservedVolumeStatus,
+    mount_state: ObservedMountState,
+    setup_kind: Option<ObservedVolumeKind>,
+    mount_root: Option<&str>,
+    reasons: impl Iterator<Item = &'a str>,
+) -> bool {
+    let reasons = reasons.collect::<Vec<_>>();
+    match (setup_kind, mount_root) {
+        (None, None) => true,
+        (Some(ObservedVolumeKind::InternalShared), Some("/storage/emulated/0")) => {
+            kind == ObservedVolumeKind::InternalShared
+                && status == ObservedVolumeStatus::Available
+                && mount_state == ObservedMountState::MountedRw
+                && reasons.contains(&"emulated_user_associated")
+                && !reasons.contains(&"primary_storage_adopted")
+        }
+        (Some(ObservedVolumeKind::RemovableSd), Some(root)) => {
+            let supported_root = root.strip_prefix("/storage/").is_some_and(|part| {
+                !part.is_empty()
+                    && !part.contains('/')
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            });
+            supported_root
+                && status == ObservedVolumeStatus::Available
+                && mount_state == ObservedMountState::MountedRw
+                && ((kind == ObservedVolumeKind::RemovableSd
+                    && reasons.contains(&"disk_removable_sd"))
+                    || (kind == ObservedVolumeKind::InternalShared
+                        && reasons.contains(&"primary_storage_physical")))
+        }
+        _ => false,
+    }
 }
 
 fn is_opaque_token(value: &str) -> bool {
@@ -1574,7 +2108,7 @@ mod tests {
     }
 
     fn duplicate_sd_payload() -> Value {
-        observed_payload(&[
+        let mut payload = observed_payload(&[
             (
                 INTERNAL_IDENTITY,
                 "internalShared",
@@ -1583,7 +2117,29 @@ mod tests {
             ),
             (SD_IDENTITY, "removableSd", "ambiguous", "mountedRw"),
             (SD_IDENTITY, "removableSd", "ambiguous", "mountedRw"),
-        ])
+        ]);
+        for volume in payload["volumes"].as_array_mut().expect("volumes array") {
+            match volume["kind"].as_str() {
+                Some("internalShared") => {
+                    volume["setupLocationKind"] = json!("internalShared");
+                    volume["mountRoot"] = json!("/storage/emulated/0");
+                    volume["reasons"] = json!([
+                        "primary_storage_emulated",
+                        "emulated_user_associated",
+                        "volume_mounted_rw"
+                    ]);
+                }
+                Some("removableSd") => {
+                    volume["reasons"] = json!([
+                        "disk_removable_sd",
+                        "volume_mounted_rw",
+                        "duplicate_identity"
+                    ]);
+                }
+                _ => unreachable!("fixture contains only internal and removable volumes"),
+            }
+        }
+        payload
     }
 
     fn handles_at_epoch(epoch: u64) -> Mutex<SessionHandles> {
@@ -1665,6 +2221,18 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {kind} volume"))
             .volume_handle
             .clone()
+    }
+
+    #[test]
+    fn frontend_freshness_token_is_not_the_sidecar_volume_evidence_digest() {
+        let handles = handles_at_epoch(1);
+        let context = context(1);
+        let projection = observe(&handles, &context, internal_and_sd(), Instant::now());
+
+        assert_ne!(
+            projection.observation_token,
+            "aaaaaaaabbbbbbbbccccccccdddddddd",
+        );
     }
 
     fn clock_at(now: Instant) -> impl FnMut() -> Instant {
@@ -2612,7 +3180,18 @@ mod tests {
     fn projection_contains_no_raw_device_identifiers() {
         let handles = handles_at_epoch(1);
         let context = context(1);
-        let projection = observe(&handles, &context, internal_and_sd(), Instant::now());
+        let mut raw_observation = internal_and_sd();
+        for volume in raw_observation["volumes"]
+            .as_array_mut()
+            .expect("raw volume array")
+        {
+            if volume["kind"] == "removableSd" {
+                volume["setupLocationKind"] = json!("removableSd");
+                volume["mountRoot"] = json!("/storage/8C4B-1A2F");
+                volume["reasons"] = json!(["disk_removable_sd"]);
+            }
+        }
+        let projection = observe(&handles, &context, raw_observation, Instant::now());
         let rendered = serde_json::to_string(&projection).expect("serialize projection");
 
         for forbidden in [
@@ -3274,7 +3853,7 @@ public:179,65 {shell_state} {fs_uuid}
             base + Duration::from_secs(1),
         );
         assert_eq!(sd, handle_for(&second, "removableSd"));
-        assert_eq!(second.observation_token, OBSERVATION_TWO);
+        assert_ne!(second.observation_token, OBSERVATION_TWO);
 
         let sequence = begin_selection_request(&handles, &context.device_handle)
             .expect("stale selection sequence");
@@ -3358,7 +3937,7 @@ public:179,65 {shell_state} {fs_uuid}
     }
 
     #[test]
-    fn identical_continuity_evidence_is_indistinguishable_not_physical_proof() {
+    fn identical_continuity_evidence_refresh_mints_a_fresh_frontend_token() {
         let handles = handles_at_epoch(1);
         let context = context(1);
         let base = Instant::now();
@@ -3374,15 +3953,14 @@ public:179,65 {shell_state} {fs_uuid}
             sd_payload(CONTINUITY_ONE, OBSERVATION_ONE),
             base + Duration::from_secs(1),
         );
-        // Two observations with identical continuity evidence are
-        // indistinguishable by design. The observation token therefore
-        // matches and the selection remains admitted; this is evidence that
-        // can lapse, not proof that the same physical card is present.
-        assert_eq!(first.observation_token, second.observation_token);
+        // A refreshed observation gets a new request token even when device
+        // evidence is unchanged. The stable volume handle still identifies the
+        // same logical choice within this session.
+        assert_ne!(first.observation_token, second.observation_token);
         let sd = handle_for(&first, "removableSd");
         let sequence =
             begin_selection_request(&handles, &context.device_handle).expect("selection sequence");
-        let selected = admit_device_volume_selection_at_sequence(
+        let stale = admit_device_volume_selection_at_sequence(
             &handles,
             &context,
             Some(&sd),
@@ -3391,7 +3969,21 @@ public:179,65 {shell_state} {fs_uuid}
             "cached",
             base + Duration::from_secs(1),
         )
-        .expect("indistinguishable evidence remains selectable");
+        .expect_err("a refreshed observation invalidates the displayed token");
+        assert!(stale.contains("stale_observation"), "error was {stale}");
+
+        let sequence =
+            begin_selection_request(&handles, &context.device_handle).expect("selection sequence");
+        let selected = admit_device_volume_selection_at_sequence(
+            &handles,
+            &context,
+            Some(&sd),
+            Some(&second.observation_token),
+            sequence,
+            "cached",
+            base + Duration::from_secs(1),
+        )
+        .expect("the current freshness token admits the stable volume choice");
         assert_eq!(
             selected.selected_volume_handle.as_deref(),
             Some(sd.as_str())
@@ -3500,6 +4092,14 @@ public:179,65 {shell_state} {fs_uuid}
         );
         assert!(duplicates.iter().all(|volume| !volume.selectable));
 
+        let internal = projection
+            .volumes
+            .iter()
+            .find(|volume| volume.kind == "internalShared")
+            .expect("internal volume remains independently selectable");
+        assert!(internal.selectable);
+        assert_ne!(internal.volume_handle, duplicates[0].volume_handle);
+
         let sequence =
             begin_selection_request(&handles, &context.device_handle).expect("selection sequence");
         let error = admit_device_volume_selection_at_sequence(
@@ -3513,6 +4113,19 @@ public:179,65 {shell_state} {fs_uuid}
         )
         .expect_err("an ambiguous duplicate cannot be selected");
         assert!(error.contains("volume_not_selectable"), "error was {error}");
+
+        let internal_sequence =
+            begin_selection_request(&handles, &context.device_handle).expect("internal sequence");
+        admit_device_volume_selection_at_sequence(
+            &handles,
+            &context,
+            Some(&internal.volume_handle),
+            Some(&projection.observation_token),
+            internal_sequence,
+            "cached",
+            base,
+        )
+        .expect("the independent internal volume remains selectable");
     }
 
     #[test]
@@ -3702,5 +4315,174 @@ public:179,65 {shell_state} {fs_uuid}
         assert!(store.notices.contains_key("device-b"));
         assert!(store.selection_requests.contains_key("device-b"));
         assert!(store.sequences.contains_key("device-b"));
+    }
+    #[test]
+    fn setup_locations_keep_independent_volumes_and_invalidate_only_changed_continuity() {
+        let now = Instant::now();
+        let internal = ObservedVolume {
+            identity_token: INTERNAL_IDENTITY.to_string(),
+            continuity_token: "dddddddddddddddddddddddddddddddd".to_string(),
+            kind: ObservedVolumeKind::InternalShared,
+            status: ObservedVolumeStatus::Available,
+            mount_state: ObservedMountState::MountedRw,
+            setup_location_kind: Some(ObservedVolumeKind::InternalShared),
+            mount_root: Some("/storage/emulated/0".to_string()),
+        };
+        let sd = ObservedVolume {
+            identity_token: SD_IDENTITY.to_string(),
+            continuity_token: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+            kind: ObservedVolumeKind::RemovableSd,
+            status: ObservedVolumeStatus::Available,
+            mount_state: ObservedMountState::MountedRw,
+            setup_location_kind: Some(ObservedVolumeKind::RemovableSd),
+            mount_root: Some("/storage/1234-ABCD".to_string()),
+        };
+        let observation = |token: &str, volumes: Vec<ObservedVolume>| VolumeObservation {
+            session_epoch: 1,
+            runtime_generation: 2,
+            platform_tools_revision: 3,
+            discovery_status: DiscoveryStatus::Observed,
+            observation_token: token.to_string(),
+            volumes,
+            fetched_at: now,
+        };
+        let mut store = DeviceStorageState::default();
+        store.observations.insert(
+            DEVICE.to_string(),
+            observation(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                vec![internal.clone(), sd.clone()],
+            ),
+        );
+        let internal_handle = volume_handle_for(DEVICE, 1, &internal);
+        let sd_handle = volume_handle_for(DEVICE, 1, &sd);
+        let internal_id = store
+            .save_setup_location(
+                DEVICE,
+                "plan-a",
+                1,
+                2,
+                3,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &internal_handle,
+                None,
+                "Internal ROMs",
+                "Games/ROMs",
+                now,
+            )
+            .unwrap()[0]
+            .id
+            .clone();
+        let sd_id = store
+            .save_setup_location(
+                DEVICE,
+                "plan-a",
+                1,
+                2,
+                3,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &sd_handle,
+                None,
+                "SD BIOS",
+                "EmuChef/BIOS",
+                now,
+            )
+            .unwrap()
+            .into_iter()
+            .find(|location| location.name == "SD BIOS")
+            .unwrap()
+            .id;
+        let other_plan_id = store
+            .save_setup_location(
+                DEVICE,
+                "plan-b",
+                1,
+                2,
+                3,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &internal_handle,
+                None,
+                "Other ROMs",
+                "Other/Games",
+                now,
+            )
+            .unwrap()[0]
+            .id
+            .clone();
+
+        let bindings = store
+            .setup_location_bindings(
+                DEVICE,
+                "plan-a",
+                1,
+                2,
+                3,
+                &[internal_id.clone(), sd_id.clone()],
+                now,
+            )
+            .unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_ne!(bindings[0].mount_root, bindings[1].mount_root);
+        let public = store.project_setup_locations(DEVICE, "plan-a", 1, 2, 3, now);
+        let serialized = serde_json::to_string(&public).unwrap();
+        assert!(!serialized.contains("/storage/"));
+        assert!(!serialized.contains(INTERNAL_IDENTITY));
+        assert!(!serialized.contains(SD_IDENTITY));
+        for private_field in [
+            "mountRoot",
+            "volumeIdentity",
+            "volumeContinuity",
+            "observationToken",
+            "deviceHandle",
+            "sessionEpoch",
+        ] {
+            assert!(
+                !serialized.contains(private_field),
+                "public Setup Location projection leaked {private_field}"
+            );
+        }
+
+        let refreshed = observation(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            vec![internal.clone(), sd.clone()],
+        );
+        store.observations.insert(DEVICE.to_string(), refreshed);
+        store.reconcile_setup_locations(DEVICE);
+        assert!(store
+            .project_setup_locations(DEVICE, "plan-a", 1, 2, 3, now)
+            .iter()
+            .all(|location| location.ready));
+
+        let replaced_sd = ObservedVolume {
+            identity_token: "ffffffffffffffffffffffffffffffff".to_string(),
+            continuity_token: "99999999999999999999999999999999".to_string(),
+            ..sd
+        };
+        store.observations.insert(
+            DEVICE.to_string(),
+            observation(
+                "cccccccccccccccccccccccccccccccc",
+                vec![internal, replaced_sd],
+            ),
+        );
+        store.reconcile_setup_locations(DEVICE);
+        let plan_a = store.project_setup_locations(DEVICE, "plan-a", 1, 2, 3, now);
+        assert!(
+            plan_a
+                .iter()
+                .find(|location| location.id == internal_id)
+                .unwrap()
+                .ready
+        );
+        assert!(
+            !plan_a
+                .iter()
+                .find(|location| location.id == sd_id)
+                .unwrap()
+                .ready
+        );
+        assert!(store
+            .setup_location_bindings(DEVICE, "plan-b", 1, 2, 3, &[other_plan_id], now)
+            .is_ok());
     }
 }

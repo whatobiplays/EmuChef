@@ -83,6 +83,7 @@ pub(crate) fn input_value_type(type_name: &str, multiple: bool) -> &'static str 
         "directory" => "directory_path",
         "file" => "file_path",
         "device_path" => "device_path",
+        "setup_location_ref" => "setup_location_ref",
         "path" => "path",
         "string_list" => "string_list",
         "path_list" => "path_list",

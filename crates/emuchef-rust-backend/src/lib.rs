@@ -45,6 +45,7 @@ pub mod jsonl;
 pub mod model;
 pub mod one_shot;
 mod owned_process;
+pub use owned_process::{isolate_process_group, OwnedProcessGroup, ProcessGroupConfig};
 mod plan_digest;
 mod planner;
 pub(crate) mod planner_device_plan;
@@ -80,6 +81,9 @@ pub mod runtime_configuration;
 pub(crate) mod runtime_refs;
 pub mod session;
 pub mod step_specs;
+pub mod storage_targets;
+#[cfg(test)]
+mod storage_targets_tests;
 pub mod user_configuration;
 pub mod user_configuration_document;
 pub mod validation;

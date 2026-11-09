@@ -202,6 +202,8 @@ fn assert_hello_result(result: &Value) {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "revokeSetupLocationLease",
+            "retireSetupLocationLeaseAttempt",
             "launchExecutionApp",
             "openRecipe",
             "openAppDefinition",

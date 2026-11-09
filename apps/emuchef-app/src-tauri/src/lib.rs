@@ -74,7 +74,9 @@ pub fn run() {
                 root_qualification: Mutex::new(
                     device_qualification::RootQualificationStore::default(),
                 ),
-                executions: Mutex::new(execution::ExecutionHandleStore::default()),
+                executions: Mutex::new(execution::ExecutionHandleStore::with_durable_operation_fence(
+                    app_data.join("active-device-operation.marker"),
+                )),
                 saved_configurations: Mutex::new(
                     saved_configurations::SavedConfigurationStore::load(
                         app_data.join("recent-configurations.json"),
@@ -113,6 +115,9 @@ pub fn run() {
             device_observation::get_device_qualification,
             device_storage::get_device_volumes,
             device_storage::select_device_volume,
+            device_storage::list_setup_locations,
+            device_storage::save_setup_location,
+            device_storage::remove_setup_location,
             commands::match_device,
             qualification_mode::get_device_qualification_mode_status,
             qualification_mode::create_qualification_target_candidate,

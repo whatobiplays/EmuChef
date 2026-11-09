@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { describedBy } from "./accessibility";
 import type {
   DeviceVolumeChoice,
   DeviceVolumeDiscoveryStatus,
   DeviceVolumesProjection,
+  SetupLocationProjection,
 } from "./types";
 
 /**
@@ -36,6 +37,24 @@ export interface DeviceStorageChoicesProps {
   onSelect: (volumeHandle: string, observationToken: string) => void;
   /** Announce a focused-option loss through the app shell live region. */
   announce: (message: string, assertive?: boolean) => void;
+  /** Current device-plan context for its independent named locations. */
+  devicePlan?: string | null;
+  /** Sanitized named locations for the current device-plan context. */
+  setupLocations?: SetupLocationProjection[];
+  /** True while listing or mutating named locations. */
+  setupLocationLoading?: boolean;
+  /** Fixed product error text from the trusted bridge, if any. */
+  setupLocationError?: string | null;
+  /** Save a location using a volume and observation from the current projection. */
+  onSaveSetupLocation?: (
+    volumeHandle: string,
+    observationToken: string,
+    existingId: string | undefined,
+    name: string,
+    relativePath: string,
+  ) => Promise<boolean>;
+  /** Remove a named location from the current device-plan context. */
+  onRemoveSetupLocation?: (id: string) => void | Promise<void>;
 }
 
 export type DeviceStorageLoadingKind = "refresh" | "selection";
@@ -63,10 +82,16 @@ function discoveryMessage(status: DeviceVolumeDiscoveryStatus): string | null {
 
 function evidenceText(projection: DeviceVolumesProjection | null): string {
   if (!projection) return "Storage options have not been read yet.";
-  if (projection.discoveryStatus === "refreshing" && projection.evidence === "unavailable") {
+  if (
+    projection.discoveryStatus === "refreshing" &&
+    projection.evidence === "unavailable"
+  ) {
     return "Storage options have not been read yet.";
   }
-  if (projection.discoveryStatus === "unavailable" || projection.evidence === "unavailable") {
+  if (
+    projection.discoveryStatus === "unavailable" ||
+    projection.evidence === "unavailable"
+  ) {
     return "Storage options could not be read. Refresh storage options to try again.";
   }
   return projection.evidence === "live"
@@ -90,6 +115,12 @@ export function DeviceStorageChoices({
   onRefresh,
   onSelect,
   announce,
+  devicePlan = null,
+  setupLocations = [],
+  setupLocationLoading = false,
+  setupLocationError = null,
+  onSaveSetupLocation,
+  onRemoveSetupLocation,
 }: DeviceStorageChoicesProps) {
   const baseId = useId();
   const optionListId = baseId + "-options";
@@ -104,9 +135,60 @@ export function DeviceStorageChoices({
   const focusedHandleRef = useRef<string | null>(null);
   const shouldRestoreFocusRef = useRef(false);
   const refreshButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [setupLocationName, setSetupLocationName] = useState("");
+  const [setupLocationPath, setSetupLocationPath] = useState("");
+  const [setupLocationVolumeHandle, setSetupLocationVolumeHandle] =
+    useState("");
+  const [editingSetupLocationId, setEditingSetupLocationId] = useState<
+    string | undefined
+  >();
   const wasLoadingRef = useRef(loading);
+  const setupLocationContextRef = useRef({
+    devicePlan,
+    deviceHandle: projection?.deviceHandle ?? null,
+    sessionEpoch: projection?.sessionEpoch ?? null,
+    hasFreshObservation: projection?.discoveryStatus === "observed"
+      && projection.evidence === "live"
+      && Boolean(projection.observationToken),
+  });
 
   const notice = projection?.selectionNotice ?? null;
+
+  useEffect(() => {
+    const previous = setupLocationContextRef.current;
+    const currentDeviceHandle = projection?.deviceHandle ?? previous.deviceHandle;
+    const currentSessionEpoch = projection?.sessionEpoch ?? previous.sessionEpoch;
+    const currentHasFreshObservation = projection?.discoveryStatus === "observed"
+      && projection.evidence === "live"
+      && Boolean(projection.observationToken);
+    const deviceContextChanged = previous.deviceHandle !== null
+      && (currentDeviceHandle !== previous.deviceHandle
+        || currentSessionEpoch !== previous.sessionEpoch);
+    const observationLost = previous.deviceHandle !== null
+      && (projection?.deviceHandle == null
+        || (previous.hasFreshObservation && !currentHasFreshObservation));
+
+    if (previous.devicePlan !== devicePlan || deviceContextChanged || observationLost) {
+      setSetupLocationName("");
+      setSetupLocationPath("");
+      setSetupLocationVolumeHandle("");
+      setEditingSetupLocationId(undefined);
+    }
+
+    setupLocationContextRef.current = {
+      devicePlan,
+      deviceHandle: currentDeviceHandle,
+      sessionEpoch: currentSessionEpoch,
+      hasFreshObservation: currentHasFreshObservation,
+    };
+  }, [
+    devicePlan,
+    projection?.deviceHandle,
+    projection?.sessionEpoch,
+    projection?.discoveryStatus,
+    projection?.evidence,
+    projection?.observationToken,
+  ]);
 
   useEffect(() => {
     const wasLoading = wasLoadingRef.current;
@@ -114,7 +196,9 @@ export function DeviceStorageChoices({
     if (!wasLoading && loading) {
       const handle = focusedHandleRef.current;
       const element = handle ? radioRefs.current.get(handle) : undefined;
-      shouldRestoreFocusRef.current = Boolean(element && document.activeElement === element);
+      shouldRestoreFocusRef.current = Boolean(
+        element && document.activeElement === element,
+      );
       return;
     }
     if (!wasLoading || loading) return;
@@ -125,11 +209,16 @@ export function DeviceStorageChoices({
     const element = radioRefs.current.get(handle);
     const active = document.activeElement;
     if (element && element.isConnected) {
-      if (active === null || active === document.body || active === element) element.focus();
+      if (active === null || active === document.body || active === element)
+        element.focus();
       return;
     }
     focusedHandleRef.current = null;
-    if (active !== null && active !== document.body && active !== refreshButtonRef.current) {
+    if (
+      active !== null &&
+      active !== document.body &&
+      active !== refreshButtonRef.current
+    ) {
       return;
     }
     refreshButtonRef.current?.focus();
@@ -141,13 +230,36 @@ export function DeviceStorageChoices({
     }
   }, [announce, error, loading, notice]);
 
-  const selectable = projection?.volumes.filter((volume) => volume.selectable) ?? [];
-  const unavailable = projection?.volumes.filter((volume) => !volume.selectable) ?? [];
-  const statusMessage = projection ? discoveryMessage(projection.discoveryStatus) : null;
+  const selectable =
+    projection?.volumes.filter((volume) => volume.selectable) ?? [];
+  const freshObservation =
+    projection?.discoveryStatus === "observed" &&
+    projection.evidence === "live";
+  const setupLocationVolume = freshObservation
+    ? selectable.find(
+        (volume) => volume.volumeHandle === setupLocationVolumeHandle,
+      )
+    : undefined;
+  const canSaveSetupLocation = Boolean(
+    devicePlan &&
+      freshObservation &&
+      setupLocationVolume &&
+      setupLocationName.trim() &&
+      setupLocationPath.trim() &&
+      !loading &&
+      !setupLocationLoading &&
+      onSaveSetupLocation,
+  );
+  const unavailable =
+    projection?.volumes.filter((volume) => !volume.selectable) ?? [];
+  const statusMessage = projection
+    ? discoveryMessage(projection.discoveryStatus)
+    : null;
   const observationToken = projection?.observationToken ?? "";
-  const loadingMessage = loadingKind === "selection"
-    ? "Selecting storage…"
-    : "Refreshing storage options…";
+  const loadingMessage =
+    loadingKind === "selection"
+      ? "Selecting storage…"
+      : "Refreshing storage options…";
   const refreshButtonText = loading
     ? loadingKind === "selection"
       ? "Selecting storage…"
@@ -159,6 +271,42 @@ export function DeviceStorageChoices({
     notice && !error ? noticeId : undefined,
     error ? errorId : undefined,
   );
+  const resetSetupLocationForm = () => {
+    setSetupLocationName("");
+    setSetupLocationPath("");
+    setSetupLocationVolumeHandle("");
+    setEditingSetupLocationId(undefined);
+  };
+  useEffect(() => {
+    if (
+      editingSetupLocationId &&
+      !setupLocations.some((location) => location.id === editingSetupLocationId)
+    ) {
+      setSetupLocationName("");
+      setSetupLocationPath("");
+      setSetupLocationVolumeHandle("");
+      setEditingSetupLocationId(undefined);
+    }
+  }, [editingSetupLocationId, setupLocations]);
+
+  const submitSetupLocation = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (
+      !canSaveSetupLocation ||
+      !projection ||
+      !setupLocationVolume ||
+      !onSaveSetupLocation
+    )
+      return;
+    const saved = await onSaveSetupLocation(
+      setupLocationVolume.volumeHandle,
+      projection.observationToken,
+      editingSetupLocationId,
+      setupLocationName.trim(),
+      setupLocationPath.trim(),
+    );
+    if (saved) resetSetupLocationForm();
+  };
 
   return (
     <fieldset className="storage-options" aria-describedby={descriptionIds}>
@@ -183,11 +331,13 @@ export function DeviceStorageChoices({
           {loadingMessage}
         </p>
       )}
-      {projection?.discoveryStatus === "observed" && selectable.length === 0 && (
-        <p className="disabled-reason">
-          No selectable storage is available right now. EmuChef has not chosen a storage option for you.
-        </p>
-      )}
+      {projection?.discoveryStatus === "observed" &&
+        selectable.length === 0 && (
+          <p className="disabled-reason">
+            No selectable storage is available right now. EmuChef has not chosen
+            a storage option for you.
+          </p>
+        )}
       {selectable.length > 0 && (
         <div id={optionListId} className="storage-option-list">
           {selectable.map((volume) => {
@@ -197,9 +347,14 @@ export function DeviceStorageChoices({
                 key={volume.presentationKey}
                 volume={volume}
                 groupName={groupName}
-                checked={projection?.selectedVolumeHandle === volume.volumeHandle}
+                checked={
+                  projection?.selectedVolumeHandle === volume.volumeHandle
+                }
                 submissionBlocked={loading}
-                describedBy={describedBy(detailId, notice && !error ? noticeId : undefined)}
+                describedBy={describedBy(
+                  detailId,
+                  notice && !error ? noticeId : undefined,
+                )}
                 detailId={detailId}
                 onFocus={() => {
                   focusedHandleRef.current = volume.volumeHandle;
@@ -207,7 +362,8 @@ export function DeviceStorageChoices({
                 }}
                 onSelect={() => onSelect(volume.volumeHandle, observationToken)}
                 register={(element) => {
-                  if (element) radioRefs.current.set(volume.volumeHandle, element);
+                  if (element)
+                    radioRefs.current.set(volume.volumeHandle, element);
                   else radioRefs.current.delete(volume.volumeHandle);
                 }}
               />
@@ -246,9 +402,140 @@ export function DeviceStorageChoices({
         {refreshButtonText}
       </button>
       <p className="disabled-reason">
-        Storage options are read-only evidence. A mount does not prove EmuChef can write to the storage, and a
-        selection here does not authorize execution.
+        Storage options are read-only evidence. A mount does not prove EmuChef
+        can write to the storage, and a selection here does not authorize
+        execution.
       </p>
+      <fieldset className="setup-locations">
+        <legend>Named Setup Locations</legend>
+        <p>Save a named folder destination for recipes in this device plan.</p>
+        {setupLocationError && (
+          <p className="error" role="alert">
+            {setupLocationError}
+          </p>
+        )}
+        {!devicePlan && (
+          <p className="disabled-reason">
+            Choose a device plan before saving Setup Locations.
+          </p>
+        )}
+        {devicePlan && !freshObservation && (
+          <p className="disabled-reason">
+            Refresh storage options before adding or updating a Setup Location.
+          </p>
+        )}
+        {devicePlan && freshObservation && selectable.length === 0 && (
+          <p className="disabled-reason">
+            No selectable storage volume is available in this report.
+          </p>
+        )}
+        {setupLocations.length > 0 && (
+          <ul
+            aria-label="Saved Setup Locations"
+            className="setup-location-list"
+          >
+            {setupLocations.map((location) => (
+              <li key={location.id}>
+                <span>
+                  <strong>{location.name}</strong>
+                  <small>
+                    {location.relativePath} · {location.volumeLabel}
+                  </small>
+                  <small className={location.ready ? undefined : "warning"}>
+                    {location.ready
+                      ? "Ready for recipe selection."
+                      : location.detail}
+                  </small>
+                </span>
+                <span className="input-entry-actions">
+                  <button
+                    className="secondary"
+                    disabled={setupLocationLoading || !onSaveSetupLocation}
+                    onClick={() => {
+                      setEditingSetupLocationId(location.id);
+                      setSetupLocationName(location.name);
+                      setSetupLocationPath(location.relativePath);
+                      setSetupLocationVolumeHandle("");
+                    }}
+                    type="button"
+                  >
+                    Edit {location.name}
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={setupLocationLoading || !onRemoveSetupLocation}
+                    onClick={() => void onRemoveSetupLocation?.(location.id)}
+                    type="button"
+                  >
+                    Remove {location.name}
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <form onSubmit={(event) => void submitSetupLocation(event)}>
+          <label className="input-field">
+            Storage volume for Setup Location
+            <select
+              disabled={
+                !devicePlan ||
+                !freshObservation ||
+                loading ||
+                setupLocationLoading
+              }
+              onChange={(event) =>
+                setSetupLocationVolumeHandle(event.target.value)
+              }
+              value={setupLocationVolumeHandle}
+            >
+              <option value="">Choose storage volume…</option>
+              {selectable.map((volume) => (
+                <option
+                  key={volume.presentationKey}
+                  value={volume.volumeHandle}
+                >
+                  {volume.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="input-field">
+            Setup Location name
+            <input
+              autoComplete="off"
+              disabled={!devicePlan || setupLocationLoading}
+              onChange={(event) => setSetupLocationName(event.target.value)}
+              value={setupLocationName}
+            />
+          </label>
+          <label className="input-field">
+            Relative folder
+            <input
+              autoComplete="off"
+              disabled={!devicePlan || setupLocationLoading}
+              onChange={(event) => setSetupLocationPath(event.target.value)}
+              value={setupLocationPath}
+            />
+          </label>
+          <div className="button-row">
+            <button disabled={!canSaveSetupLocation} type="submit">
+              {editingSetupLocationId
+                ? "Update Setup Location"
+                : "Save Setup Location"}
+            </button>
+            {editingSetupLocationId && (
+              <button
+                className="secondary"
+                onClick={resetSetupLocationForm}
+                type="button"
+              >
+                Cancel edit
+              </button>
+            )}
+          </div>
+        </form>
+      </fieldset>
     </fieldset>
   );
 }

@@ -150,6 +150,22 @@ fn diagnostics_for_open_and_validate(fixture: &str) -> (Value, Value) {
     )
 }
 
+fn setup_location_copy_recipe() -> String {
+    let source = fs::read_to_string(fixture_path("phase6i_commands.yaml"))
+        .expect("copy recipe fixture should be readable");
+    let recipe = source
+        .replace("id: phase6i.commands", "id: test.setup_location_contract")
+        .replace("name: Phase 6I Commands", "name: Setup Location Contract")
+        .replace(
+            "inputs:\n  source_dir:",
+            "inputs:\n  destination:\n    type: setup_location_ref\n    role: destination\n    label: ROM destination\n    required: true\n  source_dir:",
+        )
+        .replace("dest: /sdcard/Input", "dest: {ref: inputs.destination}");
+    assert!(recipe.contains("type: setup_location_ref"));
+    assert!(recipe.contains("dest: {ref: inputs.destination}"));
+    recipe
+}
+
 fn assert_diagnostic_shape(diagnostic: &Value) {
     let object = diagnostic.as_object().expect("diagnostic should be object");
     let keys = object.keys().cloned().collect::<Vec<_>>();
@@ -289,6 +305,8 @@ fn capabilities_include_additive_product_runtime_surface() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "revokeSetupLocationLease",
+            "retireSetupLocationLeaseAttempt",
             "launchExecutionApp",
             "openRecipe",
             "openAppDefinition",
@@ -624,6 +642,103 @@ fn stepspec_ref_sources_and_value_types_are_validated_independently() {
         "param_source_not_accepted",
         "phase6i.commands",
         Some("steps[2].params.dest"),
+    );
+}
+
+#[test]
+fn setup_location_ref_is_accepted_as_copy_files_destination_by_shared_validation() {
+    let temp_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
+    fs::write(&temp_recipe.path, setup_location_copy_recipe())
+        .expect("Setup Location Recipe should be writable");
+    let path = temp_recipe.path.to_string_lossy().into_owned();
+    let response = one_shot_response(validate_path_request(&path));
+
+    assert_eq!(response["ok"], true, "{response:#?}");
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("shared Recipe validation should return diagnostics");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["severity"] != "error"),
+        "Setup Location destination should pass shared Recipe validation: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn device_path_remains_accepted_as_copy_files_destination_by_shared_validation() {
+    let temp_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
+    let recipe =
+        setup_location_copy_recipe().replace("type: setup_location_ref", "type: device_path");
+    fs::write(&temp_recipe.path, recipe).expect("device-path Recipe should be writable");
+    let path = temp_recipe.path.to_string_lossy().into_owned();
+
+    let response = one_shot_response(validate_path_request(&path));
+
+    assert_eq!(response["ok"], true, "{response:#?}");
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("shared Recipe validation should return diagnostics");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["severity"] != "error"),
+        "device_path destination should remain accepted: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn setup_location_ref_is_rejected_as_copy_files_source_by_shared_validation() {
+    let temp_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
+    let recipe = setup_location_copy_recipe();
+    let unsupported_recipe = recipe.replace("ref: inputs.source_dir", "ref: inputs.destination");
+    assert_ne!(
+        unsupported_recipe, recipe,
+        "source input reference should be present"
+    );
+    fs::write(&temp_recipe.path, unsupported_recipe)
+        .expect("unsupported Setup Location Recipe should be writable");
+    let path = temp_recipe.path.to_string_lossy().into_owned();
+
+    let response = one_shot_response(validate_path_request(&path));
+
+    assert_eq!(response["ok"], true, "{response:#?}");
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("shared Recipe validation should return diagnostics");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["severity"] == "error"),
+        "Setup Location refs must remain unsupported as copy_files sources: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn setup_location_ref_is_rejected_as_extract_archive_destination_by_shared_validation() {
+    let temp_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
+    let recipe = setup_location_copy_recipe();
+    let unsupported_recipe =
+        recipe.replace("dest: /tmp/extracted", "dest: {ref: inputs.destination}");
+    assert_ne!(
+        unsupported_recipe, recipe,
+        "extract_archive destination should be present"
+    );
+    fs::write(&temp_recipe.path, unsupported_recipe)
+        .expect("unsupported Setup Location Recipe should be writable");
+    let path = temp_recipe.path.to_string_lossy().into_owned();
+
+    let response = one_shot_response(validate_path_request(&path));
+
+    assert_eq!(response["ok"], true, "{response:#?}");
+    let diagnostics = response["result"]["diagnostics"]
+        .as_array()
+        .expect("shared Recipe validation should return diagnostics");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["severity"] == "error"),
+        "Setup Location refs must remain unsupported as extract_archive destinations: {diagnostics:#?}"
     );
 }
 

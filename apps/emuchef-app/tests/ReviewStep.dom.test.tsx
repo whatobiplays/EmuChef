@@ -88,6 +88,48 @@ describe("review presentation", () => {
     );
   });
 
+  test("renders a sanitized legacy destination without a copy summary", () => {
+    const sourceAction = review.features[0]!.sections[0]!.actions[0]!;
+    const legacyReview: ReviewSummary = {
+      ...review,
+      features: [
+        {
+          ...review.features[0]!,
+          sections: [
+            {
+              ...review.features[0]!.sections[0]!,
+              actions: [
+                {
+                  ...sourceAction,
+                  deviceLocation: "Shared device storage /roms/legacy",
+                  copyChanges: undefined,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    render(
+      <ReviewStep
+        busy={false}
+        executionKind="idle"
+        realExecutionCompiled
+        review={legacyReview}
+        reviewStale={false}
+        onApplyToDevice={vi.fn()}
+        onBack={vi.fn()}
+        onStartSimulation={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("Destination: Shared device storage /roms/legacy"),
+    ).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Copy changes" })).toBeNull();
+  });
+
   test("keeps the selected boundary and operation totals visible and expands the complete change list", () => {
     const copyChanges = {
       selectedBoundary: "/storage/emulated/0/Android/data/com.example/files",

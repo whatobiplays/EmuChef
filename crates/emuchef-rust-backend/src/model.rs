@@ -124,7 +124,8 @@ impl InputDeclaration {
 
 fn scalar_input_value_matches(type_name: &str, value: &Value) -> bool {
     match type_name {
-        "string" | "enum" | "file" | "directory" | "path" | "device_path" => value.is_string(),
+        "string" | "enum" | "file" | "directory" | "path" | "device_path"
+        | "setup_location_ref" => value.is_string(),
         "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
         "boolean" => value.is_boolean(),
         "object" => value.is_object(),

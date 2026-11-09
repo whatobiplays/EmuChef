@@ -9,6 +9,7 @@ import type {
   DeviceMatch,
   DeviceSummary,
   DeviceVolumesProjection,
+  SetupLocationProjection,
   ExecutionCancellation,
   DeviceQualificationSnapshot,
   RootQualificationCheck,
@@ -106,6 +107,27 @@ export const api = {
       volumeHandle,
       observationToken,
     }),
+  listSetupLocations: (deviceHandle: string, devicePlan: string) =>
+    invoke<SetupLocationProjection[]>("list_setup_locations", { deviceHandle, devicePlan }),
+  saveSetupLocation: (
+    deviceHandle: string,
+    devicePlan: string,
+    observationToken: string,
+    volumeHandle: string,
+    existingId: string | undefined,
+    name: string,
+    relativePath: string,
+  ) => invoke<SetupLocationProjection[]>("save_setup_location", {
+    deviceHandle,
+    devicePlan,
+    observationToken,
+    volumeHandle,
+    existingId: existingId ?? null,
+    name,
+    relativePath,
+  }),
+  removeSetupLocation: (deviceHandle: string, devicePlan: string, id: string) =>
+    invoke<SetupLocationProjection[]>("remove_setup_location", { deviceHandle, devicePlan, id }),
   matchDevice: (deviceHandle: string) =>
     invoke<DeviceMatch>("match_device", { deviceHandle }),
   describeConfiguration: (request: {

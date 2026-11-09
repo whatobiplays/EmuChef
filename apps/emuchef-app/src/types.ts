@@ -119,6 +119,17 @@ export interface DeviceVolumesProjection {
   readonly selectionNotice: string | null;
 }
 
+/** Sanitized logical destination saved for one device-plan combination. */
+export interface SetupLocationProjection {
+  readonly id: string;
+  readonly name: string;
+  readonly relativePath: string;
+  readonly volumeKind: "internalShared" | "removableSd";
+  readonly volumeLabel: string;
+  readonly ready: boolean;
+  readonly detail: string;
+}
+
 export interface PlanCandidate {
   planId: string;
   name: string;
