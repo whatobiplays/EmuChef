@@ -123,3 +123,23 @@ fn duplicate_variable_declarations_and_bindings_are_rejected_at_parse_time() {
     )
     .is_err());
 }
+
+#[test]
+fn multiple_number_inputs_are_rejected_without_a_numeric_list_runtime_type() {
+    let recipe_source = RECIPE_SOURCE.replace(
+        "inputs:\n  user_template:",
+        "inputs:\n  numeric_values:\n    type: number\n    role: generic\n    label: Numeric values\n    required: false\n    multiple: true\n  user_template:",
+    );
+
+    let error = load_recipe_from_bytes(
+        recipe_source.as_bytes(),
+        Path::new("recipes/configuration.yaml"),
+    )
+    .expect_err("multiple numeric inputs have no declared runtime list type");
+
+    assert!(error
+        .issue
+        .expect("unsupported input shape should include an authored-data issue")
+        .message
+        .contains("numeric-list runtime values are unsupported"));
+}

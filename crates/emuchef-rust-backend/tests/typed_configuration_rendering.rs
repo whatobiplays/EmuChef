@@ -795,6 +795,33 @@ fn device_path_variables_reject_host_path_inputs_and_traversal() {
     )
     .expect_err("device paths with traversal components must block");
     assert_eq!(error.code(), "render_variable_value_invalid");
+
+    for invalid_path in [
+        "/storage/emulated/0/~user/settings.cfg",
+        "/storage/emulated/0/$HOME/settings.cfg",
+        "/storage/emulated/0/${HOME}/settings.cfg",
+        "/storage/emulated/0/{root}/settings.cfg",
+        "/storage/emulated/0/{{root}}/settings.cfg",
+    ] {
+        let binding = binding(
+            &recipe,
+            "destination_input",
+            "device_path",
+            json!(invalid_path),
+            BindingSource::Explicit,
+        );
+        let error = render(
+            &workspace,
+            &app,
+            &recipe,
+            &[binding],
+            None,
+            &[],
+            &OrderedMap::new(),
+        )
+        .expect_err("device paths must reject home, environment, and interpolation syntax");
+        assert_eq!(error.code(), "render_variable_value_invalid");
+    }
 }
 
 #[cfg(unix)]

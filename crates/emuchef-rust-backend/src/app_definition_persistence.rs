@@ -257,6 +257,7 @@ pub(crate) fn capture_opened_app_definition_file_bounded_under_root(
         relative_path.as_ref(),
         maximum_bytes,
         open_catalog_root,
+        || {},
     )
 }
 
@@ -266,6 +267,7 @@ fn capture_opened_app_definition_file_bounded_under_root_using(
     relative_path: impl AsRef<Path>,
     maximum_bytes: usize,
     open_root: impl FnOnce(&Path) -> Result<File, AppDefinitionPersistenceError>,
+    after_read: impl FnOnce(),
 ) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
     let relative_path = relative_path.as_ref();
     let candidate_path = root.join(relative_path);
@@ -315,6 +317,7 @@ fn capture_opened_app_definition_file_bounded_under_root_using(
     }
 
     let mut final_name = None;
+    let mut intermediate_directories = Vec::new();
     while let Some(component) = components.next() {
         let std::path::Component::Normal(name) = component else {
             return Err(AppDefinitionPersistenceError::new(
@@ -324,7 +327,23 @@ fn capture_opened_app_definition_file_bounded_under_root_using(
             ));
         };
         if components.peek().is_some() {
-            parent = open_child_at(&parent, name, true, &candidate_path)?;
+            let child = open_child_at(&parent, name, true, &candidate_path)?;
+            let metadata = child.metadata().map_err(|error| {
+                AppDefinitionPersistenceError::io(
+                    "app_definition_file_unavailable",
+                    "A catalog directory identity could not be read",
+                    &candidate_path,
+                    error,
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(stale_file(&candidate_path));
+            }
+            intermediate_directories.push((
+                name.to_os_string(),
+                DirectoryIdentity::from_metadata(&metadata),
+            ));
+            parent = child;
         } else {
             final_name = Some(name.to_os_string());
         }
@@ -368,6 +387,7 @@ fn capture_opened_app_definition_file_bounded_under_root_using(
             ));
         }
     };
+    after_read();
     let after = file.metadata().map_err(|error| {
         AppDefinitionPersistenceError::io(
             "app_definition_file_unavailable",
@@ -376,20 +396,10 @@ fn capture_opened_app_definition_file_bounded_under_root_using(
             error,
         )
     })?;
-    let current_path_file = open_child_at(&parent, &final_name, false, &candidate_path)
-        .map_err(|_| stale_file(&candidate_path))?;
-    let current_path = current_path_file
-        .metadata()
-        .map_err(|_| stale_file(&candidate_path))?;
-    if exceeded_limit
-        || after.len() > maximum_bytes as u64
-        || current_path.len() > maximum_bytes as u64
-    {
+    if exceeded_limit || after.len() > maximum_bytes as u64 {
         return Err(file_too_large(&candidate_path));
     }
-    if FileIdentity::from_metadata(&after) != before_identity
-        || FileIdentity::from_metadata(&current_path) != before_identity
-    {
+    if FileIdentity::from_metadata(&after) != before_identity {
         return Err(stale_file(&candidate_path));
     }
     // Confirm the path still names the same root after the read.
@@ -402,6 +412,31 @@ fn capture_opened_app_definition_file_bounded_under_root_using(
         || FileIdentity::from_metadata(&current_root_metadata) != root_identity
     {
         return Err(stale_file(&canonical_root));
+    }
+    // An open directory descriptor remains usable after its directory is moved.
+    // Rewalking from the current root verifies the authored path still reaches
+    // the same admitted directory chain at this check.
+    let mut current_parent = current_root;
+    for (name, admitted_identity) in &intermediate_directories {
+        let child = open_child_at(&current_parent, name, true, &candidate_path)
+            .map_err(|_| stale_file(&candidate_path))?;
+        let metadata = child.metadata().map_err(|_| stale_file(&candidate_path))?;
+        let current_identity = DirectoryIdentity::from_metadata(&metadata);
+        if !metadata.is_dir() || &current_identity != admitted_identity {
+            return Err(stale_file(&candidate_path));
+        }
+        current_parent = child;
+    }
+    let current_path_file = open_child_at(&current_parent, &final_name, false, &candidate_path)
+        .map_err(|_| stale_file(&candidate_path))?;
+    let current_path = current_path_file
+        .metadata()
+        .map_err(|_| stale_file(&candidate_path))?;
+    if current_path.len() > maximum_bytes as u64 {
+        return Err(file_too_large(&candidate_path));
+    }
+    if FileIdentity::from_metadata(&current_path) != before_identity {
+        return Err(stale_file(&candidate_path));
     }
     Ok(OpenedAppDefinitionFile {
         path: canonical_root.join(relative_path),
@@ -2060,6 +2095,7 @@ mod tests {
                 fs::rename(&replacement, canonical_root).unwrap();
                 open_catalog_root(canonical_root)
             },
+            || {},
         )
         .expect_err("a replaced root must not redirect a catalog read");
 
@@ -2088,8 +2124,58 @@ mod tests {
                 fs::rename(&replacement, canonical_root).unwrap();
                 Ok(descriptor)
             },
+            || {},
         )
         .expect_err("a root replaced after descriptor open must invalidate the capture");
+
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_intermediate_directory_replacement_after_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let parent = root.join("templates");
+        let original = parent.join("original");
+        let moved = directory.path().join("moved-original");
+        fs::create_dir_all(&original).unwrap();
+        let original_file = original.join("template.cfg");
+        fs::write(&original_file, b"value=original\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "templates/original/template.cfg",
+            1024,
+            open_catalog_root,
+            || {
+                fs::rename(&original, &moved).unwrap();
+                fs::create_dir(&original).unwrap();
+                fs::hard_link(moved.join("template.cfg"), original_file).unwrap();
+            },
+        )
+        .expect_err("a replaced intermediate directory must invalidate the captured path");
+
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_in_place_file_change_after_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let template = root.join("template.cfg");
+        fs::create_dir(&root).unwrap();
+        fs::write(&template, b"value=old\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "template.cfg",
+            1024,
+            open_catalog_root,
+            || fs::write(&template, b"value=changed after capture\n").unwrap(),
+        )
+        .expect_err("a file changed after its bytes are read must invalidate the capture");
 
         assert_eq!(error.code, "app_definition_stale_state");
     }
@@ -2116,10 +2202,11 @@ mod tests {
                 symlink(&outside, canonical_root).unwrap();
                 open_catalog_root(canonical_root)
             },
+            || {},
         )
         .expect_err("a symlinked replacement root must not redirect a catalog read");
 
-        assert_ne!(error.code, "");
+        assert_eq!(error.code, "app_definition_file_unavailable");
     }
 
     #[cfg(unix)]
@@ -2173,6 +2260,7 @@ mod tests {
                 opened_rx.recv().expect("writer should open the FIFO");
                 Ok(root_descriptor)
             },
+            || {},
         );
         release_tx.send(()).unwrap();
         writer

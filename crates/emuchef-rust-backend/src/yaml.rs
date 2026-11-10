@@ -553,6 +553,12 @@ fn validate_input_declaration(input_id: &str, input: &InputDeclaration) -> Resul
             single_quote(&input.type_name)
         ));
     }
+    if input.type_name == "number" && input.multiple {
+        return Err(format!(
+            "input {} cannot be multiple because numeric-list runtime values are unsupported",
+            single_quote(input_id)
+        ));
+    }
     if input.type_name == "setup_location_ref"
         && (input.multiple
             || !input.default.is_null()

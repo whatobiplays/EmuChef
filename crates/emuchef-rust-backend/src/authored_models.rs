@@ -2088,14 +2088,7 @@ pub fn is_valid_template_variable_id(value: &str) -> bool {
 
 /// Accept a concrete Android device path with no traversal or host-path syntax.
 pub fn is_valid_device_path(value: &str) -> bool {
-    value.starts_with('/')
-        && !value.starts_with("//")
-        && !value.contains('\\')
-        && !value.chars().any(char::is_control)
-        && value
-            .split('/')
-            .skip(1)
-            .all(|part| !part.is_empty() && part != "." && part != "..")
+    is_valid_target_path(AppTargetLocation::AbsoluteDevicePath, value)
 }
 
 #[cfg(test)]

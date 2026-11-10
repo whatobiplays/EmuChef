@@ -803,6 +803,8 @@ Each `--bind <recipe-id>/<input-id>=<JSON_OR_STRING>` key may occur once.
 Values parse as JSON when valid and otherwise remain strings, so list and
 `multiple: true` inputs use JSON arrays. Duplicate explicit keys are CLI errors
 and are never converted into arrays.
+Recipe inputs declared as `number` cannot use `multiple: true` because the
+runtime has no numeric-list value type.
 
 Raw one-shot and sidecar requests for `describeConfiguration` and
 `planConfiguration` reject duplicate qualified keys in a `bindings` object
@@ -825,11 +827,12 @@ input ref, while
 output refs. Canonical recipe YAML continues emitting direct literal values and
 single-field `{ ref: ... }` and `{ app_target: ... }` mappings.
 
-Recipe input declarations support `string`, `integer`, `boolean`, `enum`,
-`file`, `directory`, `path`, `device_path`, `string_list`, `path_list`, and
-`object`, plus typed `setup_location_ref` values for native-issued Setup
-Location identities. This reference is valid only as `copy_files.dest`; use by
-any other operation or parameter fails closed. Supported writers copy a host
+Recipe input declarations support `string`, `integer`, `number`, `boolean`,
+`enum`, `file`, `directory`, `path`, `device_path`, `string_list`, `path_list`,
+and `object`, plus typed `setup_location_ref` values for native-issued Setup
+Location identities. A `setup_location_ref` may bind to `copy_files.dest` or to
+a T08 `config.variables` binding for a `device_path` variable; use by any other
+operation or parameter fails closed. Supported writers copy a host
 directory to a device directory with `merge` (Add or Update), `replace`, or
 directory-style `sync` (Mirror). Existing Recipe parsing, validation, App
 Target behavior, and legacy device-path destinations retain their existing
@@ -840,8 +843,10 @@ and validation for existence, extensions, path kind, and allowed device-path
 prefixes. Enum option values are unique, defaults match the declared type and
 enum options, and canonical YAML preserves declaration and option order.
 
-Config Editor input definitions do not include `setup_location_ref`; that
-Recipe type is accepted only for `copy_files.dest`.
+Config Editor input-type choices omit `number` and `setup_location_ref`.
+Existing numeric input declarations remain intact through document load and
+save, but the editor does not author or edit that type. `setup_location_ref`
+is accepted for `copy_files.dest` and the T08 `config.variables` position only.
 
 Planner runtime types map host files and directories to `file_path` and
 `directory_path`, device paths to `device_path`, enums to strings, and declared
