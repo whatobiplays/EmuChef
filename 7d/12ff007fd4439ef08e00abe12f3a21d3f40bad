@@ -1,0 +1,41 @@
+crates/emuchef-rust-backend/src/authored_models.rs
+  s_b8ba7efc8211bb::t_d2022b729888f3 2091
+CONTEXT.md
+  s_b8ba7efc8211bb::t_f70f2cc76590b7 830-835,846-849
+  s_b8ba7efc8211bb::t_71c90be56ee20e 806-807
+crates/emuchef-rust-backend/tests/typed_configuration_rendering.rs
+  s_b8ba7efc8211bb::t_c0beafaac9e70d 798
+  s_b8ba7efc8211bb::t_4c678320d1579e 799-824
+crates/emuchef-rust-backend/src/app_definition_persistence.rs
+  s_b8ba7efc8211bb::t_91db9e8468c589 2134-2153,2155-2163
+  s_b8ba7efc8211bb::t_c86af3aeed24f1 260,270,390
+  s_b8ba7efc8211bb::t_3aa6ad6cc82f3d 2098,2127,2205
+  s_b8ba7efc8211bb::t_d050a14303ce3d 2154
+  s_b8ba7efc8211bb::t_b8783db8501b85 2263
+  s_b8ba7efc8211bb::t_009f02d651e574 320,330-346,399,402,419-422,424-439
+  s_b8ba7efc8211bb::t_d923195667e4ac 416-418
+  s_b8ba7efc8211bb::t_be4bc2771cfce0 2209
+  s_b8ba7efc8211bb::t_a6f6dc61dd9ba3 440,2164-2182
+  s_b8ba7efc8211bb::t_4c678320d1579e 423
+crates/emuchef-rust-backend/tests/typed_configuration_schema.rs
+  s_b8ba7efc8211bb::t_e8a0bdbfd34f31 126-139,145
+  s_b8ba7efc8211bb::t_d9b56ef86630be 140-144
+crates/emuchef-rust-backend/src/yaml.rs
+  s_b8ba7efc8211bb::t_d2022b729888f3 556-561
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7d12ff007fd4439ef08e00abe12f3a21d3f40bad",
+  "prompts": {},
+  "sessions": {
+    "s_b8ba7efc8211bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1bee8-fe04-7a21-a505-59aed2af3003",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "Obi <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
