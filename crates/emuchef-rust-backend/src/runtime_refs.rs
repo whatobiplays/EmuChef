@@ -88,6 +88,7 @@ pub(crate) fn input_value_type(type_name: &str, multiple: bool) -> &'static str 
         "string_list" => "string_list",
         "path_list" => "path_list",
         "integer" => "integer",
+        "number" => "number",
         "boolean" => "boolean",
         "object" => "object",
         "string" | "enum" => "string",

@@ -22,6 +22,7 @@ pub const DEVICE_PROFILE_KIND: &str = "device_profile";
 pub const SCHEMA_VERSION_V1: i64 = 1;
 pub const MAX_INLINE_CONFIG_LITERAL_BYTES: usize = 64 * 1024;
 pub const MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT: usize = 2 * 1024 * 1024;
+pub const MAX_TEMPLATE_VARIABLE_ID_BYTES: usize = 128;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -489,6 +490,58 @@ impl AppConfigurationFormatV1 {
     }
 }
 
+/// Scalar value kinds a configuration template may substitute.
+///
+/// `DevicePath` belongs to template inputs only. It is not an App Definition
+/// managed-property type and does not expand the set of values the app owns.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateVariableTypeV1 {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    DevicePath,
+}
+
+impl TemplateVariableTypeV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::DevicePath => "device_path",
+        }
+    }
+
+    pub fn matches(self, value: &Value) -> bool {
+        match self {
+            Self::String => value.is_string(),
+            Self::Integer => value
+                .as_number()
+                .is_some_and(|number| number.is_i64() || number.is_u64()),
+            Self::Number => value
+                .as_number()
+                .and_then(serde_json::Number::as_f64)
+                .is_some_and(f64::is_finite),
+            Self::Boolean => value.is_boolean(),
+            Self::DevicePath => value.as_str().is_some_and(is_valid_device_path),
+        }
+    }
+
+    /// Return whether an existing scalar Recipe input can supply this type.
+    pub fn accepts_input_type(self, input_type: &str) -> bool {
+        match self {
+            Self::String => matches!(input_type, "string" | "enum"),
+            Self::Integer => input_type == "integer",
+            Self::Number => matches!(input_type, "integer" | "number"),
+            Self::Boolean => input_type == "boolean",
+            Self::DevicePath => matches!(input_type, "device_path" | "setup_location_ref"),
+        }
+    }
+}
+
 /// Value kinds accepted by managed properties and unmanaged template literals.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -584,6 +637,13 @@ pub struct AppConfigurationV1 {
 pub struct AppConfigurationTemplateV1 {
     /// Path relative to `authored/apps`, under the directory named by the app ID.
     pub path: String,
+    /// Template-local typed declarations used only by whole-value placeholders.
+    #[serde(
+        default,
+        skip_serializing_if = "IndexMap::is_empty",
+        deserialize_with = "deserialize_named_registry"
+    )]
+    pub variables: IndexMap<String, TemplateVariableTypeV1>,
 }
 
 /// App-owned identity, location, type and constraints for one managed setting.
@@ -875,6 +935,15 @@ fn validate_configurations(
                     "Template paths must be relative slash-separated files under the owning app ID directory in authored/apps.",
                     format!("{template_field}.path"),
                 ));
+            }
+            for variable_id in template.variables.keys() {
+                if !is_valid_template_variable_id(variable_id) {
+                    diagnostics.push(AuthoredModelDiagnostic::new(
+                        "app_config_template_variable_id_invalid",
+                        "Template variable IDs must use the authored identifier grammar and contain no more than 128 ASCII characters.",
+                        format!("{template_field}.variables[{variable_id}]"),
+                    ));
+                }
             }
         }
 
@@ -2010,6 +2079,16 @@ pub(crate) fn is_valid_identifier(value: &str) -> bool {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
         .expect("the authored identifier regex is valid")
         .is_match(value)
+}
+
+/// Apply the template-local size limit without changing authored IDs elsewhere.
+pub fn is_valid_template_variable_id(value: &str) -> bool {
+    value.len() <= MAX_TEMPLATE_VARIABLE_ID_BYTES && is_valid_identifier(value)
+}
+
+/// Accept a concrete Android device path with no traversal or host-path syntax.
+pub fn is_valid_device_path(value: &str) -> bool {
+    is_valid_target_path(AppTargetLocation::AbsoluteDevicePath, value)
 }
 
 #[cfg(test)]

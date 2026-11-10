@@ -2232,6 +2232,8 @@ mod tests {
             configuration: "main".into(),
             target: "config".into(),
             base: RecipeConfigurationBaseV1::Template("default".into()),
+            input_template_variables: OrderedMap::new(),
+            variables: OrderedMap::new(),
             properties: OrderedMap::<RecipeConfigPropertyV1>::new(),
             unmanaged_literals: Vec::new(),
         });
@@ -2346,6 +2348,8 @@ mod tests {
             configuration: "main".into(),
             target: "config".into(),
             base: RecipeConfigurationBaseV1::Template("default".into()),
+            input_template_variables: OrderedMap::new(),
+            variables: OrderedMap::new(),
             properties: OrderedMap::<RecipeConfigPropertyV1>::new(),
             unmanaged_literals: Vec::new(),
         });
@@ -4030,6 +4034,8 @@ steps:
             configuration: "main".into(),
             target: "config_file".into(),
             base: RecipeConfigurationBaseV1::Template("default".into()),
+            input_template_variables: OrderedMap::new(),
+            variables: OrderedMap::new(),
             properties: OrderedMap::from([(
                 "frame_limit".into(),
                 RecipeConfigPropertyV1 {

@@ -24,6 +24,7 @@ pub mod catalog_refactor;
 pub mod catalog_source;
 mod cli;
 pub mod commands;
+pub mod configuration_renderer;
 pub(crate) mod device_probe;
 pub(crate) mod device_profile_match;
 pub(crate) mod device_storage;

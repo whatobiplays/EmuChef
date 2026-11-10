@@ -602,6 +602,10 @@ fn input_summary(input: &ExecutionResolvedInputSnapshot, value: &Value) -> Strin
             .as_i64()
             .map(|number| number.to_string())
             .unwrap_or_else(|| "Configured".to_string()),
+        "number" => value
+            .as_number()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "Configured".to_string()),
         "string" => "Configured".to_string(),
         _ => "Configured".to_string(),
     }

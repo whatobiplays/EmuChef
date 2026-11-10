@@ -3,8 +3,16 @@
 //! Opened bytes and filesystem identity stay together so a save can detect an
 //! external replacement or edit before publishing a new canonical document.
 
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -215,6 +223,310 @@ pub fn capture_opened_app_definition_file(
         bytes: snapshot.bytes,
         identity: snapshot.identity,
     })
+}
+
+/// Capture a regular file without reading more than `maximum_bytes + 1` bytes.
+///
+/// The extra byte distinguishes an exact-limit file from a file that grows
+/// beyond the limit after its initial metadata check. Filesystem identity is
+/// checked before and after the bounded read just as it is for ordinary
+/// App Definition captures.
+pub(crate) fn capture_opened_app_definition_file_bounded(
+    path: impl AsRef<Path>,
+    maximum_bytes: usize,
+) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
+    let snapshot = capture_file_snapshot_with_limit(path.as_ref(), Some(maximum_bytes))?;
+    Ok(OpenedAppDefinitionFile {
+        path: snapshot.path,
+        bytes: snapshot.bytes,
+        identity: snapshot.identity,
+    })
+}
+
+/// Capture a catalog file beneath an opened root without following symlinked
+/// path components. The relative path is walked with directory descriptors so
+/// an ancestor cannot redirect the read outside its authorized tree.
+#[cfg(unix)]
+pub(crate) fn capture_opened_app_definition_file_bounded_under_root(
+    root: impl AsRef<Path>,
+    relative_path: impl AsRef<Path>,
+    maximum_bytes: usize,
+) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
+    capture_opened_app_definition_file_bounded_under_root_using(
+        root.as_ref(),
+        relative_path.as_ref(),
+        maximum_bytes,
+        open_catalog_root,
+        || {},
+    )
+}
+
+#[cfg(unix)]
+fn capture_opened_app_definition_file_bounded_under_root_using(
+    root: &Path,
+    relative_path: impl AsRef<Path>,
+    maximum_bytes: usize,
+    open_root: impl FnOnce(&Path) -> Result<File, AppDefinitionPersistenceError>,
+    after_read: impl FnOnce(),
+) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
+    let relative_path = relative_path.as_ref();
+    let candidate_path = root.join(relative_path);
+    let root_metadata = fs::metadata(root).map_err(|error| {
+        AppDefinitionPersistenceError::io(
+            "app_definition_file_unavailable",
+            "An authored catalog root could not be inspected",
+            root,
+            error,
+        )
+    })?;
+    if !root_metadata.is_dir() {
+        return Err(AppDefinitionPersistenceError::new(
+            "app_definition_path_invalid",
+            "An authored catalog root must be directory.",
+            Some(root),
+        ));
+    }
+    let root_identity = FileIdentity::from_metadata(&root_metadata);
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        AppDefinitionPersistenceError::io(
+            "app_definition_file_unavailable",
+            "An authored catalog root could not be canonicalized",
+            root,
+            error,
+        )
+    })?;
+    let mut components = relative_path.components().peekable();
+    let mut parent = open_root(&canonical_root)?;
+    let opened_root = parent.metadata().map_err(|error| {
+        AppDefinitionPersistenceError::io(
+            "app_definition_file_unavailable",
+            "An authored catalog root identity could not be read",
+            &canonical_root,
+            error,
+        )
+    })?;
+    if !opened_root.is_dir() {
+        return Err(AppDefinitionPersistenceError::new(
+            "app_definition_path_invalid",
+            "An authored catalog root must be directory.",
+            Some(&canonical_root),
+        ));
+    }
+    if FileIdentity::from_metadata(&opened_root) != root_identity {
+        return Err(stale_file(&canonical_root));
+    }
+
+    let mut final_name = None;
+    let mut intermediate_directories = Vec::new();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(AppDefinitionPersistenceError::new(
+                "app_definition_path_invalid",
+                "A catalog file path must remain beneath its authored root.",
+                Some(&candidate_path),
+            ));
+        };
+        if components.peek().is_some() {
+            let child = open_child_at(&parent, name, true, &candidate_path)?;
+            let metadata = child.metadata().map_err(|error| {
+                AppDefinitionPersistenceError::io(
+                    "app_definition_file_unavailable",
+                    "A catalog directory identity could not be read",
+                    &candidate_path,
+                    error,
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(stale_file(&candidate_path));
+            }
+            intermediate_directories.push((
+                name.to_os_string(),
+                DirectoryIdentity::from_metadata(&metadata),
+            ));
+            parent = child;
+        } else {
+            final_name = Some(name.to_os_string());
+        }
+    }
+    let final_name = final_name.ok_or_else(|| {
+        AppDefinitionPersistenceError::new(
+            "app_definition_path_invalid",
+            "A catalog file path must name a file beneath its authored root.",
+            Some(&candidate_path),
+        )
+    })?;
+    let mut file = open_child_at(&parent, &final_name, false, &candidate_path)?;
+    let before = file.metadata().map_err(|error| {
+        AppDefinitionPersistenceError::io(
+            "app_definition_file_unavailable",
+            "A catalog file identity could not be read",
+            &candidate_path,
+            error,
+        )
+    })?;
+    if !before.is_file() {
+        return Err(AppDefinitionPersistenceError::new(
+            "app_definition_path_invalid",
+            "A catalog template path must identify a regular file.",
+            Some(&candidate_path),
+        ));
+    }
+    if before.len() > maximum_bytes as u64 {
+        return Err(file_too_large(&candidate_path));
+    }
+    let before_identity = FileIdentity::from_metadata(&before);
+    let (bytes, exceeded_limit) = match read_bounded(&mut file, maximum_bytes) {
+        Ok(bytes) => (bytes, false),
+        Err(BoundedReadError::TooLarge) => (Vec::new(), true),
+        Err(BoundedReadError::Io(error)) => {
+            return Err(AppDefinitionPersistenceError::io(
+                "app_definition_file_unavailable",
+                "A catalog file could not be read",
+                &candidate_path,
+                error,
+            ));
+        }
+    };
+    after_read();
+    let after = file.metadata().map_err(|error| {
+        AppDefinitionPersistenceError::io(
+            "app_definition_file_unavailable",
+            "A catalog file identity could not be rechecked",
+            &candidate_path,
+            error,
+        )
+    })?;
+    if exceeded_limit || after.len() > maximum_bytes as u64 {
+        return Err(file_too_large(&candidate_path));
+    }
+    if FileIdentity::from_metadata(&after) != before_identity {
+        return Err(stale_file(&candidate_path));
+    }
+    // Confirm the path still names the same root after the read.
+    let current_root =
+        open_catalog_root(&canonical_root).map_err(|_| stale_file(&canonical_root))?;
+    let current_root_metadata = current_root
+        .metadata()
+        .map_err(|_| stale_file(&canonical_root))?;
+    if !current_root_metadata.is_dir()
+        || FileIdentity::from_metadata(&current_root_metadata) != root_identity
+    {
+        return Err(stale_file(&canonical_root));
+    }
+    // An open directory descriptor remains usable after its directory is moved.
+    // Rewalking from the current root verifies the authored path still reaches
+    // the same admitted directory chain at this check.
+    let mut current_parent = current_root;
+    for (name, admitted_identity) in &intermediate_directories {
+        let child = open_child_at(&current_parent, name, true, &candidate_path)
+            .map_err(|_| stale_file(&candidate_path))?;
+        let metadata = child.metadata().map_err(|_| stale_file(&candidate_path))?;
+        let current_identity = DirectoryIdentity::from_metadata(&metadata);
+        if !metadata.is_dir() || &current_identity != admitted_identity {
+            return Err(stale_file(&candidate_path));
+        }
+        current_parent = child;
+    }
+    let current_path_file = open_child_at(&current_parent, &final_name, false, &candidate_path)
+        .map_err(|_| stale_file(&candidate_path))?;
+    let current_path = current_path_file
+        .metadata()
+        .map_err(|_| stale_file(&candidate_path))?;
+    if current_path.len() > maximum_bytes as u64 {
+        return Err(file_too_large(&candidate_path));
+    }
+    if FileIdentity::from_metadata(&current_path) != before_identity {
+        return Err(stale_file(&candidate_path));
+    }
+    Ok(OpenedAppDefinitionFile {
+        path: canonical_root.join(relative_path),
+        bytes,
+        identity: before_identity,
+    })
+}
+
+/// Walk the canonical root from `/` one component at a time. Each descriptor
+/// stays bound to its opened directory, and `open_child_at` rejects symlinks.
+#[cfg(unix)]
+fn open_catalog_root(canonical_root: &Path) -> Result<File, AppDefinitionPersistenceError> {
+    let mut parent = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open("/")
+        .map_err(|error| {
+            AppDefinitionPersistenceError::io(
+                "app_definition_file_unavailable",
+                "The filesystem root could not be opened",
+                canonical_root,
+                error,
+            )
+        })?;
+    let mut components = canonical_root.components().peekable();
+    while let Some(component) = components.next() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => {
+                let is_final = components.peek().is_none();
+                parent = open_child_at(&parent, name, !is_final, canonical_root)?;
+            }
+            _ => {
+                return Err(AppDefinitionPersistenceError::new(
+                    "app_definition_path_invalid",
+                    "An authored catalog root must be a canonical absolute directory path.",
+                    Some(canonical_root),
+                ));
+            }
+        }
+    }
+    Ok(parent)
+}
+
+#[cfg(unix)]
+fn open_child_at(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    directory: bool,
+    candidate_path: &Path,
+) -> Result<File, AppDefinitionPersistenceError> {
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        AppDefinitionPersistenceError::new(
+            "app_definition_path_invalid",
+            "A catalog file path contains an invalid component.",
+            Some(candidate_path),
+        )
+    })?;
+    let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    if directory {
+        flags |= libc::O_DIRECTORY;
+    }
+    // SAFETY: `parent` is a live directory descriptor and `name` is a
+    // NUL-terminated component. The returned descriptor is owned below.
+    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if descriptor < 0 {
+        let error = io::Error::last_os_error();
+        return Err(AppDefinitionPersistenceError::io(
+            "app_definition_file_unavailable",
+            "A catalog path component could not be opened without following links",
+            candidate_path,
+            error,
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn capture_opened_app_definition_file_bounded_under_root(
+    root: impl AsRef<Path>,
+    relative_path: impl AsRef<Path>,
+    maximum_bytes: usize,
+) -> Result<OpenedAppDefinitionFile, AppDefinitionPersistenceError> {
+    let _ = (root.as_ref(), relative_path.as_ref(), maximum_bytes);
+    Err(AppDefinitionPersistenceError::new(
+        "app_definition_platform_unsupported",
+        "Confined catalog template reads are unsupported on this platform.",
+        None,
+    ))
 }
 
 /// Publish the admitted App Definition as one atomic file replacement or a
@@ -1429,6 +1741,21 @@ pub(crate) fn capture_catalog_directory(
 pub(crate) fn capture_file_snapshot(
     path: &Path,
 ) -> Result<FileSnapshot, AppDefinitionPersistenceError> {
+    capture_file_snapshot_with_limit(path, None)
+}
+
+fn capture_file_snapshot_with_limit(
+    path: &Path,
+    maximum_bytes: Option<usize>,
+) -> Result<FileSnapshot, AppDefinitionPersistenceError> {
+    capture_file_snapshot_with_limit_using(path, maximum_bytes, open_snapshot_file)
+}
+
+fn capture_file_snapshot_with_limit_using(
+    path: &Path,
+    maximum_bytes: Option<usize>,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<FileSnapshot, AppDefinitionPersistenceError> {
     let before = fs::symlink_metadata(path).map_err(|error| {
         AppDefinitionPersistenceError::io(
             "app_definition_file_unavailable",
@@ -1444,6 +1771,9 @@ pub(crate) fn capture_file_snapshot(
             Some(path),
         ));
     }
+    if maximum_bytes.is_some_and(|maximum| before.len() > maximum as u64) {
+        return Err(file_too_large(path));
+    }
     let canonical_path = fs::canonicalize(path).map_err(|error| {
         AppDefinitionPersistenceError::io(
             "app_definition_file_unavailable",
@@ -1453,7 +1783,7 @@ pub(crate) fn capture_file_snapshot(
         )
     })?;
     let before_identity = FileIdentity::from_metadata(&before);
-    let mut file = File::open(&canonical_path).map_err(|error| {
+    let mut file = open_file(&canonical_path).map_err(|error| {
         AppDefinitionPersistenceError::io(
             "app_definition_file_unavailable",
             "An App Definition or catalog file could not be opened",
@@ -1472,15 +1802,32 @@ pub(crate) fn capture_file_snapshot(
     if !handle_before.is_file() || FileIdentity::from_metadata(&handle_before) != before_identity {
         return Err(stale_file(&canonical_path));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| {
-        AppDefinitionPersistenceError::io(
-            "app_definition_file_unavailable",
-            "An App Definition or catalog file could not be read",
-            &canonical_path,
-            error,
-        )
-    })?;
+    let (bytes, exceeded_limit) = match maximum_bytes {
+        Some(maximum) => match read_bounded(&mut file, maximum) {
+            Ok(bytes) => (bytes, false),
+            Err(BoundedReadError::TooLarge) => (Vec::new(), true),
+            Err(BoundedReadError::Io(error)) => {
+                return Err(AppDefinitionPersistenceError::io(
+                    "app_definition_file_unavailable",
+                    "An App Definition or catalog file could not be read",
+                    &canonical_path,
+                    error,
+                ));
+            }
+        },
+        None => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|error| {
+                AppDefinitionPersistenceError::io(
+                    "app_definition_file_unavailable",
+                    "An App Definition or catalog file could not be read",
+                    &canonical_path,
+                    error,
+                )
+            })?;
+            (bytes, false)
+        }
+    };
     let handle_after = file.metadata().map_err(|error| {
         AppDefinitionPersistenceError::io(
             "app_definition_file_unavailable",
@@ -1497,6 +1844,13 @@ pub(crate) fn capture_file_snapshot(
             error,
         )
     })?;
+    if exceeded_limit
+        || maximum_bytes.is_some_and(|maximum| {
+            handle_after.len() > maximum as u64 || path_after.len() > maximum as u64
+        })
+    {
+        return Err(file_too_large(&canonical_path));
+    }
     if !path_after.is_file()
         || FileIdentity::from_metadata(&handle_after) != before_identity
         || FileIdentity::from_metadata(&path_after) != before_identity
@@ -1508,6 +1862,51 @@ pub(crate) fn capture_file_snapshot(
         bytes,
         identity: before_identity,
     })
+}
+
+fn open_snapshot_file(path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    }
+
+    #[cfg(not(unix))]
+    {
+        File::open(path)
+    }
+}
+
+#[derive(Debug)]
+enum BoundedReadError {
+    TooLarge,
+    Io(io::Error),
+}
+
+fn read_bounded<R: Read>(
+    reader: &mut R,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, BoundedReadError> {
+    let read_limit = (maximum_bytes as u64).saturating_add(1);
+    let mut bytes = Vec::with_capacity(maximum_bytes.min(8192));
+    reader
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(BoundedReadError::Io)?;
+    if bytes.len() > maximum_bytes {
+        return Err(BoundedReadError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+fn file_too_large(path: &Path) -> AppDefinitionPersistenceError {
+    AppDefinitionPersistenceError::new(
+        "app_definition_file_too_large",
+        "The opened App Definition or catalog file exceeds its byte limit.",
+        Some(path),
+    )
 }
 
 pub(crate) fn file_snapshots_equal(left: &FileSnapshot, right: &FileSnapshot) -> bool {
@@ -1533,6 +1932,34 @@ fn is_yaml_catalog_file(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    struct GrowingReader {
+        remaining: usize,
+        bytes_read: usize,
+    }
+
+    impl Read for GrowingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = buffer.len().min(self.remaining);
+            buffer[..count].fill(b'x');
+            self.remaining -= count;
+            self.bytes_read += count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn bounded_capture_stops_after_the_first_byte_beyond_limit() {
+        let mut reader = GrowingReader {
+            remaining: 128,
+            bytes_read: 0,
+        };
+
+        let error = read_bounded(&mut reader, 8).expect_err("growth must exceed the limit");
+
+        assert!(matches!(error, BoundedReadError::TooLarge));
+        assert_eq!(reader.bytes_read, 9);
+    }
+
     #[test]
     fn opened_file_snapshot_keeps_the_original_bytes_and_canonical_path() {
         let directory = tempfile::tempdir().unwrap();
@@ -1543,6 +1970,306 @@ mod tests {
 
         assert_eq!(snapshot.path(), path.canonicalize().unwrap());
         assert_eq!(snapshot.raw_bytes(), b"raw: bytes\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_fifo_without_blocking_on_open() {
+        use std::ffi::CString;
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::mpsc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("template.cfg");
+        let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "FIFO fixture should be created");
+
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(writer_path)
+                .expect("writer should rendezvous with the nonblocking reader");
+            opened_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(file);
+        });
+
+        let root = File::open(directory.path()).unwrap();
+        let reader = open_child_at(&root, std::ffi::OsStr::new("template.cfg"), false, &path)
+            .expect("FIFO should open nonblocking so its type can be rejected");
+        let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1, "reader flags should be available");
+        assert_ne!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "catalog opens must be nonblocking"
+        );
+        opened_rx.recv().unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root(
+            directory.path(),
+            "template.cfg",
+            1024,
+        )
+        .expect_err("a FIFO must not be admitted as a catalog file");
+        assert_eq!(error.code, "app_definition_path_invalid");
+
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
+        drop(reader);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_template_capture_rejects_file_replaced_by_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::mpsc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("user-template.cfg");
+        fs::write(&path, b"original template").unwrap();
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut writer = None;
+        let result = capture_file_snapshot_with_limit_using(&path, Some(1024), |canonical_path| {
+            fs::remove_file(canonical_path).unwrap();
+            let path_c = CString::new(canonical_path.as_os_str().as_bytes()).unwrap();
+            let result = unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) };
+            assert_eq!(result, 0, "FIFO replacement should be created");
+
+            let writer_path = canonical_path.to_path_buf();
+            writer = Some(std::thread::spawn(move || {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .open(writer_path)
+                    .expect("writer should rendezvous with the opened FIFO");
+                opened_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                drop(file);
+            }));
+
+            let file = open_snapshot_file(canonical_path)?;
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            if flags == -1 || flags & libc::O_NONBLOCK == 0 {
+                return Err(io::Error::other("snapshot file open must be nonblocking"));
+            }
+            opened_rx.recv().map_err(io::Error::other)?;
+            Ok(file)
+        });
+        release_tx.send(()).unwrap();
+        writer
+            .expect("FIFO writer should be started")
+            .join()
+            .unwrap();
+
+        let error = result.expect_err("a replaced special file must be rejected");
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_catalog_root_replaced_by_another_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let moved_root = directory.path().join("catalog-original");
+        let replacement = directory.path().join("replacement");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(replacement.join("template.cfg"), b"outside=yes\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "template.cfg",
+            1024,
+            |canonical_root| {
+                fs::rename(canonical_root, &moved_root).unwrap();
+                fs::rename(&replacement, canonical_root).unwrap();
+                open_catalog_root(canonical_root)
+            },
+            || {},
+        )
+        .expect_err("a replaced root must not redirect a catalog read");
+
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_catalog_root_replacement_after_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let moved_root = directory.path().join("catalog-original");
+        let replacement = directory.path().join("replacement");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("template.cfg"), b"value=original\n").unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(replacement.join("template.cfg"), b"value=replacement\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "template.cfg",
+            1024,
+            |canonical_root| {
+                let descriptor = open_catalog_root(canonical_root)?;
+                fs::rename(canonical_root, &moved_root).unwrap();
+                fs::rename(&replacement, canonical_root).unwrap();
+                Ok(descriptor)
+            },
+            || {},
+        )
+        .expect_err("a root replaced after descriptor open must invalidate the capture");
+
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_intermediate_directory_replacement_after_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let parent = root.join("templates");
+        let original = parent.join("original");
+        let moved = directory.path().join("moved-original");
+        fs::create_dir_all(&original).unwrap();
+        let original_file = original.join("template.cfg");
+        fs::write(&original_file, b"value=original\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "templates/original/template.cfg",
+            1024,
+            open_catalog_root,
+            || {
+                fs::rename(&original, &moved).unwrap();
+                fs::create_dir(&original).unwrap();
+                fs::hard_link(moved.join("template.cfg"), original_file).unwrap();
+            },
+        )
+        .expect_err("a replaced intermediate directory must invalidate the captured path");
+
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_in_place_file_change_after_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let template = root.join("template.cfg");
+        fs::create_dir(&root).unwrap();
+        fs::write(&template, b"value=old\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "template.cfg",
+            1024,
+            open_catalog_root,
+            || fs::write(&template, b"value=changed after capture\n").unwrap(),
+        )
+        .expect_err("a file changed after its bytes are read must invalidate the capture");
+
+        assert_eq!(error.code, "app_definition_stale_state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_catalog_root_replaced_by_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let moved_root = directory.path().join("catalog-original");
+        let outside = directory.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("template.cfg"), b"outside=yes\n").unwrap();
+
+        let error = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "template.cfg",
+            1024,
+            |canonical_root| {
+                fs::rename(canonical_root, &moved_root).unwrap();
+                symlink(&outside, canonical_root).unwrap();
+                open_catalog_root(canonical_root)
+            },
+            || {},
+        )
+        .expect_err("a symlinked replacement root must not redirect a catalog read");
+
+        assert_eq!(error.code, "app_definition_file_unavailable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_capture_rejects_catalog_root_replaced_by_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::mpsc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("catalog");
+        let moved_root = directory.path().join("catalog-original");
+        fs::create_dir(&root).unwrap();
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut writer = None;
+        let result = capture_opened_app_definition_file_bounded_under_root_using(
+            &root,
+            "template.cfg",
+            1024,
+            |canonical_root| {
+                fs::rename(canonical_root, &moved_root).unwrap();
+                let root_c = CString::new(canonical_root.as_os_str().as_bytes()).unwrap();
+                let result = unsafe { libc::mkfifo(root_c.as_ptr(), 0o600) };
+                assert_eq!(result, 0, "FIFO replacement should be created");
+
+                let writer_path = canonical_root.to_path_buf();
+                writer = Some(std::thread::spawn(move || {
+                    let file = OpenOptions::new()
+                        .write(true)
+                        .open(writer_path)
+                        .expect("writer should rendezvous with the nonblocking root open");
+                    opened_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                    drop(file);
+                }));
+
+                let root_descriptor = open_catalog_root(canonical_root)?;
+                let flags = unsafe { libc::fcntl(root_descriptor.as_raw_fd(), libc::F_GETFL) };
+                assert_ne!(
+                    flags, -1,
+                    "catalog root descriptor flags should be readable"
+                );
+                assert_ne!(
+                    flags & libc::O_NONBLOCK,
+                    0,
+                    "catalog root open must be nonblocking"
+                );
+                opened_rx.recv().expect("writer should open the FIFO");
+                Ok(root_descriptor)
+            },
+            || {},
+        );
+        release_tx.send(()).unwrap();
+        writer
+            .expect("FIFO writer should be started")
+            .join()
+            .unwrap();
+
+        let error = result.expect_err("a FIFO root must be rejected");
+        assert_eq!(error.code, "app_definition_path_invalid");
     }
 
     #[cfg(unix)]

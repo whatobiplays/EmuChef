@@ -175,6 +175,7 @@ pub struct ProjectedAppConfiguration {
 pub struct ProjectedAppConfigurationTemplate {
     pub id: String,
     pub path: String,
+    pub variables: indexmap::IndexMap<String, authored_models::TemplateVariableTypeV1>,
 }
 /// One typed property and its App Definition constraints.
 #[derive(Clone, Debug, PartialEq)]
@@ -259,10 +260,16 @@ fn projected_configuration_to_dto(configuration: &ProjectedAppConfiguration) -> 
         "id": configuration.id,
         "format": configuration.format,
         "target": configuration.target,
-        "templates": configuration.templates.iter().map(|template| json!({
-            "id": template.id,
-            "path": template.path,
-        })).collect::<Vec<_>>(),
+        "templates": configuration.templates.iter().map(|template| {
+            let mut dto = json!({
+                "id": template.id,
+                "path": template.path,
+            });
+            if !template.variables.is_empty() {
+                dto["variables"] = json!(template.variables);
+            }
+            dto
+        }).collect::<Vec<_>>(),
     });
     let properties = configuration
         .managed_properties
@@ -382,6 +389,7 @@ fn project_app_definition(app: &AppDefinitionV1) -> ProjectedAppDefinition {
                     .map(|(id, template)| ProjectedAppConfigurationTemplate {
                         id: id.clone(),
                         path: template.path.clone(),
+                        variables: template.variables.clone(),
                     })
                     .collect(),
                 managed_properties: configuration
@@ -1221,6 +1229,85 @@ pub(crate) fn validate_recipe_configuration(
         }
     }
 
+    let declarations = match &config.base {
+        crate::model::RecipeConfigurationBaseV1::Template(template_id) => configuration
+            .templates
+            .get(template_id)
+            .map(|template| &template.variables),
+        crate::model::RecipeConfigurationBaseV1::Input(_) => Some(&config.input_template_variables),
+    };
+    if matches!(
+        &config.base,
+        crate::model::RecipeConfigurationBaseV1::Template(_)
+    ) && !config.input_template_variables.is_empty()
+    {
+        errors.push(recipe_configuration_diagnostic(
+            file,
+            recipe,
+            "config.base.variables",
+            "recipe_config_variable_declaration_owner_invalid",
+            "Recipe-local template variable declarations require a user-supplied base input.",
+        ));
+    }
+    if let Some(declarations) = declarations {
+        if matches!(
+            &config.base,
+            crate::model::RecipeConfigurationBaseV1::Input(_)
+        ) {
+            for variable_id in declarations.keys() {
+                if !authored_models::is_valid_template_variable_id(variable_id) {
+                    errors.push(recipe_configuration_diagnostic(
+                        file,
+                        recipe,
+                        &format!("config.base.variables[{variable_id}]"),
+                        "recipe_config_template_variable_id_invalid",
+                        "Template variable IDs must use the authored identifier grammar and contain no more than 128 ASCII characters.",
+                    ));
+                }
+            }
+        }
+        for (variable_id, input_id) in &config.variables {
+            let field = format!("config.variables[{variable_id}]");
+            let Some(variable_type) = declarations.get(variable_id) else {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &field,
+                    "recipe_config_variable_undeclared",
+                    "Recipe configuration binds a variable not declared by its selected template.",
+                ));
+                continue;
+            };
+            let Some(input) = recipe.inputs.get(input_id) else {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &field,
+                    "recipe_config_variable_input_unknown",
+                    "Template variable binding must reference a declared Recipe input.",
+                ));
+                continue;
+            };
+            if input.multiple {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &field,
+                    "recipe_config_variable_input_multiple_invalid",
+                    "Template variables require a single scalar Recipe input.",
+                ));
+            } else if !variable_type.accepts_input_type(&input.type_name) {
+                errors.push(recipe_configuration_diagnostic(
+                    file,
+                    recipe,
+                    &field,
+                    "recipe_config_variable_input_type_invalid",
+                    "Recipe input type is not compatible with the template variable type.",
+                ));
+            }
+        }
+    }
+
     for (property_id, exposure) in &config.properties {
         let property_field = format!("config.properties[{property_id}]");
         let Some(property) = configuration.managed_properties.get(property_id) else {
@@ -1725,6 +1812,67 @@ mod specification_regression_tests {
     }
 
     #[test]
+    fn catalog_projection_preserves_app_owned_template_declarations() {
+        let root = TempDir::new().expect("temporary authored root");
+        let (apps, _) = write_configuration_catalog(root.path());
+        let source = include_str!("../fixtures/configuration_contracts/app-key-value.yaml")
+            .replace(
+                "        path: retroarch/default.cfg",
+                "        path: retroarch/default.cfg\n        variables:\n          install_path: device_path",
+            );
+        fs::write(apps.join("retroarch.yaml"), source).expect("App Definition with variables");
+
+        let projected = project_app_catalog(Some(root.path())).to_dto();
+
+        assert_eq!(projected["status"], "ready");
+        assert_eq!(
+            projected["apps"][0]["configurations"][0]["templates"][0]["variables"]["install_path"],
+            "device_path"
+        );
+        assert_eq!(
+            projected["apps"][0]["configurations"][0]["managedProperties"][0]["path"],
+            json!(["audio_driver"])
+        );
+    }
+
+    #[test]
+    fn catalog_validation_admits_user_template_variables_only_through_recipe_inputs() {
+        let app = configuration_app();
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml")
+            .replace(
+                "inputs:\n  user_template:",
+                "inputs:\n  numeric_value:\n    type: number\n    role: generic\n    label: Numeric value\n    required: false\n    default: 1.25\n  user_template:",
+            )
+            .replace(
+                "    input: user_template\n",
+                "    input: user_template\n    variables:\n      frame_limit: number\n",
+            )
+            .replace(
+                "  properties:\n",
+                "  variables:\n    frame_limit: numeric_value\n  properties:\n",
+            );
+        let recipe = yaml::load_recipe_from_bytes(
+            source.as_bytes(),
+            Path::new("recipes/configuration.yaml"),
+        )
+        .expect("user-template variable Recipe should parse");
+
+        assert!(configuration_diagnostic_codes(&recipe, &[app]).is_empty());
+
+        let mut invalid = recipe;
+        invalid
+            .config
+            .as_mut()
+            .unwrap()
+            .variables
+            .insert("frame_limit".to_string(), "user_template".to_string());
+        assert!(
+            configuration_diagnostic_codes(&invalid, &[configuration_app()])
+                .contains(&"recipe_config_variable_input_type_invalid".to_string())
+        );
+    }
+
+    #[test]
     fn recipe_configuration_base_rejects_multiple_file_inputs() {
         let app = configuration_app();
         let mut recipe = configuration_recipe();
@@ -1783,6 +1931,7 @@ mod specification_regression_tests {
             "foreign_template".to_string(),
             authored_models::AppConfigurationTemplateV1 {
                 path: "other_app/foreign.cfg".to_string(),
+                variables: indexmap::IndexMap::new(),
             },
         );
         let mut foreign_property = foreign_configuration.managed_properties["audio_driver"].clone();
