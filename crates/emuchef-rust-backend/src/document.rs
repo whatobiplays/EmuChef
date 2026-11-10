@@ -1864,7 +1864,7 @@ fn json_truthy(value: &Value) -> bool {
 fn coerce_input_type(value: &Value) -> Result<String, String> {
     let value = json_value_to_string(value);
     match value.as_str() {
-        "string" | "integer" | "boolean" | "enum" | "file" | "directory" | "path"
+        "string" | "integer" | "number" | "boolean" | "enum" | "file" | "directory" | "path"
         | "device_path" | "string_list" | "path_list" | "object" => Ok(value),
         _ => Err(format!("Invalid input type {value:?}.")),
     }

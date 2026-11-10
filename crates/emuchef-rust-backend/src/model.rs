@@ -7,7 +7,7 @@
 use indexmap::IndexMap;
 use serde_json::Value;
 
-use crate::authored_models::UnmanagedTemplateLiteralTypeV1;
+use crate::authored_models::{TemplateVariableTypeV1, UnmanagedTemplateLiteralTypeV1};
 
 pub type OrderedMap<T> = IndexMap<String, T>;
 
@@ -34,6 +34,14 @@ pub struct RecipeConfigurationV1 {
     pub configuration: String,
     pub target: String,
     pub base: RecipeConfigurationBaseV1,
+    /// Declarations admitted for a user-supplied `base.input` template.
+    ///
+    /// App Definition templates carry their declarations with the App
+    /// Definition. These Recipe-local declarations cannot change that app's
+    /// format, target, managed paths, validators, or editing authority.
+    pub input_template_variables: OrderedMap<TemplateVariableTypeV1>,
+    /// Explicit bindings from template variable IDs to Recipe input IDs.
+    pub variables: OrderedMap<String>,
     pub properties: OrderedMap<RecipeConfigPropertyV1>,
     pub unmanaged_literals: Vec<UnmanagedTemplateLiteralV1>,
 }
@@ -127,6 +135,10 @@ fn scalar_input_value_matches(type_name: &str, value: &Value) -> bool {
         "string" | "enum" | "file" | "directory" | "path" | "device_path"
         | "setup_location_ref" => value.is_string(),
         "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value
+            .as_number()
+            .and_then(serde_json::Number::as_f64)
+            .is_some_and(f64::is_finite),
         "boolean" => value.is_boolean(),
         "object" => value.is_object(),
         "string_list" | "path_list" => value.is_array(),

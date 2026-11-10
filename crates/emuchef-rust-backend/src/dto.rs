@@ -120,10 +120,15 @@ pub(crate) fn recipe_to_dto(recipe: &Recipe) -> Value {
 }
 
 fn recipe_configuration_to_dto(config: &RecipeConfigurationV1) -> Value {
-    let base = match &config.base {
+    let mut base = match &config.base {
         RecipeConfigurationBaseV1::Template(template) => json!({"template": template}),
         RecipeConfigurationBaseV1::Input(input) => json!({"input": input}),
     };
+    if matches!(&config.base, RecipeConfigurationBaseV1::Input(_))
+        && !config.input_template_variables.is_empty()
+    {
+        base["variables"] = json!(config.input_template_variables);
+    }
     let properties = config
         .properties
         .iter()
@@ -149,7 +154,7 @@ fn recipe_configuration_to_dto(config: &RecipeConfigurationV1) -> Value {
         })
         .map(|(id, value)| (id, value))
         .collect::<Vec<_>>();
-    json!({
+    let mut dto = json!({
         "appRef": config.app_ref,
         "configuration": config.configuration,
         "target": config.target,
@@ -160,7 +165,11 @@ fn recipe_configuration_to_dto(config: &RecipeConfigurationV1) -> Value {
     "type": literal.type_name.as_str(),
             "value": literal.value,
         })).collect::<Vec<_>>(),
-    })
+    });
+    if !config.variables.is_empty() {
+        dto["variables"] = json!(config.variables);
+    }
+    dto
 }
 
 pub(crate) fn input_to_dto(recipe_id: &str, input_id: &str, input: &InputDeclaration) -> Value {
@@ -363,5 +372,33 @@ mod tests {
             dto["config"]["unmanagedLiterals"][0]["path"],
             json!(["custom_extension"])
         );
+    }
+
+    #[test]
+    fn recipe_dto_preserves_user_template_declarations_and_bindings() {
+        let source = include_str!("../fixtures/configuration_contracts/recipe-key-value.yaml")
+            .replace(
+                "inputs:\n  user_template:",
+                "inputs:\n  render_label:\n    type: string\n    role: generic\n    label: Render label\n    required: false\n    default: Ready\n  user_template:",
+            )
+            .replace(
+                "    input: user_template\n",
+                "    input: user_template\n    variables:\n      title: string\n",
+            )
+            .replace(
+                "  properties:\n",
+                "  variables:\n    title: render_label\n  properties:\n",
+            );
+        let recipe = crate::yaml::load_recipe_from_bytes(
+            source.as_bytes(),
+            std::path::Path::new("recipe.yaml"),
+        )
+        .expect("Recipe declarations should parse");
+
+        let dto = recipe_to_dto(&recipe);
+
+        assert_eq!(dto["config"]["base"]["variables"]["title"], "string");
+        assert_eq!(dto["config"]["variables"]["title"], "render_label");
+        assert_eq!(dto["inputs"]["render_label"]["type"], "string");
     }
 }

@@ -397,6 +397,20 @@ device documents and final per-destination configuration documents. T07
 defines typed contracts and projections; it does not render files, merge
 existing settings, or write to devices.
 
+App-owned configuration templates declare their own typed variables. A Recipe
+using a user-supplied base template may declare the variables admitted from that
+template under `config.base.variables`; those declarations do not change the
+App Definition's format, target, managed-property paths, validators, or editing
+authority. `config.variables` binds used variables to existing effective Recipe
+inputs, preserving their precedence, validation, source, and sensitivity.
+Placeholders use complete `{{emuchef:<id>}}` scalar strings and substitute as
+typed values for the selected format. T08 rejects missing or undeclared
+bindings, invalid values, and unresolved resets. It validates substituted
+managed properties before applying Recipe operations, then returns deterministic
+bytes, their SHA-256, and sanitized provenance. A `device_path` value from a
+Setup Location resolves only against the current trusted device session; a reset
+uses only a trusted pre-resolved T11 value and its source provenance.
+
 Authored App Definition and Recipe fields use strict schemas. Unknown fields,
 duplicate YAML keys, null operations, and ambiguous overrides fail closed.
 Config Editor's Rust document layer preserves typed configuration fields on

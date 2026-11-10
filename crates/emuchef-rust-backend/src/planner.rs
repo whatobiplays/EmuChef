@@ -2372,7 +2372,7 @@ fn binding_diagnostic(
     }
 }
 
-fn validate_binding_value(
+pub(crate) fn validate_binding_value(
     input_id: &str,
     declaration: &crate::model::InputDeclaration,
     value: &Value,
@@ -2661,6 +2661,7 @@ fn binding_to_runtime_value(
         ),
         "enum" | "string" => ("string", None),
         "integer" => ("integer", None),
+        "number" => ("number", None),
         "boolean" => ("boolean", None),
         "string_list" => ("string_list", None),
         "path_list" => ("path_list", Some("host".to_string())),

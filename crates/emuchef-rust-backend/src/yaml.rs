@@ -14,7 +14,7 @@ use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::authored_models::{
-    self, UnmanagedTemplateLiteralTypeV1, MAX_INLINE_CONFIG_LITERAL_BYTES,
+    self, TemplateVariableTypeV1, UnmanagedTemplateLiteralTypeV1, MAX_INLINE_CONFIG_LITERAL_BYTES,
     MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT,
 };
 use crate::model::{
@@ -534,6 +534,7 @@ fn validate_input_declaration(input_id: &str, input: &InputDeclaration) -> Resul
     const SUPPORTED_TYPES: &[&str] = &[
         "string",
         "integer",
+        "number",
         "boolean",
         "enum",
         "file",
@@ -812,6 +813,7 @@ fn parse_recipe_configuration(
             "configuration",
             "target",
             "base",
+            "variables",
             "properties",
             "unmanaged_literals",
         ],
@@ -831,7 +833,9 @@ fn parse_recipe_configuration(
             ));
         }
     }
-    let base = parse_recipe_configuration_base(get_yaml(mapping, "base"))?;
+    let (base, input_template_variables) =
+        parse_recipe_configuration_base(get_yaml(mapping, "base"))?;
+    let variables = parse_recipe_config_variable_bindings(get_yaml(mapping, "variables"))?;
     let properties = parse_recipe_config_properties(get_yaml(mapping, "properties"))?;
     let unmanaged_literals = parse_unmanaged_literals(get_yaml(mapping, "unmanaged_literals"))?;
 
@@ -860,6 +864,8 @@ fn parse_recipe_configuration(
         configuration,
         target,
         base,
+        input_template_variables,
+        variables,
         properties,
         unmanaged_literals,
     }))
@@ -867,30 +873,99 @@ fn parse_recipe_configuration(
 
 fn parse_recipe_configuration_base(
     value: Option<&YamlValue>,
-) -> Result<RecipeConfigurationBaseV1, String> {
+) -> Result<
+    (
+        RecipeConfigurationBaseV1,
+        OrderedMap<TemplateVariableTypeV1>,
+    ),
+    String,
+> {
     let Some(YamlValue::Mapping(mapping)) = value else {
         return Err("recipe config base must name exactly one template or input".to_string());
     };
-    if mapping.len() != 1 {
+    let has_template = get_yaml(mapping, "template").is_some();
+    let has_input = get_yaml(mapping, "input").is_some();
+    if has_template == has_input {
         return Err("recipe config base must name exactly one template or input".to_string());
     }
-    let Some((key, value)) = mapping.iter().next() else {
-        return Err("recipe config base must name exactly one template or input".to_string());
-    };
-    let YamlValue::String(key) = key else {
-        return Err("recipe config base selector must be a string".to_string());
-    };
-    let YamlValue::String(value) = value else {
-        return Err("recipe config base selector must be a string".to_string());
-    };
-    if !authored_models::is_valid_identifier(value) {
-        return Err("recipe config base selector must be an authored identifier".to_string());
+    if has_template {
+        reject_unknown_fields(mapping, &["template"], "recipe config template base")?;
+        let template = required_yaml_string(mapping, "template")?;
+        if !authored_models::is_valid_identifier(&template) {
+            return Err("recipe config base selector must be an authored identifier".to_string());
+        }
+        Ok((
+            RecipeConfigurationBaseV1::Template(template),
+            OrderedMap::new(),
+        ))
+    } else {
+        reject_unknown_fields(mapping, &["input", "variables"], "recipe config input base")?;
+        let input = required_yaml_string(mapping, "input")?;
+        if !authored_models::is_valid_identifier(&input) {
+            return Err("recipe config base selector must be an authored identifier".to_string());
+        }
+        let declarations = parse_template_variable_declarations(get_yaml(mapping, "variables"))?;
+        Ok((RecipeConfigurationBaseV1::Input(input), declarations))
     }
-    match key.as_str() {
-        "template" => Ok(RecipeConfigurationBaseV1::Template(value.clone())),
-        "input" => Ok(RecipeConfigurationBaseV1::Input(value.clone())),
-        _ => Err("recipe config base supports only template or input".to_string()),
+}
+
+fn parse_template_variable_declarations(
+    value: Option<&YamlValue>,
+) -> Result<OrderedMap<TemplateVariableTypeV1>, String> {
+    let mut declarations = OrderedMap::new();
+    let Some(value) = value else {
+        return Ok(declarations);
+    };
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("template variables must be a mapping".to_string());
+    };
+    for (key, value) in mapping {
+        let YamlValue::String(variable_id) = key else {
+            return Err("template variable IDs must be strings".to_string());
+        };
+        let YamlValue::String(type_name) = value else {
+            return Err("template variable types must be strings".to_string());
+        };
+        let type_name = match type_name.as_str() {
+            "string" => TemplateVariableTypeV1::String,
+            "integer" => TemplateVariableTypeV1::Integer,
+            "number" => TemplateVariableTypeV1::Number,
+            "boolean" => TemplateVariableTypeV1::Boolean,
+            "device_path" => TemplateVariableTypeV1::DevicePath,
+            _ => return Err("template variable type is unsupported".to_string()),
+        };
+        declarations.insert(variable_id.clone(), type_name);
     }
+    Ok(declarations)
+}
+
+fn parse_recipe_config_variable_bindings(
+    value: Option<&YamlValue>,
+) -> Result<OrderedMap<String>, String> {
+    let mut bindings = OrderedMap::new();
+    let Some(value) = value else {
+        return Ok(bindings);
+    };
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("recipe config variables must be a mapping".to_string());
+    };
+    for (key, value) in mapping {
+        let YamlValue::String(variable_id) = key else {
+            return Err("recipe config variable IDs must be strings".to_string());
+        };
+        let YamlValue::String(input_id) = value else {
+            return Err("recipe config variable bindings must name input IDs".to_string());
+        };
+        if !authored_models::is_valid_template_variable_id(variable_id)
+            || !authored_models::is_valid_identifier(input_id)
+        {
+            return Err(
+                "recipe config variable binding IDs must be valid authored identifiers".to_string(),
+            );
+        }
+        bindings.insert(variable_id.clone(), input_id.clone());
+    }
+    Ok(bindings)
 }
 
 fn parse_recipe_config_properties(
@@ -1343,9 +1418,31 @@ fn recipe_configuration_to_yaml(config: &RecipeConfigurationV1) -> YamlValue {
         }
         RecipeConfigurationBaseV1::Input(input) => {
             insert(&mut base, "input", YamlValue::String(input.clone()));
+            if !config.input_template_variables.is_empty() {
+                let mut variables = Mapping::new();
+                for (variable_id, type_name) in &config.input_template_variables {
+                    insert(
+                        &mut variables,
+                        variable_id,
+                        YamlValue::String(type_name.as_str().to_string()),
+                    );
+                }
+                insert(&mut base, "variables", YamlValue::Mapping(variables));
+            }
         }
     }
     insert(&mut mapping, "base", YamlValue::Mapping(base));
+    if !config.variables.is_empty() {
+        let mut variables = Mapping::new();
+        for (variable_id, input_id) in &config.variables {
+            insert(
+                &mut variables,
+                variable_id,
+                YamlValue::String(input_id.clone()),
+            );
+        }
+        insert(&mut mapping, "variables", YamlValue::Mapping(variables));
+    }
 
     let mut properties = Mapping::new();
     for (property_id, property) in &config.properties {
