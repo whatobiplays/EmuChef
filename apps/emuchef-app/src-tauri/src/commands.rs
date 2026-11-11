@@ -3359,6 +3359,7 @@ mod tests {
                 ("t03.copy_app_target/policy".to_string(), json!("merge")),
             ]),
             1,
+            "real".to_string(),
             app.state(),
         )
         .unwrap_or_else(|error| {
