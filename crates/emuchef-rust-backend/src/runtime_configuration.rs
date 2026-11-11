@@ -5,10 +5,12 @@
 //! download, extraction, copy, device-write, or persistence operations.
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::catalog_source::{CatalogIdentity, CatalogSnapshot};
 use crate::dto;
@@ -16,7 +18,7 @@ use crate::model::{OrderedMap, Recipe};
 use crate::planner::{
     expand_recipe_dependencies, resolve_runtime_bindings, BindingDiagnostic, BindingResolution,
     BindingSource, ExecutionPlan, PlannerInput, PlannerLoadError, PlannerMessage,
-    TargetDeviceBinding,
+    ResolvedInputBinding, TargetDeviceBinding,
 };
 use crate::planner_device_plan::{self, PlannerInputParts};
 use crate::review_projection::{project_review, ReviewProjection};
@@ -143,6 +145,573 @@ pub struct PlanConfigurationResult {
     pub copy_commit_preparation_required: bool,
     pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
+}
+
+/// One source selected for the optional RetroArch configuration write.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum RetroArchConfigurationSource {
+    Generated {
+        recipe_id: String,
+        video_threaded: bool,
+        binding_source: BindingSource,
+    },
+    Uploaded {
+        recipe_id: String,
+        path: String,
+        binding_source: BindingSource,
+    },
+}
+
+const RETROARCH_CONFIGURATION_RECIPE_IDS: [&str; 2] =
+    ["app.retroarch.provision", "app.retroarch.configure"];
+
+impl RetroArchConfigurationSource {
+    fn recipe_id(&self) -> &str {
+        match self {
+            Self::Generated { recipe_id, .. } | Self::Uploaded { recipe_id, .. } => recipe_id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EffectiveRetroArchConfigurationMode {
+    None,
+    Managed,
+    Uploaded,
+}
+
+impl EffectiveRetroArchConfigurationMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Managed => "managed",
+            Self::Uploaded => "uploaded",
+        }
+    }
+}
+
+struct EffectiveRetroArchConfigurationSelection {
+    recipe_id: String,
+    mode: EffectiveRetroArchConfigurationMode,
+    video_threaded: Option<(bool, BindingSource)>,
+    uploaded: Option<(String, BindingSource)>,
+}
+
+pub(crate) const MAX_RETROARCH_CONFIGURATION_BYTES: usize =
+    crate::authored_models::MAX_INLINE_CONFIG_LITERAL_BYTES_PER_DOCUMENT;
+
+/// Exact bytes and source identity retained for planning and execution.
+/// Review preparation adds the resolved target identity and confirmed-absence
+/// precondition before the canonical plan digest is finalized.
+struct FrozenRetroArchConfiguration {
+    bytes: Vec<u8>,
+    sha256: String,
+    source_identity: Value,
+}
+
+impl std::fmt::Debug for FrozenRetroArchConfiguration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrozenRetroArchConfiguration")
+            .field("bytes", &"[redacted]")
+            .field("sha256", &self.sha256)
+            .field("source_identity", &"[redacted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for RetroArchConfigurationSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Generated {
+                video_threaded,
+                binding_source,
+                ..
+            } => formatter
+                .debug_struct("GeneratedRetroArchConfiguration")
+                .field("video_threaded", video_threaded)
+                .field("binding_source", binding_source)
+                .finish(),
+            Self::Uploaded { binding_source, .. } => formatter
+                .debug_struct("UploadedRetroArchConfiguration")
+                .field("path", &"[redacted]")
+                .field("binding_source", binding_source)
+                .finish(),
+        }
+    }
+}
+
+/// Resolves one source choice for planning and presentation. A file-only saved
+/// setup remains an upload selection for compatibility.
+fn resolve_retroarch_configuration_selection(
+    inputs: &[ResolvedInputBinding],
+) -> Result<Option<EffectiveRetroArchConfigurationSelection>, &'static str> {
+    fn selected<'a>(
+        inputs: &'a [ResolvedInputBinding],
+        recipe_id: &str,
+        input_id: &str,
+    ) -> Result<Option<&'a ResolvedInputBinding>, &'static str> {
+        let mut matches = inputs
+            .iter()
+            .filter(|input| input.recipe_id == recipe_id && input.input_id == input_id);
+        let Some(input) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() || input.key != format!("{recipe_id}/{input_id}") {
+            return Err("configuration_input_ambiguous");
+        }
+        Ok(Some(input))
+    }
+
+    fn is_user_binding(source: Option<BindingSource>) -> bool {
+        matches!(
+            source,
+            Some(
+                BindingSource::Explicit
+                    | BindingSource::UserConfiguration
+                    | BindingSource::DevicePlan
+            )
+        )
+    }
+
+    let recipe_ids = RETROARCH_CONFIGURATION_RECIPE_IDS
+        .iter()
+        .copied()
+        .filter(|recipe_id| {
+            inputs.iter().any(|input| {
+                input.recipe_id == *recipe_id
+                    && matches!(
+                        input.input_id.as_str(),
+                        "retroarch_cfg_source" | "retroarch_video_threaded" | "retroarch_cfg"
+                    )
+            })
+        })
+        .collect::<Vec<_>>();
+    let [recipe_id] = recipe_ids.as_slice() else {
+        return if recipe_ids.is_empty() {
+            Ok(None)
+        } else {
+            Err("configuration_input_ambiguous")
+        };
+    };
+
+    let mode = selected(inputs, recipe_id, "retroarch_cfg_source")?;
+    let setting = selected(inputs, recipe_id, "retroarch_video_threaded")?;
+    let uploaded = selected(inputs, recipe_id, "retroarch_cfg")?;
+
+    let selected_mode = mode
+        .and_then(|input| input.value.as_ref())
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_str().ok_or("configuration_source_invalid"))
+        .transpose()?;
+    if selected_mode.is_some_and(|value| !matches!(value, "none" | "managed" | "uploaded")) {
+        return Err("configuration_source_invalid");
+    }
+
+    let video_threaded = setting
+        .and_then(|input| input.value.as_ref())
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_bool().ok_or("configuration_managed_value_invalid"))
+        .transpose()?;
+    let setting_source = setting.and_then(|input| input.source);
+    let active_setting = video_threaded.is_some()
+        && setting_source.is_some_and(|source| source != BindingSource::RecipeDefault);
+
+    let upload_path = uploaded
+        .and_then(|input| input.value.as_ref())
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|path| !path.trim().is_empty())
+                .map(str::to_string)
+                .ok_or("configuration_upload_invalid")
+        })
+        .transpose()?;
+    let upload_source = uploaded.and_then(|input| input.source);
+    let active_upload = upload_path.is_some() && upload_source.is_some();
+
+    let mode_source = mode.and_then(|input| input.source);
+    let managed_selected = match selected_mode {
+        Some("managed") => true,
+        Some("uploaded") => false,
+        Some("none") if is_user_binding(mode_source) => false,
+        Some("none") => active_setting,
+        None => active_setting,
+        _ => unreachable!("mode values are validated above"),
+    };
+    let uploaded_selected = match selected_mode {
+        Some("uploaded") => true,
+        Some("managed") => false,
+        Some("none") if is_user_binding(mode_source) => false,
+        Some("none") => active_upload,
+        None => active_upload,
+        _ => unreachable!("mode values are validated above"),
+    };
+
+    if selected_mode == Some("none")
+        && is_user_binding(mode_source)
+        && (active_setting || active_upload)
+    {
+        return Err("configuration_source_conflict");
+    }
+    if (managed_selected && active_upload) || (uploaded_selected && active_setting) {
+        return Err("configuration_source_conflict");
+    }
+
+    let selected_mode = match (managed_selected, uploaded_selected) {
+        (true, false) => EffectiveRetroArchConfigurationMode::Managed,
+        (false, true) => EffectiveRetroArchConfigurationMode::Uploaded,
+        (false, false) => EffectiveRetroArchConfigurationMode::None,
+        (true, true) => return Err("configuration_source_conflict"),
+    };
+    let video_threaded = video_threaded.zip(setting_source);
+    let uploaded = upload_path.zip(upload_source);
+
+    Ok(Some(EffectiveRetroArchConfigurationSelection {
+        recipe_id: (*recipe_id).to_string(),
+        mode: selected_mode,
+        video_threaded,
+        uploaded,
+    }))
+}
+
+/// The user-facing mode is derived from the same Rust source decision that
+/// planning consumes. Conflicts stay visible so the UI cannot hide stale data.
+fn effective_retroarch_configuration_source(
+    inputs: &[ResolvedInputBinding],
+    recipe_id: &str,
+) -> &'static str {
+    match resolve_retroarch_configuration_selection(inputs) {
+        Ok(Some(selection)) if selection.recipe_id == recipe_id => selection.mode.as_str(),
+        Ok(Some(_)) => "conflict",
+        Ok(None) => "none",
+        Err(_) => "conflict",
+    }
+}
+
+/// Selects one executable source and rejects stale bindings from the other.
+fn select_retroarch_configuration_source(
+    inputs: &[ResolvedInputBinding],
+) -> Result<Option<RetroArchConfigurationSource>, &'static str> {
+    let Some(selection) = resolve_retroarch_configuration_selection(inputs)? else {
+        return Ok(None);
+    };
+    match selection.mode {
+        EffectiveRetroArchConfigurationMode::None => Ok(None),
+        EffectiveRetroArchConfigurationMode::Managed => {
+            let (video_threaded, binding_source) = selection
+                .video_threaded
+                .ok_or("configuration_managed_value_missing")?;
+            Ok(Some(RetroArchConfigurationSource::Generated {
+                recipe_id: selection.recipe_id,
+                video_threaded,
+                binding_source,
+            }))
+        }
+        EffectiveRetroArchConfigurationMode::Uploaded => {
+            let (path, binding_source) =
+                selection.uploaded.ok_or("configuration_upload_missing")?;
+            Ok(Some(RetroArchConfigurationSource::Uploaded {
+                recipe_id: selection.recipe_id,
+                path,
+                binding_source,
+            }))
+        }
+    }
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[cfg(unix)]
+fn host_file_object_identity(metadata: &std::fs::Metadata) -> Value {
+    use std::os::unix::fs::MetadataExt;
+
+    json!({
+        "platform": "unix",
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "length": metadata.len(),
+        "modifiedSeconds": metadata.mtime(),
+        "modifiedNanoseconds": metadata.mtime_nsec(),
+        "changedSeconds": metadata.ctime(),
+        "changedNanoseconds": metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(not(unix))]
+fn host_file_object_identity(metadata: &std::fs::Metadata) -> Value {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().to_string());
+    json!({
+        "platform": std::env::consts::OS,
+        "length": metadata.len(),
+        "modifiedNanosecondsSinceEpoch": modified,
+    })
+}
+
+fn freeze_uploaded_retroarch_configuration(
+    recipe_id: &str,
+    path: &str,
+    binding_source: BindingSource,
+) -> Result<FrozenRetroArchConfiguration, &'static str> {
+    let source_path = Path::new(path);
+    let mut file =
+        std::fs::File::open(source_path).map_err(|_| "configuration_upload_unavailable")?;
+    let before = file
+        .metadata()
+        .map_err(|_| "configuration_upload_unavailable")?;
+    if !before.is_file() {
+        return Err("configuration_upload_not_file");
+    }
+    if before.len() > MAX_RETROARCH_CONFIGURATION_BYTES as u64 {
+        return Err("configuration_upload_too_large");
+    }
+
+    let source_identity_before = host_file_object_identity(&before);
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_RETROARCH_CONFIGURATION_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "configuration_upload_unavailable")?;
+    if bytes.len() > MAX_RETROARCH_CONFIGURATION_BYTES {
+        return Err("configuration_upload_too_large");
+    }
+
+    let after = file
+        .metadata()
+        .map_err(|_| "configuration_upload_unavailable")?;
+    if source_identity_before != host_file_object_identity(&after)
+        || after.len() != bytes.len() as u64
+    {
+        return Err("configuration_upload_changed_during_capture");
+    }
+
+    let sha256 = sha256_hex(&bytes);
+    let canonical_path = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.into());
+    let path_identity_sha256 = sha256_hex(canonical_path.to_string_lossy().as_bytes());
+    Ok(FrozenRetroArchConfiguration {
+        source_identity: json!({
+            "kind": "uploaded",
+            "recipeId": recipe_id,
+            "inputId": "retroarch_cfg",
+            "bindingSource": binding_source,
+            "pathIdentitySha256": path_identity_sha256,
+            "fileObject": source_identity_before,
+            "byteLength": bytes.len(),
+            "sha256": sha256,
+        }),
+        bytes,
+        sha256,
+    })
+}
+
+fn retroarch_app_definition(
+    prepared: &PreparedConfiguration,
+) -> Result<crate::authored_models::AppDefinitionV1, &'static str> {
+    crate::catalog::load_app_definition_catalog(prepared.catalog.root())
+        .entries
+        .into_iter()
+        .map(|(_, app)| app)
+        .find(|app| app.id == "retroarch")
+        .ok_or("configuration_app_definition_missing")
+}
+
+fn retroarch_target_identity(
+    app: &crate::authored_models::AppDefinitionV1,
+) -> Result<Value, &'static str> {
+    let target = app
+        .targets
+        .get("config")
+        .ok_or("configuration_target_missing")?;
+    Ok(json!({
+        "appId": app.id,
+        "packageId": app.package_id,
+        "targetId": "config",
+        "target": target,
+    }))
+}
+
+fn freeze_generated_retroarch_configuration(
+    prepared: &PreparedConfiguration,
+    recipe_id: &str,
+    video_threaded: bool,
+    binding_source: BindingSource,
+) -> Result<FrozenRetroArchConfiguration, RuntimeConfigurationDiagnostic> {
+    let app = retroarch_app_definition(prepared).map_err(|code| {
+        configuration_diagnostic(
+            code,
+            "The RetroArch app configuration target is unavailable.",
+        )
+    })?;
+    let recipe = prepared
+        .recipes
+        .iter()
+        .find(|recipe| recipe.id == recipe_id)
+        .ok_or_else(|| {
+            configuration_diagnostic(
+                "configuration_recipe_missing",
+                "The selected RetroArch configuration recipe is unavailable.",
+            )
+        })?;
+    let resolved_resets = indexmap::IndexMap::new();
+    let rendered = crate::configuration_renderer::render_recipe_configuration(
+        crate::configuration_renderer::ConfigurationRenderRequest {
+            app: &app,
+            recipe,
+            authored_root: prepared.catalog.root(),
+            inputs: &prepared.binding_resolution.resolved_inputs,
+            authority: None,
+            setup_locations: &[],
+            resolved_resets: &resolved_resets,
+        },
+    )
+    .map_err(|error| configuration_diagnostic(error.code(), &error.to_string()))?;
+    if rendered.sha256() != sha256_hex(rendered.bytes()) {
+        return Err(configuration_diagnostic(
+            "configuration_render_hash_mismatch",
+            "The generated configuration hash did not match its bytes.",
+        ));
+    }
+    let provenance = serde_json::to_value(rendered.provenance()).map_err(|_| {
+        configuration_diagnostic(
+            "configuration_provenance_invalid",
+            "The generated configuration provenance could not be captured.",
+        )
+    })?;
+    let bytes = rendered.bytes().to_vec();
+    let sha256 = rendered.sha256().to_string();
+    Ok(FrozenRetroArchConfiguration {
+        source_identity: json!({
+            "kind": "generated",
+            "recipeId": recipe_id,
+            "appId": app.id,
+            "configurationId": "main",
+            "bindingSource": binding_source,
+            "videoThreaded": video_threaded,
+            "renderProvenance": provenance,
+            "sha256": sha256,
+            "byteLength": bytes.len(),
+        }),
+        bytes,
+        sha256,
+    })
+}
+
+fn configuration_diagnostic(
+    code: impl Into<String>,
+    message: &str,
+) -> RuntimeConfigurationDiagnostic {
+    RuntimeConfigurationDiagnostic {
+        severity: "error",
+        code: code.into(),
+        message: message.to_string(),
+        key: None,
+        provenance: None,
+        details: json!({}),
+    }
+}
+
+fn create_configuration_planner_input_file(
+    bytes: &[u8],
+) -> Result<tempfile::NamedTempFile, &'static str> {
+    let mut file = tempfile::Builder::new()
+        .suffix(".cfg")
+        .tempfile()
+        .map_err(|_| "configuration_staging_unavailable")?;
+    file.write_all(bytes)
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(|_| "configuration_staging_unavailable")?;
+    Ok(file)
+}
+
+fn frozen_configuration_value(
+    frozen: &FrozenRetroArchConfiguration,
+    target_identity: Value,
+) -> Value {
+    let byte_length = frozen.bytes.len();
+    json!({
+        "type": "configuration_artifact",
+        "schemaVersion": 1,
+        "bytes": frozen.bytes,
+        "byteLength": byte_length,
+        "sha256": frozen.sha256,
+        "sourceIdentity": frozen.source_identity,
+        "targetIdentity": target_identity,
+        "absencePrecondition": Value::Null,
+    })
+}
+
+fn bind_frozen_configuration_to_plan(
+    plan: &mut ExecutionPlan,
+    recipe_id: &str,
+    artifact: Value,
+) -> Result<(), &'static str> {
+    let seed_step_ids = plan
+        .steps
+        .iter()
+        .filter(|step| step.recipe_ref == recipe_id && step.id.ends_with("seed_retroarch_cfg"))
+        .map(|step| step.id.clone())
+        .collect::<Vec<_>>();
+    let [seed_step_id] = seed_step_ids.as_slice() else {
+        return Err("configuration_create_step_missing");
+    };
+    let seed_step = plan
+        .steps
+        .iter_mut()
+        .find(|step| step.id == *seed_step_id)
+        .ok_or("configuration_create_step_missing")?;
+    if seed_step.type_name != "copy_files" {
+        return Err("configuration_create_step_invalid");
+    }
+    seed_step.params.insert(
+        "source".to_string(),
+        crate::planner::ExecutionParamValue::Literal { value: artifact },
+    );
+    seed_step.params.insert(
+        "copy_policy".to_string(),
+        crate::planner::ExecutionParamValue::Literal {
+            value: Value::String("create_only".to_string()),
+        },
+    );
+
+    for input in &mut plan.inputs {
+        if input.id == format!("{recipe_id}/retroarch_cfg") {
+            input.value.value = Value::Null;
+            input.value.location = None;
+        }
+    }
+    for input in &mut plan.resolved_inputs {
+        if input.key == format!("{recipe_id}/retroarch_cfg") {
+            input.value = None;
+        }
+    }
+
+    if recipe_id == "app.retroarch.provision" {
+        if let Some(launch_step) = plan
+            .steps
+            .iter_mut()
+            .find(|step| step.recipe_ref == recipe_id && step.id.ends_with("launch_retroarch"))
+        {
+            if !launch_step.dependencies.contains(seed_step_id) {
+                launch_step.dependencies.push(seed_step_id.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -354,8 +923,76 @@ pub(crate) fn plan_configuration(
             diagnostics: prepared.diagnostics,
         });
     }
+    let selected_configuration = match select_retroarch_configuration_source(&resolved_inputs) {
+        Ok(source) => source,
+        Err(code) => {
+            let mut diagnostics = prepared.diagnostics.clone();
+            diagnostics.push(configuration_diagnostic(
+                code,
+                "The selected RetroArch configuration inputs conflict or are invalid.",
+            ));
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
+        }
+    };
+    let frozen_configuration = match selected_configuration.as_ref() {
+        Some(RetroArchConfigurationSource::Generated {
+            recipe_id,
+            video_threaded,
+            binding_source,
+        }) => match freeze_generated_retroarch_configuration(
+            &prepared,
+            recipe_id,
+            *video_threaded,
+            *binding_source,
+        ) {
+            Ok(frozen) => Some(frozen),
+            Err(diagnostic) => {
+                let mut diagnostics = prepared.diagnostics.clone();
+                diagnostics.push(diagnostic);
+                return Ok(PlanConfigurationResult {
+                    plan: None,
+                    plan_digest: None,
+                    review: None,
+                    copy_commit_preparation_required: false,
+                    resolved_inputs,
+                    diagnostics,
+                });
+            }
+        },
+        Some(RetroArchConfigurationSource::Uploaded {
+            recipe_id,
+            path,
+            binding_source,
+        }) => match freeze_uploaded_retroarch_configuration(recipe_id, path, *binding_source) {
+            Ok(frozen) => Some(frozen),
+            Err(code) => {
+                let mut diagnostics = prepared.diagnostics.clone();
+                diagnostics.push(configuration_diagnostic(
+                    code,
+                    "The supplied RetroArch configuration could not be frozen safely.",
+                ));
+                return Ok(PlanConfigurationResult {
+                    plan: None,
+                    plan_digest: None,
+                    review: None,
+                    copy_commit_preparation_required: false,
+                    resolved_inputs,
+                    diagnostics,
+                });
+            }
+        },
+        None => None,
+    };
+
     let plan_id = format!("plan.{}.001", prepared.effective_device_plan);
-    let Some(input) = prepared.planner_input(plan_id) else {
+    let Some(mut input) = prepared.planner_input(plan_id) else {
         return Ok(PlanConfigurationResult {
             plan: None,
             plan_digest: None,
@@ -365,6 +1002,23 @@ pub(crate) fn plan_configuration(
             diagnostics: prepared.diagnostics,
         });
     };
+    let mut generated_input_file = None;
+    if let (Some(RetroArchConfigurationSource::Generated { recipe_id, .. }), Some(frozen)) =
+        (&selected_configuration, &frozen_configuration)
+    {
+        let temporary = create_configuration_planner_input_file(&frozen.bytes).map_err(|code| {
+            ConfigurationContextError::Catalog(PlannerLoadError::new(
+                code,
+                "Generated RetroArch configuration could not be staged for planning.".to_string(),
+            ))
+        })?;
+        input.explicit_input_bindings.insert(
+            format!("{recipe_id}/retroarch_cfg"),
+            json!(temporary.path().to_string_lossy()),
+        );
+        generated_input_file = Some(temporary);
+    }
+
     let result = plan_prepared_input(&prepared.catalog, input);
     let mut diagnostics = prepared.diagnostics.clone();
     diagnostics.extend(
@@ -380,15 +1034,65 @@ pub(crate) fn plan_configuration(
             .into_iter()
             .map(|message| planner_result_diagnostic("error", message)),
     );
-    let copy_commit_preparation_required = result
-        .execution_plan
+    let mut execution_plan = result.execution_plan;
+    if let (Some(selected), Some(frozen)) = (&selected_configuration, &frozen_configuration) {
+        let target_identity = match retroarch_app_definition(&prepared)
+            .and_then(|app| retroarch_target_identity(&app))
+        {
+            Ok(identity) => identity,
+            Err(code) => {
+                diagnostics.push(configuration_diagnostic(
+                    code,
+                    "The RetroArch configuration target identity could not be captured.",
+                ));
+                return Ok(PlanConfigurationResult {
+                    plan: None,
+                    plan_digest: None,
+                    review: None,
+                    copy_commit_preparation_required: false,
+                    resolved_inputs,
+                    diagnostics,
+                });
+            }
+        };
+        let Some(plan) = execution_plan.as_mut() else {
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
+        };
+        if let Err(code) = bind_frozen_configuration_to_plan(
+            plan,
+            selected.recipe_id(),
+            frozen_configuration_value(frozen, target_identity),
+        ) {
+            diagnostics.push(configuration_diagnostic(
+                code,
+                "The selected RetroArch configuration action is not present in the plan.",
+            ));
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
+        }
+    }
+    drop(generated_input_file);
+
+    let copy_commit_preparation_required = execution_plan
         .as_ref()
         .is_some_and(crate::executor::plan_requires_copy_commit_preparation);
     let plan_digest = if copy_commit_preparation_required {
         None
     } else {
-        result
-            .execution_plan
+        execution_plan
             .as_ref()
             .map(crate::plan_digest::execution_plan_digest)
             .transpose()
@@ -402,13 +1106,12 @@ pub(crate) fn plan_configuration(
     let review = if copy_commit_preparation_required {
         None
     } else {
-        result
-            .execution_plan
+        execution_plan
             .as_ref()
             .map(|plan| project_review(plan, &diagnostics))
     };
     Ok(PlanConfigurationResult {
-        plan: result.execution_plan,
+        plan: execution_plan,
         plan_digest,
         review,
         copy_commit_preparation_required,
@@ -951,6 +1654,17 @@ pub(crate) fn describe_configuration(
                     serde_json::to_value(source).expect("binding source should serialize")
                 }),
             );
+            if resolved.input_id == "retroarch_cfg_source"
+                && RETROARCH_CONFIGURATION_RECIPE_IDS.contains(&resolved.recipe_id.as_str())
+            {
+                object.insert(
+                    "effectiveConfigurationSource".to_string(),
+                    json!(effective_retroarch_configuration_source(
+                        &prepared.binding_resolution.resolved_inputs,
+                        &resolved.recipe_id,
+                    )),
+                );
+            }
             object.insert(
                 "diagnostics".to_string(),
                 json!(prepared
@@ -1133,3 +1847,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_configuration_t13a_tests.rs"]
+mod t13a_tests;

@@ -229,6 +229,20 @@ targets:
     kind: file
     location: external_app_data
     path: files/retroarch.cfg
+configurations:
+  main:
+    format: key_value/v1
+    target: config
+    templates:
+      default:
+        path: retroarch/default.cfg
+        variables:
+          video_threaded: boolean
+    managed_properties:
+      video_threaded:
+        path: [video_threaded]
+        type: boolean
+        default: false
 metadata:
   homepage: https://www.retroarch.com/
   tags:

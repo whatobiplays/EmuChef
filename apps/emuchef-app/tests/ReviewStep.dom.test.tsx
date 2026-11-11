@@ -6,6 +6,7 @@ import type { ReviewSummary } from "../src/types";
 
 const review: ReviewSummary = {
   reviewHandle: "review-opaque",
+  executionMode: "simulated",
   setup: { name: "Pocket setup", description: "A complete handheld setup." },
   target: {
     label: "Connected Android device",
@@ -87,6 +88,80 @@ describe("review presentation", () => {
       /digest|recipe[_-]?id|step[_-]?id/i,
     );
   });
+
+  test.each([
+    ["EmuChef-generated", "generated"],
+    ["Uploaded file", "uploaded"],
+  ] as const)(
+    "shows the reviewed %s bytes as create-only",
+    (source, _sourceKind) => {
+      const sha256 = "a".repeat(64);
+      const sourceAction = review.features[0]!.sections[0]!.actions[0]!;
+      const configurationReview: ReviewSummary = {
+        ...review,
+        features: [
+          {
+            ...review.features[0]!,
+            sections: [
+              {
+                ...review.features[0]!.sections[0]!,
+                actions: [
+                  {
+                    ...sourceAction,
+                    title: "Create the RetroArch configuration",
+                    description:
+                      "Create this file only when its destination is absent.",
+                    deviceLocation: undefined,
+                    configurationCreate: {
+                      source,
+                      sha256,
+                      byteLength: 22,
+                      targetLabel: "RetroArch configuration file",
+                      confirmedAbsent: true,
+                      verificationScope:
+                        "Dry-run sandbox only; device target not checked",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+
+      const { container } = render(
+        <ReviewStep
+          busy={false}
+          executionKind="idle"
+          realExecutionCompiled
+          review={configurationReview}
+          reviewStale={false}
+          onApplyToDevice={vi.fn()}
+          onBack={vi.fn()}
+          onStartSimulation={vi.fn()}
+        />,
+      );
+
+      const creation = screen.getByRole("region", {
+        name: "Configuration creation",
+      });
+      expect(within(creation).getByText(source)).toBeTruthy();
+      expect(within(creation).getByText(sha256)).toBeTruthy();
+      expect(within(creation).getByText("22 bytes")).toBeTruthy();
+      expect(
+        within(creation).getByText("RetroArch configuration file"),
+      ).toBeTruthy();
+      expect(
+        within(creation).getByText("Confirmed absent · create only"),
+      ).toBeTruthy();
+      expect(
+        within(creation).getByText(
+          "Dry-run sandbox only; device target not checked",
+        ),
+      ).toBeTruthy();
+      expect(container.textContent).not.toContain("/storage/emulated/0/");
+    },
+  );
 
   test("renders a sanitized legacy destination without a copy summary", () => {
     const sourceAction = review.features[0]!.sections[0]!.actions[0]!;
@@ -294,13 +369,9 @@ describe("review presentation", () => {
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Apply to Device",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+  expect(
+    screen.queryByRole("button", { name: "Apply to Device" }),
+  ).toBeNull();
     expect(screen.getByText(/cannot review safely/i)).toBeTruthy();
   });
 });
@@ -331,13 +402,9 @@ describe("stale execution review", () => {
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Apply to Device",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+  expect(
+    screen.queryByRole("button", { name: "Apply to Device" }),
+  ).toBeNull();
     expect(
       screen.getByText(/generate a fresh review before running again/i),
     ).toBeTruthy();

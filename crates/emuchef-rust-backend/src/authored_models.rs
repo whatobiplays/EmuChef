@@ -3666,6 +3666,13 @@ mod tests {
         app.id = "RetroArch".to_string();
         app.name = " ".to_string();
         app.package_id = "retroarch".to_string();
+        app.configurations
+            .get_mut("main")
+            .unwrap()
+            .templates
+            .get_mut("default")
+            .unwrap()
+            .path = "RetroArch/default.cfg".to_string();
         let app_codes = codes(&app);
         assert_eq!(
             app_codes,

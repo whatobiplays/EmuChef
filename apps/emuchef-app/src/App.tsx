@@ -91,6 +91,7 @@ import {
   reviewReady,
   runBusyAction,
   savedBindingKeysToRemove,
+  type ExecutionMode,
   updateRecipeSelection,
   workflowReducer,
 } from "./workflow";
@@ -3652,7 +3653,7 @@ if (rejectSetupActionDuringRepair()) return;
     workflow.step,
   ]);
 
-  const generateReview = async () => {
+const generateReview = async (mode: ExecutionMode) => {
     if (rejectSetupActionDuringRepair()) return;
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
     setValidationRequested(true);
@@ -3677,6 +3678,7 @@ if (rejectSetupActionDuringRepair()) return;
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
         requestGeneration,
+        mode: mode === "simulated" ? "dry_run" : "real",
       });
       if (
         runtimeGenerationRef.current !== runtimeGeneration ||
@@ -5095,6 +5097,7 @@ if (rejectSetupActionDuringRepair()) return;
             {workflow.step === "inputs" && workflow.description && (
               <InputsStep
                 bindings={workflow.bindings}
+                realExecutionCompiled={realExecutionCompiled}
                 busy={setupIntentBusy || workflow.descriptionDirty}
                 description={workflow.description}
                 setupLocations={setupLocations}

@@ -23,6 +23,8 @@ const KONKR_DEVICE_PROFILE: &str = "ayaneo.konkr_pocket_fit";
 const RETROARCH_RECIPE: &str = "app.retroarch.provision";
 const BIOS_RECIPE: &str = "feature.copy_bios";
 const RETROARCH_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
+const CONFIG_SOURCE_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg_source";
+const VIDEO_THREADED_INPUT_KEY: &str = "app.retroarch.provision/retroarch_video_threaded";
 const BIOS_INPUT_KEY: &str = "feature.copy_bios/bios_source_dir";
 const BIOS_DESTINATION: &str = "/storage/emulated/0/RetroArch/system";
 const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
@@ -123,7 +125,14 @@ fn load_contract() -> CombinedQualificationContract {
     assert_eq!(contract.selected_recipes.len(), 2);
     assert_eq!(contract.permission_android_api_level, 35);
     assert_eq!(contract.required_inputs, vec![BIOS_INPUT_KEY]);
-    assert_eq!(contract.optional_inputs, vec![RETROARCH_INPUT_KEY]);
+    assert_eq!(
+        contract.optional_inputs,
+        vec![
+            RETROARCH_INPUT_KEY,
+            CONFIG_SOURCE_INPUT_KEY,
+            VIDEO_THREADED_INPUT_KEY
+        ]
+    );
     assert!(!contract.fake_storage_aliases_qualified);
     assert!(!contract.live_network_required_for_automated_qualification);
     assert_eq!(contract.automated_status, "qualified");
@@ -429,7 +438,7 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
         assert!(runtime_capability_enabled(plan, capability));
     }
 
-    assert_eq!(result.resolved_inputs.len(), 2);
+    assert_eq!(result.resolved_inputs.len(), 4);
     let bios_binding = result
         .resolved_inputs
         .iter()
@@ -448,6 +457,21 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
         .find(|binding| binding.key == RETROARCH_INPUT_KEY)
         .expect("RetroArch config binding should be resolved");
     assert_eq!(config_binding.source, Some(BindingSource::Explicit));
+    let source_binding = result
+        .resolved_inputs
+        .iter()
+        .find(|binding| binding.key == CONFIG_SOURCE_INPUT_KEY)
+        .expect("RetroArch configuration source selection should be resolved");
+    assert_eq!(
+        source_binding.value,
+        Some(Value::String("none".to_string()))
+    );
+    let threaded_binding = result
+        .resolved_inputs
+        .iter()
+        .find(|binding| binding.key == VIDEO_THREADED_INPUT_KEY)
+        .expect("RetroArch authored video setting should be resolved");
+    assert_eq!(threaded_binding.value, Some(Value::Bool(false)));
 
     assert!(review.can_execute);
     assert_eq!(review.features.len(), 2);

@@ -1,0 +1,579 @@
+{
+  "schemaVersion": 1,
+  "issue": 56,
+  "slice": "T13a",
+  "implementationStatus": "COMPLETE",
+  "qualificationStatus": "LIMITED",
+  "candidate": {
+    "repository": "EmuChef",
+    "worktree": "/Users/daniel/.codex/worktrees/df5f/EmuChef",
+    "branch": "codex/issue-56-t13a",
+    "baseCommit": "aa54a27b2581b4cc165e4cb54fd0ca54a62ecbc3",
+    "headCommit": "6a486aecc72f719cc591035a902aa36f4eebe0c0",
+    "workingTree": "An uncommitted four-path packaging correction and evidence update was validated on top of reviewed HEAD 6a486aecc72f719cc591035a902aa36f4eebe0c0; no commit or push was made.",
+    "published": false,
+    "originMainCommitAtFinalCheck": "aa54a27b2581b4cc165e4cb54fd0ca54a62ecbc3",
+    "headCommitAtFinalCheck": "6a486aecc72f719cc591035a902aa36f4eebe0c0"
+  },
+  "implementedContract": {
+    "appOwnedSetting": "The RetroArch app definition owns the boolean setting video_threaded, with an authored default of false. Generated configuration writes that value.",
+    "recipeSourceSelector": "One Rust resolver supplies the effective source to planning and the input description. RecipeDefault none retains legacy saved uploaded-file and managed-setting inference. Explicit none with stale saved source data is a conflict.",
+    "sourceExclusivity": "Rust rejects stale saved bindings and contradictory source selections. Explicit none with stale source data produces no plan. Choosing a source in the UI clears bindings for other modes, while raw values and binding provenance remain available.",
+    "uploadedBytes": "The supplied file bytes are captured once, hashed, and preserved without content changes or execution-time rereads.",
+    "target": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
+    "createOperation": "Both source modes use the same reviewed create-only operation. The final target is opened with openat(O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC); execution consumes the frozen bytes and never overwrites an existing target.",
+    "absenceAuthority": "The target identity and confirmed-absence precondition are included in the reviewed artifact before digest finalization.",
+    "writeSafety": "Descriptor-anchored parent traversal, selected-root identity checks, T03 drift checks, file and directory synchronization, and exact final readback are retained. EEXIST leaves existing bytes untouched. Partial writes, lost responses, hash mismatches, and cleanup uncertainty have distinct truthful outcomes.",
+    "launchOrdering": "When a configuration source is selected, the planner orders seed_retroarch_cfg before the optional final launch_retroarch step. With no configuration source, the existing optional launch graph is retained.",
+    "bootstrap": "The existing bootstrap lifecycle is preserved. An earlier RetroArch launch may create retroarch.cfg before the selected configuration step; T13a then blocks on the existing target and leaves it untouched.",
+    "videoThreaded": "The generated value video_threaded=false is explicit EmuChef-authored configuration. It is not asserted to be the selected Android build's runtime default, and no T11 recommendation behavior was added.",
+    "executionPolicy": {
+      "realExecutionDefault": "OFF",
+      "physicalDeviceOperations": "NOT_RUN",
+      "configEditor": "DEFERRED"
+    },
+    "configurationOnlyRecipe": "The separately selectable app.retroarch.configure recipe creates or accepts a configuration for an already installed RetroArch app. It omits install, bootstrap launch, asset copy, and core provisioning actions. The existing app.retroarch.provision recipe retains its install, launch, mandatory copy_assets, and optionality behavior.",
+    "configurationOnlyTarget": "The configuration-only recipe resolves the existing app-owned RetroArch config target. It uses the same reviewed create-only operation as provisioning and blocks an existing target without changing it.",
+    "sourceModePresentation": "Rust owns the effective source projection. Choosing managed or uploaded preserves that selected source binding and clears only inactive-mode bindings; choosing none clears both source bindings. Explicit none with stale bindings remains a backend conflict unless the user explicitly clears them.",
+    "existingTargetClassification": "The helper's create-only operation checks the anchored target without following symlinks and returns the existing-target status for entries present before the final open or created in the O_EXCL race. Errors after creation remain partial or uncertain."
+  },
+  "validation": {
+    "focusedT13aSuite": {
+      "command": "rtk proxy cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml runtime_configuration::t13a_tests --lib",
+      "exitCode": 0,
+      "testsPassed": 34
+    },
+    "ancestorSwapRegression": {
+      "redCommand": "rtk proxy cargo test --lib --manifest-path crates/emuchef-rust-backend/Cargo.toml symlinked_sandbox_root_ancestor_after_review_cannot_redirect_creation -- --nocapture",
+      "redExitCode": 101,
+      "greenExitCode": 0,
+      "result": "The device-bound review replay test failed before the root traversal fix and passed afterward; the redirected outside directory remained untouched."
+    },
+    "finalReadbackFifoRegression": {
+      "command": "rtk proxy cargo test --lib --manifest-path crates/emuchef-rust-backend/Cargo.toml selected_root_helper_rejects_fifo_replacement_during_final_readback -- --nocapture",
+      "redExitCode": 101,
+      "greenExitCode": 0,
+      "helperSuiteCommand": "rtk proxy cargo test --lib --manifest-path crates/emuchef-rust-backend/Cargo.toml selected_root_helper",
+      "helperSuiteExitCode": 0,
+      "result": "The test replaces the final file with a FIFO after close and synchronization. O_NONBLOCK lets final readback reach the retained regular-file check; the helper reports the unverified failure and leaves the FIFO in place."
+    },
+    "canonicalMakeTest": {
+      "finalCommand": "rtk proxy make test",
+      "finalExitCode": 0,
+      "result": "Passed with the functional macOS catalog correction in place. A later JSDoc-only comment addition was followed by a final focused packaging suite pass (41/41). The canonical target completed Rust, EmuChef, security, frontend typecheck/lint, Config Editor typecheck/lint, and host-side qualification-definition checks.",
+      "physicalDeviceOperations": "NOT_RUN"
+    },
+    "canonicalMakeBuild": {
+      "finalCommand": "rtk proxy make build",
+      "finalExitCode": 0,
+      "result": "Backend, EmuChef application, and Config Editor builds passed after the functional correction. The only later source change was a JSDoc-only comment; the exact final source then passed the focused suite and macOS package qualification. Build output retained existing Rust dead-code, stale Browserslist data, and Config Editor chunk-size warnings."
+    },
+    "formatAndDiff": {
+      "backendCargoFmtCheckExitCode": 0,
+      "tauriCargoFmtCheckExitCode": 0,
+      "gitDiffCheckExitCode": 0
+    },
+    "preservedRegressionFamilies": [
+      "T03",
+      "T05",
+      "T07",
+      "T08"
+    ],
+    "configurationOnlyAcceptanceFlow": {
+      "command": "rtk proxy cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml configuration_only_recipe -- --nocapture",
+      "exitCode": 0,
+      "coverage": [
+        "ordinary backend recipe availability",
+        "stale and contradictory source bindings",
+        "configuration-only plan selection",
+        "immutable review preparation, source and target identity, confirmed-absence precondition, canonical digest",
+        "controlled adapter creation and authoritative created_verified report"
+      ]
+    },
+    "frontendSourceModes": {
+      "command": "rtk proxy ./node_modules/.bin/vitest run --config tests/vitest.config.ts tests/InputsStep.dom.test.tsx",
+      "workingDirectory": "apps/emuchef-app",
+      "exitCode": 0,
+      "testsPassed": 10,
+      "testsSkipped": 0,
+      "coverage": [
+        "managed, uploaded, and none modes expose only matching controls",
+        "legacy default-none saved file and managed values display Rust effective-source projection",
+        "explicit none with stale saved sources displays a conflict",
+        "resolving a conflict preserves the selected saved source and clears the inactive source",
+        "resolving a conflict to none clears both stale bindings",
+        "source switching clears bindings for modes no longer selected"
+      ]
+    },
+    "helperExistingTarget": {
+      "command": "rtk proxy cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml selected_root_helper_preserves_initial_and_racing_targets -- --nocapture",
+      "exitCode": 0,
+      "coverage": [
+        "An initially present target remains unchanged and is classified as existing.",
+        "A target appearing immediately before the exclusive final open remains unchanged and is classified as existing."
+      ]
+    },
+    "adapterExistingTarget": {
+      "command": "rtk proxy cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml --features android-copy-commit-helper helper_existing_target_status_maps_to_the_adapter_existing_outcome -- --nocapture",
+      "exitCode": 0,
+      "result": "The adapter maps helper status 10 to the blocked existing-target outcome."
+    },
+    "clippy": {
+      "backendDefaultFeatures": {
+        "command": "rtk proxy cargo clippy --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml --all-targets",
+        "exitCode": 0
+      },
+      "backendAndroidCopyCommitHelper": {
+        "command": "rtk proxy cargo clippy --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml --all-targets --features android-copy-commit-helper",
+        "exitCode": 0
+      },
+      "tauriSimulationOnly": {
+        "command": "rtk proxy cargo clippy --locked --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --all-targets --no-default-features",
+        "exitCode": 0
+      },
+      "tauriRealExecution": {
+        "command": "rtk proxy cargo clippy --locked --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --all-targets --no-default-features --features real-execution",
+        "exitCode": 0
+      },
+      "warnings": "Commands exited 0 with warnings from unchanged Rust sources, including dead_code and existing Clippy suggestions."
+    },
+    "sha256ManifestVerification": {
+      "command": "Regenerated from tracked changes relative to aa54a27b2581b4cc165e4cb54fd0ca54a62ecbc3 plus non-ignored untracked files; RESULT.json and SHA256SUMS excluded by the existing self-reference convention.",
+      "coveredFileCount": 46,
+      "hashMismatches": 0,
+      "manifestSha256": "c6bb6c256887de46bcf72773e8c234e14089c2f70a509561603a11da2a0596d8",
+      "missingEntries": 0,
+      "unexpectedEntries": 0,
+      "candidateChangedPathCount": 48
+    },
+    "tauriOptionProjection": {
+      "command": "rtk proxy cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml configuration_projection_flattens_picker_metadata_and_drops_internal_fields -- --nocapture",
+      "exitCode": 0,
+      "coverage": "The public Tauri configuration projection preserves valid option value/label pairs and the Rust-authored effective RetroArch configuration source."
+    },
+    "sourceProjectionDom": {
+      "command": "rtk proxy ./node_modules/.bin/vitest run --config tests/vitest.config.ts tests/InputsStep.dom.test.tsx",
+      "workingDirectory": "apps/emuchef-app",
+      "exitCode": 0,
+      "testsPassed": 10,
+      "coverage": [
+        "managed, uploaded, and none modes expose only matching controls",
+        "legacy default-none saved file and managed values display Rust effective-source projection",
+        "explicit none with stale saved sources displays a conflict",
+        "resolving a conflict preserves the selected saved source and clears the inactive source",
+        "resolving a conflict to none clears both stale bindings",
+        "source switching clears bindings for modes no longer selected"
+      ]
+    },
+    "linkedTauriBackendReview": {
+      "command": "rtk proxy cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml projected_recipe_selection_creates_reviewed_sandbox_file_and_projects_simulation_report -- --nocapture",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "coverage": [
+        "Reads the managed source option from the Rust-authored Tauri projection and selects app.retroarch.configure.",
+        "Runs the production Tauri review path and retains the exact backend plan, canonical digest, immutable artifact, target identity, and confirmed-absence precondition.",
+        "Prepares two distinct review-scoped sandbox roots; the second remains absent when the first executes.",
+        "Starts through the production simulated-start reservation and one-shot review authority handoff; the sidecar consumes the review root for that attempt.",
+        "Checks the sidecar authoritative simulated_create_verified result, exact bytes and SHA-256, then checks the Tauri projection reports simulation_only and no device file changed.",
+        "An unreviewed start and a replay of consumed authority fail without changing the created target.",
+        "The selected dry-run mode is retained with the private review snapshot and accepted by the matching simulated-start path."
+      ]
+    },
+    "stepSpecSurface": {
+      "command": "rtk proxy cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml step_specs::tests --lib",
+      "exitCode": 0,
+      "coverage": [
+        "generic copy_files StepSpec omits recipe-scoped create_only",
+        "internal authored StepSpec retains create_only for validation"
+      ]
+    },
+    "noConfigurationNoWrite": {
+      "command": "rtk proxy cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml no_configuration_keeps_the_existing_optional_launch_graph --lib",
+      "exitCode": 0,
+      "coverage": "The none source selects no configuration-create step and retains the existing optional launch graph. InputsStep DOM coverage exposes neither managed property nor file picker in none mode."
+    },
+    "sandboxAuthorityHandoff": {
+      "reviewRoot": "runtime/copy-review-preparation/<unique-review-authority>/simulated-device",
+      "executionRoot": "T13a dry-run start consumes the matching one-shot authority and uses the sandbox_root retained with that authority; it does not fall back to runtime/executions/<executionId>.",
+      "binding": "Authority records the reviewed plan digest, mode, target identity, and sandbox root. Start removes the authority, checks digest/mode/target, and transfers that root into the execution attempt.",
+      "positiveEvidence": "The linked Tauri/sidecar regression creates and verifies the file under the first review authority root while a second review root remains untouched.",
+      "mismatchRegression": "The backend review/execution sandbox-root mismatch regression remains fail-closed with review_parent_changed and no target mutation."
+    },
+    "executionModeAuthority": {
+      "command": "rtk proxy cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml t13a_review_cannot_start_in_a_different_execution_mode -- --nocapture",
+      "exitCode": 0,
+      "coverage": [
+        "A T13a review cannot start through the other execution mode.",
+        "The linked dry-run retains the selected mode in the private review snapshot."
+      ]
+    },
+    "executionModeFixtureRegression": {
+      "command": "rtk proxy cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml simulated_retroarch_modes_keep_the_reviewed_plan_and_project_backend_reports -- --nocapture",
+      "exitCode": 0,
+      "result": "The simulated RetroArch fixture now declares the mode that its review represents."
+    },
+    "frontendTypecheckAndLint": {
+      "apps/emuchef-app": {
+        "typecheckCommand": "rtk proxy npm --prefix apps/emuchef-app run typecheck",
+        "typecheckExitCode": 0,
+        "lintCommand": "rtk proxy npm --prefix apps/emuchef-app run lint",
+        "lintExitCode": 0
+      },
+      "apps/config-editor": {
+        "typecheckCommand": "rtk proxy npm --prefix apps/config-editor run typecheck",
+        "typecheckExitCode": 0,
+        "lintCommand": "rtk proxy npm --prefix apps/config-editor run lint",
+        "lintExitCode": 0
+      },
+      "alsoPassedThrough": "rtk proxy make test"
+    },
+    "tauriRealExecution": {
+      "command": "rtk proxy cargo test --locked --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --no-default-features --features real-execution",
+      "exitCode": 0,
+      "result": "Passed after adding the real execution mode to the fixture and regenerating the Phase 6D.6 UI-binding index."
+    },
+    "tauriSimulationOnly": {
+      "command": "rtk proxy cargo test --locked --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --no-default-features",
+      "exitCode": 0,
+      "result": "Simulation-only Tauri suite passed."
+    },
+    "phase6d6EvidenceValidator": {
+      "regenerateCommand": "rtk proxy node tools/phase-6d6-evidence.mjs --regenerate-ui-binding-index",
+      "regenerateExitCode": 0,
+      "validatorCommand": "rtk proxy node tools/phase-6d6-evidence.mjs",
+      "validatorExitCode": 0,
+      "result": "Evidence contract valid but incomplete: 2 mandatory physical repetitions and 2 UI-smoke repetitions are missing. No physical qualification was run.",
+      "correctionRun": {
+        "command": "rtk proxy node tools/phase-6d6-evidence.mjs",
+        "exitCode": 0,
+        "result": "Evidence contract valid but incomplete: 2 mandatory physical repetitions and 2 UI-smoke repetitions are missing.",
+        "uiBindingIndexRegenerated": false,
+        "reason": "No actual UI-binding index source digest input changed."
+      }
+    },
+    "macosPackagingCorrection": {
+      "redGreen": {
+        "acceptedTemplateRedCommand": "rtk proxy node --test apps/emuchef-app/scripts/macos-packaging.test.mjs",
+        "acceptedTemplateRedExitCode": 1,
+        "acceptedTemplateRedFailure": "The new valid apps/retroarch/default.cfg case failed because catalogDigest rejected all non-YAML content.",
+        "symlinkRootRedCommand": "rtk proxy node --test --test-name-pattern='symlinked required catalog directory' apps/emuchef-app/scripts/macos-packaging.test.mjs",
+        "symlinkRootRedExitCode": 1,
+        "symlinkRootRedFailure": "The old statSync followed a symlinked required directory, so the expected rejection did not occur.",
+        "focusedPackagingCommand": "rtk proxy npm --prefix apps/emuchef-app run test:packaging",
+        "focusedPackagingExitCode": 0,
+        "testsPassed": 41,
+        "testsFailed": 0,
+        "coverage": {
+          "linesPercent": 100,
+          "branchesPercent": 95.86,
+          "functionsPercent": 100
+        }
+      },
+      "packagedResourceChecks": {
+        "declarationCommand": "rtk proxy npm --prefix apps/emuchef-app run check:packaged-resources",
+        "declarationExitCode": 0,
+        "declarationResult": "Tauri catalog resources are declared and Platform-Tools is absent.",
+        "bundledCommand": "rtk proxy node apps/emuchef-app/scripts/check-packaged-resources.mjs --bundle apps/emuchef-app/src-tauri/target/release/bundle/macos/EmuChef.app",
+        "bundledExitCode": 0,
+        "bundledResult": "Packaged Rust sidecar and catalog snapshot verified (23 files, sha256 a01ff53165ba61945fe8c2c0d5deb3de45177b7f0d9bea2e3b77ed9255d0d8c2)."
+      },
+      "rustCatalogCompatibility": {
+        "backendCommand": "rtk proxy cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml --lib catalog_source::tests::catalog_digest_tracks_app_configuration_template_assets -- --exact",
+        "backendExitCode": 0,
+        "backendTestsPassed": 1,
+        "tauriCommand": "rtk proxy cargo test --locked --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --no-default-features catalog::tests",
+        "tauriExitCode": 0,
+        "tauriTestsPassed": 12
+      },
+      "macosQualification": {
+        "host": "Darwin arm64",
+        "command": "rtk proxy npm --prefix apps/emuchef-app run package:macos:qualify -- --manifest <path>",
+        "firstRun": {
+          "exitCode": 0,
+          "bundleQualification": "PASSED",
+          "architecture": "arm64",
+          "catalogFileCount": 23,
+          "catalogSha256": "a01ff53165ba61945fe8c2c0d5deb3de45177b7f0d9bea2e3b77ed9255d0d8c2",
+          "normalizedContentSha256": "ff8e24a9c5dccaecf355be4ec864b960891a26786bd0041d4cee5f68df7702c8",
+          "cleanEnvironmentProbe": {
+            "status": "PASSED",
+            "runtimeReady": true,
+            "catalogLoaded": true,
+            "readOnlyCatalogOperation": true,
+            "realExecutionEnabled": false
+          }
+        },
+        "secondRun": {
+          "exitCode": 0,
+          "bundleQualification": "PASSED",
+          "architecture": "arm64",
+          "catalogFileCount": 23,
+          "catalogSha256": "a01ff53165ba61945fe8c2c0d5deb3de45177b7f0d9bea2e3b77ed9255d0d8c2",
+          "normalizedContentSha256": "ff8e24a9c5dccaecf355be4ec864b960891a26786bd0041d4cee5f68df7702c8",
+          "cleanEnvironmentProbe": {
+            "status": "PASSED",
+            "runtimeReady": true,
+            "catalogLoaded": true,
+            "readOnlyCatalogOperation": true,
+            "realExecutionEnabled": false
+          }
+        },
+        "packagedTemplate": {
+          "path": "Contents/Resources/catalog/apps/retroarch/default.cfg",
+          "present": true,
+          "byteLength": 42,
+          "catalogDigestMatchesBundleAndManifest": true
+        },
+        "compareCommand": "rtk proxy npm --prefix apps/emuchef-app run package:macos:compare -- /tmp/emuchef-pr77-macos-first.json /tmp/emuchef-pr77-macos-second.json",
+        "compareExitCode": 0,
+        "compareResult": "equivalent-normalized-content",
+        "normalizedContentMatches": true,
+        "rawArtifactHashesMayDiffer": true,
+        "finalSourceRun": {
+          "exitCode": 0,
+          "bundleQualification": "PASSED",
+          "architecture": "arm64",
+          "catalogFileCount": 23,
+          "catalogSha256": "a01ff53165ba61945fe8c2c0d5deb3de45177b7f0d9bea2e3b77ed9255d0d8c2",
+          "normalizedContentSha256": "ff8e24a9c5dccaecf355be4ec864b960891a26786bd0041d4cee5f68df7702c8",
+          "cleanEnvironmentProbe": {
+            "status": "PASSED",
+            "runtimeReady": true,
+            "catalogLoaded": true,
+            "readOnlyCatalogOperation": true,
+            "realExecutionEnabled": false
+          }
+        },
+        "finalSourceCompare": {
+          "command": "rtk proxy npm --prefix apps/emuchef-app run package:macos:compare -- /tmp/emuchef-pr77-macos-first.json /tmp/emuchef-pr77-macos-final.json",
+          "exitCode": 0,
+          "result": "equivalent-normalized-content",
+          "normalizedContentMatches": true,
+          "rawArtifactHashesMayDiffer": true
+        }
+      },
+      "deviceQualification": {
+        "androidAdapter": "NOT_QUALIFIED",
+        "physicalDeviceOperations": "NOT_RUN"
+      }
+    }
+  },
+  "qualificationLimitations": [
+    {
+      "id": "prepared-install-android-reachability",
+      "status": "NOT_DEMONSTRATED",
+      "detail": "Host tests reach a sandbox review with a confirmed-absent synthetic target. They do not demonstrate a reachable confirmed-absent retroarch.cfg path on a supported prepared installation; first-run bootstrap may already have created the file, and T13a blocks when it exists."
+    },
+    {
+      "id": "physical-device",
+      "status": "NOT_RUN",
+      "detail": "No physical ADB/device operation or Android runtime qualification was performed."
+    },
+    {
+      "id": "react-ui-and-native-ipc-in-one-linked-run",
+      "status": "NOT_DEMONSTRATED",
+      "detail": "The linked host test starts from the Rust-authored Tauri source projection and exercises Tauri review/start, backend authority, sidecar adapter, authoritative result, and Tauri report projection. It does not invoke React DOM events and native desktop IPC in the same run; DOM tests cover source-mode interaction separately."
+    }
+  ],
+  "independentReviews": {
+    "standards": {
+      "status": "P2_NON_BLOCKING_FOLLOW_UP",
+      "disposition": "Fresh Standards review found that unique dry-run roots remain after their one-shot authority is consumed or evicted. This is recorded as sandboxAuthorityLifecycle; cleanup is deferred because deleting partial or unverified output would be unsafe without a cleanup contract. The follow-up is tracked in #76."
+    },
+    "specification": {
+      "status": "NO_P1_P2_FINDINGS",
+      "disposition": "Fresh Specification review found no P1/P2 gaps against the attached handoff requirements."
+    },
+    "product": {
+      "status": "NO_P1_P2_FINDINGS",
+      "disposition": "Fresh Product review found no P1/P2 issues in source/mode selection, the linked host path, or qualification wording."
+    },
+    "reviewProvenance": {
+      "type": "The independent Standards, Specification, and Product reviews apply to the earlier candidate manifest recorded above. They do not provide a state-bound review attestation for this CI correction.",
+      "manifestSha256": "e37351a3cadc36da506b5ffff82d9b1a6b5cebb6f2039616a08e2c4940b74f34",
+      "delegationV3Run": "NOT_REGISTERED",
+      "stateBoundRepoCodexReview": "NOT_CLAIMED",
+      "reviewedCandidateManifestSha256": "e37351a3cadc36da506b5ffff82d9b1a6b5cebb6f2039616a08e2c4940b74f34",
+      "currentCandidateManifestSha256": "c6bb6c256887de46bcf72773e8c234e14089c2f70a509561603a11da2a0596d8",
+      "correctionReview": "A separate read-only review identified the existing path-policy difference recorded in macosPackagingPathPolicy. The previously recorded Standards/Specification/Product reviews remain tied to the earlier manifest; no Delegation v3 or state-bound repo_codex_review attestation is claimed."
+    },
+    "sourceSelectionConflictFinding": {
+      "status": "FIXED",
+      "detail": "Conflict resolution now preserves the saved value for the explicitly selected source, clears the inactive source, and clears both bindings for none. DOM regressions cover managed, uploaded, and none resolutions."
+    },
+    "initialProductFinding": {
+      "status": "FIXED",
+      "detail": "InputsStep treated backend {value, label} enum choices as strings. The shared input type, renderer, and DOM fixture now use the backend DTO shape."
+    },
+    "initialSpecificationFinding": {
+      "status": "FIXED",
+      "detail": "The Tauri public projection flattened enum options to values only. It now preserves validated string value/label pairs, covered by a Tauri command regression."
+    },
+    "standardsFinding": {
+      "status": "FIXED_AND_RECHECKED",
+      "severity": "P2",
+      "detail": "The generic public copy_files StepSpec no longer advertises create_only globally. The internal authored contract retains the value; planner scope checks remain authoritative. Fresh Standards review found no remaining findings."
+    },
+    "sourceSelectionFormattingFinding": {
+      "status": "FIXED_AND_RECHECKED",
+      "severity": "P3",
+      "detail": "The source-selection block indentation was corrected. Focused DOM, typecheck, lint, and diff checks pass; final Standards recheck found no remaining findings."
+    },
+    "cubicRecommendationFollowUp": {
+      "classification": "NONBLOCKING_MAINTAINABILITY_RECOMMENDATION",
+      "issue": 78,
+      "url": "https://github.com/whatobiplays/EmuChef/issues/78",
+      "status": "OPEN"
+    },
+    "macosPackagingPathPolicy": {
+      "status": "EXISTING_VALIDATOR_POLICY_DIFFERENCE_TRIAGED",
+      "severity": "P2",
+      "finding": "The Rust authored-model and catalog template checks allow some relative template components containing spaces, while scripts/check-packaged-resources.mjs rejects those components using its established safe-segment allowlist.",
+      "disposition": "This correction mirrors the packaged-resource checker's stricter app-id and safe relative-path rules. It does not broaden the packaged checker or Rust validators. Space-bearing template paths remain rejected by the existing packaging policy; a broader cross-validator change requires a separate product decision."
+    }
+  },
+  "preservation": {
+    "primaryCheckout": "/Users/daniel/Projects/EmuChef",
+    "ownerPathsPreserved": [
+      "apps/emuchef-app/src-tauri/src/execution.rs",
+      "crates/emuchef-rust-backend/src/request.rs",
+      "crates/emuchef-rust-backend/src/storage_targets_tests.rs",
+      "crates/emuchef-rust-backend/tests/runtime_input_metadata.rs",
+      "docs/adr/0006-app-owned-configuration-definitions.md",
+      "apps/emuchef-app/src-tauri/src/execution_authority_fault_tests.rs",
+      "apps/emuchef-app/tests/CrossComponentContract.dom.test.tsx",
+      "crates/emuchef-rust-backend/tests/cross_component_contract.rs",
+      "tests/fixtures/contracts/setup_location_copy_v1.json",
+      "tests/fixtures/contracts/setup_location_copy_v1.yaml"
+    ],
+    "suppliedPrimaryCheckoutPrompt": {
+      "path": "/Users/daniel/Projects/EmuChef/.chatgpt/backlog/issue-56-t13a-reviewed-config-create-codex-prompt.md",
+      "sha256": "9675e7eec7f78e0d4e7adb2fdf590f1008b53ef63aed25d575f4d93872ba7631",
+      "modified": false
+    },
+    "primaryCheckoutStatusEntriesAtFinalCheck": 10,
+    "primaryCheckoutModifiedByTask": false,
+    "originMainAtFinalCheck": "aa54a27b2581b4cc165e4cb54fd0ca54a62ecbc3"
+  },
+  "demonstratedProductAcceptance": {
+    "status": "HOST_ONLY_LINKED_ACCEPTANCE_DEMONSTRATED",
+    "recipeId": "app.retroarch.configure",
+    "ordinaryApplicationSelection": {
+      "status": "DEMONSTRATED_IN_LINKED_TAURI_TEST",
+      "evidence": "The test reads the Rust-authored Tauri projection, selects app.retroarch.configure, and prepares review through the production Tauri command."
+    },
+    "backendReviewAndExecution": {
+      "status": "DEMONSTRATED",
+      "evidence": "The linked test follows Tauri planning, immutable review, one-shot sandbox authority transfer, create-only sidecar execution, and authoritative result projection."
+    },
+    "integrationBoundary": "The linked host test begins at the Rust Tauri projection; React DOM and native Tauri IPC are not exercised together in one run.",
+    "linkedHostReview": {
+      "status": "PASS",
+      "evidence": "The reviewed bytes and SHA-256 are verified under the first review-scoped sandbox root; a second review root stays untouched, and replay is rejected."
+    },
+    "androidAdapter": "NOT_QUALIFIED",
+    "physicalDeviceResult": "NOT_RUN"
+  },
+  "physicalQualification": {
+    "status": "NOT_RUN",
+    "adbOperations": "NOT_RUN",
+    "androidRuntime": "NOT_QUALIFIED"
+  },
+  "publicationReadiness": {
+    "detail": "The local macOS packaging failure is corrected and two full arm64 qualification runs plus normalized repeatability pass. The correction and updated evidence remain uncommitted on HEAD 6a486aecc72f719cc591035a902aa36f4eebe0c0; remote PR checks still refer to the prior published state. The existing path-policy difference, Android adapter qualification, and physical qualification remain outstanding. No G1 readiness or Issue #56 closure is claimed.",
+    "published": "NO; the local correction is uncommitted and PR #77 remains open and unmerged.",
+    "status": "LOCAL_MACOS_QUALIFICATION_PASS_OWNER_REVIEW_REQUIRED",
+    "workingTree": "Four unstaged paths: macOS packaging implementation, its tests, RESULT.json, and SHA256SUMS. No commit, push, merge, or auto-merge."
+  },
+  "artifactManifest": {
+    "path": "docs/qualification/issue-56-t13a/SHA256SUMS",
+    "algorithm": "SHA-256",
+    "sha256": "c6bb6c256887de46bcf72773e8c234e14089c2f70a509561603a11da2a0596d8",
+    "coveredFileCount": 46,
+    "scope": "All changed tracked and non-ignored untracked implementation, test, authored-data, contract-fixture, and product-context files relative to the approved baseline; RESULT.json and SHA256SUMS are excluded to avoid self-reference."
+  },
+  "outstandingQualificationLimitations": {
+    "desktopIpcIntegration": "NOT_RUN. The linked host test exercises Tauri projection/review/start functions and the sidecar through a controlled runtime. It does not run the React event handler and native desktop IPC in that same test; DOM tests cover source-mode interaction separately.",
+    "androidAdapter": "NOT_QUALIFIED. The linked create uses the host dry-run sandbox adapter.",
+    "supportedPreparedInstallation": "NOT_DEMONSTRATED. No actual supported RetroArch installation with a confirmed-absent target was exercised.",
+    "fullFirstRunIntegration": "NOT_COVERED. Existing bootstrap behavior is preserved; T13a blocks if bootstrap has already created the target.",
+    "physicalQualification": "NOT_RUN. No physical ADB or Android operation occurred.",
+    "publication": "PR #77 remains open and unmerged at remote HEAD 6a486aecc72f719cc591035a902aa36f4eebe0c0. The local packaging correction is uncommitted and unpublished. Owner review and authorized publication are required before PR CI can validate the correction. No G1 readiness or Issue #56 closure is claimed.",
+    "sandboxAuthorityLifecycle": {
+      "status": "OWNER_REVIEW_FOLLOW_UP",
+      "detail": "Review-scoped dry-run roots are not automatically reclaimed when authority expires or is consumed. Cleanup remains deferred because partial or unverified output must not be removed without a safe cleanup contract. Tracked separately in https://github.com/whatobiplays/EmuChef/issues/76."
+    },
+    "linkedTestWait": {
+      "status": "NON_BLOCKING_TEST_HARNESS_FOLLOW_UP",
+      "detail": "The linked test waits for the asynchronous simulated report with a bounded 10-second polling deadline. A completion notification would remove the remaining timing-sensitive polling."
+    },
+    "macosPackagingCatalog": "Local macOS arm64 package qualification now passes twice, and the normalized manifests match. The correction remains uncommitted, so the existing remote PR CI has not rerun on it.",
+    "packagedTemplatePathPolicyConsistency": "Existing policy difference: Rust template path validation allows some space-bearing relative components, while the packaged-resource checker rejects them. This candidate follows the packaged-resource safe-segment allowlist; broader support is outside this correction."
+  },
+  "ciCorrection": {
+    "reviewedHeadBeforeCorrections": "703eb1efc3f5c0057a6d518a5fe7ebd49bad14f1",
+    "observedFailures": [
+      {
+        "workflowRunId": 42964577631,
+        "job": "Tauri Rust (real-execution)",
+        "step": "Test Tauri Rust configuration",
+        "failure": "Rust E0061 at the prepare_execution_review fixture: the call omitted the new execution-mode argument.",
+        "correction": "Passed \"real\".to_string() before app.state(); the fixture continues to exercise real execution and selected-tree drift checks.",
+        "status": "FIXED_AND_RETESTED"
+      },
+      {
+        "workflowRunId": 42964577631,
+        "job": "Phase 6C.1 Android fixture contract",
+        "step": "Validate gated Phase 6D.6 evidence contract without ADB",
+        "failure": "The derived UI-binding index source digest for execution.rs and its aggregate digest were stale after the T13a source change.",
+        "correction": "Regenerated the index using the repository generator. Only the execution.rs source digest and aggregate index digest changed.",
+        "status": "FIXED_AND_VALIDATED"
+      }
+    ],
+    "additionalObservedFailure": {
+      "workflowRunId": 42964577640,
+      "job": "normalized-repeatability",
+      "step": "Build and qualify first local artifact",
+      "failure": "The package build passed, then macOS package qualification exited with 'macos-package: catalog contains unsupported content'.",
+      "rootCause": "Tauri packages authored/apps as catalog/apps. T13a adds authored/apps/retroarch/default.cfg, while catalogDigest currently accepts only YAML files.",
+      "status": "FIXED_AND_LOCALLY_QUALIFIED_UNPUBLISHED",
+      "scopeDisposition": "Only macOS catalog digest recognition and its tests changed. The packaged-resource and Rust validators were not weakened or changed. PR CI has not rerun because this correction remains uncommitted.",
+      "correction": "catalogDigest now accepts app-owned .cfg assets only under apps/<safe-app-id>/ with the existing packaged-resource safe-segment rules. YAML acceptance, sorted path ordering, and digest framing are preserved. Required catalog roots are checked with lstatSync so symlink roots fail closed. Focused regressions and two local macOS qualification runs pass.",
+      "localQualification": {
+        "status": "PASSED",
+        "catalogSha256": "a01ff53165ba61945fe8c2c0d5deb3de45177b7f0d9bea2e3b77ed9255d0d8c2",
+        "normalizedContentSha256": "ff8e24a9c5dccaecf355be4ec864b960891a26786bd0041d4cee5f68df7702c8",
+        "repeatability": "PASSED",
+        "cleanEnvironmentProbe": "PASSED"
+      }
+    },
+    "cubicArchitectureRecommendation": {
+      "classification": "NONBLOCKING_MAINTAINABILITY_FOLLOW_UP",
+      "issue": 78,
+      "url": "https://github.com/whatobiplays/EmuChef/issues/78",
+      "status": "OPEN"
+    },
+    "diffInventory": {
+      "candidateChangedPathCount": 48,
+      "manifestCoveredFileCount": 46,
+      "previousCorrectionCommitPathCount": 4,
+      "previousCorrectionPaths": [
+        "apps/emuchef-app/src-tauri/src/commands.rs",
+        "docs/qualification/issue-56-t13a/RESULT.json",
+        "docs/qualification/issue-56-t13a/SHA256SUMS",
+        "docs/testing/phase-6d6/ui-binding-index.json"
+      ],
+      "currentUncommittedPathCount": 4,
+      "currentUncommittedPaths": [
+        "apps/emuchef-app/scripts/macos-packaging.mjs",
+        "apps/emuchef-app/scripts/macos-packaging.test.mjs",
+        "docs/qualification/issue-56-t13a/RESULT.json",
+        "docs/qualification/issue-56-t13a/SHA256SUMS"
+      ],
+      "selfReferentialManifestExclusions": [
+        "docs/qualification/issue-56-t13a/RESULT.json",
+        "docs/qualification/issue-56-t13a/SHA256SUMS"
+      ]
+    }
+  }
+}

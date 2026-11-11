@@ -486,6 +486,14 @@ pub(crate) struct DeviceOperationError {
     pub(crate) cleanup: Option<ProcessCleanup>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CopyCommitCreateFileOutcome {
+    CreatedVerified { sha256: String, byte_length: u64 },
+    TargetAlreadyExists,
+    SourceHashMismatch,
+    PartialWriteUnverified,
+}
+
 impl DeviceOperationError {
     pub(crate) fn other(message: impl Into<String>) -> Self {
         Self {
@@ -755,6 +763,22 @@ pub trait ExecutorDevice: std::fmt::Debug {
             "device adapter does not expose selected-root-relative no-follow mutation",
         ))
     }
+    /// Create one reviewed file with final-component O_EXCL semantics and
+    /// return only after the device helper verifies exact readback.
+    fn copy_commit_create_file_exclusive(
+        &mut self,
+        _selected_root: &str,
+        _destination_binding: &str,
+        _stage_root: &str,
+        _helper_path: &str,
+        _relative_path: &str,
+        _expected_absence: &str,
+        _expected_source_sha256: &str,
+    ) -> Result<CopyCommitCreateFileOutcome, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support reviewed exclusive file creation",
+        ))
+    }
 
     /// Removes the temporary one-shot helper from its staging directory.
     fn copy_commit_cleanup_mutation_helper(
@@ -964,6 +988,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .iter()
             .filter(|step| step.type_name == "copy_files")
         {
+            if is_t13a_configuration_create_step(step) {
+                continue;
+            }
             if has_runtime_output_reference(step) {
                 continue;
             }
@@ -1122,7 +1149,242 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             &snapshots,
         )?;
         plan.copy_commit_snapshots = snapshots;
+        self.prepare_t13a_configuration_absence_precondition(plan, &sandbox)?;
         Ok(())
+    }
+
+    /// Bind the exact configuration artifact to one confirmed-absent target.
+    /// The caller finalizes the reviewed plan digest only after this binding is
+    /// recorded, so execution can use the retained bytes without re-reading a
+    /// mutable host source.
+    fn prepare_t13a_configuration_absence_precondition(
+        &mut self,
+        plan: &mut ExecutionPlan,
+        sandbox: &SandboxRoots,
+    ) -> Result<(), String> {
+        let state = ExecutionState::from_plan(plan);
+        let step_ids = plan
+            .steps
+            .iter()
+            .filter(|step| is_t13a_configuration_create_step(step))
+            .map(|step| step.id.clone())
+            .collect::<Vec<_>>();
+
+        for step_id in step_ids {
+            let step = plan
+                .steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .ok_or_else(|| {
+                    "RetroArch configuration step disappeared during review.".to_string()
+                })?;
+            let artifact = t13a_configuration_artifact_for_review(step)
+                .cloned()
+                .ok_or_else(|| "Frozen RetroArch configuration artifact is missing.".to_string())?;
+            if !artifact["absencePrecondition"].is_null() {
+                return Err(
+                    "RetroArch configuration absence precondition was already prepared."
+                        .to_string(),
+                );
+            }
+            let params =
+                resolve_step_params(&state, &step.params).map_err(|error| error.message)?;
+            let destination_kind = if is_t13a_configuration_create_step(step) {
+                if step.app_id.as_deref() != Some("retroarch")
+                    || params.get("dest_kind").and_then(Value::as_str) != Some("file")
+                {
+                    return Err(
+                        "RetroArch configuration creation must use the app-owned file target."
+                            .to_string(),
+                    );
+                }
+                Some(CopyCommitDestinationKind::AppTarget)
+            } else {
+                copy_commit_destination_kind(step, &params)?
+            };
+            if destination_kind != Some(CopyCommitDestinationKind::AppTarget) {
+                return Err(
+                    "RetroArch configuration creation requires its reviewed App Target."
+                        .to_string(),
+                );
+            }
+            let destination = params
+                .get("dest")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "RetroArch configuration destination is unresolved.".to_string())?;
+            let frozen_bytes = t13a_configuration_artifact_bytes(&artifact)?;
+            if artifact["targetIdentity"]["appId"].as_str() != Some("retroarch")
+                || artifact["targetIdentity"]["targetId"].as_str() != Some("config")
+            {
+                return Err(
+                    "Frozen RetroArch configuration target identity is invalid.".to_string()
+                );
+            }
+            if !t13a_target_matches_plan(plan, step, &artifact, destination)
+                || artifact["sourceIdentity"]["byteLength"].as_u64()
+                    != Some(frozen_bytes.len() as u64)
+            {
+                return Err(
+                    "Frozen RetroArch configuration source or target identity is invalid."
+                        .to_string(),
+                );
+            }
+            let parent = device_parent(destination).ok_or_else(|| {
+                "RetroArch configuration target has no parent directory.".to_string()
+            })?;
+            let file_name = Path::new(destination)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| *name == "retroarch.cfg")
+                .ok_or_else(|| "RetroArch configuration target filename is invalid.".to_string())?;
+
+            let (parent_binding, target_exists, target_is_symlink, authority) = if self
+                .adapters
+                .device
+                .uses_fake_copy_commit_adapter()
+            {
+                let root_anchor =
+                    self.adapters
+                        .t13a_fake_root_anchor
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "Dry-run configuration sandbox root could not be anchored safely."
+                                .to_string()
+                        })?;
+                let fake_target = sandbox
+                    .fake_device_path(destination)
+                    .map_err(|error| error.message)?;
+                let fake_target = root_anchor
+                    .resolve_selected_path(&sandbox.fake_device_root, &fake_target)
+                    .map_err(|_| {
+                        "Dry-run configuration sandbox root changed during review.".to_string()
+                    })?;
+                let fake_parent = fake_target
+                    .parent()
+                    .ok_or_else(|| "Dry-run configuration target has no parent.".to_string())?;
+                open_fake_t13a_parent_directory(root_anchor, fake_parent, true).map_err(|_| {
+                    "Dry-run configuration parent could not be prepared safely.".to_string()
+                })?;
+                let binding = Self::fake_directory_identity_binding(fake_parent)?;
+                let (exists, is_symlink) = match std::fs::symlink_metadata(&fake_target) {
+                    Ok(metadata) => (true, metadata.file_type().is_symlink()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (false, false),
+                    Err(error) => {
+                        return Err(format!(
+                            "Dry-run configuration target could not be inspected: {error}"
+                        ));
+                    }
+                };
+                (binding, exists, is_symlink, "dry_run_sandbox")
+            } else {
+                self.ensure_root_preflight()
+                    .map_err(|error| error.message)?;
+                let before = self
+                    .adapters
+                    .device
+                    .copy_commit_path_binding(&parent)
+                    .map_err(|error| error.message)?;
+                let is_symlink = self
+                    .adapters
+                    .device
+                    .copy_commit_path_is_symlink(destination)
+                    .map_err(|error| error.message)?;
+                let exists = self
+                    .adapters
+                    .device
+                    .path_exists(destination)
+                    .map_err(|error| error.message)?;
+                let after = self
+                    .adapters
+                    .device
+                    .copy_commit_path_binding(&parent)
+                    .map_err(|error| error.message)?;
+                if before != after {
+                    return Err(
+                        "RetroArch configuration parent identity changed during review."
+                            .to_string(),
+                    );
+                }
+                (before, exists, is_symlink, "device")
+            };
+
+            if target_exists || target_is_symlink {
+                return Err(
+                    "RetroArch configuration target already exists; create-only review is blocked."
+                        .to_string(),
+                );
+            }
+
+            let precondition = json!({
+                "status": "confirmed_absent",
+                "authority": authority,
+                "targetPath": destination,
+                "parentPath": parent,
+                "parentBinding": parent_binding,
+                "entryName": file_name,
+            });
+            let step = plan
+                .steps
+                .iter_mut()
+                .find(|step| step.id == step_id)
+                .ok_or_else(|| {
+                    "RetroArch configuration step disappeared during review.".to_string()
+                })?;
+            let source = step
+                .params
+                .get_mut("source")
+                .ok_or_else(|| "Frozen RetroArch configuration source is missing.".to_string())?;
+            let crate::planner::ExecutionParamValue::Literal { value } = source else {
+                return Err("Frozen RetroArch configuration source is not immutable.".to_string());
+            };
+            value["absencePrecondition"] = precondition;
+        }
+        Ok(())
+    }
+
+    fn fake_directory_identity_binding(path: &Path) -> Result<String, String> {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("Dry-run target parent could not be inspected: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Dry-run target parent is not a real directory.".to_string());
+        }
+        let canonical = std::fs::canonicalize(path).map_err(|error| {
+            format!("Dry-run target parent could not be canonicalized: {error}")
+        })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Dry-run target parent has no parent directory.".to_string())?;
+        let parent_metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| format!("Dry-run target ancestor could not be inspected: {error}"))?;
+        if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+            return Err("Dry-run target ancestor is not a real directory.".to_string());
+        }
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
+            format!("Dry-run target ancestor could not be canonicalized: {error}")
+        })?;
+        #[cfg(unix)]
+        let (identity, parent_identity) = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                json!({ "device": metadata.dev(), "inode": metadata.ino() }),
+                json!({
+                    "device": parent_metadata.dev(),
+                    "inode": parent_metadata.ino(),
+                }),
+            )
+        };
+        #[cfg(not(unix))]
+        let (identity, parent_identity) = (
+            json!({ "canonicalPath": canonical }),
+            json!({ "canonicalPath": canonical_parent }),
+        );
+        Ok(json!({
+            "canonicalPath": canonical,
+            "selectedIdentity": identity,
+            "canonicalParentPath": canonical_parent,
+            "parentIdentity": parent_identity,
+        })
+        .to_string())
     }
 
     /// Supply release metadata fixtures to exercise the production selection path offline.
@@ -2442,6 +2704,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        if is_t13a_configuration_create_step(step) {
+            return self.execute_t13a_configuration_create(plan, step, resolved_params);
+        }
         let source = runtime_value_param(resolved_params, "source")?;
         let setup_destination = runtime_value_param(resolved_params, "dest")
             .ok()
@@ -2661,6 +2926,339 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Ok(outputs)
     }
 
+    /// Create the reviewed RetroArch file without replacing any existing path.
+    /// The adapter receives the frozen bytes and returns the final readback
+    /// result; this method never renders or opens the original host source.
+    fn execute_t13a_configuration_create(
+        &mut self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let artifact = resolved_params.get("source").ok_or_else(|| {
+            StepFailure::new("Reviewed RetroArch configuration artifact is missing.".to_string())
+        })?;
+        let bytes = t13a_configuration_artifact_bytes(artifact).map_err(StepFailure::new)?;
+        let expected_sha256 = artifact["sha256"]
+            .as_str()
+            .expect("validated configuration artifact has a digest")
+            .to_string();
+        let destination = resolved_params
+            .get("dest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StepFailure::new("Reviewed configuration target is missing.".to_string())
+            })?;
+        if !t13a_target_matches_plan(plan, step, artifact, destination)
+            || resolved_params.get("dest_kind").and_then(Value::as_str) != Some("file")
+            || resolved_params.get("copy_policy").and_then(Value::as_str) != Some("create_only")
+        {
+            return Err(t13a_failure(
+                "Reviewed configuration no longer matches the app-owned create-only target.",
+                t13a_configuration_report(
+                    artifact,
+                    "review_target_stale",
+                    "unknown",
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+        let parent = device_parent(destination).ok_or_else(|| {
+            StepFailure::new("Reviewed configuration target is invalid.".to_string())
+        })?;
+        let expected_precondition = &artifact["absencePrecondition"];
+        let expected_parent_binding =
+            expected_precondition["parentBinding"]
+                .as_str()
+                .ok_or_else(|| {
+                    StepFailure::new(
+                        "Reviewed configuration absence binding is missing.".to_string(),
+                    )
+                })?;
+        let expected_authority = expected_precondition["authority"].as_str().ok_or_else(|| {
+            StepFailure::new("Reviewed configuration authority is missing.".to_string())
+        })?;
+        let expected_name = Path::new(destination)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                StepFailure::new("Reviewed configuration target name is invalid.".to_string())
+            })?;
+        if expected_precondition["status"].as_str() != Some("confirmed_absent")
+            || expected_precondition["targetPath"].as_str() != Some(destination)
+            || expected_precondition["parentPath"].as_str() != Some(parent)
+            || expected_precondition["entryName"].as_str() != Some(expected_name)
+            || expected_name != "retroarch.cfg"
+            || artifact["targetIdentity"]["appId"].as_str() != Some("retroarch")
+            || artifact["targetIdentity"]["targetId"].as_str() != Some("config")
+        {
+            return Err(t13a_failure(
+                "Reviewed configuration target or absence precondition is stale.",
+                t13a_configuration_report(
+                    artifact,
+                    "review_precondition_invalid",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+
+        let sandbox = self.adapters.sandbox()?.clone();
+        let fake = self.adapters.device.uses_fake_copy_commit_adapter();
+        if (fake && !matches!(expected_authority, "dry_run_sandbox" | "device"))
+            || (!fake && expected_authority != "device")
+        {
+            return Err(t13a_failure(
+                "Reviewed configuration authority no longer matches the selected adapter.",
+                t13a_configuration_report(
+                    artifact,
+                    "review_authority_stale",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+
+        if fake {
+            // The app's normal simulation follows a device-bound immutable
+            // review. It can demonstrate the reviewed bytes in its isolated
+            // sandbox, while sandbox-prepared unit plans retain their own
+            // reviewed parent identity.
+            let sandbox_parent_binding =
+                (expected_authority == "dry_run_sandbox").then_some(expected_parent_binding);
+            return execute_fake_t13a_configuration_create(
+                &sandbox,
+                self.adapters.t13a_fake_root_anchor.as_ref(),
+                destination,
+                sandbox_parent_binding,
+                &bytes,
+                artifact,
+            );
+        }
+
+        self.ensure_root_preflight()?;
+        let binding_before = self
+            .adapters
+            .device
+            .copy_commit_path_binding(parent)
+            .map_err(StepFailure::from)?;
+        let symlink = self
+            .adapters
+            .device
+            .copy_commit_path_is_symlink(destination)
+            .map_err(StepFailure::from)?;
+        let exists = self
+            .adapters
+            .device
+            .path_exists(destination)
+            .map_err(StepFailure::from)?;
+        let binding_after = self
+            .adapters
+            .device
+            .copy_commit_path_binding(parent)
+            .map_err(StepFailure::from)?;
+        if binding_before != expected_parent_binding || binding_after != binding_before {
+            return Err(t13a_failure(
+                "Reviewed configuration parent identity changed before creation.",
+                t13a_configuration_report(
+                    artifact,
+                    "review_parent_changed",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+        if exists || symlink {
+            return Err(t13a_failure(
+                "RetroArch configuration target already exists; no bytes were replaced.",
+                t13a_configuration_report(
+                    artifact,
+                    "blocked_existing_target",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+
+        let stage_root = next_t13a_stage_root();
+        let helper_path = format!("{stage_root}-helper");
+        let staged_source = format!("{stage_root}/retroarch.cfg");
+        let mut stage_creation_attempted = false;
+        let mut stage_created = false;
+        let mut helper_may_exist = false;
+        let stage_result = (|| {
+            self.adapters
+                .device
+                .mkdir_p("/data/local/tmp/emuchef")
+                .map_err(StepFailure::from)?;
+            stage_creation_attempted = true;
+            self.adapters
+                .device
+                .copy_commit_create_directory(&stage_root)
+                .map_err(StepFailure::from)?;
+            stage_created = true;
+
+            let mut source_file = tempfile::Builder::new()
+                .prefix("emuchef-t13a-")
+                .suffix(".cfg")
+                .tempfile_in(&sandbox.runtime_root)
+                .map_err(|_| {
+                    StepFailure::new("Configuration staging file could not be created.".to_string())
+                })?;
+            std::io::Write::write_all(&mut source_file, &bytes)
+                .and_then(|()| source_file.as_file().sync_all())
+                .map_err(|_| {
+                    StepFailure::new(
+                        "Configuration staging bytes could not be synchronized.".to_string(),
+                    )
+                })?;
+            self.adapters
+                .device
+                .push(source_file.path(), &staged_source, false)
+                .map_err(StepFailure::from)?;
+            helper_may_exist = true;
+            self.adapters
+                .device
+                .copy_commit_prepare_mutation_helper(&stage_root, &helper_path)
+                .map_err(StepFailure::from)?;
+            Ok::<(), StepFailure>(())
+        })();
+        if let Err(stage_failure) = stage_result {
+            let cleanup_warnings = cleanup_t13a_stage(
+                &mut self.adapters.device,
+                &stage_root,
+                &helper_path,
+                &staged_source,
+                stage_creation_attempted,
+                stage_created,
+                helper_may_exist,
+            );
+            let report = t13a_configuration_report(
+                artifact,
+                "staging_failed_no_target_write",
+                expected_authority,
+                false,
+                false,
+                if cleanup_warnings.is_empty() {
+                    "complete"
+                } else {
+                    "warning"
+                },
+                &cleanup_warnings,
+            );
+            return Err(t13a_failure(stage_failure.message, report));
+        }
+
+        let create_result = self.adapters.device.copy_commit_create_file_exclusive(
+            parent,
+            expected_parent_binding,
+            &stage_root,
+            &helper_path,
+            expected_name,
+            "absent",
+            &expected_sha256,
+        );
+        let outcome = match create_result {
+            Ok(CopyCommitCreateFileOutcome::CreatedVerified { sha256, byte_length })
+                if sha256 == expected_sha256 && byte_length == bytes.len() as u64 =>
+            {
+                ("created_verified", false, true, true, None)
+            }
+            Ok(CopyCommitCreateFileOutcome::CreatedVerified { .. }) => (
+                "final_readback_mismatch",
+                true,
+                false,
+                true,
+                Some("Final configuration readback did not match the reviewed bytes.".to_string()),
+            ),
+            Ok(CopyCommitCreateFileOutcome::TargetAlreadyExists) => (
+                "blocked_existing_target",
+                false,
+                false,
+                true,
+                Some("RetroArch configuration target already exists; no bytes were replaced.".to_string()),
+            ),
+            Ok(CopyCommitCreateFileOutcome::SourceHashMismatch) => (
+                "staged_source_hash_mismatch",
+                false,
+                false,
+                true,
+                Some("Staged configuration did not match the reviewed digest; target was not opened.".to_string()),
+            ),
+            Ok(CopyCommitCreateFileOutcome::PartialWriteUnverified) => (
+                "partial_write_unverified",
+                true,
+                false,
+                true,
+                Some("Configuration creation may have left partial bytes; no cleanup was attempted on the target.".to_string()),
+            ),
+            Err(error) => {
+                let failure: StepFailure = error.into();
+                let report = t13a_configuration_report(
+                    artifact,
+                    "completion_uncertain",
+                    expected_authority,
+                    true,
+                    false,
+                    "deferred_due_uncertain_outcome",
+                    &[],
+                );
+                return Err(t13a_failure_with_kind(failure, report));
+            }
+        };
+
+        let cleanup_warnings = cleanup_t13a_stage(
+            &mut self.adapters.device,
+            &stage_root,
+            &helper_path,
+            &staged_source,
+            stage_creation_attempted,
+            stage_created,
+            helper_may_exist,
+        );
+        let report = t13a_configuration_report(
+            artifact,
+            outcome.0,
+            expected_authority,
+            outcome.1,
+            outcome.2,
+            if cleanup_warnings.is_empty() {
+                "complete"
+            } else {
+                "warning"
+            },
+            &cleanup_warnings,
+        );
+        if let Some(message) = outcome.4 {
+            return Err(t13a_failure(message, report));
+        }
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "configuration_create_report".to_string(),
+            RuntimeValue {
+                type_name: "configuration_create_report".to_string(),
+                value: report,
+                location: Some("device".to_string()),
+            },
+        );
+        Ok(outputs)
+    }
+
     fn execute_install_apk(
         &mut self,
         plan: &ExecutionPlan,
@@ -2866,6 +3464,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 }
 
 pub(crate) fn plan_requires_copy_commit_preparation(plan: &ExecutionPlan) -> bool {
+    if plan.steps.iter().any(is_t13a_configuration_create_step) {
+        return true;
+    }
     if validate_supported_copy_plan(plan).is_err() {
         return true;
     }
@@ -2879,6 +3480,698 @@ pub(crate) fn plan_requires_copy_commit_preparation(plan: &ExecutionPlan) -> boo
                 .ok()
                 .is_some_and(|params| is_selected_directory_step(step, &params).unwrap_or(false))
         })
+}
+
+fn is_t13a_configuration_create_step(step: &ExecutionStep) -> bool {
+    step.type_name == "copy_files"
+        && matches!(
+            step.recipe_ref.as_str(),
+            "app.retroarch.provision" | "app.retroarch.configure"
+        )
+        && step.id.ends_with("seed_retroarch_cfg")
+}
+
+/// Returns whether a plan contains the T13a RetroArch configuration create action.
+pub(crate) fn plan_requires_t13a_configuration_create(plan: &ExecutionPlan) -> bool {
+    plan.steps.iter().any(is_t13a_configuration_create_step)
+}
+
+fn t13a_target_matches_plan(
+    plan: &ExecutionPlan,
+    step: &ExecutionStep,
+    artifact: &Value,
+    destination: &str,
+) -> bool {
+    if step.app_id.as_deref() != Some("retroarch")
+        || artifact["targetIdentity"]["appId"].as_str() != Some("retroarch")
+        || artifact["targetIdentity"]["targetId"].as_str() != Some("config")
+        || artifact["targetIdentity"]["target"]["path"].as_str() != Some("files/retroarch.cfg")
+    {
+        return false;
+    }
+    let package_id = artifact["targetIdentity"]["packageId"].as_str();
+    let Some(package_id) = package_id else {
+        return false;
+    };
+    let mut matching_apps = plan.apps.iter().filter(|app| app.id == "retroarch");
+    let Some(app) = matching_apps.next() else {
+        return false;
+    };
+    if matching_apps.next().is_some() {
+        return false;
+    }
+    app.package_id == package_id
+        && destination
+            == format!("/storage/emulated/0/Android/data/{package_id}/files/retroarch.cfg")
+}
+
+fn t13a_configuration_report(
+    artifact: &Value,
+    outcome: &str,
+    verification_scope: &str,
+    may_have_changed: bool,
+    verified: bool,
+    cleanup_status: &str,
+    cleanup_warnings: &[String],
+) -> Value {
+    json!({
+        "schemaVersion": 1,
+        "operation": "create_only",
+        "outcome": outcome,
+        "sourceKind": artifact["sourceIdentity"]["kind"],
+        "sha256": artifact["sha256"],
+        "byteLength": artifact["byteLength"],
+        "target": { "appId": "retroarch", "targetId": "config" },
+        "verificationScope": verification_scope,
+        "mayHaveChanged": may_have_changed,
+        "simulated": verification_scope == "dry_run_sandbox",
+        "appliedToDevice": verified && verification_scope == "device",
+        "verified": verified,
+        "cleanup": {
+            "status": cleanup_status,
+            "warnings": cleanup_warnings,
+        },
+    })
+}
+
+fn t13a_failure(message: impl Into<String>, report: Value) -> StepFailure {
+    let mut failure = StepFailure::new(message.into());
+    failure.outputs.insert(
+        "configuration_create_report".to_string(),
+        RuntimeValue {
+            type_name: "configuration_create_report".to_string(),
+            value: report,
+            location: None,
+        },
+    );
+    failure
+}
+
+fn t13a_failure_with_kind(mut failure: StepFailure, report: Value) -> StepFailure {
+    failure.outputs.insert(
+        "configuration_create_report".to_string(),
+        RuntimeValue {
+            type_name: "configuration_create_report".to_string(),
+            value: report,
+            location: None,
+        },
+    );
+    failure
+}
+
+fn t13a_success(report: Value, location: Option<&str>) -> OrderedMap<RuntimeValue> {
+    let mut outputs = OrderedMap::new();
+    outputs.insert(
+        "configuration_create_report".to_string(),
+        RuntimeValue {
+            type_name: "configuration_create_report".to_string(),
+            value: report,
+            location: location.map(str::to_string),
+        },
+    );
+    outputs
+}
+
+/// Records the fake-device root selected when the adapters are created.
+/// T13a reopens each canonical path component without following symlinks and
+/// checks the captured device and inode before entering the root.
+#[derive(Clone, Debug)]
+struct FakeT13aRootAnchor {
+    selected_path: PathBuf,
+    canonical_path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl FakeT13aRootAnchor {
+    #[cfg(unix)]
+    fn capture(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let selected_path = normalize_path(path);
+        let selected_metadata = fs::symlink_metadata(&selected_path).ok()?;
+        if !selected_metadata.file_type().is_dir() {
+            return None;
+        }
+        let canonical_path = normalize_path(&fs::canonicalize(&selected_path).ok()?);
+        let directory = open_absolute_directory_nofollow(&canonical_path).ok()?;
+        let metadata = directory.metadata().ok()?;
+        Some(Self {
+            selected_path,
+            canonical_path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn capture(_path: &Path) -> Option<Self> {
+        None
+    }
+
+    fn resolve_selected_path(&self, selected_root: &Path, path: &Path) -> io::Result<PathBuf> {
+        let selected_root = normalize_path(selected_root);
+        if selected_root != self.selected_path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fake configuration sandbox root changed after adapter creation",
+            ));
+        }
+        let path = normalize_path(path);
+        let relative = path.strip_prefix(&self.selected_path).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fake configuration path escaped its selected sandbox root",
+            )
+        })?;
+        Ok(normalize_path(&self.canonical_path.join(relative)))
+    }
+}
+
+#[cfg(unix)]
+fn open_absolute_directory_nofollow(path: &Path) -> io::Result<fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fake configuration sandbox root must be absolute",
+        ));
+    }
+    let mut current_options = fs::OpenOptions::new();
+    current_options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut current = current_options.open("/")?;
+    for component in path.components() {
+        let std::path::Component::Normal(name) = component else {
+            if matches!(component, std::path::Component::RootDir) {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fake configuration sandbox root contains an invalid component",
+            ));
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fake configuration sandbox root contains an invalid component",
+            )
+        })?;
+        let directory_fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if directory_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        current = unsafe { fs::File::from_raw_fd(directory_fd) };
+    }
+    Ok(current)
+}
+
+#[cfg(not(unix))]
+fn open_absolute_directory_nofollow(_path: &Path) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "descriptor-relative no-follow sandbox operations are unavailable",
+    ))
+}
+
+#[cfg(unix)]
+fn open_fake_t13a_parent_directory(
+    root: &FakeT13aRootAnchor,
+    parent: &Path,
+    create_missing: bool,
+) -> io::Result<fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let parent = normalize_path(parent);
+    let relative_parent = parent.strip_prefix(&root.canonical_path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fake configuration parent escaped its sandbox root",
+        )
+    })?;
+    let mut current = open_absolute_directory_nofollow(&root.canonical_path)?;
+    let root_metadata = current.metadata()?;
+    if root_metadata.dev() != root.device || root_metadata.ino() != root.inode {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "fake configuration sandbox root identity changed",
+        ));
+    }
+    for component in relative_parent.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fake configuration parent contains an invalid path component",
+            ));
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fake configuration parent contains an invalid path component",
+            )
+        })?;
+        if create_missing {
+            let result = unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o755) };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+        }
+        let directory_fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if directory_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        current = unsafe { fs::File::from_raw_fd(directory_fd) };
+    }
+    Ok(current)
+}
+
+#[cfg(not(unix))]
+fn open_fake_t13a_parent_directory(
+    _root: &FakeT13aRootAnchor,
+    _parent: &Path,
+    _create_missing: bool,
+) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "descriptor-relative no-follow sandbox operations are unavailable",
+    ))
+}
+
+fn execute_fake_t13a_configuration_create(
+    sandbox: &SandboxRoots,
+    root_anchor: Option<&FakeT13aRootAnchor>,
+    destination: &str,
+    expected_parent_binding: Option<&str>,
+    bytes: &[u8],
+    artifact: &Value,
+) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+    #[cfg(unix)]
+    {
+        return execute_fake_t13a_configuration_create_unix(
+            sandbox,
+            root_anchor,
+            destination,
+            expected_parent_binding,
+            bytes,
+            artifact,
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        execute_fake_t13a_configuration_create_path(
+            sandbox,
+            destination,
+            expected_parent_binding,
+            bytes,
+            artifact,
+        )
+    }
+}
+
+#[cfg(not(unix))]
+fn execute_fake_t13a_configuration_create_path(
+    _sandbox: &SandboxRoots,
+    _destination: &str,
+    _expected_parent_binding: Option<&str>,
+    _bytes: &[u8],
+    artifact: &Value,
+) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+    Err(t13a_failure(
+        "This host cannot safely simulate create-only configuration without descriptor-relative operations.",
+        t13a_configuration_report(
+            artifact,
+            "simulation_unsupported_host",
+            "dry_run_sandbox",
+            false,
+            false,
+            "not_required",
+            &[],
+        ),
+    ))
+}
+
+#[cfg(unix)]
+fn execute_fake_t13a_configuration_create_unix(
+    sandbox: &SandboxRoots,
+    root_anchor: Option<&FakeT13aRootAnchor>,
+    destination: &str,
+    expected_parent_binding: Option<&str>,
+    bytes: &[u8],
+    artifact: &Value,
+) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+    use std::ffi::CString;
+    use std::io::{Read, Write};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let report = |outcome, may_have_changed, verified, cleanup_status| {
+        t13a_configuration_report(
+            artifact,
+            outcome,
+            "dry_run_sandbox",
+            may_have_changed,
+            verified,
+            cleanup_status,
+            &[],
+        )
+    };
+    let failure = |message, outcome, may_have_changed| {
+        t13a_failure(
+            message,
+            report(outcome, may_have_changed, false, "not_required"),
+        )
+    };
+    let root_anchor = root_anchor.ok_or_else(|| {
+        failure(
+            "Dry-run configuration sandbox root could not be anchored safely.",
+            "review_parent_changed",
+            false,
+        )
+    })?;
+    let selected_target = sandbox.fake_device_path(destination).map_err(|_| {
+        failure(
+            "Dry-run configuration target is invalid.",
+            "target_inspection_failed",
+            false,
+        )
+    })?;
+    let target = root_anchor
+        .resolve_selected_path(&sandbox.fake_device_root, &selected_target)
+        .map_err(|_| {
+            failure(
+                "Dry-run configuration sandbox root changed after review.",
+                "review_parent_changed",
+                false,
+            )
+        })?;
+    let parent = target.parent().ok_or_else(|| {
+        failure(
+            "Dry-run configuration target has no parent.",
+            "target_inspection_failed",
+            false,
+        )
+    })?;
+    let parent_directory =
+        open_fake_t13a_parent_directory(root_anchor, parent, expected_parent_binding.is_none())
+            .map_err(|_| {
+                failure(
+                    "Dry-run configuration parent changed or contains a symlink.",
+                    "review_parent_changed",
+                    false,
+                )
+            })?;
+
+    if let Some(expected) = expected_parent_binding {
+        let current = ExecutorRunner::<FakeDryRunDevice>::fake_directory_identity_binding(parent)
+            .map_err(|_| {
+            failure(
+                "Dry-run configuration parent is no longer a real directory.",
+                "review_parent_changed",
+                false,
+            )
+        })?;
+        if current != expected {
+            return Err(failure(
+                "Dry-run configuration parent identity changed after review.",
+                "review_parent_changed",
+                false,
+            ));
+        }
+    }
+
+    let name = CString::new(
+        target
+            .file_name()
+            .ok_or_else(|| {
+                failure(
+                    "Dry-run configuration target name is invalid.",
+                    "target_inspection_failed",
+                    false,
+                )
+            })?
+            .as_bytes(),
+    )
+    .map_err(|_| {
+        failure(
+            "Dry-run configuration target name is invalid.",
+            "target_inspection_failed",
+            false,
+        )
+    })?;
+    let mut existing = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let inspection = unsafe {
+        libc::fstatat(
+            parent_directory.as_raw_fd(),
+            name.as_ptr(),
+            existing.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if inspection == 0 {
+        return Err(failure(
+            "RetroArch configuration target already exists; no bytes were replaced.",
+            "blocked_existing_target",
+            false,
+        ));
+    }
+    if io::Error::last_os_error().kind() != io::ErrorKind::NotFound {
+        return Err(failure(
+            "Dry-run configuration target could not be inspected.",
+            "target_inspection_failed",
+            false,
+        ));
+    }
+
+    let destination_fd = unsafe {
+        libc::openat(
+            parent_directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if destination_fd < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            return Err(failure(
+                "RetroArch configuration target appeared during simulation; no bytes were replaced.",
+                "blocked_existing_target",
+                false,
+            ));
+        }
+        return Err(failure(
+            "Dry-run configuration target could not be created.",
+            "create_failed_no_target_write",
+            false,
+        ));
+    }
+    let mut destination_file = unsafe { fs::File::from_raw_fd(destination_fd) };
+    let created_identity = destination_file.metadata().ok();
+    let write_result = destination_file.write_all(bytes).and_then(|()| {
+        let mode_result = unsafe { libc::fchmod(destination_file.as_raw_fd(), 0o644) };
+        if mode_result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        destination_file.sync_all()
+    });
+    if write_result.is_err() {
+        return Err(failure(
+            "Dry-run configuration write may be partial; the file was left for inspection.",
+            "partial_write_unverified",
+            true,
+        ));
+    }
+    if parent_directory.sync_all().is_err() {
+        return Err(failure(
+            "Dry-run configuration directory synchronization could not be verified.",
+            "created_unverified",
+            true,
+        ));
+    }
+
+    let readback_fd = unsafe {
+        libc::openat(
+            parent_directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if readback_fd < 0 {
+        return Err(failure(
+            "Dry-run configuration final readback failed.",
+            "created_unverified",
+            true,
+        ));
+    }
+    let mut readback_file = unsafe { fs::File::from_raw_fd(readback_fd) };
+    let readback_identity = readback_file.metadata().ok();
+    if !readback_identity
+        .as_ref()
+        .is_some_and(|metadata| metadata.is_file())
+        || !created_identity
+            .as_ref()
+            .zip(readback_identity.as_ref())
+            .is_some_and(|(created, readback)| {
+                created.dev() == readback.dev() && created.ino() == readback.ino()
+            })
+    {
+        return Err(failure(
+            "Dry-run configuration final target changed before readback.",
+            "final_readback_mismatch",
+            true,
+        ));
+    }
+    let mut readback = Vec::new();
+    if readback_file.read_to_end(&mut readback).is_err() {
+        return Err(failure(
+            "Dry-run configuration final readback failed.",
+            "created_unverified",
+            true,
+        ));
+    }
+    if readback != bytes
+        || crate::runtime_configuration::sha256_hex(&readback)
+            != artifact["sha256"].as_str().unwrap_or_default()
+    {
+        return Err(failure(
+            "Dry-run configuration final readback did not match the reviewed bytes.",
+            "final_readback_mismatch",
+            true,
+        ));
+    }
+
+    Ok(t13a_success(
+        report("simulated_create_verified", true, true, "not_required"),
+        None,
+    ))
+}
+
+fn next_t13a_stage_root() -> String {
+    static NEXT_STAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_STAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "/data/local/tmp/emuchef/t13a-{}-{sequence}",
+        std::process::id()
+    )
+}
+
+fn cleanup_t13a_stage<D: ExecutorDevice>(
+    device: &mut D,
+    stage_root: &str,
+    helper_path: &str,
+    staged_source: &str,
+    stage_creation_attempted: bool,
+    stage_created: bool,
+    helper_may_exist: bool,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if helper_may_exist
+        && device
+            .copy_commit_cleanup_mutation_helper(helper_path)
+            .is_err()
+    {
+        warnings.push("helper_cleanup_failed".to_string());
+    }
+    if stage_created {
+        if device.remove_file(staged_source).is_err() {
+            warnings.push("staged_source_cleanup_failed".to_string());
+        }
+        if device
+            .copy_commit_remove_empty_directory(stage_root)
+            .is_err()
+        {
+            warnings.push("staging_directory_cleanup_failed".to_string());
+        }
+    } else if stage_creation_attempted {
+        warnings.push("staging_directory_cleanup_deferred_creation_uncertain".to_string());
+    }
+    warnings
+}
+
+fn t13a_configuration_artifact_bytes(artifact: &Value) -> Result<Vec<u8>, String> {
+    if artifact.get("type").and_then(Value::as_str) != Some("configuration_artifact")
+        || artifact.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(
+            "Frozen RetroArch configuration artifact has an unsupported shape.".to_string(),
+        );
+    }
+    let expected_length = artifact
+        .get("byteLength")
+        .and_then(Value::as_u64)
+        .filter(|length| {
+            *length <= crate::runtime_configuration::MAX_RETROARCH_CONFIGURATION_BYTES as u64
+        })
+        .ok_or_else(|| "Frozen RetroArch configuration length is invalid.".to_string())?;
+    let byte_values = artifact
+        .get("bytes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Frozen RetroArch configuration bytes are missing.".to_string())?;
+    if byte_values.len() as u64 != expected_length {
+        return Err("Frozen RetroArch configuration length does not match its bytes.".to_string());
+    }
+    let bytes = byte_values
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|byte| u8::try_from(byte).ok())
+                .ok_or_else(|| {
+                    "Frozen RetroArch configuration contains an invalid byte.".to_string()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_sha256 = artifact
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|digest| crate::authored_models::is_lowercase_sha256(digest))
+        .ok_or_else(|| "Frozen RetroArch configuration digest is invalid.".to_string())?;
+    if crate::runtime_configuration::sha256_hex(&bytes) != expected_sha256
+        || artifact["sourceIdentity"]["sha256"].as_str() != Some(expected_sha256)
+        || artifact["sourceIdentity"]["byteLength"].as_u64() != Some(expected_length)
+    {
+        return Err(
+            "Frozen RetroArch configuration digest does not match its source identity.".to_string(),
+        );
+    }
+    let source_kind = artifact["sourceIdentity"]["kind"]
+        .as_str()
+        .ok_or_else(|| "Frozen RetroArch configuration source identity is missing.".to_string())?;
+    if !matches!(source_kind, "generated" | "uploaded") {
+        return Err("Frozen RetroArch configuration source identity is unsupported.".to_string());
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn t13a_configuration_artifact_for_review(step: &ExecutionStep) -> Option<&Value> {
+    let crate::planner::ExecutionParamValue::Literal { value } = step.params.get("source")? else {
+        return None;
+    };
+    (value.get("type").and_then(Value::as_str) == Some("configuration_artifact")).then_some(value)
 }
 
 fn has_runtime_output_reference(step: &ExecutionStep) -> bool {
@@ -4260,6 +5553,24 @@ pub(crate) fn validate_supported_copy_plan(plan: &ExecutionPlan) -> Result<(), S
         .iter()
         .filter(|step| step.type_name == "copy_files")
     {
+        if step.params.get("copy_policy").is_some_and(|param| {
+            matches!(
+                param,
+                crate::planner::ExecutionParamValue::Literal { value }
+                    if value.as_str() == Some("create_only")
+            )
+        }) {
+            if !is_t13a_configuration_create_step(step)
+                || step.app_id.as_deref() != Some("retroarch")
+                || t13a_configuration_artifact_for_review(step).is_none()
+            {
+                return Err(format!(
+                    "copy_files step {} unsupported: create_only is reserved for the reviewed RetroArch configuration artifact",
+                    step.id
+                ));
+            }
+            continue;
+        }
         if has_runtime_output_reference(step) {
             if has_runtime_source_output_reference(step) && step.app_id.is_some() {
                 return Err(format!(
@@ -4861,6 +6172,7 @@ pub struct ExecutorAdapters<D: ExecutorDevice = FakeDryRunDevice> {
     device: D,
     sleep_calls: Vec<f64>,
     sandbox: Option<SandboxRoots>,
+    t13a_fake_root_anchor: Option<FakeT13aRootAnchor>,
     perform_sleep: bool,
 }
 
@@ -4870,6 +6182,7 @@ impl Default for ExecutorAdapters<FakeDryRunDevice> {
             device: FakeDryRunDevice::default(),
             sleep_calls: Vec::new(),
             sandbox: None,
+            t13a_fake_root_anchor: None,
             perform_sleep: false,
         }
     }
@@ -4882,6 +6195,7 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
             device,
             sleep_calls: Vec::new(),
             sandbox: None,
+            t13a_fake_root_anchor: None,
             perform_sleep: false,
         }
     }
@@ -4894,6 +6208,7 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
         read_only_roots: Vec<PathBuf>,
         perform_sleep: bool,
     ) -> Self {
+        let t13a_fake_root_anchor = FakeT13aRootAnchor::capture(&fake_device_root);
         Self {
             device,
             sleep_calls: Vec::new(),
@@ -4903,6 +6218,7 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
                 fake_device_root,
                 read_only_roots,
             }),
+            t13a_fake_root_anchor,
             perform_sleep,
         }
     }
@@ -4945,6 +6261,7 @@ impl ExecutorAdapters<FakeDryRunDevice> {
         fake_device_root: PathBuf,
         read_only_roots: Vec<PathBuf>,
     ) -> Self {
+        let t13a_fake_root_anchor = FakeT13aRootAnchor::capture(&fake_device_root);
         Self {
             device: FakeDryRunDevice::default(),
             sleep_calls: Vec::new(),
@@ -4954,6 +6271,7 @@ impl ExecutorAdapters<FakeDryRunDevice> {
                 fake_device_root,
                 read_only_roots,
             }),
+            t13a_fake_root_anchor,
             perform_sleep: false,
         }
     }
@@ -4974,6 +6292,9 @@ pub struct FakeDryRunDevice {
     root_preflight_result: Option<Result<(), String>>,
     root_preflight_calls: usize,
 }
+
+#[cfg(test)]
+mod copy_commit_helper_tests;
 
 impl FakeDryRunDevice {
     #[cfg(test)]
@@ -5499,6 +6820,29 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
             helper_path,
             expected_entry,
             mutation,
+        )
+        .map_err(map_adb_error)
+    }
+
+    fn copy_commit_create_file_exclusive(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        relative_path: &str,
+        expected_absence: &str,
+        expected_source_sha256: &str,
+    ) -> Result<CopyCommitCreateFileOutcome, DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_create_file_exclusive(
+            self,
+            selected_root,
+            destination_binding,
+            stage_root,
+            helper_path,
+            relative_path,
+            expected_absence,
+            expected_source_sha256,
         )
         .map_err(map_adb_error)
     }

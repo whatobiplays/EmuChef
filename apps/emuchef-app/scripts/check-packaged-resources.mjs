@@ -6,9 +6,16 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const config = JSON.parse(fs.readFileSync(path.join(appDir, "src-tauri/tauri.conf.json"), "utf8"));
+const config = JSON.parse(
+  fs.readFileSync(path.join(appDir, "src-tauri/tauri.conf.json"), "utf8"),
+);
 const resources = config.bundle?.resources ?? {};
-for (const directory of ["apps", "device_plans", "device_profiles", "recipes"]) {
+for (const directory of [
+  "apps",
+  "device_plans",
+  "device_profiles",
+  "recipes",
+]) {
   if (!Object.values(resources).includes(`catalog/${directory}`)) {
     throw new Error(`Bundled catalog resource '${directory}' is missing`);
   }
@@ -16,6 +23,26 @@ for (const directory of ["apps", "device_plans", "device_profiles", "recipes"]) 
 const serialized = JSON.stringify(config);
 if (/platform-tools|platform_tools|latest-darwin\.zip/i.test(serialized)) {
   throw new Error("Tauri bundle must not contain Platform-Tools resources");
+}
+
+function isAppTemplateDirectory(relativePath) {
+  const [appId, ...directories] = relativePath.split("/");
+  return (
+    /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(appId ?? "") &&
+    directories.every((part) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(part))
+  );
+}
+
+function isAppTemplatePath(relativePath) {
+  const parts = relativePath.split("/");
+  return (
+    parts.length >= 2 &&
+    /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(parts[0]) &&
+    parts
+      .slice(1)
+      .every((part) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(part)) &&
+    parts.at(-1).endsWith(".cfg")
+  );
 }
 
 const bundleIndex = process.argv.indexOf("--bundle");
@@ -26,40 +53,84 @@ if (bundleIndex >= 0) {
   const catalog = path.join(contents, "Resources", "catalog");
   const catalogRoot = fs.realpathSync(catalog);
   const files = [];
-  for (const directory of ["apps", "device_plans", "device_profiles", "recipes"]) {
+  for (const directory of [
+    "apps",
+    "device_plans",
+    "device_profiles",
+    "recipes",
+  ]) {
     const directoryPath = path.join(catalog, directory);
     const metadata = fs.lstatSync(directoryPath);
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new Error(`Packaged catalog '${directory}' is not a real directory`);
+      throw new Error(
+        `Packaged catalog '${directory}' is not a real directory`,
+      );
     }
-    for (const name of fs.readdirSync(directoryPath).sort()) {
-      const entry = path.join(directoryPath, name);
-      const entryMetadata = fs.lstatSync(entry);
-      if (name === ".gitkeep" && entryMetadata.isFile() && !entryMetadata.isSymbolicLink()) {
-        continue;
+    const visit = (currentDirectory, relativeDirectory = "") => {
+      for (const name of fs.readdirSync(currentDirectory).sort()) {
+        const entry = path.join(currentDirectory, name);
+        const entryMetadata = fs.lstatSync(entry);
+        if (entryMetadata.isSymbolicLink()) {
+          throw new Error(
+            `Packaged catalog '${directory}' must not contain symlinks`,
+          );
+        }
+        if (name === ".gitkeep" && entryMetadata.isFile()) continue;
+        const relativePath = relativeDirectory
+          ? `${relativeDirectory}/${name}`
+          : name;
+        if (entryMetadata.isDirectory()) {
+          if (directory !== "apps" || !isAppTemplateDirectory(relativePath)) {
+            throw new Error(
+              `Packaged catalog '${directory}' contains an unsupported directory`,
+            );
+          }
+          visit(entry, relativePath);
+          continue;
+        }
+        const yamlFile =
+          !relativeDirectory && entryMetadata.isFile() && /\.ya?ml$/.test(name);
+        const templateFile =
+          directory === "apps" &&
+          entryMetadata.isFile() &&
+          isAppTemplatePath(relativePath);
+        if (!entryMetadata.isFile() || (!yamlFile && !templateFile)) {
+          throw new Error(
+            `Packaged catalog '${directory}' contains an unsupported entry`,
+          );
+        }
+        const resolved = fs.realpathSync(entry);
+        if (!resolved.startsWith(`${catalogRoot}${path.sep}`)) {
+          throw new Error(
+            `Packaged catalog '${directory}' escaped its resource root`,
+          );
+        }
+        files.push([`${directory}/${relativePath}`, fs.readFileSync(entry)]);
       }
-      if (!entryMetadata.isFile() || entryMetadata.isSymbolicLink() || !/\.ya?ml$/.test(name)) {
-        throw new Error(`Packaged catalog '${directory}' contains an unsupported entry`);
-      }
-      const resolved = fs.realpathSync(entry);
-      if (!resolved.startsWith(`${catalogRoot}${path.sep}`)) {
-        throw new Error(`Packaged catalog '${directory}' escaped its resource root`);
-      }
-      files.push([`${directory}/${name}`, fs.readFileSync(entry)]);
-    }
+    };
+    visit(directoryPath);
   }
   if (files.length === 0) throw new Error("Packaged catalog is empty");
   const hasher = crypto.createHash("sha256");
-  for (const [relative, bytes] of files.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))) {
-    hasher.update(`${Buffer.byteLength(relative, "utf8")}:${relative}${bytes.length}:`);
+  for (const [relative, bytes] of files.sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    hasher.update(
+      `${Buffer.byteLength(relative, "utf8")}:${relative}${bytes.length}:`,
+    );
     hasher.update(bytes);
   }
   const digest = hasher.digest("hex");
-  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("Packaged catalog digest is invalid");
+  if (!/^[a-f0-9]{64}$/.test(digest))
+    throw new Error("Packaged catalog digest is invalid");
   const sidecar = path.join(contents, "MacOS", "emuchef");
-  if (!fs.statSync(sidecar).isFile()) throw new Error("Packaged Rust sidecar is missing");
+  if (!fs.statSync(sidecar).isFile())
+    throw new Error("Packaged Rust sidecar is missing");
   const packagedNames = [];
-  for (const base of [path.join(contents, "MacOS"), path.join(contents, "Resources")]) {
+  for (const base of [
+    path.join(contents, "MacOS"),
+    path.join(contents, "Resources"),
+  ]) {
     const visit = (directory) => {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
         packagedNames.push(entry.name);
@@ -68,10 +139,20 @@ if (bundleIndex >= 0) {
     };
     visit(base);
   }
-  if (packagedNames.some((name) => /platform[-_]tools|latest-darwin\.zip/i.test(name))) {
-    throw new Error("Packaged app contains a forbidden Platform-Tools artifact");
+  if (
+    packagedNames.some((name) =>
+      /platform[-_]tools|latest-darwin\.zip/i.test(name),
+    )
+  ) {
+    throw new Error(
+      "Packaged app contains a forbidden Platform-Tools artifact",
+    );
   }
-  console.log(`Packaged Rust sidecar and catalog snapshot verified (${files.length} files, sha256 ${digest}).`);
+  console.log(
+    `Packaged Rust sidecar and catalog snapshot verified (${files.length} files, sha256 ${digest}).`,
+  );
 } else {
-  console.log("Packaged catalog resources are declared and Platform-Tools is absent.");
+  console.log(
+    "Packaged catalog resources are declared and Platform-Tools is absent.",
+  );
 }

@@ -263,15 +263,63 @@ conditions read the package identity from their bound App Definition and use
 an empty parameter map; legacy package-name conditions and app-less APK
 installation forms are invalid.
 
-The RetroArch App Definition owns named `kind: file` direct-URL artifacts for
+The RetroArch App Definition owns named `kind: file` direct URL artifacts for
 seven frontend archives, thirteen core archives, and three core-system
-archives. Its provisioning Recipe references these resources through the
-existing Recipe artifact IDs and keeps cache selection, artifact groups,
-extraction, step dependencies, and app-aware copy destinations. The Recipe's
-`retroarch_apk` is a Recipe App Artifact reference to RetroArch's `apk`
-App Artifact. The install step carries `app_ref: retroarch`, and its
-`package_installed` condition is parameterless so package identity comes from
-the App Definition.
+archives. Its provisioning Recipe references resources by their existing
+Recipe artifact IDs and retains cache selection, artifact groups, extraction,
+step dependencies, and app-aware copy destinations. The Recipe's
+`retroarch_apk` input references the App Definition's `apk` artifact. The
+install step carries `app_ref: retroarch`, and its `package_installed`
+condition takes package identity from the App Definition.
+App configuration template files under `apps/<app-id>/` are included in the
+bundled catalog integrity digest.
+
+The separately selectable `app.retroarch.configure` recipe targets an
+installation that is already prepared. It contains only the configuration
+seed action. The provisioning recipe retains its complete bootstrap and
+mandatory asset-copy sequence.
+
+RetroArch configuration is optional and offers `none`, `managed`, and
+`uploaded` source selections. Managed mode renders the App Definition's
+`video_threaded` setting. EmuChef authors `false` as its value; the selected
+build's Android runtime default has not been verified. Uploaded mode freezes
+the selected file's exact bytes and preserves them. Before review is
+finalized, the plan digest binds those bytes, their SHA-256, source and target
+identities, and the confirmed-absent target precondition. Review displays the
+source, digest, byte count, safe destination label, absence state, and
+verification scope. Both managed and uploaded modes use the same reviewed
+create-only operation for `retroarch.cfg`. Existing or newly appearing
+targets block creation and remain untouched. Failed writes may leave partial
+output and are reported as unverified; lost responses are reported as
+uncertain. Staging cleanup warnings remain separate from the file outcome.
+Simulated runs report that the file was created in a sandbox and was not
+applied to the device.
+
+Rust resolves the effective source used by planning and the Inputs step. A
+legacy saved file input or managed setting remains effective when the recipe
+default is `none`. The UI displays that effective source and retains each
+binding's raw value and provenance. An explicit user selection of `none`
+conflicts with stale configuration bindings; both source inputs remain visible
+until the user resolves the conflict. Choosing managed or uploaded preserves
+that mode's saved binding and clears the inactive mode. Choosing none clears
+both source bindings. The managed property appears only in managed mode, the file
+picker only in uploaded mode, and neither appears in `none` mode. Selecting
+`none` leaves the configuration target unwritten.
+
+The full provisioning recipe launches RetroArch before `seed_retroarch_cfg`, so first-run initialization can create `retroarch.cfg`. T13a blocks when the target exists and leaves it unchanged.
+
+The separately selectable `app.retroarch.configure` recipe supports an already prepared RetroArch installation. Its dry-run review creates a unique sandbox root and binds that root to the one-shot review authority, reviewed plan digest, and target. Execution consumes that authority and uses the same sandbox root.
+
+The linked host regression selects managed mode from the Tauri-projected Rust source options, prepares the immutable backend review, and executes the reviewed plan through the sidecar adapter. It verifies the confirmed-absent target, frozen bytes, SHA-256, and simulated create result. A second review keeps a separate sandbox, and replaying consumed authority does not create another file. The Tauri report identifies the result as a simulation and says no device file changed.
+
+The execution mode is selected before review when real execution is compiled in. Simulation is the default, and the selector is hidden when real execution is unavailable. Rust requires the selected mode, returns it in the Tauri review projection, and the review screen offers only the matching execution action. Real execution remains disabled by default.
+
+The regression covers the controlled host sandbox. Android adapter behavior, an absent target on a supported prepared installation, physical Android execution, and full first-run integration remain unqualified.
+Config Editor development is deferred. The generic `copy_files` StepSpec
+does not advertise `create_only` as a policy for every copy step; authored
+validation retains the value internally and planning restricts it to the
+RetroArch configuration action. Real execution is disabled by default, and
+physical-device operations for this work are `NOT_RUN`.
 
 An App Definition target names a file or directory at `app_data`,
 `external_app_data`, `shared_storage`, or `absolute_device_path`. App-aware

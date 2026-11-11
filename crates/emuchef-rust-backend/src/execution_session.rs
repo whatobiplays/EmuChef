@@ -5,9 +5,9 @@
 //! exit. Cancellation is cooperative between atomic steps and never rolls back
 //! completed work. Retrying or repairing always creates a new execution id.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -220,6 +220,26 @@ struct ExecutionState {
     next_execution_id: u64,
     active_execution_id: Option<String>,
     records: HashMap<String, ExecutionRecord>,
+    pending_copy_review_authorities: HashMap<String, PreparedCopyReviewAuthority>,
+    copy_review_authority_order: VecDeque<String>,
+}
+
+/// Keeps one prepared T13a plan bound to the sandbox root recorded in its digest.
+#[derive(Debug)]
+struct PreparedCopyReviewAuthority {
+    plan_digest: String,
+    mode: ExecutionMode,
+    target: Option<TargetDeviceBinding>,
+    sandbox_root: PathBuf,
+}
+
+/// Matches the number of reviewed plans Tauri retains at once.
+const MAX_PENDING_COPY_REVIEW_AUTHORITIES: usize = 16;
+static NEXT_COPY_REVIEW_AUTHORITY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_copy_review_authority_id() -> String {
+    let sequence = NEXT_COPY_REVIEW_AUTHORITY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("copy-review-{}-{sequence}", std::process::id())
 }
 
 #[derive(Debug, Default)]
@@ -633,7 +653,7 @@ impl ExecutionSessionManager {
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
     ) -> Result<Value, ApiError> {
-        self.start_with_setup_location_lease(plan, required_digest, mode, supplied_target, None)
+        self.start_with_review_authority(plan, required_digest, mode, supplied_target, None, None)
     }
 
     pub(crate) fn start_with_setup_location_lease(
@@ -643,6 +663,25 @@ impl ExecutionSessionManager {
         mode: ExecutionMode,
         supplied_target: Option<TargetDeviceBinding>,
         setup_location_lease_context: Option<SetupLocationExecutionLease>,
+    ) -> Result<Value, ApiError> {
+        self.start_with_review_authority(
+            plan,
+            required_digest,
+            mode,
+            supplied_target,
+            setup_location_lease_context,
+            None,
+        )
+    }
+
+    pub(crate) fn start_with_review_authority(
+        &self,
+        plan: ExecutionPlan,
+        required_digest: String,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+        setup_location_lease_context: Option<SetupLocationExecutionLease>,
+        review_authority_id: Option<String>,
     ) -> Result<Value, ApiError> {
         crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
             ApiError::new(
@@ -681,7 +720,13 @@ impl ExecutionSessionManager {
             &actual_digest,
         )?;
 
-        let (execution_id, report, cancel_requested, slot_lease, mutation_lease) = {
+        let requires_review_authority = mode == ExecutionMode::DryRun
+            && crate::executor::plan_requires_t13a_configuration_create(&plan);
+        if requires_review_authority != review_authority_id.is_some() {
+            return Err(copy_review_authority_error());
+        }
+
+        let (execution_id, report, cancel_requested, slot_lease, mutation_lease, attempt_root) = {
             let mut state = lock(&self.state);
             if let Some(active) = &state.active_execution_id {
                 return Err(ApiError::new(
@@ -690,13 +735,35 @@ impl ExecutionSessionManager {
                     json!({ "activeExecutionId": active }),
                 ));
             }
+            let reviewed_sandbox = match review_authority_id.as_deref() {
+                Some(authority_id) => {
+                    let prepared = state
+                        .pending_copy_review_authorities
+                        .remove(authority_id)
+                        .ok_or_else(copy_review_authority_error)?;
+                    state
+                        .copy_review_authority_order
+                        .retain(|queued| queued != authority_id);
+                    if prepared.plan_digest != actual_digest
+                        || prepared.mode != mode
+                        || prepared.target != target
+                    {
+                        return Err(copy_review_authority_error());
+                    }
+                    Some(prepared)
+                }
+                None => None,
+            };
             let prospective_number = state.next_execution_id + 1;
             let execution_id = format!("execution-{prospective_number}");
-            let attempt_root = self
-                .config
-                .runtime_root
-                .join("executions")
-                .join(&execution_id);
+            let attempt_root = reviewed_sandbox
+                .map(|prepared| prepared.sandbox_root)
+                .unwrap_or_else(|| {
+                    self.config
+                        .runtime_root
+                        .join("executions")
+                        .join(&execution_id)
+                });
             admit_plan_artifacts(
                 &plan,
                 SandboxRoots {
@@ -744,6 +811,7 @@ impl ExecutionSessionManager {
                 cancel_requested,
                 slot_lease,
                 mutation_lease,
+                attempt_root,
             )
         };
 
@@ -761,6 +829,7 @@ impl ExecutionSessionManager {
                     mode,
                     target,
                     config,
+                    attempt_root,
                     cancel_requested,
                     mutation_lease,
                 )
@@ -871,6 +940,26 @@ impl ExecutionSessionManager {
             supplied_target,
             &storage_targets,
             crate::executor::adb::RealAdbDevice::new,
+            false,
+        )
+        .map(|(plan, _)| plan)
+    }
+
+    /// Prepare a copy review and retain its one-shot dry-run sandbox binding.
+    pub(crate) fn prepare_review_plan_with_storage_targets_and_authority(
+        &self,
+        plan: ExecutionPlan,
+        mode: ExecutionMode,
+        supplied_target: Option<TargetDeviceBinding>,
+        storage_targets: Vec<StorageTargetBinding>,
+    ) -> Result<(ExecutionPlan, Option<String>), ApiError> {
+        self.prepare_review_plan_with_device_factory(
+            plan,
+            mode,
+            supplied_target,
+            &storage_targets,
+            crate::executor::adb::RealAdbDevice::new,
+            true,
         )
     }
 
@@ -885,12 +974,13 @@ impl ExecutionSessionManager {
         supplied_target: Option<TargetDeviceBinding>,
         storage_targets: &[StorageTargetBinding],
         real_device_factory: F,
-    ) -> Result<ExecutionPlan, ApiError>
+        retain_dry_run_authority: bool,
+    ) -> Result<(ExecutionPlan, Option<String>), ApiError>
     where
         F: FnOnce(String, Option<String>) -> crate::executor::adb::RealAdbDevice,
     {
         if !crate::executor::plan_requires_copy_commit_preparation(&plan) {
-            return Ok(plan);
+            return Ok((plan, None));
         }
 
         crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
@@ -910,33 +1000,71 @@ impl ExecutionSessionManager {
             ));
         }
 
-        let review_root = self.config.runtime_root.join("copy-review-preparation");
-        let fake_device_root = review_root.join("simulated-device");
-        std::fs::create_dir_all(&fake_device_root).map_err(|error| {
-            ApiError::new(
-                ApiErrorCode::InvalidExecutionPlan,
-                format!("Copy review filesystem could not be prepared: {error}"),
-                json!({ "field": "plan" }),
-            )
-        })?;
+        let is_t13a_create = crate::executor::plan_requires_t13a_configuration_create(&plan);
+        let (review_id, review_root, fake_device_root) =
+            if mode == ExecutionMode::DryRun && is_t13a_create {
+                let review_root_parent = self.config.runtime_root.join("copy-review-preparation");
+                std::fs::create_dir_all(&review_root_parent).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InvalidExecutionPlan,
+                        format!("Copy review filesystem could not be prepared: {error}"),
+                        json!({ "field": "plan" }),
+                    )
+                })?;
+                let (review_id, review_root) = loop {
+                    let review_id = next_copy_review_authority_id();
+                    let review_root = review_root_parent.join(&review_id);
+                    match std::fs::create_dir(&review_root) {
+                        Ok(()) => break (review_id, review_root),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(error) => {
+                            return Err(ApiError::new(
+                                ApiErrorCode::InvalidExecutionPlan,
+                                format!("Copy review filesystem could not be prepared: {error}"),
+                                json!({ "field": "plan" }),
+                            ));
+                        }
+                    }
+                };
+                let fake_device_root = review_root.join("simulated-device");
+                std::fs::create_dir(&fake_device_root).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InvalidExecutionPlan,
+                        format!("Copy review filesystem could not be prepared: {error}"),
+                        json!({ "field": "plan" }),
+                    )
+                })?;
+                (Some(review_id), review_root, fake_device_root)
+            } else {
+                let review_root = self.config.runtime_root.join("copy-review-preparation");
+                let fake_device_root = review_root.join("simulated-device");
+                std::fs::create_dir_all(&fake_device_root).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InvalidExecutionPlan,
+                        format!("Copy review filesystem could not be prepared: {error}"),
+                        json!({ "field": "plan" }),
+                    )
+                })?;
+                (None, review_root, fake_device_root)
+            };
         let read_only_roots = read_only_roots(&plan);
         let preparation = match mode {
             ExecutionMode::DryRun => {
                 let adapters = ExecutorAdapters::<FakeDryRunDevice>::with_sandbox_roots(
-                    review_root,
+                    review_root.clone(),
                     self.config.cache_root.clone(),
-                    fake_device_root,
+                    fake_device_root.clone(),
                     read_only_roots,
                 );
                 prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
             }
             ExecutionMode::Real => {
-                let serial = target.map(|binding| binding.serial);
+                let serial = target.as_ref().map(|binding| binding.serial.clone());
                 let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
                     real_device_factory(self.config.adb_path.clone(), serial),
-                    review_root,
+                    review_root.clone(),
                     self.config.cache_root.clone(),
-                    fake_device_root,
+                    fake_device_root.clone(),
                     read_only_roots,
                     true,
                 );
@@ -950,7 +1078,41 @@ impl ExecutionSessionManager {
                 json!({ "field": "plan" }),
             )
         })?;
-        Ok(plan)
+        let review_authority_id = if retain_dry_run_authority && mode == ExecutionMode::DryRun {
+            review_id
+        } else {
+            None
+        };
+        if let Some(authority_id) = review_authority_id.as_ref() {
+            let plan_digest = crate::plan_digest::execution_plan_digest(&plan).map_err(|_| {
+                ApiError::new(
+                    ApiErrorCode::InvalidExecutionPlan,
+                    "Prepared copy review could not be canonically hashed.",
+                    json!({ "field": "plan" }),
+                )
+            })?;
+            let mut state = lock(&self.state);
+            while state.pending_copy_review_authorities.len() >= MAX_PENDING_COPY_REVIEW_AUTHORITIES
+            {
+                let Some(expired) = state.copy_review_authority_order.pop_front() else {
+                    break;
+                };
+                state.pending_copy_review_authorities.remove(&expired);
+            }
+            state.pending_copy_review_authorities.insert(
+                authority_id.clone(),
+                PreparedCopyReviewAuthority {
+                    plan_digest,
+                    mode,
+                    target,
+                    sandbox_root: review_root,
+                },
+            );
+            state
+                .copy_review_authority_order
+                .push_back(authority_id.clone());
+        }
+        Ok((plan, review_authority_id))
     }
 
     /// Launch the single app proven eligible by a retained successful real execution.
@@ -1384,6 +1546,26 @@ fn redacted_report_plan(plan: &ExecutionPlan) -> (ExecutionPlan, bool, bool) {
             redacted = true;
         }
     }
+    for step in &mut redacted_plan.steps {
+        if crate::executor::t13a_configuration_artifact_for_review(step).is_none() {
+            continue;
+        }
+        if let Some(crate::planner::ExecutionParamValue::Literal { value }) =
+            step.params.get_mut("source")
+        {
+            *value = json!({
+                "type": "configuration_artifact",
+                "redacted": true,
+            });
+            redacted = true;
+        }
+        if let Some(crate::planner::ExecutionParamValue::Literal { value }) =
+            step.params.get_mut("dest")
+        {
+            *value = json!("[redacted app target]");
+            redacted = true;
+        }
+    }
     for artifact in &mut redacted_plan.artifacts {
         let crate::planner::ExecutionArtifactSource::DirectUrl { url, .. } = &mut artifact.source
         else {
@@ -1458,6 +1640,7 @@ fn execute_attempt(
     mode: ExecutionMode,
     target: Option<TargetDeviceBinding>,
     config: SidecarRuntimeConfig,
+    attempt_root: PathBuf,
     cancel_requested: Arc<AtomicBool>,
     mutation_lease: Option<Arc<SetupLocationMutationLease>>,
 ) -> ExecutionRunResult {
@@ -1465,7 +1648,6 @@ fn execute_attempt(
     if plan.id == "__test_execution_worker_panics__" {
         panic!("injected execution worker panic");
     }
-    let attempt_root = config.runtime_root.join("executions").join(execution_id);
     let fake_device_root = attempt_root.join("simulated-device");
     let read_only_roots = read_only_roots(plan);
     match mode {
@@ -2129,6 +2311,14 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn copy_review_authority_error() -> ApiError {
+    ApiError::new(
+        ApiErrorCode::StaleReview,
+        "The RetroArch configuration review is stale or belongs to another execution.",
+        json!({ "field": "reviewAuthorityId" }),
+    )
 }
 
 #[cfg(test)]
@@ -2987,6 +3177,87 @@ mod tests {
     }
 
     #[test]
+    fn configuration_artifact_reports_keep_bytes_and_target_private() {
+        let source_path = "/private/uploads/reviewed.cfg";
+        let device_path =
+            "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg";
+        let exact_bytes = b"private configuration bytes";
+        let digest = crate::runtime_configuration::sha256_hex(exact_bytes);
+        let artifact = json!({
+            "type": "configuration_artifact",
+            "schemaVersion": 1,
+            "bytes": exact_bytes,
+            "byteLength": exact_bytes.len(),
+            "sha256": digest,
+            "sourceIdentity": {
+                "kind": "uploaded",
+                "path": source_path,
+                "sha256": digest,
+                "byteLength": exact_bytes.len()
+            },
+            "targetIdentity": {
+                "appId": "retroarch",
+                "targetId": "config",
+                "absolutePath": device_path
+            },
+            "absencePrecondition": {
+                "status": "confirmed_absent",
+                "targetPath": device_path,
+                "parentBinding": "private-parent-identity"
+            }
+        });
+        let mut plan = test_plan("plan.configuration-artifact");
+        plan.steps[0].type_name = "copy_files".to_string();
+        plan.steps[0].app_id = Some("retroarch".to_string());
+        plan.steps[0].params.insert(
+            "source".to_string(),
+            ExecutionParamValue::Literal {
+                value: artifact.clone(),
+            },
+        );
+        plan.steps[0].params.insert(
+            "dest".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!(device_path),
+            },
+        );
+        let reviewed_digest = "f".repeat(64);
+
+        let report = initial_report(
+            "execution.configuration-artifact",
+            &plan,
+            &reviewed_digest,
+            ExecutionMode::DryRun,
+            None,
+        );
+
+        assert_eq!(
+            report.reviewed_plan.steps[0].params["source"],
+            ExecutionParamValue::Literal { value: artifact }
+        );
+        assert_eq!(report.plan_digest, reviewed_digest);
+        assert!(report.public_reviewed_plan.is_none());
+        let consumer_plan = report.redacted_reviewed_plan.as_ref().unwrap();
+        assert_eq!(
+            consumer_plan.steps[0].params["source"],
+            ExecutionParamValue::Literal {
+                value: json!({"type": "configuration_artifact", "redacted": true})
+            }
+        );
+        assert_eq!(
+            consumer_plan.steps[0].params["dest"],
+            ExecutionParamValue::Literal {
+                value: json!("[redacted app target]")
+            }
+        );
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("private configuration bytes"));
+        assert!(!serialized.contains(source_path));
+        assert!(!serialized.contains(device_path));
+        assert!(!serialized.contains("private-parent-identity"));
+    }
+
+    #[test]
     fn input_only_report_redaction_does_not_mark_source_urls_redacted() {
         let enum_label_secret = "PRIVATE_ENUM_LABEL_SENTINEL";
         let mut plan = test_plan("plan.sensitive-input");
@@ -3836,6 +4107,7 @@ mod tests {
             next_execution_id: 1,
             active_execution_id: Some(execution_id.to_string()),
             records,
+            ..ExecutionState::default()
         }));
 
         finish_panicked(&state, execution_id);

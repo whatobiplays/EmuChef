@@ -20,6 +20,7 @@ test("prepares the execution review through the native bridge", async () => {
       "t03.copy_app_target/policy": "merge",
     },
     requestGeneration: 1,
+    mode: "dry_run" as const,
   };
   const review = { reviewHandle: "review-opaque" };
   mockInvoke.mockResolvedValue(review);
