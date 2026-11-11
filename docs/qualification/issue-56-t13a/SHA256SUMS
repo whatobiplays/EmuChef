@@ -1,5 +1,7 @@
 f5990eb326893b31b76ed0afb4380ef0798d78469c7ea0daee4306484023cf6c  CONTEXT.md
 541c453470a5ed401a88dcca11a4ab5219d2910006a1491a2a5e7457cbf3e456  apps/emuchef-app/scripts/check-packaged-resources.mjs
+033cbb9219953a8f4d6f85b42f7028b72f1ceccae23f3158d49012d09e1b2233  apps/emuchef-app/scripts/macos-packaging.mjs
+8a443044caac2f56dd7064c1a0a7787f5d8f7291d3d35187828523b7c4c7af34  apps/emuchef-app/scripts/macos-packaging.test.mjs
 cf4cf29a45179a9c220349846ca2f8bbd3526daac6decf3c6dd3177b61dbb296  apps/emuchef-app/src-tauri/src/catalog.rs
 ab9a595320fa435da57bc7037722257ab8e76b744fd939e27c8927f542f16680  apps/emuchef-app/src-tauri/src/commands.rs
 a5b52e188c215d71315cbe291a196262c543a1477275c17f69a3e6db7b829dd5  apps/emuchef-app/src-tauri/src/execution.rs
