@@ -100,6 +100,7 @@ test("opening portable intent preserves stale references but resets all runtime 
       ...initialWorkflowState,
       review: {
         reviewHandle: "old-review",
+        executionMode: "simulated",
         setup: { name: "Saved setup" },
         target: { label: "Connected Android device" },
         features: [],
@@ -130,6 +131,7 @@ test("opening portable intent preserves stale references but resets all runtime 
 test("Save and pure Save As preserve the current stage and review authority", () => {
   const review = {
     reviewHandle: "review-opaque",
+  executionMode: "simulated" as const,
     setup: { name: "Current setup" },
     target: { label: "Connected Android device" },
     features: [],

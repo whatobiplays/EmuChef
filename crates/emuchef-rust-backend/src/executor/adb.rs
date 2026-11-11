@@ -1667,6 +1667,112 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
     }
 
+    /// Create the final selected-root file with O_EXCL and return the helper's
+    /// exact readback outcome. The helper never removes a file after opening it.
+    #[cfg(feature = "android-copy-commit-helper")]
+    fn copy_commit_create_file_outcome_for_return_code(
+        returncode: i32,
+    ) -> Option<super::CopyCommitCreateFileOutcome> {
+        match returncode {
+            10 => Some(super::CopyCommitCreateFileOutcome::TargetAlreadyExists),
+            11 => Some(super::CopyCommitCreateFileOutcome::SourceHashMismatch),
+            12 => Some(super::CopyCommitCreateFileOutcome::PartialWriteUnverified),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn copy_commit_create_file_exclusive(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        relative_path: &str,
+        expected_absence: &str,
+        expected_source_sha256: &str,
+    ) -> Result<super::CopyCommitCreateFileOutcome, AdbCommandError> {
+        if relative_path != "retroarch.cfg" || expected_absence != "absent" {
+            return Err(AdbCommandError::Resolution(
+                "exclusive file creation requires the reviewed RetroArch config basename and absence precondition"
+                    .to_string(),
+            ));
+        }
+        #[cfg(not(feature = "android-copy-commit-helper"))]
+        {
+            let _ = (
+                selected_root,
+                destination_binding,
+                stage_root,
+                helper_path,
+                expected_source_sha256,
+            );
+            Err(AdbCommandError::Resolution(
+                "exclusive file creation unavailable because the build lacks the Android helper feature"
+                    .to_string(),
+            ))
+        }
+        #[cfg(feature = "android-copy-commit-helper")]
+        {
+            let privileged = is_app_private_path(selected_root);
+            if !privileged && self.copy_commit_path_binding(selected_root)? != destination_binding {
+                return Err(AdbCommandError::Resolution(
+                    "exclusive file creation selected-root identity changed before mutation"
+                        .to_string(),
+                ));
+            }
+            let (canonical_path, selected_identity) =
+                Self::copy_commit_helper_binding_arguments(destination_binding)?;
+            let helper_arguments = vec![
+                helper_path.to_string(),
+                selected_root.to_string(),
+                canonical_path,
+                selected_identity,
+                stage_root.to_string(),
+                "create-file".to_string(),
+                relative_path.to_string(),
+                expected_absence.to_string(),
+                expected_source_sha256.to_string(),
+            ];
+            self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+                let result = device.run_shell_with_privilege_unchecked(
+                    helper_arguments,
+                    false,
+                    privileged,
+                    ProcessOperation::ShellMutation,
+                )?;
+                match result.returncode {
+                    0 => {
+                        let mut fields = result.stdout.split_whitespace();
+                        let marker = fields.next();
+                        let digest = fields.next();
+                        let byte_length = fields.next().and_then(|value| value.parse::<u64>().ok());
+                        if marker == Some("CREATED")
+                            && digest == Some(expected_source_sha256)
+                            && fields.next().is_none()
+                        {
+                            Ok(super::CopyCommitCreateFileOutcome::CreatedVerified {
+                                sha256: expected_source_sha256.to_string(),
+                                byte_length: byte_length.unwrap_or(0),
+                            })
+                        } else {
+                            Ok(super::CopyCommitCreateFileOutcome::PartialWriteUnverified)
+                        }
+                    }
+                    returncode => {
+                        match Self::copy_commit_create_file_outcome_for_return_code(returncode) {
+                            Some(outcome) => Ok(outcome),
+                            None => Err(AdbCommandError::CommandFailed {
+                                args: result.args,
+                                returncode,
+                                stderr: result.stderr,
+                            }),
+                        }
+                    }
+                }
+            })
+        }
+    }
+
     /// Extracts the canonical path and selected identity for separate helper arguments.
     #[cfg(feature = "android-copy-commit-helper")]
     fn copy_commit_helper_binding_arguments(
@@ -2368,6 +2474,16 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "android-copy-commit-helper")]
+    #[test]
+    fn helper_existing_target_status_maps_to_the_adapter_existing_outcome() {
+        assert!(matches!(
+            RealAdbDevice::<FakeAdbCommandExecutor>::
+                copy_commit_create_file_outcome_for_return_code(10),
+            Some(super::super::CopyCommitCreateFileOutcome::TargetAlreadyExists)
+        ));
+    }
 
     #[cfg(feature = "android-copy-commit-helper")]
     #[test]

@@ -1679,9 +1679,21 @@ where
     S: FnMut(&Value, &mut F) -> Result<Value, String>,
 {
     let target_device = payload.get("targetDevice").cloned().unwrap_or(Value::Null);
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("real")
+        .to_string();
+    if !matches!(mode.as_str(), "real" | "dry_run") {
+        return Err(safe_error(
+            "execution_mode_invalid",
+            "The requested execution mode is not supported.",
+        ));
+    }
     let mut planning_payload = payload;
     if let Some(object) = planning_payload.as_object_mut() {
         object.remove("storageTargets");
+        object.remove("mode");
     }
     let plan_configuration = request("planConfiguration", planning_payload)?;
     let Some(plan) = plan_configuration
@@ -1696,7 +1708,7 @@ where
         "prepareExecutionReview",
         json!({
             "plan": plan,
-            "mode": "real",
+            "mode": mode,
             "targetDevice": target_device,
             "storageTargets": storage_targets,
         }),
@@ -1710,6 +1722,7 @@ pub fn prepare_execution_review(
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
     request_generation: u64,
+    mode: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let sidecar = &state.sidecar;
@@ -1719,6 +1732,7 @@ pub fn prepare_execution_review(
         selected_recipes,
         bindings,
         request_generation,
+        &mode,
         &state,
         &mut |operation, payload| sidecar.request(operation, payload),
     )
@@ -1730,12 +1744,19 @@ fn prepare_execution_review_with_runtime<F>(
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
     request_generation: u64,
+    mode: &str,
     state: &AppState,
     request: &mut F,
 ) -> Result<Value, String>
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
+    if !matches!(mode, "real" | "dry_run") {
+        return Err(safe_error(
+            "execution_mode_invalid",
+            "The requested execution mode is not supported.",
+        ));
+    }
     state
         .input_contracts
         .lock()
@@ -1764,13 +1785,14 @@ where
             "Re-enter the omitted sensitive configuration values before creating a new review.",
         ));
     }
-    let payload = configuration_payload(
+    let mut payload = configuration_payload(
         state,
         &device_handle,
         &device_plan,
         selected_recipes,
         bindings.clone(),
     )?;
+    payload["mode"] = json!(mode);
     let target = payload
         .get("targetDevice")
         .cloned()
@@ -1780,7 +1802,7 @@ where
         .cloned()
         .expect("configuration payload always binds a catalog");
     let mut storage_target_error = None;
-    let result = plan_and_prepare_execution_review(payload, request, &mut |plan, request| {
+    let mut result = plan_and_prepare_execution_review(payload, request, &mut |plan, request| {
         let resolved = (|| {
             let setup_location_ids = state
                 .input_contracts
@@ -1829,6 +1851,7 @@ where
             )
         })
     })?;
+    result["executionMode"] = json!(mode);
     let plan = result
         .get("plan")
         .filter(|value| !value.is_null())
@@ -1922,7 +1945,13 @@ where
     let exact_serial = plan
         .pointer("/target_device/serial")
         .and_then(Value::as_str);
-    Ok(public_review(&review_handle, &review, exact_serial))
+    let mut public = public_review(&review_handle, &review, exact_serial);
+    public["executionMode"] = json!(if mode == "dry_run" {
+        "simulated"
+    } else {
+        "real"
+    });
+    Ok(public)
 }
 
 #[tauri::command]
@@ -2567,7 +2596,11 @@ pub(crate) fn public_configuration_description(result: &Value, exact_serial: &st
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|option| option.get("value").cloned())
+                .filter_map(|option| {
+                    let value = option.get("value")?.as_str()?;
+                    let label = option.get("label")?.as_str()?;
+                    Some(json!({ "value": value, "label": label }))
+                })
                 .collect::<Vec<_>>();
             let presentation_category = input_presentation_category(input);
             let presentation_kind = input_presentation_kind(input, &options);
@@ -2597,6 +2630,7 @@ pub(crate) fn public_configuration_description(result: &Value, exact_serial: &st
                 "presentationKind": presentation_kind,
                 "value": input.get("value"),
                 "valueSource": input.get("valueSource"),
+                "effectiveConfigurationSource": input.get("effectiveConfigurationSource"),
                 "entries": entries,
                 "diagnostics": diagnostics,
             })
@@ -2969,7 +3003,7 @@ mod tests {
         }
     }
 
-    fn reset_test_state(root: &std::path::Path) -> AppState {
+    pub(super) fn reset_test_state(root: &std::path::Path) -> AppState {
         AppState {
             sidecar: SidecarState::new(root.join("sidecar-cache")),
             catalog: Err("catalog is not used by session reset".to_string()),
@@ -3032,7 +3066,7 @@ mod tests {
             },
         );
         state.catalog = CatalogDescriptor::for_test_root(catalog_root);
-        state.adb = Mutex::new(crate::adb::AdbManager::with_test_installation(
+        state.adb = std::sync::Mutex::new(crate::adb::AdbManager::with_test_installation(
             root.join("platform-tools"),
         ));
         let device_handle = {
@@ -3082,6 +3116,7 @@ mod tests {
                 ("t03.copy_app_target/policy".to_string(), json!("merge")),
             ]),
             1,
+            "real",
             &state,
             &mut |operation, payload| {
                 if operation == "planConfiguration" {
@@ -4185,11 +4220,11 @@ mod tests {
         snapshot.replace(
             4,
             &json!({
-                "inputs": [{
-                    "key": "recipe/files", "type": "file", "multiple": true,
-                    "validation": { "pathKind": "file", "allowedExtensions": ["txt"] }
-                }]
-            }),
+            "inputs": [{
+                        "key": "recipe/files", "type": "file", "multiple": true,
+                        "validation": { "pathKind": "file", "allowedExtensions": ["txt"] }
+                    }]
+                }),
         );
         assert!(snapshot.require(4, "recipe/files").unwrap().multiple);
         snapshot.replace(3, &json!({ "inputs": [] }));
@@ -4572,51 +4607,80 @@ mod tests {
     fn configuration_projection_flattens_picker_metadata_and_drops_internal_fields() {
         let public = public_configuration_description(
             &json!({
-                "catalog": { "root": "/private/catalog" },
-                "devicePlan": "plan",
-                "selectedRecipes": ["recipe"],
-                "expandedRecipes": ["recipe"],
-                "recipeOptions": [{
-                    "id": "recipe", "name": "Recipe", "description": null,
-                    "selected": true, "recommended": true, "dependencyRequired": false,
-                    "recipeDependencies": ["dependency"],
-                    "contentRequirements": ["bios_files"],
-                    "requiredCapabilities": ["shared_storage_write"],
-                    "available": true, "unavailableCapabilities": [], "internal": "secret-serial"
-                }],
-                "inputs": [{
-                    "key": "recipe/file", "recipeId": "recipe", "inputId": "file",
-                    "type": "file", "role": "bios", "label": "File", "description": null, "required": true,
-                    "multiple": false, "options": [{ "value": "one", "label": "One" }],
-                    "validation": { "pathKind": "file", "allowedExtensions": ["apk"] },
-                    "sensitive": false,
-                    "value": null, "valueSource": null,
+                    "catalog": { "root": "/private/catalog" },
+                    "devicePlan": "plan",
+                    "selectedRecipes": ["recipe"],
+                    "expandedRecipes": ["recipe"],
+                    "recipeOptions": [{
+                        "id": "recipe", "name": "Recipe", "description": null,
+                        "selected": true, "recommended": true, "dependencyRequired": false,
+                        "recipeDependencies": ["dependency"],
+                        "contentRequirements": ["bios_files"],
+                        "requiredCapabilities": ["shared_storage_write"],
+                        "available": true, "unavailableCapabilities": [], "internal": "secret-serial"
+                    }],
+                    "inputs": [{
+                        "key": "recipe/file", "recipeId": "recipe", "inputId": "file",
+                        "type": "file", "role": "bios", "label": "File", "description": null, "required": true,
+                        "multiple": false, "options": [{ "value": "one", "label": "One" }],
+                        "validation": { "pathKind": "file", "allowedExtensions": ["apk"] },
+                        "sensitive": false,
+                        "value": null, "valueSource": null,
+                        "diagnostics": [{
+                            "key": "recipe/file", "code": "binding_missing",
+                            "message": "A file is required.", "severity": "error",
+                            "internal": "drop-me"
+                        }],
+                "internalPath": "/private/input"
+            }, {
+                "key": "app.retroarch.configure/retroarch_cfg_source",
+                "recipeId": "app.retroarch.configure",
+                "inputId": "retroarch_cfg_source",
+                "type": "enum", "role": "generic", "label": "Configuration source",
+                "description": "Choose a configuration source.", "required": false,
+                "multiple": false, "options": [
+                    { "value": "none", "label": "No configuration" },
+                    { "value": "managed", "label": "Create EmuChef setting" },
+                    { "value": "uploaded", "label": "Use supplied file" }
+                ],
+                "validation": {}, "sensitive": false,
+                "value": "none", "valueSource": "recipe_default", "diagnostics": [],
+                "effectiveConfigurationSource": "uploaded"
+                    }],
                     "diagnostics": [{
                         "key": "recipe/file", "code": "binding_missing",
                         "message": "A file is required.", "severity": "error",
                         "internal": "drop-me"
                     }],
-                    "internalPath": "/private/input"
-                }],
-                "diagnostics": [{
-                    "key": "recipe/file", "code": "binding_missing",
-                    "message": "A file is required.", "severity": "error",
-                    "internal": "drop-me"
-                }],
-                "targetDevice": {
-                    "serial": "secret-serial",
-                    "manufacturer": "AYANEO",
-                    "model": "Pocket S mini",
-                    "androidApiLevel": 33
-                }
-            }),
+                    "targetDevice": {
+                        "serial": "secret-serial",
+                        "manufacturer": "AYANEO",
+                        "model": "Pocket S mini",
+                        "androidApiLevel": 33
+                    }
+                }),
             "secret-serial",
         );
         assert_eq!(public["inputs"][0]["pathKind"], "file");
         assert_eq!(public["inputs"][0]["acceptedExtensions"], json!(["apk"]));
         assert_eq!(public["inputs"][0]["presentationCategory"], "Firmware");
         assert_eq!(public["inputs"][0]["presentationKind"], "Single file");
-        assert_eq!(public["inputs"][0]["options"], json!(["one"]));
+        assert_eq!(
+            public["inputs"][0]["options"],
+            json!([{ "value": "one", "label": "One" }])
+        );
+        assert_eq!(
+            public["inputs"][1]["options"],
+            json!([
+            { "value": "none", "label": "No configuration" },
+            { "value": "managed", "label": "Create EmuChef setting" },
+            { "value": "uploaded", "label": "Use supplied file" }
+            ])
+        );
+        assert_eq!(
+            public["inputs"][1]["effectiveConfigurationSource"],
+            "uploaded"
+        );
         assert_eq!(
             public["recipeOptions"][0]["contentRequirements"],
             json!(["bios_files"])
@@ -5004,9 +5068,60 @@ fn setup_location_input_contract_resolves_only_active_copy_destinations() {
 }
 #[cfg(test)]
 mod prepared_review_bridge_tests {
+    use super::configuration_payload;
     use super::plan_and_prepare_execution_review;
+    use super::prepare_execution_review_with_runtime;
+    use super::tests::reset_test_state;
+    use crate::execution::RuntimeRequester;
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
 
+    struct LinkedReviewRuntime<'a> {
+        sidecar: &'a crate::sidecar::SidecarState,
+        serial: String,
+        facts: Value,
+        execution_id: std::sync::Mutex<Option<String>>,
+    }
+
+    impl RuntimeRequester for LinkedReviewRuntime<'_> {
+        fn request(&self, request_type: &str, payload: Value) -> Result<Value, String> {
+            match request_type {
+                "listAdbDevices" => Ok(json!({
+                    "devices": [{
+                        "serial": self.serial.clone(),
+                        "state": "available",
+                        "transportId": "synthetic-retroarch-transport",
+                        "model": self.facts["model"].clone(),
+                    }]
+                })),
+                "probeDevice" => Ok(self.facts.clone()),
+                _ => {
+                    let response = self.sidecar.request(request_type, payload)?;
+                    if request_type == "startExecution" {
+                        let execution_id = response
+                            .pointer("/execution/executionId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        *self.execution_id.lock().map_err(|_| {
+                            "controlled runtime execution ID state is unavailable".to_string()
+                        })? = execution_id;
+                    }
+                    Ok(response)
+                }
+            }
+        }
+    }
+
+    fn find_configuration_create_review(value: &Value) -> Option<&Value> {
+        match value {
+            Value::Object(object) => object
+                .get("configurationCreate")
+                .filter(|value| !value.is_null())
+                .or_else(|| object.values().find_map(find_configuration_create_review)),
+            Value::Array(items) => items.iter().find_map(find_configuration_create_review),
+            _ => None,
+        }
+    }
     #[test]
     fn review_bridge_returns_the_prepared_plan_digest_snapshots_and_copy_changes() {
         let plan = json!({
@@ -5073,6 +5188,375 @@ mod prepared_review_bridge_tests {
         assert_eq!(
             result["review"]["copyChanges"]["selectedBoundary"],
             "app_data/target"
+        );
+    }
+
+    #[test]
+    fn projected_recipe_selection_creates_reviewed_sandbox_file_and_projects_simulation_report() {
+        const CONFIGURATION_RECIPE_ID: &str = "app.retroarch.configure";
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../authored")
+            .canonicalize()
+            .unwrap();
+        let synthetic_target_device = json!({
+            "serial": "synthetic-retroarch-target",
+            "manufacturer": "AYANEO",
+            "model": "Pocket Fit",
+            "androidApiLevel": 33,
+        });
+        let runtime_root = temp.path().join("runtime");
+        let cache_root = temp.path().join("cache");
+        let mut state = reset_test_state(temp.path());
+        state.sidecar = crate::sidecar::SidecarState::with_test_backend(
+            temp.path().join("sidecar-cache"),
+            emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                runtime_root: runtime_root.clone(),
+                cache_root,
+                adb_path: "unused-test-adb".to_string(),
+            },
+        );
+        state.catalog = crate::catalog::CatalogDescriptor::for_test_root_with_identity(
+            catalog_root,
+            "emuchef.phase1.bundled",
+            "phase1-bundled-1",
+        );
+        state.adb = std::sync::Mutex::new(crate::adb::AdbManager::with_test_installation(
+            temp.path().join("platform-tools"),
+        ));
+        let sidecar = &state.sidecar;
+        let runtime = LinkedReviewRuntime {
+            sidecar,
+            serial: synthetic_target_device["serial"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            facts: json!({
+                "manufacturer": synthetic_target_device["manufacturer"].clone(),
+                "model": synthetic_target_device["model"].clone(),
+                "androidVersion": synthetic_target_device["androidVersion"].clone(),
+                "androidApiLevel": synthetic_target_device["androidApiLevel"].clone(),
+            }),
+            execution_id: std::sync::Mutex::new(None),
+        };
+        crate::commands::list_and_reconcile_inventory(&state, &mut |operation, payload| {
+            runtime.request(operation, payload)
+        })
+        .expect("the controlled test runtime should establish a synthetic device session");
+        let device_handle = state
+            .handles
+            .lock()
+            .unwrap()
+            .single_available_device_handle()
+            .unwrap();
+        crate::commands::probe_device_facts_with(&device_handle, &state, |serial| {
+            runtime.request(
+                "probeDevice",
+                json!({ "adbPath": "synthetic-test-adb", "serial": serial }),
+            )
+        })
+        .expect("the controlled runtime should supply synthetic device facts");
+        let session_epoch = state
+            .handles
+            .lock()
+            .unwrap()
+            .device_session_epoch(&device_handle)
+            .unwrap();
+        let runtime_generation = state.sidecar.try_generation().unwrap();
+        let platform_tools_revision = state.adb.lock().unwrap().revision();
+        let qualification_context = crate::device_observation::QualificationContextKey::new(
+            device_handle.clone(),
+            session_epoch,
+            runtime_generation,
+            platform_tools_revision,
+            platform_tools_revision,
+            "controlled-linked-test-capability-fingerprint",
+        );
+        state
+            .handles
+            .lock()
+            .unwrap()
+            .set_qualification_context(qualification_context.clone());
+        assert_eq!(
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle),
+            Some(qualification_context.clone())
+        );
+        let root_key =
+            crate::device_qualification::RootQualificationKey::from_context(&qualification_context);
+        let root_attempt = state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .begin(root_key.clone())
+            .unwrap();
+        assert!(state
+            .root_qualification
+            .lock()
+            .unwrap()
+            .complete_with_route(
+                root_attempt,
+                crate::device_qualification::RootQualificationState::Granted,
+                Some(crate::device_qualification::RootShellRoute::SuCommand),
+            ));
+        let base_payload = configuration_payload(
+            &state,
+            &device_handle,
+            "ayaneo.konkr_pocket_fit.base",
+            Some(vec![CONFIGURATION_RECIPE_ID.to_string()]),
+            std::collections::HashMap::new(),
+        )
+        .expect("the production Tauri configuration payload should be available");
+        let target_device = base_payload["targetDevice"].clone();
+
+        let description = sidecar
+            .request("describeConfiguration", base_payload.clone())
+            .unwrap();
+        let projected =
+            super::public_configuration_description(&description, "synthetic-retroarch-target");
+        let source = projected["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|input| input["inputId"] == "retroarch_cfg_source")
+            .expect("projected source selector should be available");
+        assert_eq!(source["effectiveConfigurationSource"], "none");
+        assert!(source["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["value"] == "managed"));
+        let selected_source = source["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["value"] == "managed")
+            .unwrap()["value"]
+            .clone();
+
+        let mut planning_payload = base_payload.clone();
+        planning_payload["bindings"] = json!({
+            format!("{CONFIGURATION_RECIPE_ID}/retroarch_cfg_source"): selected_source.clone(),
+        });
+        let managed_description = sidecar
+            .request("describeConfiguration", planning_payload.clone())
+            .unwrap();
+        state
+            .input_contracts
+            .lock()
+            .unwrap()
+            .replace(1, &managed_description);
+        let managed_projection = super::public_configuration_description(
+            &managed_description,
+            "synthetic-retroarch-target",
+        );
+        let managed_source = managed_projection["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|input| input["inputId"] == "retroarch_cfg_source")
+            .unwrap();
+        assert_eq!(managed_source["effectiveConfigurationSource"], "managed");
+        let mut request = |operation: &str, payload: Value| {
+            if operation == "prepareExecutionReview" {
+                assert_eq!(
+                    payload["mode"], "dry_run",
+                    "the production review bridge must prepare the same mode as simulated execution"
+                );
+            }
+            runtime.request(operation, payload)
+        };
+        let selected_bindings = std::collections::HashMap::from([(
+            format!("{CONFIGURATION_RECIPE_ID}/retroarch_cfg_source"),
+            selected_source.clone(),
+        )]);
+        let selected_recipes = Some(vec![CONFIGURATION_RECIPE_ID.to_string()]);
+        let prepared = prepare_execution_review_with_runtime(
+            device_handle.clone(),
+            "ayaneo.konkr_pocket_fit.base".to_string(),
+            selected_recipes.clone(),
+            selected_bindings.clone(),
+            1,
+            "dry_run",
+            &state,
+            &mut request,
+        )
+        .expect("projected selection should reach the production Tauri review path");
+        assert_eq!(prepared["executionMode"], "simulated");
+        assert!(prepared.get("reviewAuthorityId").is_none());
+        let review_handle = prepared["reviewHandle"].as_str().unwrap().to_string();
+        let review_snapshot = state
+            .handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .clone();
+        assert_eq!(review_snapshot.response["executionMode"], "dry_run");
+        assert_eq!(
+            review_snapshot.response["plan"]["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(review_snapshot.plan_digest.len(), 64);
+        let config_review = find_configuration_create_review(&prepared)
+            .expect("prepared review should include the configuration creation");
+        assert_eq!(config_review["source"], "EmuChef-generated");
+        assert_eq!(config_review["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(config_review["byteLength"], 21);
+        assert_eq!(config_review["confirmedAbsent"], true);
+        assert_eq!(
+            config_review["verificationScope"],
+            "Dry-run sandbox only; device target not checked"
+        );
+        let review_authority_id = review_snapshot.response["reviewAuthorityId"]
+            .as_str()
+            .expect("prepared review should retain its private sandbox authority");
+        let sandbox_target = runtime_root
+            .join("copy-review-preparation")
+            .join(review_authority_id)
+            .join("simulated-device/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+        assert!(
+            !sandbox_target.exists(),
+            "review preparation must leave its confirmed-absent target unchanged"
+        );
+        let second_prepared = prepare_execution_review_with_runtime(
+            device_handle.clone(),
+            "ayaneo.konkr_pocket_fit.base".to_string(),
+            selected_recipes.clone(),
+            selected_bindings.clone(),
+            1,
+            "dry_run",
+            &state,
+            &mut request,
+        )
+        .expect("a second independent review should be preparable");
+        let second_review_handle = second_prepared["reviewHandle"].as_str().unwrap();
+        let second_review_snapshot = state
+            .handles
+            .lock()
+            .unwrap()
+            .review(second_review_handle)
+            .unwrap()
+            .clone();
+        let second_authority_id = second_review_snapshot.response["reviewAuthorityId"]
+            .as_str()
+            .expect("the second review should own distinct sandbox authority");
+        assert_ne!(review_authority_id, second_authority_id);
+        let second_sandbox_target = runtime_root
+            .join("copy-review-preparation")
+            .join(second_authority_id)
+            .join("simulated-device/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+        assert_ne!(sandbox_target, second_sandbox_target);
+        assert!(
+            !second_sandbox_target.exists(),
+            "preparing another review must not create its target"
+        );
+        let unreviewed_start = sidecar.request(
+            "startExecution",
+            json!({
+                "plan": review_snapshot.response["plan"].clone(),
+                "planDigest": review_snapshot.plan_digest,
+                "mode": "dry_run",
+                "targetDevice": target_device.clone(),
+            }),
+        );
+        assert!(unreviewed_start.is_err());
+        assert!(!sandbox_target.exists());
+
+        let started = crate::execution::start_simulated_execution_with_runtime(
+            &review_handle,
+            &state,
+            &runtime,
+        )
+        .expect("the reviewed plan should start through the production simulated-start path");
+        assert_eq!(started["simulated"], true);
+        assert_eq!(started["verificationScope"], "simulation_only");
+        let execution_handle = started["executionHandle"]
+            .as_str()
+            .expect("dry-run should return its Tauri execution handle")
+            .to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let execution_report = loop {
+            let report = crate::execution::get_simulated_execution_with_runtime(
+                &state,
+                &runtime,
+                &execution_handle,
+            )
+            .expect("the Tauri simulated report projection should remain queryable");
+            if report["terminal"] == true {
+                break report;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sandbox execution did not reach a terminal report"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(
+            execution_report["status"], "succeeded",
+            "{execution_report:#}"
+        );
+        let sidecar_execution_id = runtime
+            .execution_id
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the sidecar should return its execution identity");
+        let authoritative_report = sidecar
+            .request(
+                "getExecution",
+                json!({ "executionId": sidecar_execution_id }),
+            )
+            .expect("the sidecar should retain the completed authoritative report");
+        let configuration_report = authoritative_report
+            .pointer("/execution/recipes/0/steps/0/outputs/configuration_create_report/value")
+            .expect("the sidecar report should include the configuration result");
+        assert_eq!(configuration_report["outcome"], "simulated_create_verified");
+        assert_eq!(configuration_report["sha256"], config_review["sha256"]);
+        assert_eq!(configuration_report["verified"], true);
+        assert_eq!(configuration_report["byteLength"], 21);
+        assert!(
+            sandbox_target.is_file(),
+            "the selected adapter should create the sandbox target"
+        );
+        assert_eq!(
+            std::fs::read(&sandbox_target).unwrap(),
+            b"video_threaded=false\n"
+        );
+        let expected_sha256 = format!("{:x}", Sha256::digest(b"video_threaded=false\n"));
+        assert_eq!(configuration_report["sha256"], expected_sha256);
+        assert_eq!(config_review["sha256"], expected_sha256);
+        assert!(
+            !second_sandbox_target.exists(),
+            "executing one reviewed plan must not write into another review's sandbox"
+        );
+        let stale_replay = crate::execution::request_dry_run_start(&runtime, &review_snapshot)
+            .expect_err("a consumed review authority must not start a second attempt");
+        assert!(
+            stale_replay.contains("stale"),
+            "a consumed review authority must be rejected as stale: {stale_replay}"
+        );
+        assert_eq!(
+            std::fs::read(&sandbox_target).unwrap(),
+            b"video_threaded=false\n",
+            "replay must preserve the first attempt's exact bytes"
+        );
+        let projected = execution_report;
+        assert_eq!(projected["verificationScope"], "simulation_only");
+        assert_eq!(projected["status"], "succeeded");
+        assert_eq!(projected["simulated"], true);
+        assert!(
+            projected["recipes"][0]["steps"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no device file was changed"),
+            "{projected:#}"
         );
     }
 }

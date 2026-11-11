@@ -1,0 +1,81 @@
+schema_version: 1
+kind: recipe
+id: app.retroarch.configure
+name: Configure RetroArch
+description: Create a configuration for an installed RetroArch copy or use a supplied file.
+recipe_dependencies: []
+provides:
+  features: []
+inputs:
+  retroarch_cfg:
+    type: file
+    role: generic
+    label: RetroArch config
+    description: RetroArch config file.
+    required: false
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions:
+        - cfg
+      path_kind: file
+    default: null
+  retroarch_cfg_source:
+    type: enum
+    role: generic
+    label: Configuration source
+    description: Choose whether EmuChef creates a configuration or uses the supplied file.
+    required: false
+    multiple: false
+    default: none
+    options:
+      - value: none
+        label: No configuration
+      - value: managed
+        label: Create from EmuChef setting
+      - value: uploaded
+        label: Use supplied file
+  retroarch_video_threaded:
+    type: boolean
+    role: generic
+    label: Threaded video
+    description: Value written when EmuChef creates the RetroArch configuration.
+    required: false
+    multiple: false
+    default: false
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: seed_retroarch_cfg
+    type: copy_files
+    app_ref: retroarch
+    name: Create RetroArch config
+    description: Write the selected configuration to the RetroArch app data folder.
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.retroarch_cfg
+      dest:
+        app_target: config
+      copy_policy: create_only
+    verify:
+      - type: file_exists
+        params:
+          path:
+            app_target: config
+config:
+  app_ref: retroarch
+  configuration: main
+  target: config
+  base:
+    template: default
+  variables:
+    video_threaded: retroarch_video_threaded
+  properties:
+    video_threaded:
+      label: Threaded video

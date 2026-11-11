@@ -32,6 +32,8 @@ use crate::runtime_configuration::{
 const TARGET_RECIPE: &str = "app.retroarch.provision";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.konkr_pocket_fit.base";
 const OPTIONAL_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
+const CONFIG_SOURCE_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg_source";
+const VIDEO_THREADED_INPUT_KEY: &str = "app.retroarch.provision/retroarch_video_threaded";
 const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
 const RETROARCH_LAUNCHER: &str = "com.retroarch.browser.mainmenu.MainMenuActivity";
 
@@ -374,12 +376,50 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
     assert!(!plan.runtime_capabilities.package_remove_for_user);
 
     assert!(contract.required_inputs.is_empty());
-    assert_eq!(result.resolved_inputs.len(), 1);
-    assert_eq!(result.resolved_inputs[0].key, OPTIONAL_INPUT_KEY);
-    assert!(result.resolved_inputs[0].value.is_none());
+    assert_eq!(
+        result
+            .resolved_inputs
+            .iter()
+            .map(|input| input.key.as_str())
+            .collect::<Vec<_>>(),
+        contract
+            .optional_inputs
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    assert!(result
+        .resolved_inputs
+        .iter()
+        .find(|input| input.key == OPTIONAL_INPUT_KEY)
+        .unwrap()
+        .value
+        .is_none());
+    assert_eq!(
+        result
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == CONFIG_SOURCE_INPUT_KEY)
+            .unwrap()
+            .value,
+        Some(Value::String("none".to_string()))
+    );
+    assert_eq!(
+        result
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == VIDEO_THREADED_INPUT_KEY)
+            .unwrap()
+            .value,
+        Some(Value::Bool(false))
+    );
     assert_eq!(
         contract.optional_inputs,
-        vec![OPTIONAL_INPUT_KEY.to_string()]
+        vec![
+            OPTIONAL_INPUT_KEY.to_string(),
+            CONFIG_SOURCE_INPUT_KEY.to_string(),
+            VIDEO_THREADED_INPUT_KEY.to_string(),
+        ]
     );
 
     for edge in &contract.material_dependency_edges {
@@ -658,13 +698,35 @@ fn retroarch_optional_cfg_is_not_required_for_planning() {
     let plan = result
         .plan
         .expect("plan should be generated without the optional config");
-    assert_eq!(result.resolved_inputs.len(), 1);
+    assert_eq!(result.resolved_inputs.len(), 3);
     assert_eq!(result.resolved_inputs[0].key, OPTIONAL_INPUT_KEY);
     assert!(
         result.resolved_inputs[0].value.is_none(),
         "unbound optional input must resolve to no value"
     );
+    assert_eq!(
+        result
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == CONFIG_SOURCE_INPUT_KEY)
+            .unwrap()
+            .value,
+        Some(Value::String("none".to_string()))
+    );
+    assert_eq!(
+        result
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == VIDEO_THREADED_INPUT_KEY)
+            .unwrap()
+            .value,
+        Some(Value::Bool(false))
+    );
     assert!(!plan.steps.is_empty());
+    assert!(!plan
+        .steps
+        .iter()
+        .any(|step| step.id.ends_with("/seed_retroarch_cfg")));
     assert!(
         plan.steps.iter().all(|step| !step.id.is_empty()),
         "no emitted step may carry an empty id"

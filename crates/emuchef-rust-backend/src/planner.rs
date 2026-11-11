@@ -758,7 +758,7 @@ pub struct ExecutionStepCondition {
     pub params: OrderedMap<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ExecutionParamValue {
     Ref {
@@ -768,6 +768,29 @@ pub enum ExecutionParamValue {
     Literal {
         value: Value,
     },
+}
+
+impl std::fmt::Debug for ExecutionParamValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ref { ref_value } => formatter
+                .debug_struct("Ref")
+                .field("ref_value", ref_value)
+                .finish(),
+            Self::Literal { value }
+                if value.get("type").and_then(Value::as_str) == Some("configuration_artifact") =>
+            {
+                formatter
+                    .debug_struct("Literal")
+                    .field("value", &"[configuration artifact redacted]")
+                    .finish()
+            }
+            Self::Literal { value } => formatter
+                .debug_struct("Literal")
+                .field("value", value)
+                .finish(),
+        }
+    }
 }
 
 /// Validate an app-context lifecycle step against only the reviewed plan.
@@ -3240,8 +3263,38 @@ fn validate_copy_files_param_values(
         step,
         normalized,
         "copy_policy",
-        &["merge", "replace", "sync"],
+        &["merge", "replace", "sync", "create_only"],
     ));
+    if matches!(
+        normalized.get("copy_policy"),
+        Some(ParamValue::Literal(Value::String(policy))) if policy == "create_only"
+    ) {
+        let supported_target = matches!(
+            recipe_id,
+            "app.retroarch.provision" | "app.retroarch.configure"
+        ) && step.id == "seed_retroarch_cfg"
+            && step.app_ref.as_deref() == Some("retroarch")
+            && matches!(
+                step.params.get("source"),
+                Some(ParamValue::Ref(reference)) if reference == "inputs.retroarch_cfg"
+            )
+            && matches!(
+                step.params.get("dest"),
+                Some(ParamValue::AppTarget(target)) if target == "config"
+            );
+        if !supported_target {
+            errors.push(PlannerMessage {
+                code: "copy_policy_create_only_scope_invalid".to_string(),
+                message: "The create_only copy policy is supported only for the RetroArch config file action."
+                    .to_string(),
+                details: json!({
+                    "recipe_ref": recipe_id,
+                    "step_id": step.id,
+                    "param": "copy_policy",
+                }),
+            });
+        }
+    }
     errors
 }
 

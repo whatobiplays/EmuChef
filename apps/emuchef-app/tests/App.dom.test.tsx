@@ -3525,6 +3525,17 @@ describe("Phase 5B workflow surfaces", () => {
           unavailableCapabilities: [],
         },
         {
+          id: "app.retroarch.configure",
+          name: "Configure RetroArch",
+          description: "Create or upload a configuration for an installed copy.",
+          contentRequirements: [],
+          selected: false,
+          recommended: false,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
           id: "recipe.root-tools",
           name: "Root tools",
           description: "Configure features that require root access.",
@@ -3566,7 +3577,7 @@ describe("Phase 5B workflow surfaces", () => {
         selector: ".recipe-selection-summary p",
       }),
     ).toBeTruthy();
-    expect(screen.getByText("Recipes · 4 of 4 shown")).toBeTruthy();
+    expect(screen.getByText("Recipes · 5 of 5 shown")).toBeTruthy();
     expect(screen.getByText("Also includes: Copy BIOS files")).toBeTruthy();
     expect(screen.getByText("Downloads files")).toBeTruthy();
     const optionalRootRecipe = screen.getByRole("checkbox", {
@@ -3585,7 +3596,7 @@ describe("Phase 5B workflow surfaces", () => {
     ).toBeTruthy();
     expect(screen.getByText("BIOS files required")).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: /RetroArch/ })).toBeNull();
-    expect(screen.getByText("Recipes · 1 of 4 shown")).toBeTruthy();
+    expect(screen.getByText("Recipes · 1 of 5 shown")).toBeTruthy();
 
     await user.clear(search);
     await user.click(screen.getByRole("radio", { name: "Unavailable" }));
@@ -3623,6 +3634,23 @@ describe("Phase 5B workflow surfaces", () => {
     expect(
       screen.getByText("No recipes match the current search and filter."),
     ).toBeTruthy();
+
+    await user.click(screen.getByRole("radio", { name: "All" }));
+    await user.click(screen.getByRole("checkbox", { name: /Configure RetroArch/ }));
+    expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
+    expect(
+      screen.getByText("Configure RetroArch", {
+        selector: ".recipe-selection-summary p",
+      }),
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: expect.arrayContaining(["app.retroarch.configure"]),
+      }),
+    );
   });
 
   test("selects only available backend-recommended recipes and revalidates them", async () => {
@@ -4808,6 +4836,7 @@ describe("device qualification controller integration", () => {
       expect.objectContaining({
         devicePlan: "plan.supported",
         selectedRecipes: ["recipe.one"],
+        mode: "dry_run",
       }),
     );
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
@@ -4833,6 +4862,83 @@ describe("device qualification controller integration", () => {
     expect(reason?.textContent).toBe(
       "The qualification session is already bound to its validated device for this app session.",
     );
+  });
+
+  test("binds the reviewed mode to the selected execution action", async () => {
+    const user = userEvent.setup();
+    mockApi.executionCapabilities.mockResolvedValue({
+      realExecutionCompiled: true,
+      platformToolsStatus: "ready",
+      executorReadiness: "ready",
+    } satisfies ExecutionCapabilities);
+    mockApi.prepareExecutionReview.mockResolvedValue({
+      reviewHandle: "review-real",
+      executionMode: "real",
+      setup: { name: "Reviewed setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    });
+    const availableRecipe = {
+      id: "recipe.one",
+      name: "Example emulator",
+      description: "Install the example emulator.",
+      selected: false,
+      recommended: false,
+      dependencyRequired: false,
+      available: true,
+      unavailableCapabilities: [],
+    };
+    mockApi.describeConfiguration.mockImplementation(
+      async (request: { selectedRecipes: string[] | null }) => {
+        const selectedRecipes = request.selectedRecipes ?? [];
+        return {
+          devicePlan: "plan.supported",
+          selectedRecipes,
+          expandedRecipes: selectedRecipes,
+          recipeOptions: [
+            {
+              ...availableRecipe,
+              selected: selectedRecipes.includes(availableRecipe.id),
+            },
+          ],
+          inputs: [],
+          diagnostics: [],
+        };
+      },
+    );
+
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    await renderReadyApp();
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Supported Handheld.*Connected/,
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    await user.click(screen.getByRole("checkbox", { name: /Example emulator/ }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", {
+      name: "Provide required files and options",
+    });
+    await user.click(
+      await screen.findByRole("radio", { name: "Apply to device" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+
+    await waitFor(() =>
+      expect(mockApi.prepareExecutionReview).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: "real" }),
+      ),
+    );
+    await screen.findByRole("button", { name: "Apply to Device" });
+    expect(
+      screen.queryByRole("button", { name: "Start simulation" }),
+    ).toBeNull();
   });
 });
 

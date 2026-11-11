@@ -80,6 +80,27 @@ impl CatalogDescriptor {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_root_with_identity(
+        root: PathBuf,
+        source_id: &'static str,
+        version: &'static str,
+    ) -> Result<Self, String> {
+        let digest = verify_and_digest(&root)?;
+        Ok(Self {
+            root,
+            identity: CatalogIdentityDto {
+                source_kind: "bundled",
+                source_id,
+                version: Some(version.to_string()),
+                content_digest: CatalogDigestDto {
+                    algorithm: "sha256",
+                    value: digest,
+                },
+            },
+        })
+    }
+
     pub fn resolve(app: &AppHandle) -> Result<Self, String> {
         let ordinary_root = if cfg!(debug_assertions) {
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -229,11 +250,39 @@ fn collect_files(
                 .to_string_lossy()
                 .replace('\\', "/");
             files.push((relative, path));
+        } else if file_type.is_file() && is_app_configuration_template_asset(root, &path) {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| "Bundled catalog entry escaped its root.".to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((relative, path));
         } else {
             return Err("Bundled catalog contains an unsupported entry type.".to_string());
         }
     }
     Ok(())
+}
+
+// App configuration templates live under `apps/<app-id>/`. Their bytes are
+// part of the catalog digest.
+fn is_app_configuration_template_asset(root: &Path, path: &Path) -> bool {
+    let Some(relative) = path.strip_prefix(root).ok().and_then(Path::to_str) else {
+        return false;
+    };
+    let components = relative.split('/').collect::<Vec<_>>();
+    components.len() >= 3
+        && components[0] == "apps"
+        && components[1].bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && components[1]
+            .bytes()
+            .any(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && Path::new(relative)
+            .extension()
+            .and_then(|value| value.to_str())
+            == Some("cfg")
 }
 
 #[cfg(any(test, all(debug_assertions, feature = "real-execution")))]
@@ -292,8 +341,8 @@ fn build_qualification_catalog_overlay(
                 "Qualification catalog identity collides with the ordinary catalog.".to_string(),
             );
         }
-        copy_catalog_tree(ordinary_root, &staging, false)?;
-        copy_catalog_tree(fragment_root, &staging, true)?;
+        copy_catalog_tree(ordinary_root, ordinary_root, &staging, false)?;
+        copy_catalog_tree(fragment_root, fragment_root, &staging, true)?;
         verify_and_digest(&staging)?;
         fs::rename(&staging, &overlay)
             .map_err(|_| "Qualification catalog could not be activated.".to_string())?;
@@ -317,6 +366,7 @@ fn reject_symlink_root(root: &Path, label: &str) -> Result<(), String> {
 
 #[cfg(any(test, all(debug_assertions, feature = "real-execution")))]
 fn copy_catalog_tree(
+    catalog_root: &Path,
     source: &Path,
     destination: &Path,
     reject_collisions: bool,
@@ -334,13 +384,14 @@ fn copy_catalog_tree(
         }
         let target = destination.join(entry.file_name());
         if file_type.is_dir() {
-            copy_catalog_tree(&entry.path(), &target, reject_collisions)?;
+            copy_catalog_tree(catalog_root, &entry.path(), &target, reject_collisions)?;
         } else if file_type.is_file()
             && (entry.file_name() == ".gitkeep"
                 || matches!(
                     entry.path().extension().and_then(|value| value.to_str()),
                     Some("yaml" | "yml")
-                ))
+                )
+                || is_app_configuration_template_asset(catalog_root, &entry.path()))
         {
             if reject_collisions && target.exists() {
                 return Err(
@@ -363,7 +414,12 @@ fn catalog_ids(root: &Path) -> Result<HashSet<String>, String> {
         collect_files(root, &root.join(directory), &mut files)?;
     }
     let mut ids = HashSet::new();
-    for (_, path) in files {
+    for (_, path) in files.into_iter().filter(|(_, path)| {
+        matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("yaml" | "yml")
+        )
+    }) {
         let bytes = fs::read(&path).map_err(|_| "Catalog file is unreadable.".to_string())?;
         let value = serde_yaml::from_slice::<serde_yaml::Value>(&bytes)
             .map_err(|_| "Catalog YAML is invalid.".to_string())?;
@@ -422,6 +478,28 @@ mod tests {
         let second = verify_and_digest(temp.path()).unwrap();
         assert_eq!(first, second);
         assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn digest_includes_app_owned_configuration_template_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in REQUIRED_DIRECTORIES {
+            fs::create_dir(temp.path().join(directory)).unwrap();
+            fs::write(temp.path().join(directory).join("one.yaml"), directory).unwrap();
+        }
+        let template_dir = temp.path().join("apps/retroarch");
+        fs::create_dir(&template_dir).unwrap();
+        let template = template_dir.join("default.cfg");
+        fs::write(&template, "video_threaded=false\n").unwrap();
+
+        let first = verify_and_digest(temp.path()).unwrap();
+        fs::write(&template, "video_threaded=true\n").unwrap();
+        let second = verify_and_digest(temp.path()).unwrap();
+
+        assert_ne!(
+            first, second,
+            "template bytes must be bound by the catalog digest"
+        );
     }
 
     #[test]

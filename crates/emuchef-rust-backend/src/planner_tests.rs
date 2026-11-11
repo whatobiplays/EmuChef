@@ -2480,7 +2480,7 @@ fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
             "copy",
             "copy_policy",
             "invalid_enum_value",
-            json!(["merge", "replace", "sync"]),
+            json!(["merge", "replace", "sync", "create_only"]),
             json!("overwrite"),
         ),
         (
@@ -4971,7 +4971,10 @@ fn repo_plan_e2e_normalized_steps_match_runtime_contract() {
         seed["params"]["source"],
         json!({"ref": "inputs.app.retroarch.provision/retroarch_cfg"})
     );
-    assert_eq!(seed["params"]["copy_policy"], json!({"value": "replace"}));
+    assert_eq!(
+        seed["params"]["copy_policy"],
+        json!({"value": "create_only"})
+    );
 }
 
 #[test]
@@ -5952,6 +5955,10 @@ fn authored_corpus_recipe_inventory() -> &'static [AuthoredCorpusRecipeEntry] {
         AuthoredCorpusRecipeEntry {
             path: "authored/recipes/app.obtainium.install.yaml",
             recipe_id: "app.obtainium.install",
+        },
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/app.retroarch.configure.yaml",
+            recipe_id: "app.retroarch.configure",
         },
         AuthoredCorpusRecipeEntry {
             path: "authored/recipes/app.retroarch.provision.yaml",

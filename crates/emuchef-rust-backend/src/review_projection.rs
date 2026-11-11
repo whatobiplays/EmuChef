@@ -81,11 +81,23 @@ pub(crate) struct ReviewAction {
     /// Manifest-derived changes within a reviewed selected directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_changes: Option<ReviewCopyChanges>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_create: Option<ReviewConfigurationCreate>,
     pub requirement: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_location: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewConfigurationCreate {
+    pub source: &'static str,
+    pub sha256: String,
+    pub byte_length: usize,
+    pub target_label: &'static str,
+    pub confirmed_absent: bool,
+    pub verification_scope: &'static str,
+}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReviewCopyChanges {
@@ -311,6 +323,7 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     let permission_plan = (step.type_name == "grant_permissions")
         .then(|| crate::planner::validated_plan_permission_plan(plan, step).ok())
         .flatten();
+    let configuration_create = configuration_create_review(step);
     let title = if let Some((app, permission_plan)) = permission_plan {
         Some(format!(
             "Grant {} permissions to {}",
@@ -421,18 +434,54 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
             deletions: snapshot.reviewed_deletion_set.clone(),
         }
     });
+    let device_location = if configuration_create.is_some() {
+        None
+    } else {
+        device_destination(step)
+    };
     ReviewAction {
         title,
-        description,
+        description: configuration_create
+            .as_ref()
+            .map(|_| "Creates the reviewed RetroArch configuration only when the target is absent.")
+            .map(str::to_string)
+            .or(description),
         reviewed_deletion_set: copy_snapshot.map(|snapshot| snapshot.reviewed_deletion_set.clone()),
         copy_changes,
+        configuration_create,
         requirement: if step.skip_if.is_empty() {
             "required"
         } else {
             "conditional"
         },
-        device_location: device_destination(step),
+        device_location,
     }
+}
+
+fn configuration_create_review(step: &ExecutionStep) -> Option<ReviewConfigurationCreate> {
+    let artifact = crate::executor::t13a_configuration_artifact_for_review(step)?;
+    let source = match artifact.get("sourceIdentity")?.get("kind")?.as_str()? {
+        "generated" => "EmuChef-generated",
+        "uploaded" => "Uploaded file",
+        _ => return None,
+    };
+    let sha256 = artifact.get("sha256")?.as_str()?.to_string();
+    let byte_length = artifact.get("bytes")?.as_array()?.len();
+    let precondition = artifact.get("absencePrecondition")?;
+    let confirmed_absent = precondition.get("status")?.as_str()? == "confirmed_absent";
+    let verification_scope = match precondition.get("authority")?.as_str()? {
+        "device" => "Device target checked during review",
+        "dry_run_sandbox" => "Dry-run sandbox only; device target not checked",
+        _ => return None,
+    };
+    Some(ReviewConfigurationCreate {
+        source,
+        sha256,
+        byte_length,
+        target_label: "RetroArch configuration file",
+        confirmed_absent,
+        verification_scope,
+    })
 }
 
 fn copy_entries_have_same_content(
@@ -790,6 +839,93 @@ mod tests {
         assert!(review.inputs[0].required);
         assert!(review.can_execute);
         assert_eq!(project_review(&plan.clone(), &[]), review);
+    }
+
+    #[test]
+    fn configuration_review_exposes_frozen_summary_without_raw_paths_or_bytes() {
+        use crate::planner::{ExecutionParamValue, ExecutionStep, ExecutionStepConstraints};
+
+        let source_path = "/private/uploads/reviewed.cfg";
+        let target_path =
+            "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg";
+        let exact_bytes = b"uploaded settings";
+        let sha256 = crate::runtime_configuration::sha256_hex(exact_bytes);
+        let artifact = serde_json::json!({
+            "type": "configuration_artifact",
+            "schemaVersion": 1,
+            "bytes": exact_bytes,
+            "byteLength": exact_bytes.len(),
+            "sha256": sha256,
+            "sourceIdentity": {
+                "kind": "uploaded",
+                "path": source_path,
+                "sha256": sha256,
+                "byteLength": exact_bytes.len()
+            },
+            "targetIdentity": {
+                "appId": "retroarch",
+                "targetId": "config",
+                "absolutePath": target_path
+            },
+            "absencePrecondition": {
+                "status": "confirmed_absent",
+                "authority": "dry_run_sandbox",
+                "parentBinding": "private-parent-identity"
+            }
+        });
+        let mut plan = immutable_review_plan();
+        let mut params = OrderedMap::new();
+        params.insert(
+            "source".into(),
+            ExecutionParamValue::Literal { value: artifact },
+        );
+        params.insert(
+            "dest".into(),
+            ExecutionParamValue::Literal {
+                value: serde_json::json!(target_path),
+            },
+        );
+        plan.steps.push(ExecutionStep {
+            id: "recipe.review/seed_retroarch_cfg".into(),
+            recipe_ref: "recipe.review".into(),
+            app_id: Some("retroarch".into()),
+            type_name: "copy_files".into(),
+            name: "Create RetroArch configuration".into(),
+            note: "Create selected configuration".into(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            permission_plan: None,
+            params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        });
+
+        let review = project_review(&plan, &[]);
+
+        let action = review.features[0]
+            .sections
+            .iter()
+            .find(|section| section.kind == "copies")
+            .unwrap()
+            .actions
+            .first()
+            .unwrap();
+        let config = action.configuration_create.as_ref().unwrap();
+        assert_eq!(config.source, "Uploaded file");
+        assert_eq!(config.sha256, sha256);
+        assert_eq!(config.byte_length, exact_bytes.len());
+        assert_eq!(config.target_label, "RetroArch configuration file");
+        assert!(config.confirmed_absent);
+        assert!(action.device_location.is_none());
+        let serialized = serde_json::to_string(&review).unwrap();
+        assert!(!serialized.contains(source_path));
+        assert!(!serialized.contains(target_path));
+        assert!(!serialized.contains("private-parent-identity"));
+        assert!(!serialized.contains("uploaded settings"));
+        assert!(serialized.contains(&sha256));
     }
 
     #[test]
