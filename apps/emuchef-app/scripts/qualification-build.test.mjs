@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,8 +15,20 @@ import test from "node:test";
 import { APP_ROOT } from "./run-device-qualification.mjs";
 
 const REPO_ROOT = path.resolve(APP_ROOT, "../..");
+const CARGO_FIXTURE_ROOT = path.join(
+  APP_ROOT,
+  "scripts/fixtures/qualification-build",
+);
+const CARGO_FIXTURE_MANIFEST = path.join(
+  CARGO_FIXTURE_ROOT,
+  "apps/emuchef-app/src-tauri/Cargo.toml",
+);
 const BUILD_SCRIPT_SOURCE = path.join(APP_ROOT, "src-tauri", "build.rs");
-const BUILD_MODULE_SOURCE = path.join(APP_ROOT, "src-tauri", "src/qualification_build.rs");
+const BUILD_MODULE_SOURCE = path.join(
+  APP_ROOT,
+  "src-tauri",
+  "src/qualification_build.rs",
+);
 const TOOL_SOURCE = path.join(REPO_ROOT, "tools/device-qualification.mjs");
 const INHERITED_BUILD_IDENTITY = JSON.stringify({
   appVersion: "0.1.0",
@@ -26,8 +45,13 @@ function writeFixtureFile(fixtureRoot, relativePath, contents) {
 }
 
 function createCargoFixture() {
-  const fixtureRoot = mkdtempSync(path.join(tmpdir(), "emuchef-qualification-cargo-"));
-  const buildScriptPath = path.join(fixtureRoot, "apps/emuchef-app/src-tauri/build.rs");
+  const fixtureRoot = mkdtempSync(
+    path.join(tmpdir(), "emuchef-qualification-cargo-"),
+  );
+  const buildScriptPath = path.join(
+    fixtureRoot,
+    "apps/emuchef-app/src-tauri/build.rs",
+  );
   const toolPath = path.join(fixtureRoot, "tools/device-qualification.mjs");
 
   try {
@@ -39,17 +63,25 @@ function createCargoFixture() {
     writeFixtureFile(
       fixtureRoot,
       "apps/emuchef-app/package-lock.json",
-      `${JSON.stringify({
-        name: "qualification-build-fixture",
-        version: "0.1.0",
-        lockfileVersion: 3,
-        requires: true,
-        packages: {
-          "": { name: "qualification-build-fixture", version: "0.1.0" },
+      `${JSON.stringify(
+        {
+          name: "qualification-build-fixture",
+          version: "0.1.0",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": { name: "qualification-build-fixture", version: "0.1.0" },
+          },
         },
-      }, null, 2)}\n`,
+        null,
+        2,
+      )}\n`,
     );
-    writeFixtureFile(fixtureRoot, "apps/emuchef-app/src/main.js", "export const fixture = true;\n");
+    writeFixtureFile(
+      fixtureRoot,
+      "apps/emuchef-app/src/main.js",
+      "export const fixture = true;\n",
+    );
     writeFixtureFile(
       fixtureRoot,
       "apps/emuchef-app/src-tauri/src/material.rs",
@@ -61,31 +93,19 @@ function createCargoFixture() {
       "crates/emuchef-rust-backend/src/lib.rs",
       "pub const FIXTURE_BACKEND: bool = true;\n",
     );
-    writeFixtureFile(
+    const fixtureManifestPath = path.join(
       fixtureRoot,
       "apps/emuchef-app/src-tauri/Cargo.toml",
-      `[package]
-name = "qualification-build-fixture"
-version = "0.1.0"
-edition = "2021"
-build = "build.rs"
-
-[features]
-default = []
-real-execution = []
-
-[dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
-tauri = { path = "../../../tauri-fixture" }
-
-[build-dependencies]
-serde_json = { version = "1.0", features = ["preserve_order"] }
-tauri-build = { version = "2.5.1", features = [] }
-
-[lib]
-path = "src/lib.rs"
-`,
+    );
+    copyFileSync(CARGO_FIXTURE_MANIFEST, fixtureManifestPath);
+    copyFileSync(
+      path.join(path.dirname(CARGO_FIXTURE_MANIFEST), "Cargo.lock"),
+      path.join(path.dirname(fixtureManifestPath), "Cargo.lock"),
+    );
+    cpSync(
+      path.join(CARGO_FIXTURE_ROOT, "tauri-fixture"),
+      path.join(fixtureRoot, "tauri-fixture"),
+      { recursive: true },
     );
     writeFixtureFile(
       fixtureRoot,
@@ -114,62 +134,59 @@ mod tests {
     );
     copyFileSync(
       BUILD_MODULE_SOURCE,
-      path.join(fixtureRoot, "apps/emuchef-app/src-tauri/src/qualification_build.rs"),
+      path.join(
+        fixtureRoot,
+        "apps/emuchef-app/src-tauri/src/qualification_build.rs",
+      ),
     );
-    writeFixtureFile(
-      fixtureRoot,
-      "tauri-fixture/Cargo.toml",
-      `[package]
-name = "tauri"
-version = "2.11.0"
-edition = "2021"
-links = "tauri"
-build = "build.rs"
-`,
-    );
-    writeFixtureFile(
-      fixtureRoot,
-      "tauri-fixture/build.rs",
-      'fn main() { println!("cargo:dev=true"); }\n',
-    );
-    writeFixtureFile(fixtureRoot, "tauri-fixture/src/lib.rs", "pub fn fixture_tauri() {}\n");
+    writeFixtureFile(fixtureRoot, ".gitignore", "/cargo-target/\n");
     writeFixtureFile(
       fixtureRoot,
       "apps/emuchef-app/src-tauri/tauri.conf.json",
-      `${JSON.stringify({
-        "$schema": "https://schema.tauri.app/config/2",
-        productName: "Qualification Build Fixture",
-        version: "0.1.0",
-        identifier: "com.emuchef.qualificationbuildfixture",
-        build: { frontendDist: "." },
-      }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          $schema: "https://schema.tauri.app/config/2",
+          productName: "Qualification Build Fixture",
+          version: "0.1.0",
+          identifier: "com.emuchef.qualificationbuildfixture",
+          build: { frontendDist: "." },
+        },
+        null,
+        2,
+      )}\n`,
     );
     copyFileSync(BUILD_SCRIPT_SOURCE, buildScriptPath);
     mkdirSync(path.dirname(toolPath), { recursive: true });
     copyFileSync(TOOL_SOURCE, toolPath);
-    execFileSync("cargo", [
-      "generate-lockfile",
-      "--manifest-path",
-      path.join(fixtureRoot, "apps/emuchef-app/src-tauri/Cargo.toml"),
-    ], {
-      cwd: fixtureRoot,
-      env: { ...process.env, CARGO_NET_OFFLINE: "true" },
-      stdio: "pipe",
-    });
-
     execFileSync("git", ["init"], { cwd: fixtureRoot, stdio: "pipe" });
-    execFileSync("git", ["config", "user.name", "Codex"], { cwd: fixtureRoot, stdio: "pipe" });
-    execFileSync("git", ["config", "user.email", "codex@example.com"], { cwd: fixtureRoot, stdio: "pipe" });
-    execFileSync("git", ["add", "."], { cwd: fixtureRoot, stdio: "pipe" });
-    execFileSync("git", ["commit", "-m", "initial Cargo qualification fixture"], {
+    execFileSync("git", ["config", "user.name", "Codex"], {
       cwd: fixtureRoot,
       stdio: "pipe",
     });
+    execFileSync("git", ["config", "user.email", "codex@example.com"], {
+      cwd: fixtureRoot,
+      stdio: "pipe",
+    });
+    execFileSync("git", ["add", "."], { cwd: fixtureRoot, stdio: "pipe" });
+    execFileSync(
+      "git",
+      ["commit", "-m", "initial Cargo qualification fixture"],
+      {
+        cwd: fixtureRoot,
+        stdio: "pipe",
+      },
+    );
 
     return {
       fixtureRoot,
-      materialPath: path.join(fixtureRoot, "apps/emuchef-app/src-tauri/src/material.rs"),
-      manifestPath: path.join(fixtureRoot, "apps/emuchef-app/src-tauri/Cargo.toml"),
+      materialPath: path.join(
+        fixtureRoot,
+        "apps/emuchef-app/src-tauri/src/material.rs",
+      ),
+      manifestPath: path.join(
+        fixtureRoot,
+        "apps/emuchef-app/src-tauri/Cargo.toml",
+      ),
       targetPath: path.join(fixtureRoot, "cargo-target"),
     };
   } catch (error) {
@@ -178,15 +195,23 @@ build = "build.rs"
   }
 }
 
-function cargoQualificationCheck(fixture) {
+function cargoQualificationCheck(fixture, { cargoHome } = {}) {
   return spawnSync(
     "cargo",
-    ["check", "--locked", "--manifest-path", fixture.manifestPath, "--features", "real-execution"],
+    [
+      "check",
+      "--locked",
+      "--manifest-path",
+      fixture.manifestPath,
+      "--features",
+      "real-execution",
+    ],
     {
       cwd: fixture.fixtureRoot,
       encoding: "utf8",
       env: {
         ...process.env,
+        ...(cargoHome ? { CARGO_HOME: cargoHome } : {}),
         CARGO_NET_OFFLINE: "true",
         CARGO_TARGET_DIR: fixture.targetPath,
         EMUCHEF_DEVICE_QUALIFICATION: "1",
@@ -209,7 +234,14 @@ function cargoQualificationTestWithInheritedIdentity(fixture) {
   delete environment.EMUCHEF_DEVICE_QUALIFICATION;
   return spawnSync(
     "cargo",
-    ["test", "--locked", "--manifest-path", fixture.manifestPath, "--features", "real-execution"],
+    [
+      "test",
+      "--locked",
+      "--manifest-path",
+      fixture.manifestPath,
+      "--features",
+      "real-execution",
+    ],
     {
       cwd: fixture.fixtureRoot,
       encoding: "utf8",
@@ -229,6 +261,25 @@ test("ordinary Cargo builds reject inherited qualification identity metadata", (
   }
 });
 
+test("a cold offline Cargo home reports the missing locked dependency", () => {
+  const fixture = createCargoFixture();
+  const cargoHome = mkdtempSync(path.join(tmpdir(), "emuchef-cargo-cold-"));
+
+  try {
+    const coldBuild = cargoQualificationCheck(fixture, { cargoHome });
+    const output = commandOutput(coldBuild);
+    assert.notEqual(coldBuild.status, 0, output);
+    assert.match(
+      output,
+      /no matching package named `serde` found|failed to download `serde v[^`]+`/i,
+    );
+    assert.match(output, /offline|--offline/i);
+  } finally {
+    rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+    rmSync(cargoHome, { recursive: true, force: true });
+  }
+});
+
 test("opted-in Cargo builds rerun build.rs after tracked material changes", () => {
   const fixture = createCargoFixture();
 
@@ -236,17 +287,24 @@ test("opted-in Cargo builds rerun build.rs after tracked material changes", () =
     const cleanBuild = cargoQualificationCheck(fixture);
     assert.equal(cleanBuild.status, 0, commandOutput(cleanBuild));
 
-    writeFileSync(fixture.materialPath, "pub const MATERIAL_VALUE: u8 = 2;\n", "utf8");
+    writeFileSync(
+      fixture.materialPath,
+      "pub const MATERIAL_VALUE: u8 = 2;\n",
+      "utf8",
+    );
     const dirtyFiles = execFileSync(
       "git",
-      ["status", "--porcelain", "--untracked-files=no"],
+      ["status", "--porcelain", "--untracked-files=all"],
       { cwd: fixture.fixtureRoot, encoding: "utf8" },
     );
     assert.match(dirtyFiles, /apps\/emuchef-app\/src-tauri\/src\/material\.rs/);
 
     const dirtyBuild = cargoQualificationCheck(fixture);
     assert.notEqual(dirtyBuild.status, 0, commandOutput(dirtyBuild));
-    assert.match(commandOutput(dirtyBuild), /device qualification requires a clean tracked worktree/);
+    assert.match(
+      commandOutput(dirtyBuild),
+      /device qualification requires a clean source worktree/,
+    );
   } finally {
     rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }

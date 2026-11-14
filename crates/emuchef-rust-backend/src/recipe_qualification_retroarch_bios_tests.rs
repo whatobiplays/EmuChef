@@ -160,6 +160,7 @@ fn plan_configuration_for(
     use crate::catalog_source::CatalogSnapshot;
     use crate::runtime_configuration::{
         plan_configuration, ConfigurationContextRequest, DeviceContextOverride,
+        RuntimeCapabilityAvailability,
     };
 
     let catalog = CatalogSnapshot::legacy_local(authored_root())
@@ -178,6 +179,14 @@ fn plan_configuration_for(
         );
     }
 
+    let runtime_capability_availability = retroarch_config.map(|_| RuntimeCapabilityAvailability {
+        root_shell: true,
+        app_data_write: true,
+        root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
+        config_create_write_evidence: Some(
+            crate::runtime_configuration::test_config_create_write_evidence(),
+        ),
+    });
     plan_configuration(ConfigurationContextRequest {
         catalog,
         configuration_root: None,
@@ -190,7 +199,7 @@ fn plan_configuration_for(
             ..DeviceContextOverride::default()
         }),
         target_device: None,
-        runtime_capability_availability: None,
+        runtime_capability_availability,
     })
     .expect("real authored combined configuration should prepare")
 }

@@ -459,7 +459,7 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
 }
 
 fn configuration_create_review(step: &ExecutionStep) -> Option<ReviewConfigurationCreate> {
-    let artifact = crate::executor::t13a_configuration_artifact_for_review(step)?;
+    let artifact = crate::executor::retroarch_config_create_artifact_for_review(step)?;
     let source = match artifact.get("sourceIdentity")?.get("kind")?.as_str()? {
         "generated" => "EmuChef-generated",
         "uploaded" => "Uploaded file",

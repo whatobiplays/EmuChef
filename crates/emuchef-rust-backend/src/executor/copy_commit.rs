@@ -497,6 +497,27 @@ impl ExecutionCopyCommitSnapshot {
 
     /// Rebuild the adapter request from the reviewed bytes, rejecting any
     /// internally inconsistent snapshot before the adapter can mutate a tree.
+    /// Checks that a reviewed host source tree still has the captured files and bytes.
+    pub(crate) fn validate_source_unchanged(&self) -> Result<(), CopyCommitError> {
+        let current_root = fs::canonicalize(&self.source_path).map_err(|error| {
+            CopyCommitError::Stale(format!(
+                "reviewed copy source is no longer available: {error}"
+            ))
+        })?;
+        if current_root != self.source_root {
+            return Err(CopyCommitError::Stale(
+                "copy source path no longer identifies the reviewed tree".to_string(),
+            ));
+        }
+        let current_manifest = scan_tree(&self.source_root)?;
+        if manifest_digest(&current_manifest) != self.source_digest_sha256 {
+            return Err(CopyCommitError::Stale(
+                "copy source tree changed after review".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn request_for_execution(
         &self,
         step_id: &str,

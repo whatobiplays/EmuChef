@@ -49,9 +49,20 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/emuchef-app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Provision locked qualification fixture dependencies
+        env:
+          CARGO_HOME: ${{ runner.temp }}/emuchef-qualification-cargo-home
+          CARGO_NET_OFFLINE: "false"
+        run: |
+          test ! -e "$CARGO_HOME"
+          cargo fetch --locked --manifest-path apps/emuchef-app/scripts/fixtures/qualification-build/apps/emuchef-app/src-tauri/Cargo.toml
       - name: Install JavaScript dependencies
         run: npm ci --prefix apps/emuchef-app
       - name: Verify packaging policy
+        env:
+          CARGO_HOME: ${{ runner.temp }}/emuchef-qualification-cargo-home
+          CARGO_NET_OFFLINE: "true"
         run: npm --prefix apps/emuchef-app run test:packaging
       - name: Verify Config Editor sidecar packaging
         run: npm --prefix apps/config-editor run test:sidecar-packaging

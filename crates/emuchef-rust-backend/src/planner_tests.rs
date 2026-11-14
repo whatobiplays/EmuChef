@@ -3503,6 +3503,17 @@ fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
                     "api_36".to_string(),
                 ],
             ),
+            (
+                "authored/device_profiles/konkr.pocket_advance.yaml".to_string(),
+                "konkr.pocket_advance".to_string(),
+                true,
+                false,
+                vec![
+                    "handheld_android".to_string(),
+                    "brand_konkr".to_string(),
+                    "retroarch_config_create_qualification".to_string(),
+                ],
+            ),
         ]
     );
 }
@@ -5077,6 +5088,57 @@ fn invalid_app_target_is_reported_before_capability_pruning() {
 }
 
 #[test]
+fn config_create_write_grant_does_not_admit_other_steps_to_the_same_target() {
+    let temp = TempDir::new().expect("config-create planner fixture should be created");
+    let mut input = repo_plan_e2e_input_for_device_plan(
+        "ayaneo.pocket_s_mini.base",
+        &temp,
+        &[RepoPlanE2eBinding::RetroarchCfg],
+    );
+    input.runtime_capabilities.app_data_write = false;
+    input.config_create_destination = Some(
+        "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg".to_string(),
+    );
+    input.explicit_input_bindings.insert(
+        "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        json!("uploaded"),
+    );
+
+    let authorized_result = planning_result_value(input.clone());
+    assert_eq!(
+        authorized_result["status"], "success",
+        "{authorized_result:#}"
+    );
+    assert!(execution_step_ids(&authorized_result)
+        .contains(&"app.retroarch.provision/seed_retroarch_cfg"));
+
+    let recipe = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.retroarch.provision")
+        .expect("selected RetroArch provisioning recipe should be loaded");
+    let unrelated_copy = recipe
+        .steps
+        .iter_mut()
+        .find(|step| step.id == "seed_retroarch_cfg")
+        .expect("authored configuration-create step should be present");
+    unrelated_copy.id = "copy_config_with_merge".to_string();
+    unrelated_copy.name = "Copy to the same target with merge policy".to_string();
+    unrelated_copy.params.insert(
+        "copy_policy".to_string(),
+        ParamValue::Literal(json!("merge")),
+    );
+
+    let result = planning_result_value(input);
+    assert_ne!(result["status"], "error", "{result:#}");
+    let step_ids = execution_step_ids(&result);
+    assert!(
+        !step_ids.contains(&"app.retroarch.provision/copy_config_with_merge"),
+        "a destination match alone must not grant app_data_write to another operation: {step_ids:#?}"
+    );
+}
+
+#[test]
 fn derived_target_capability_matches_selected_plan_constraint() {
     let case = repo_plan_e2e_cases().remove(1);
     let temp = TempDir::new().unwrap();
@@ -5258,6 +5320,7 @@ fn artifact_selection_input(
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
+        config_create_destination: None,
     }
 }
 
@@ -5306,6 +5369,7 @@ fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
+        config_create_destination: None,
     }
 }
 
@@ -5402,6 +5466,7 @@ fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
+        config_create_destination: None,
     }
 }
 
@@ -5476,6 +5541,7 @@ fn recipe_expansion_input(recipes: Vec<Recipe>, selected_recipe_refs: Vec<&str>)
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
+        config_create_destination: None,
     }
 }
 
@@ -5600,6 +5666,7 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
+        config_create_destination: None,
     }
 }
 
