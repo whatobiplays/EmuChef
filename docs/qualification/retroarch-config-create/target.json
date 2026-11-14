@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "qualificationTargetId": "konkr-pocket-advance-retroarch-config-create",
+  "qualificationScope": "RetroArch configuration-create qualification",
+  "selectionPolicy": "explicit_operator_selection",
+  "automaticProfileMatching": false,
+  "deviceSessionBinding": "blocked_by_existing_canonical_selection_contract",
+  "status": "pending_physical_qualification",
+  "profileId": "konkr.pocket_advance",
+  "retailIdentity": {
+    "value": "KONKR Pocket Advance",
+    "source": "owner_attestation"
+  },
+  "observations": {
+    "manufacturer": {
+      "value": "ARBOR",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "GT78-VN",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "12",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 31,
+      "source": "production_observation"
+    },
+    "abi": {
+      "value": "arm64-v8a",
+      "source": "production_observation"
+    },
+    "board": {
+      "value": "k85v1_64",
+      "source": "production_observation"
+    },
+    "buildId": {
+      "value": "SP1A.210812.016",
+      "source": "production_observation"
+    },
+    "firmwareFingerprint": {
+      "value": "ARBOR/GT78-VN/GT78-VN:11/RP1A.200720.011/mp1V95182:user/release-keys",
+      "source": "production_observation"
+    },
+    "rootRoute": {
+      "value": "Magisk su -c id returned UID 0",
+      "source": "explicit_root_check"
+    },
+    "selinux": {
+      "value": "Enforcing",
+      "source": "production_observation"
+    }
+  },
+  "unresolvedObservations": [
+    "The Android 12/API 31 observation conflicts with the Android 11 release encoded in the firmware fingerprint.",
+    "Brand, product, device, and connection-speed facts are not copied into this target record and must be re-observed before canonical registration."
+  ],
+  "capabilities": {
+    "rootShell": "verified",
+    "appDataWrite": "not_verified"
+  },
+  "canonicalWorkflowEvidence": "not_created"
+}

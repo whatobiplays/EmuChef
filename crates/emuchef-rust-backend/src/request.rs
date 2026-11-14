@@ -2579,14 +2579,17 @@ fn optional_runtime_capability_availability(
 ) -> Result<Option<runtime_configuration::RuntimeCapabilityAvailability>, ApiError> {
     match payload.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Object(value)) => serde_json::from_value(Value::Object(value.clone()))
-            .map(Some)
-            .map_err(|error| {
-                ApiError::invalid_request_with_details(
-                    format!("Request field '{field}' is invalid: {error}"),
-                    json!({ "field": field }),
-                )
-            }),
+        Some(Value::Object(value)) => serde_json::from_value::<
+            runtime_configuration::RuntimeCapabilityAvailabilityRequest,
+        >(Value::Object(value.clone()))
+        .map(runtime_configuration::RuntimeCapabilityAvailability::from)
+        .map(Some)
+        .map_err(|error| {
+            ApiError::invalid_request_with_details(
+                format!("Request field '{field}' is invalid: {error}"),
+                json!({ "field": field }),
+            )
+        }),
         Some(_) => Err(ApiError::invalid_request_with_details(
             format!("Request field '{field}' must be an object."),
             json!({ "field": field }),
@@ -3032,6 +3035,7 @@ steps:
                 name: Some("Example Setup Locations".to_string()),
                 description: None,
             }),
+            config_create_destination: None,
         };
         let planning = crate::planner::plan_execution(input);
         assert_eq!(

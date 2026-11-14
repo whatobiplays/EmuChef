@@ -586,6 +586,14 @@ pub(crate) fn match_device(
 
     let mut candidates = Vec::new();
     let mut safe_generic_plans = Vec::new();
+    let explicit_only_profile_model_matches = facts.model.as_deref().is_some_and(|model| {
+        profiles.iter().any(|profile| {
+            profile_requires_explicit_selection(profile)
+                && profile.match_.model_patterns.iter().any(|pattern| {
+                    regex::Regex::new(pattern).is_ok_and(|expression| expression.is_match(model))
+                })
+        })
+    });
     for profile in profiles {
         let evidence = evaluate_profile(facts, &profile.match_);
         let generic = profile_is_generic(&profile);
@@ -632,6 +640,8 @@ pub(crate) fn match_device(
                 "profileDescription": profile.description,
                 "confidence": confidence,
                 "reasons": evidence.reasons,
+                "requiresExplicitChoice": profile_requires_explicit_selection(&profile)
+                    || explicit_only_profile_model_matches,
             })
         }));
     }
@@ -653,7 +663,10 @@ pub(crate) fn match_device(
         .iter()
         .take_while(|candidate| candidate["confidence"] == confidence)
         .count();
-    let recommended_plan_id = if matches!(confidence, "exact" | "high") && top_count == 1 {
+    let recommended_plan_id = if matches!(confidence, "exact" | "high")
+        && top_count == 1
+        && candidates[0]["requiresExplicitChoice"] != true
+    {
         candidates[0]["planId"].as_str()
     } else {
         None
@@ -734,6 +747,19 @@ fn profile_is_generic(profile: &ProfileYaml) -> bool {
         .and_then(Value::as_bool)
         .unwrap_or(false)
         || profile.id.split('.').any(|part| part == "generic")
+}
+
+fn profile_requires_explicit_selection(profile: &ProfileYaml) -> bool {
+    profile
+        .metadata
+        .get("automatic_profile_matching")
+        .and_then(Value::as_bool)
+        == Some(false)
+        || profile
+            .metadata
+            .get("selection_policy")
+            .and_then(Value::as_str)
+            == Some("explicit_operator_selection")
 }
 
 fn evaluate_profile(facts: &DetectedDeviceFacts, criteria: &ProfileMatchYaml) -> MatchEvidence {
@@ -1665,7 +1691,105 @@ truncated
         );
     }
 
+    #[test]
+    fn explicit_only_profile_is_never_auto_recommended_when_it_is_the_only_match() {
+        let result = match_fixture_with_metadata(
+            "manufacturer_contains: [ARBOR]\nmodel_patterns: ['^GT78-VN$']\nandroid_version:\n  min: 12",
+            DetectedDeviceFacts {
+                manufacturer: Some("ARBOR".to_string()),
+                model: Some("GT78-VN".to_string()),
+                android_version: Some(12),
+                ..DetectedDeviceFacts::default()
+            },
+            false,
+            "automatic_profile_matching: false\nselection_policy: explicit_operator_selection",
+        );
+
+        assert_eq!(result["candidates"][0]["profileId"], "profile.test");
+        assert_eq!(result["candidates"][0]["requiresExplicitChoice"], true);
+        assert!(result["recommendedPlanId"].is_null());
+        assert_eq!(result["requiresExplicitChoice"], true);
+    }
+
+    #[test]
+    fn air_mini_and_konkr_profiles_never_auto_resolve_the_shared_model_identity() {
+        let root = tempfile::tempdir().unwrap();
+        for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+            fs::create_dir(root.path().join(directory)).unwrap();
+        }
+        let authored_profiles =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored/device_profiles");
+        for profile in ["ayaneo.pocket_air_mini", "konkr.pocket_advance"] {
+            fs::copy(
+                authored_profiles.join(format!("{profile}.yaml")),
+                root.path().join(format!("device_profiles/{profile}.yaml")),
+            )
+            .unwrap();
+            fs::write(
+                root.path().join(format!("device_plans/{profile}.yaml")),
+                format!(
+                    "id: plan.{profile}\nname: {profile}\ndescription: Test\ndevice_profile_ref: {profile}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let snapshot = CatalogSnapshot::legacy_local(root.path()).unwrap();
+        let result = match_device(
+            &snapshot,
+            &DetectedDeviceFacts {
+                manufacturer: Some("ARBOR".to_string()),
+                brand: Some("ARBOR".to_string()),
+                model: Some("GT78-VN".to_string()),
+                android_version: Some(12),
+                ..DetectedDeviceFacts::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result["candidates"].as_array().unwrap().len(), 2);
+        assert!(result["recommendedPlanId"].is_null());
+        assert_eq!(result["requiresExplicitChoice"], true);
+
+        let fingerprint_release_conflict = match_device(
+            &snapshot,
+            &DetectedDeviceFacts {
+                manufacturer: Some("ARBOR".to_string()),
+                brand: Some("ARBOR".to_string()),
+                model: Some("GT78-VN".to_string()),
+                android_version: Some(11),
+                ..DetectedDeviceFacts::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fingerprint_release_conflict["candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fingerprint_release_conflict["candidates"][0]["profileId"],
+            "ayaneo.pocket_air_mini"
+        );
+        assert_eq!(
+            fingerprint_release_conflict["candidates"][0]["requiresExplicitChoice"],
+            true
+        );
+        assert!(fingerprint_release_conflict["recommendedPlanId"].is_null());
+    }
+
     fn match_fixture(match_yaml: &str, facts: DetectedDeviceFacts, safe_generic: bool) -> Value {
+        match_fixture_with_metadata(match_yaml, facts, safe_generic, "")
+    }
+
+    fn match_fixture_with_metadata(
+        match_yaml: &str,
+        facts: DetectedDeviceFacts,
+        safe_generic: bool,
+        metadata: &str,
+    ) -> Value {
         let temp = tempfile::tempdir().unwrap();
         for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
             fs::create_dir(temp.path().join(directory)).unwrap();
@@ -1678,13 +1802,18 @@ truncated
         fs::write(
             temp.path().join("device_profiles/profile.yaml"),
             format!(
-                "id: {profile_id}\nname: Test profile\ndescription: Test\nmatch:\n{}\nmetadata:\n  safe_generic: {}\n",
+                "id: {profile_id}\nname: Test profile\ndescription: Test\nmatch:\n{}\nmetadata:\n  safe_generic: {}\n{}\n",
                 match_yaml
                     .lines()
                     .map(|line| format!("  {line}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                safe_generic
+                safe_generic,
+                metadata
+                    .lines()
+                    .map(|line| format!("  {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ),
         )
         .unwrap();

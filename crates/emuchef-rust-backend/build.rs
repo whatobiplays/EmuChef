@@ -6,6 +6,43 @@ use std::process::Command;
 fn main() {
     let source = PathBuf::from("src/executor/copy_commit_helper.c");
     println!("cargo:rerun-if-changed={}", source.display());
+    let qualification_identity = [
+        (
+            "EMUCHEF_CONFIG_CREATE_QUALIFICATION_BUILD_GIT_COMMIT",
+            "EMU_CHEF_CONFIG_CREATE_QUALIFICATION_BUILD_GIT_COMMIT",
+        ),
+        (
+            "EMUCHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_DIGEST",
+            "EMU_CHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_DIGEST",
+        ),
+        (
+            "EMUCHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_INPUTS_DIGEST",
+            "EMU_CHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_INPUTS_DIGEST",
+        ),
+    ];
+    let mut identity_values = Vec::with_capacity(qualification_identity.len());
+    for (input_name, output_name) in qualification_identity {
+        println!("cargo:rerun-if-env-changed={input_name}");
+        identity_values.push((output_name, env::var(input_name).ok()));
+    }
+    let supplied_identity_count = identity_values
+        .iter()
+        .filter(|(_, value)| value.is_some())
+        .count();
+    if supplied_identity_count != 0 && supplied_identity_count != identity_values.len() {
+        panic!(
+            "configuration-create qualification build identity must be supplied as a complete set"
+        );
+    }
+    if supplied_identity_count == identity_values.len() {
+        for (name, value) in identity_values {
+            let value = value.expect("complete qualification identity was checked");
+            if value.contains('\n') || value.contains('\r') {
+                panic!("configuration-create qualification build identity contains a line break");
+            }
+            println!("cargo:rustc-env={name}={value}");
+        }
+    }
     for name in [
         "ANDROID_NDK_HOME",
         "ANDROID_NDK_ROOT",

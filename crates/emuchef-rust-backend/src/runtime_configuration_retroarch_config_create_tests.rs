@@ -56,8 +56,23 @@ fn mode(value: &str) -> ResolvedInputBinding {
     )
 }
 
+fn runtime_availability(
+    root_shell: bool,
+    app_data_write: bool,
+    root_shell_route: Option<crate::planner::RootShellRoute>,
+) -> super::RuntimeCapabilityAvailability {
+    super::RuntimeCapabilityAvailability {
+        root_shell,
+        app_data_write,
+        root_shell_route,
+        config_create_write_evidence: None,
+    }
+}
+
 fn plan_request(explicit_bindings: OrderedMap<Value>) -> ConfigurationContextRequest {
     let authored_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+    // Existing host-planning fixtures model controlled, current write evidence.
+    // Authorization regressions pass explicit evidence-free availability.
     ConfigurationContextRequest {
         catalog: CatalogSnapshot::legacy_local(&authored_root).unwrap(),
         configuration_root: None,
@@ -70,8 +85,433 @@ fn plan_request(explicit_bindings: OrderedMap<Value>) -> ConfigurationContextReq
             ..Default::default()
         }),
         target_device: None,
-        runtime_capability_availability: None,
+        runtime_capability_availability: Some(super::RuntimeCapabilityAvailability {
+            root_shell: true,
+            app_data_write: true,
+            root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
+            config_create_write_evidence: Some(super::test_config_create_write_evidence()),
+        }),
     }
+}
+
+fn copy_authored_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_authored_tree(&source_path, &destination_path);
+        } else {
+            std::fs::copy(source_path, destination_path).unwrap();
+        }
+    }
+}
+
+fn config_create_plan_request(
+    authored_root: &Path,
+    recipe_id: &str,
+    explicit_bindings: OrderedMap<Value>,
+    write_evidence: bool,
+) -> ConfigurationContextRequest {
+    let runtime_capability_availability = super::RuntimeCapabilityAvailability {
+        root_shell: true,
+        app_data_write: true,
+        root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
+        config_create_write_evidence: write_evidence.then(super::test_config_create_write_evidence),
+    };
+    ConfigurationContextRequest {
+        catalog: CatalogSnapshot::legacy_local(authored_root).unwrap(),
+        configuration_root: None,
+        user_configuration: None,
+        device_plan: Some("ayaneo.konkr_pocket_fit.base".to_string()),
+        selected_recipes: Some(vec![recipe_id.to_string()]),
+        explicit_bindings,
+        device_context: Some(super::DeviceContextOverride {
+            android_api_level: Some(31),
+            ..Default::default()
+        }),
+        target_device: None,
+        runtime_capability_availability: Some(runtime_capability_availability),
+    }
+}
+
+#[test]
+fn caller_supplied_config_create_evidence_is_not_a_runtime_capability_field() {
+    let parsed =
+        serde_json::from_value::<super::RuntimeCapabilityAvailabilityRequest>(serde_json::json!({
+            "rootShell": true,
+            "appDataWrite": true,
+            "configCreateWriteEvidence": true,
+            "rootShellRoute": "suCommand"
+        }));
+
+    assert!(
+        parsed.is_err(),
+        "a sidecar caller cannot author configuration-create write evidence in runtime capabilities"
+    );
+}
+
+#[test]
+fn configuration_create_requires_evidence_for_both_profiles_recipes_and_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+    let authored_root = temp.path().join("authored");
+    copy_authored_tree(&source_root, &authored_root);
+    let plan_path = authored_root.join("device_plans/ayaneo.konkr_pocket_fit.base.yaml");
+    let plan_yaml = std::fs::read_to_string(&plan_path).unwrap();
+    let pocket_fit_profile = "device_profile_ref: ayaneo.konkr_pocket_fit";
+    assert_eq!(plan_yaml.matches(pocket_fit_profile).count(), 1);
+    let profile_path = authored_root.join("device_profiles/konkr.pocket_advance.yaml");
+    let profile_yaml = std::fs::read_to_string(&profile_path).unwrap();
+    assert_eq!(profile_yaml.matches("apk_install: false").count(), 1);
+    assert_eq!(profile_yaml.matches("app_launch: false").count(), 1);
+    // Enable unrelated provisioning prerequisites in this temporary fixture
+    // so the regression isolates the app_data_write evidence policy.
+    std::fs::write(
+        profile_path,
+        profile_yaml
+            .replace("apk_install: false", "apk_install: true")
+            .replace("app_launch: false", "app_launch: true"),
+    )
+    .unwrap();
+
+    let uploaded_config = temp.path().join("uploaded-retroarch.cfg");
+    std::fs::write(&uploaded_config, b"video_threaded = false\n").unwrap();
+
+    for profile_ref in ["konkr.pocket_advance", "ayaneo.konkr_pocket_fit"] {
+        std::fs::write(
+            &plan_path,
+            plan_yaml.replace(
+                pocket_fit_profile,
+                &format!("device_profile_ref: {profile_ref}"),
+            ),
+        )
+        .unwrap();
+        for recipe_id in ["app.retroarch.configure", "app.retroarch.provision"] {
+            for source in ["managed", "uploaded"] {
+                let mut bindings = OrderedMap::new();
+                bindings.insert(
+                    format!("{recipe_id}/retroarch_cfg_source"),
+                    serde_json::json!(source),
+                );
+                if source == "uploaded" {
+                    bindings.insert(
+                        format!("{recipe_id}/retroarch_cfg"),
+                        serde_json::json!(uploaded_config),
+                    );
+                }
+
+                let request = |write_evidence| {
+                    config_create_plan_request(
+                        &authored_root,
+                        recipe_id,
+                        bindings.clone(),
+                        write_evidence,
+                    )
+                };
+                let missing = plan_configuration(request(false)).unwrap();
+                assert!(
+                    missing.plan.is_none(),
+                    "root capability admitted {profile_ref}/{recipe_id}/{source} without scoped evidence"
+                );
+                assert!(
+                    missing
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "config_create_write_unverified"),
+                    "{profile_ref}/{recipe_id}/{source}: {:?}",
+                    missing.diagnostics
+                );
+
+                let prepared = super::prepare_configuration(request(true)).unwrap();
+                assert!(super::retroarch_config_create_selected(
+                    &prepared.binding_resolution.resolved_inputs
+                ));
+                let plan = plan_configuration(request(true))
+                    .unwrap()
+                    .plan
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "current scoped evidence should retain {profile_ref}/{recipe_id}/{source}: {:?}",
+                            prepared.diagnostics
+                        )
+                    });
+                assert!(plan
+                    .steps
+                    .iter()
+                    .any(|step| step.id.ends_with("/seed_retroarch_cfg")));
+                assert_eq!(
+                    serde_json::to_value(plan).unwrap()["source"]["device_profile_ref"],
+                    profile_ref
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+    let authored_root = temp.path().join("authored");
+    copy_authored_tree(&source_root, &authored_root);
+
+    let plan_path = authored_root.join("device_plans/ayaneo.konkr_pocket_fit.base.yaml");
+    let plan_yaml = std::fs::read_to_string(&plan_path).unwrap();
+    std::fs::write(
+        &plan_path,
+        plan_yaml.replace(
+            "device_profile_ref: ayaneo.konkr_pocket_fit",
+            "device_profile_ref: konkr.pocket_advance",
+        ),
+    )
+    .unwrap();
+
+    let profile_path = authored_root.join("device_profiles/konkr.pocket_advance.yaml");
+    let profile_yaml = std::fs::read_to_string(&profile_path).unwrap();
+    std::fs::write(
+        &profile_path,
+        profile_yaml
+            .replace("apk_install: false", "apk_install: true")
+            .replace("app_launch: false", "app_launch: true")
+            // The host fixture supplies an explicitly selected root-capable
+            // profile; the production KONKR defaults remain unchanged.
+            .replace("root_shell: false", "root_shell: true"),
+    )
+    .unwrap();
+
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        serde_json::json!("managed"),
+    );
+    let request =
+        config_create_plan_request(&authored_root, "app.retroarch.provision", bindings, true);
+    let plan = plan_configuration(request)
+        .unwrap()
+        .plan
+        .expect("verified configuration-create evidence should admit configuration creation");
+
+    assert!(!plan.runtime_capabilities.app_data_write);
+    assert!(plan
+        .steps
+        .iter()
+        .any(|step| step.id.ends_with("/seed_retroarch_cfg")));
+    let config_step = plan
+        .steps
+        .iter()
+        .find(|step| step.id.ends_with("/seed_retroarch_cfg"))
+        .unwrap();
+    let source_artifact = match config_step.params.get("source").unwrap() {
+        crate::planner::ExecutionParamValue::Literal { value } => value,
+        _ => panic!("configuration source should be frozen in the reviewed plan"),
+    };
+    assert_eq!(
+        source_artifact
+            .pointer("/targetIdentity/target/path")
+            .and_then(Value::as_str),
+        Some("files/retroarch.cfg")
+    );
+    assert!(crate::executor::runtime_capability_enabled(
+        &plan,
+        config_step,
+        "app_data_write"
+    ));
+    assert!(crate::executor::reviewed_root_authorized(&plan));
+    let mut wrong_destination = plan.clone();
+    let wrong_destination_step = wrong_destination
+        .steps
+        .iter_mut()
+        .find(|step| step.id.ends_with("/seed_retroarch_cfg"))
+        .unwrap();
+    if let Some(crate::planner::ExecutionParamValue::Literal { value }) =
+        wrong_destination_step.params.get_mut("source")
+    {
+        value["targetIdentity"]["target"]["path"] = serde_json::json!("files/other.cfg");
+    }
+    let wrong_destination_step = wrong_destination
+        .steps
+        .iter()
+        .find(|step| step.id.ends_with("/seed_retroarch_cfg"))
+        .unwrap();
+    assert!(!crate::executor::runtime_capability_enabled(
+        &wrong_destination,
+        wrong_destination_step,
+        "app_data_write"
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(
+        &wrong_destination
+    ));
+    let mut unrelated_step = config_step.clone();
+    unrelated_step.id = "app.retroarch.provision/copy_cores".to_string();
+    assert!(!crate::executor::runtime_capability_enabled(
+        &plan,
+        &unrelated_step,
+        "app_data_write"
+    ));
+    let mut generic_copy = config_step.clone();
+    generic_copy.id = "feature.copy_roms/import_config".to_string();
+    generic_copy.recipe_ref = "feature.copy_roms".to_string();
+    generic_copy.app_id = None;
+    generic_copy.params.insert(
+        "source".to_string(),
+        crate::planner::ExecutionParamValue::Literal {
+            value: serde_json::to_value(crate::planner::RuntimeValue {
+                type_name: "file_path".to_string(),
+                value: serde_json::json!("/tmp/retroarch.cfg"),
+                location: Some("host".to_string()),
+            })
+            .unwrap(),
+        },
+    );
+    generic_copy.params.insert(
+        "dest".to_string(),
+        crate::planner::ExecutionParamValue::Literal {
+            value: serde_json::json!(
+                "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg"
+            ),
+        },
+    );
+    generic_copy.params.insert(
+        "copy_policy".to_string(),
+        crate::planner::ExecutionParamValue::Literal {
+            value: serde_json::json!("merge"),
+        },
+    );
+    let mut plan_with_generic_writer = plan.clone();
+    plan_with_generic_writer
+        .source
+        .selected_recipe_refs
+        .push("feature.copy_roms".to_string());
+    plan_with_generic_writer.steps.push(generic_copy);
+    let generic_writer_error =
+        crate::executor::validate_supported_copy_plan(&plan_with_generic_writer)
+            .expect_err("scoped configuration evidence must not authorize a generic writer");
+    assert!(
+        generic_writer_error.contains("protected RetroArch configuration target"),
+        "{generic_writer_error}"
+    );
+    assert!(
+        !plan.runtime_capabilities.app_data_write,
+        "the plan receives only the scoped configuration grant"
+    );
+    assert!(plan.steps.iter().all(|step| {
+        !step
+            .constraints
+            .capabilities
+            .iter()
+            .any(|capability| capability == "app_data_write")
+            || step.id.ends_with("/seed_retroarch_cfg")
+    }));
+}
+
+#[test]
+fn explicit_none_leaves_unrelated_rooted_provisioning_on_legacy_authority() {
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        serde_json::json!("none"),
+    );
+    let mut request = plan_request(bindings);
+    request.runtime_capability_availability = Some(runtime_availability(
+        true,
+        true,
+        Some(crate::planner::RootShellRoute::SuCommand),
+    ));
+
+    let plan = plan_configuration(request)
+        .unwrap()
+        .plan
+        .expect("explicit none should leave unrelated provisioning available");
+    assert!(plan.runtime_capabilities.app_data_write);
+    assert!(!plan
+        .steps
+        .iter()
+        .any(|step| step.id.ends_with("/seed_retroarch_cfg")));
+    assert!(plan.steps.iter().any(|step| {
+        step.constraints
+            .capabilities
+            .iter()
+            .any(|capability| capability == "app_data_write")
+    }));
+}
+
+#[test]
+fn configuration_create_fails_closed_when_authored_app_target_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+    let authored_root = temp.path().join("authored");
+    copy_authored_tree(&source_root, &authored_root);
+
+    let app_path = authored_root.join("apps/retroarch.yaml");
+    let app_yaml = std::fs::read_to_string(&app_path).unwrap();
+    let expected_target =
+        "  config:\n    kind: file\n    location: external_app_data\n    path: files/retroarch.cfg";
+    assert_eq!(app_yaml.matches(expected_target).count(), 1);
+    std::fs::write(
+        app_path,
+        app_yaml.replace(
+            expected_target,
+            "  config:\n    kind: file\n    location: app_data\n    path: files/retroarch.cfg",
+        ),
+    )
+    .unwrap();
+
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        serde_json::json!("managed"),
+    );
+    let result = plan_configuration(config_create_plan_request(
+        &authored_root,
+        "app.retroarch.provision",
+        bindings,
+        true,
+    ))
+    .unwrap();
+    assert!(result.plan.is_none());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "retroarch_config_create_target_invalid"));
+}
+
+#[test]
+fn legacy_rooted_app_data_write_does_not_admit_config_create_without_evidence() {
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        serde_json::json!("managed"),
+    );
+    let legacy_availability =
+        || runtime_availability(true, true, Some(crate::planner::RootShellRoute::SuCommand));
+    let mut request = plan_request(bindings.clone());
+    request.runtime_capability_availability = Some(legacy_availability());
+
+    let prepared = super::prepare_configuration(request.clone()).unwrap();
+    let input = prepared
+        .planner_input("plan.legacy.rooted.test".to_string())
+        .unwrap();
+    assert_eq!(input.device_profile_ref, "ayaneo.konkr_pocket_fit");
+    assert!(input.runtime_capabilities.root_shell);
+    assert!(input.runtime_capabilities.app_data_write);
+
+    let denied = plan_configuration(request).unwrap();
+    assert!(denied.plan.is_none());
+    assert!(denied
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "config_create_write_unverified"));
+
+    let mut unverified_route = plan_request(bindings);
+    unverified_route.runtime_capability_availability = Some(runtime_availability(true, true, None));
+    let prepared = super::prepare_configuration(unverified_route).unwrap();
+    let input = prepared
+        .planner_input("plan.legacy.unverified.test".to_string())
+        .unwrap();
+    assert!(!input.runtime_capabilities.root_shell);
+    assert!(!input.runtime_capabilities.app_data_write);
 }
 
 fn saved_configuration_source(

@@ -6,7 +6,7 @@
 
 **Architectural decisions:** [ADRs 0005–0011](docs/adr/) record accepted design boundaries and rationale. **Current implemented runtime behavior:** the detailed sections below and the [architecture documents](docs/architecture/) describe existing Rust/Tauri/sidecar code, which is authoritative for what currently works; do not infer code behavior from future product requirements. **Qualification evidence:** the [qualification-obligation register](docs/product/qualification-obligations.md) indexes open target/phase evidence, while original records, runbooks and validators decide actual passing, missing or deferred status. **Active scheduling/tracking:** [EmuChef wayfinder map #43](https://github.com/whatobiplays/EmuChef/issues/43) and its same 23 child issues own work order and direct body-level blockers, not execution authority or physical evidence.
 
-**Scoped release authority:** The initial EmuChef proper public-release target is Apple Silicon macOS with applicable *current-product* Developer ID, notarization, Gatekeeper, clean-Mac, host artifact inspection, privacy/accessibility and selected supported-workflow evidence. See [release readiness](docs/release/release-readiness.md). The Config Editor public release and additional host platforms/cross-platform release automation are separately scoped/deferred, not unconditional prerequisites. Historical Config Editor signed artifacts remain evidence for those artifacts alone. This local documentation and GitHub tracking reconciliation does **not** authorize runtime work, commits/pushes, physical device operations, production enablement or release.
+**Scoped release authority:** The initial EmuChef proper public-release target is Apple Silicon macOS with applicable _current-product_ Developer ID, notarization, Gatekeeper, clean-Mac, host artifact inspection, privacy/accessibility and selected supported-workflow evidence. See [release readiness](docs/release/release-readiness.md). The Config Editor public release and additional host platforms/cross-platform release automation are separately scoped/deferred, not unconditional prerequisites. Historical Config Editor signed artifacts remain evidence for those artifacts alone. This local documentation and GitHub tracking reconciliation does **not** authorize runtime work, commits/pushes, physical device operations, production enablement or release.
 
 ## Language
 
@@ -158,7 +158,6 @@ _Avoid_: Sync
 A file transfer whose destination contents match the source, including explicit removal of destination-only files.
 _Avoid_: Sync
 
-
 This document is the standalone current-state contract for the repository.
 
 ## Product
@@ -306,7 +305,9 @@ both source bindings. The managed property appears only in managed mode, the fil
 picker only in uploaded mode, and neither appears in `none` mode. Selecting
 `none` leaves the configuration target unwritten.
 
-The full provisioning recipe launches RetroArch before `seed_retroarch_cfg`, so first-run initialization can create `retroarch.cfg`. T13a blocks when the target exists and leaves it unchanged.
+The full provisioning recipe launches RetroArch before `seed_retroarch_cfg`, so first-run initialization can create `retroarch.cfg`. Configuration creation blocks when the target exists and leaves it unchanged.
+
+Native plan admission rejects generic `copy_files` and device-targeted `extract_archive` steps when their normalized destination equals, contains, or lies beneath `files/retroarch.cfg`. Normalization handles `/sdcard`, `/storage/self/primary`, and dot segments. The check runs before execution, and reviewed directory-copy sources are revalidated before device mutation. The reviewed create-only step remains the only copy operation allowed to write this file.
 
 The separately selectable `app.retroarch.configure` recipe supports an already prepared RetroArch installation. Its dry-run review creates a unique sandbox root and binds that root to the one-shot review authority, reviewed plan digest, and target. Execution consumes that authority and uses the same sandbox root.
 
@@ -2431,8 +2432,7 @@ wrapper, with legal provenance restricted by field: ordinary identity facts use
 policy arrays and provenance-source changes do not alter identity while
 material fact-value changes do.
 
-Device qualification evidence records and fingerprints also use schema version
-2. Embedded `deviceTarget` facts preserve the same typed provenance wrappers as
+Device qualification evidence records and fingerprints also use schema version 2. Embedded `deviceTarget` facts preserve the same typed provenance wrappers as
 the registered target, while compatibility fingerprints project only the fact
 values needed by workflow invalidation. `fingerprint.emuchefBuild` is a strict
 object containing the application version, exact Git commit, canonical
@@ -3033,7 +3033,6 @@ The manual shared-storage qualification uses an isolated directory below
 `/sdcard/ROMs` and a sibling sentinel; it does not modify the production ROM
 Recipe destination or RetroArch definition.
 
-
 ## Prepared execution reviews
 
 The native application plans the selected configuration, then sends that plan,
@@ -3066,6 +3065,7 @@ observation and revalidates continuity, access, confinement, and destination
 preconditions. A failure before the first destination mutation leaves the
 selected destination untouched; staging and cleanup are reported separately.
 After an authorized mutation, failures retain T03's truthful partial outcome.
+
 ### Lost runtime and remote completion
 
 Before Tauri sends a real execution request, it retains a private operation identity bound to the runtime generation, monotonic attempt sequence, device handle, and reviewed plan digest. It also creates and syncs a fixed marker in app data. The marker contains generic state text only; it contains no device handle, plan digest, destination path, or volume identity. A valid execution identity replaces the unresolved-start fence with the normal active execution mapping.
@@ -3087,3 +3087,13 @@ Tauri reads local cleanup evidence without waiting on the sidecar state mutex.
 Contention or poisoned state is unconfirmed: recovery returns an error, leaves
 device and review authority unchanged, and retains any unresolved-start fence
 or Setup Location lease.
+
+## KONKR Pocket Advance RetroArch configuration qualification
+
+The owner-confirmed KONKR Pocket Advance has the separate qualification target `konkr-pocket-advance-retroarch-config-create` and authored profile `konkr.pocket_advance`. Operator selection is required. The target remains `pending_physical_qualification` and stays outside the four canonical device workflows. ARBOR / GT78-VN can match both this device and the AYANEO Pocket Air Mini, so model facts do not select a profile. The observed Android 12 / API 31 values remain separate from the Android 11 release text in the firmware fingerprint until fresh observations reconcile them.
+
+Root-shell access and protected app-data write evidence are separate authorities. Existing rooted workflows keep their profile restrictions, verified root route, session checks, execution guards, and legacy `appDataWrite` behavior. Managed or uploaded configuration creation through `app.retroarch.configure` and `app.retroarch.provision/seed_retroarch_cfg` requires current evidence for the resolved package, catalog, destination, device session, and root authority. Root access and legacy `appDataWrite` do not grant that evidence. The planner's scoped `app_data_write` grant applies only to the create-only operation resolved against RetroArch's `config` App Target; a destination match alone does not authorize another step. An explicit `none` keeps provisioning to other targets outside this gate. Generic copy and device-targeted archive extraction that could overlap `files/retroarch.cfg` are rejected during native plan admission; the reviewed create-only step remains the only copy operation authorized to write it. KONKR keeps `app_data_write: false`; no production probe or trusted evidence bridge is available, and real execution remains fail-closed. The policy boundary is recorded in [ADR 0012](docs/adr/0012-retroarch-config-create-policy-boundary.md).
+
+The qualification sidecar combines `real-execution` and `android-copy-commit-helper`. Ordinary debug and production profiles keep real execution disabled. Build provenance binds the source revision, material inputs, target, features, embedded ARM64 helper, and both sidecar digests. The Tauri qualification runner is development-only; release packaging with real execution is unsupported. Its build lock, state marker, and process lease pin the sidecar artifacts. Archival and release hold the same lock while validating and removing pins. The detailed build, recovery, and physical run procedure is in the [qualification runbook](docs/qualification/retroarch-config-create/PREPARATION.md).
+
+Physical qualification remains blocked on the production protected-app-data probe, trusted evidence bridge, KONKR session binding, and a reviewed physical race mechanism. The eventual run keeps RetroArch and a successfully created `retroarch.cfg` installed. The runbook lists each device mutation that requires owner authorization.

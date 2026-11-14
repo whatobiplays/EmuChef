@@ -30,7 +30,10 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const QUALIFICATION_ROOT = path.join(REPO_ROOT, "docs/testing/device-qualification");
+const QUALIFICATION_ROOT = path.join(
+  REPO_ROOT,
+  "docs/testing/device-qualification",
+);
 const EVIDENCE_ROOT = path.join(QUALIFICATION_ROOT, "evidence");
 
 const WORKFLOW_FIELDS = [
@@ -91,7 +94,10 @@ const FACT_SOURCE_BY_FIELD = new Map([
   ["androidApi", new Set(["production_observation"])],
   ["abiSocClass", new Set(["production_observation"])],
   ["rootState", new Set(["explicit_root_check"])],
-  ["connectionType", new Set(["operator_attestation", "production_observation"])],
+  [
+    "connectionType",
+    new Set(["operator_attestation", "production_observation"]),
+  ],
   ["firmwareBuild", new Set(["production_observation"])],
 ]);
 const COMPATIBILITY_DIMENSIONS = new Set([
@@ -184,12 +190,13 @@ export const TARGET_WIDE_FAILURES = [
 ];
 const AUTHORED_CONTENT_ENTRY_FIELDS = ["id", "sha256"];
 const EVIDENCE_ARTIFACT_FIELDS = ["id", "kind", "path", "sha256"];
-const EVIDENCE_DEVICE_TARGET_FIELDS = [
-  "id",
-  ...TARGET_FACT_FIELDS,
-];
+const EVIDENCE_DEVICE_TARGET_FIELDS = ["id", ...TARGET_FACT_FIELDS];
 const AUTOMATED_OBSERVATION_RECORD_FIELDS = ["id", "outcome", "observedAt"];
-const HUMAN_CHECKPOINT_RECORD_FIELDS = ["checkpointId", "outcome", "observedAt"];
+const HUMAN_CHECKPOINT_RECORD_FIELDS = [
+  "checkpointId",
+  "outcome",
+  "observedAt",
+];
 const TARGET_REGISTRATION_CANDIDATE_FIELDS = [
   "candidateSchemaVersion",
   "candidateId",
@@ -232,7 +239,8 @@ const CANDIDATE_ID_PATTERN = /^qualification-candidate-[0-9a-f]{32}$/;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const TARGET_ID_PATTERN = /^device-target-sha256:[0-9a-f]{64}$/;
-const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const RFC3339_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const EXECUTION_REPORT_ARTIFACT = {
   id: "execution-report",
@@ -290,7 +298,10 @@ function assertBoolean(value, label) {
 }
 
 function assertStringArray(value, label) {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) {
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || item.length === 0)
+  ) {
     fail(`${label} must be an array of non-empty strings`);
   }
   if (new Set(value).size !== value.length) {
@@ -312,7 +323,9 @@ function assertFactWrapper(target, field, validator) {
   }
   const legalSources = FACT_SOURCE_BY_FIELD.get(field);
   if (!legalSources?.has(fact.source)) {
-    fail(`device target ${field} source must be one of ${[...legalSources].join(", ")}`);
+    fail(
+      `device target ${field} source must be one of ${[...legalSources].join(", ")}`,
+    );
   }
   validator(fact.value, `device target ${field} value`);
   return fact;
@@ -322,7 +335,9 @@ export function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]),
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalize(value[key])]),
     );
   }
   return value;
@@ -336,8 +351,10 @@ export function canonicalDigest(value) {
 
 function isMaterialBuildPath(relativePath) {
   if (MATERIAL_EXCLUDED.includes(relativePath)) return false;
-  return MATERIAL_EXACT_FILES.has(relativePath)
-    || MATERIAL_ROOTS.some((prefix) => relativePath.startsWith(prefix));
+  return (
+    MATERIAL_EXACT_FILES.has(relativePath) ||
+    MATERIAL_ROOTS.some((prefix) => relativePath.startsWith(prefix))
+  );
 }
 
 export function materialBuildDigestFromEntries(entries) {
@@ -348,7 +365,10 @@ export function materialBuildDigestFromEntries(entries) {
 }
 
 function trackedFiles(repoRoot) {
-  const output = execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8" });
+  const output = execFileSync("git", ["ls-files", "-z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
   return output.split("\0").filter(Boolean);
 }
 
@@ -356,6 +376,14 @@ function trackedWorktreeStatus(repoRoot) {
   return execFileSync(
     "git",
     ["status", "--porcelain", "--untracked-files=no"],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+}
+
+function sourceWorktreeStatus(repoRoot) {
+  return execFileSync(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
     { cwd: repoRoot, encoding: "utf8" },
   );
 }
@@ -379,34 +407,48 @@ function validateBuildIdentity(buildIdentity, label) {
   if (!GIT_COMMIT_PATTERN.test(buildIdentity.gitCommit)) {
     fail(`${label} gitCommit must be a 40-character lowercase hex commit`);
   }
-  assertString(buildIdentity.materialBuildDigest, `${label} materialBuildDigest`);
+  assertString(
+    buildIdentity.materialBuildDigest,
+    `${label} materialBuildDigest`,
+  );
   if (!DIGEST_PATTERN.test(buildIdentity.materialBuildDigest)) {
     fail(`${label} materialBuildDigest must be a sha256 digest`);
   }
-  assertBoolean(buildIdentity.realExecutionEnabled, `${label} realExecutionEnabled`);
-  assertPositiveInteger(buildIdentity.qualificationContract, `${label} qualificationContract`);
+  assertBoolean(
+    buildIdentity.realExecutionEnabled,
+    `${label} realExecutionEnabled`,
+  );
+  assertPositiveInteger(
+    buildIdentity.qualificationContract,
+    `${label} qualificationContract`,
+  );
   return buildIdentity;
 }
 
 export function compareBuildIdentity(current, evidence) {
   validateBuildIdentity(current, "current build identity");
   validateBuildIdentity(evidence, "evidence build identity");
-  return current.appVersion === evidence.appVersion
-    && current.materialBuildDigest === evidence.materialBuildDigest
-    && current.realExecutionEnabled === evidence.realExecutionEnabled
-    && current.qualificationContract === evidence.qualificationContract
+  return current.appVersion === evidence.appVersion &&
+    current.materialBuildDigest === evidence.materialBuildDigest &&
+    current.realExecutionEnabled === evidence.realExecutionEnabled &&
+    current.qualificationContract === evidence.qualificationContract
     ? "compatible"
     : "invalidating";
 }
 
 export function buildMaterialIdentity({ repoRoot, requireClean = false }) {
-  if (requireClean && trackedWorktreeStatus(repoRoot) !== "") {
-    fail("device qualification requires a clean tracked worktree");
+  if (requireClean && sourceWorktreeStatus(repoRoot) !== "") {
+    fail("device qualification requires a clean source worktree");
   }
-  const packageJson = JSON.parse(readFileSync(path.join(repoRoot, "apps/emuchef-app/package.json"), "utf8"));
+  const packageJson = JSON.parse(
+    readFileSync(path.join(repoRoot, "apps/emuchef-app/package.json"), "utf8"),
+  );
   return {
     appVersion: packageJson.version,
-    gitCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim(),
+    gitCommit: execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim(),
     materialBuildDigest: materialBuildDigest(repoRoot),
     realExecutionEnabled: true,
     qualificationContract: QUALIFICATION_CONTRACT_VERSION,
@@ -428,12 +470,15 @@ export function deviceTargetId(target) {
 }
 
 function equalJson(left, right) {
-  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+  return (
+    JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right))
+  );
 }
 
 export function validateWorkflowCatalog(value) {
   assertExactKeys(value, ["schemaVersion", "workflows"], "workflow catalog");
-  if (value.schemaVersion !== 1) fail("workflow catalog schemaVersion must be 1");
+  if (value.schemaVersion !== 1)
+    fail("workflow catalog schemaVersion must be 1");
   if (!Array.isArray(value.workflows) || value.workflows.length === 0) {
     fail("workflow catalog must contain at least one workflow");
   }
@@ -446,9 +491,15 @@ export function validateWorkflowCatalog(value) {
     assertPositiveInteger(workflow.version, "workflow version");
     assertString(workflow.purpose, "workflow purpose");
     assertStringArray(workflow.productionRecipes, "workflow productionRecipes");
-    assertStringArray(workflow.requiredCapabilities, "workflow requiredCapabilities");
+    assertStringArray(
+      workflow.requiredCapabilities,
+      "workflow requiredCapabilities",
+    );
     assertStringArray(workflow.prerequisites, "workflow prerequisites");
-    assertStringArray(workflow.compatibilityDimensions, "workflow compatibilityDimensions");
+    assertStringArray(
+      workflow.compatibilityDimensions,
+      "workflow compatibilityDimensions",
+    );
     if (workflow.compatibilityDimensions.length === 0) {
       fail("workflow compatibilityDimensions must not be empty");
     }
@@ -457,14 +508,22 @@ export function validateWorkflowCatalog(value) {
         fail(`workflow compatibility dimension ${dimension} is not supported`);
       }
     }
-    if (!Array.isArray(workflow.automatedObservations) || workflow.automatedObservations.length === 0) {
+    if (
+      !Array.isArray(workflow.automatedObservations) ||
+      workflow.automatedObservations.length === 0
+    ) {
       fail("workflow automatedObservations must contain at least one entry");
     }
     const observationIds = new Set();
     for (const observation of workflow.automatedObservations) {
-      assertExactKeys(observation, AUTOMATED_OBSERVATION_FIELDS, "automated observation");
+      assertExactKeys(
+        observation,
+        AUTOMATED_OBSERVATION_FIELDS,
+        "automated observation",
+      );
       assertString(observation.id, "automated observation id");
-      if (observationIds.has(observation.id)) fail(`duplicate automated observation id ${observation.id}`);
+      if (observationIds.has(observation.id))
+        fail(`duplicate automated observation id ${observation.id}`);
       observationIds.add(observation.id);
       if (typeof observation.required !== "boolean") {
         fail("automated observation required must be a boolean");
@@ -477,17 +536,27 @@ export function validateWorkflowCatalog(value) {
     for (const checkpoint of workflow.humanCheckpoints) {
       assertExactKeys(checkpoint, HUMAN_CHECKPOINT_FIELDS, "human checkpoint");
       assertString(checkpoint.id, "human checkpoint id");
-      if (checkpointIds.has(checkpoint.id)) fail(`duplicate human checkpoint id ${checkpoint.id}`);
+      if (checkpointIds.has(checkpoint.id))
+        fail(`duplicate human checkpoint id ${checkpoint.id}`);
       checkpointIds.add(checkpoint.id);
       assertString(checkpoint.instruction, "human checkpoint instruction");
       assertString(checkpoint.fact, "human checkpoint fact");
-      if (!Array.isArray(checkpoint.allowedOutcomes) || checkpoint.allowedOutcomes.length === 0) {
-        fail("human checkpoint allowedOutcomes must contain at least one outcome");
+      if (
+        !Array.isArray(checkpoint.allowedOutcomes) ||
+        checkpoint.allowedOutcomes.length === 0
+      ) {
+        fail(
+          "human checkpoint allowedOutcomes must contain at least one outcome",
+        );
       }
       for (const outcome of checkpoint.allowedOutcomes) {
-        if (!CHECKPOINT_OUTCOME_SET.has(outcome)) fail(`human checkpoint outcome ${outcome} is not supported`);
+        if (!CHECKPOINT_OUTCOME_SET.has(outcome))
+          fail(`human checkpoint outcome ${outcome} is not supported`);
       }
-      if (new Set(checkpoint.allowedOutcomes).size !== checkpoint.allowedOutcomes.length) {
+      if (
+        new Set(checkpoint.allowedOutcomes).size !==
+        checkpoint.allowedOutcomes.length
+      ) {
         fail("human checkpoint allowedOutcomes must not contain duplicates");
       }
       if (typeof checkpoint.required !== "boolean") {
@@ -512,7 +581,13 @@ export function validateDeviceTargets(value, { authoredProfilesDir }) {
     if (seenIds.has(target.id)) fail(`duplicate device target id ${target.id}`);
     seenIds.add(target.id);
     assertFactWrapper(target, "profileId", assertString);
-    for (const field of ["manufacturer", "model", "androidVersion", "abiSocClass", "firmwareBuild"]) {
+    for (const field of [
+      "manufacturer",
+      "model",
+      "androidVersion",
+      "abiSocClass",
+      "firmwareBuild",
+    ]) {
       assertFactWrapper(target, field, assertString);
     }
     assertFactWrapper(target, "androidApi", assertPositiveInteger);
@@ -520,18 +595,32 @@ export function validateDeviceTargets(value, { authoredProfilesDir }) {
     if (!ROOT_STATES.has(rootState.value)) {
       fail(`device target rootState value ${rootState.value} is not supported`);
     }
-    const connectionType = assertFactWrapper(target, "connectionType", assertString);
+    const connectionType = assertFactWrapper(
+      target,
+      "connectionType",
+      assertString,
+    );
     if (!CONNECTION_TYPES.has(connectionType.value)) {
-      fail(`device target connectionType value ${connectionType.value} is not supported`);
+      fail(
+        `device target connectionType value ${connectionType.value} is not supported`,
+      );
     }
     if (target.id !== deviceTargetId(target)) {
       fail("device target id does not match canonical target identity");
     }
     assertStringArray(target.capabilities, "device target capabilities");
-    assertStringArray(target.deferredWorkflows, "device target deferredWorkflows");
-    const profilePath = path.join(authoredProfilesDir, `${targetFactValue(target, "profileId")}.yaml`);
+    assertStringArray(
+      target.deferredWorkflows,
+      "device target deferredWorkflows",
+    );
+    const profilePath = path.join(
+      authoredProfilesDir,
+      `${targetFactValue(target, "profileId")}.yaml`,
+    );
     if (!existsSync(profilePath)) {
-      fail(`unknown authored device profile ${targetFactValue(target, "profileId")}`);
+      fail(
+        `unknown authored device profile ${targetFactValue(target, "profileId")}`,
+      );
     }
   }
   return value;
@@ -542,7 +631,10 @@ export function loadWorkflowCatalog(catalogPath) {
 }
 
 export function loadDeviceTargets(targetsPath, options) {
-  return validateDeviceTargets(JSON.parse(readFileSync(targetsPath, "utf8")), options);
+  return validateDeviceTargets(
+    JSON.parse(readFileSync(targetsPath, "utf8")),
+    options,
+  );
 }
 
 function assertRfc3339(value, label) {
@@ -576,31 +668,53 @@ export function sealEvidenceRecord(unsealedRecord) {
 
 function validateFingerprint(fingerprint) {
   assertExactKeys(fingerprint, FINGERPRINT_FIELDS, "fingerprint");
-  if (fingerprint.schemaVersion !== 2) fail("fingerprint schemaVersion must be 2");
+  if (fingerprint.schemaVersion !== 2)
+    fail("fingerprint schemaVersion must be 2");
   validateBuildIdentity(fingerprint.emuchefBuild, "fingerprint emuchefBuild");
-  for (const field of ["runtimeContract", "deviceProfile", "firmwareBuild", "abiSocClass"]) {
+  for (const field of [
+    "runtimeContract",
+    "deviceProfile",
+    "firmwareBuild",
+    "abiSocClass",
+  ]) {
     assertString(fingerprint[field], `fingerprint ${field}`);
   }
   if (fingerprint.runtimeContract !== RUNTIME_CONTRACT) {
     fail(`fingerprint runtimeContract must be ${RUNTIME_CONTRACT}`);
   }
-  assertPositiveInteger(fingerprint.workflowVersion, "fingerprint workflowVersion");
+  assertPositiveInteger(
+    fingerprint.workflowVersion,
+    "fingerprint workflowVersion",
+  );
   assertPositiveInteger(fingerprint.androidApi, "fingerprint androidApi");
-  if (!ROOT_STATES.has(fingerprint.rootState)) fail(`fingerprint rootState ${fingerprint.rootState} is not supported`);
+  if (!ROOT_STATES.has(fingerprint.rootState))
+    fail(`fingerprint rootState ${fingerprint.rootState} is not supported`);
   if (!CONNECTION_TYPES.has(fingerprint.connectionType)) {
-    fail(`fingerprint connectionType ${fingerprint.connectionType} is not supported`);
+    fail(
+      `fingerprint connectionType ${fingerprint.connectionType} is not supported`,
+    );
   }
   if (!Array.isArray(fingerprint.authoredContent)) {
     fail("fingerprint authoredContent must be an array");
   }
   const seenIds = new Set();
   for (const entry of fingerprint.authoredContent) {
-    assertExactKeys(entry, AUTHORED_CONTENT_ENTRY_FIELDS, "authored content entry");
+    assertExactKeys(
+      entry,
+      AUTHORED_CONTENT_ENTRY_FIELDS,
+      "authored content entry",
+    );
     assertString(entry.id, "authored content entry id");
-    if (seenIds.has(entry.id)) fail(`duplicate authored content id ${entry.id}`);
+    if (seenIds.has(entry.id))
+      fail(`duplicate authored content id ${entry.id}`);
     seenIds.add(entry.id);
-    if (typeof entry.sha256 !== "string" || !SHA256_PATTERN.test(entry.sha256)) {
-      fail("authored content entry sha256 must be a 64-character lowercase hex digest");
+    if (
+      typeof entry.sha256 !== "string" ||
+      !SHA256_PATTERN.test(entry.sha256)
+    ) {
+      fail(
+        "authored content entry sha256 must be a 64-character lowercase hex digest",
+      );
     }
   }
   return true;
@@ -615,10 +729,16 @@ function compareDimension(dimension, currentFingerprint, evidenceFingerprint) {
   const field = DIMENSION_FIELDS[dimension];
   if (!field) return "not_applicable";
   if (dimension === "emuchef_build") {
-    return compareBuildIdentity(currentFingerprint.emuchefBuild, evidenceFingerprint.emuchefBuild);
+    return compareBuildIdentity(
+      currentFingerprint.emuchefBuild,
+      evidenceFingerprint.emuchefBuild,
+    );
   }
   if (dimension === "authored_content") {
-    return equalJson(currentFingerprint.authoredContent, evidenceFingerprint.authoredContent)
+    return equalJson(
+      currentFingerprint.authoredContent,
+      evidenceFingerprint.authoredContent,
+    )
       ? "compatible"
       : "invalidating";
   }
@@ -629,13 +749,23 @@ function compareDimension(dimension, currentFingerprint, evidenceFingerprint) {
 
 function buildEvidenceDeviceTarget(target) {
   return Object.fromEntries(
-    EVIDENCE_DEVICE_TARGET_FIELDS.map((field) => [field, structuredClone(target[field])]),
+    EVIDENCE_DEVICE_TARGET_FIELDS.map((field) => [
+      field,
+      structuredClone(target[field]),
+    ]),
   );
 }
 
-export function classifyCompatibility({ workflow, currentFingerprint, evidenceFingerprint }) {
+export function classifyCompatibility({
+  workflow,
+  currentFingerprint,
+  evidenceFingerprint,
+}) {
   for (const dimension of workflow.compatibilityDimensions) {
-    if (compareDimension(dimension, currentFingerprint, evidenceFingerprint) === "invalidating") {
+    if (
+      compareDimension(dimension, currentFingerprint, evidenceFingerprint) ===
+      "invalidating"
+    ) {
       return "invalidating";
     }
   }
@@ -655,23 +785,37 @@ function assertEvidenceDeviceTarget(deviceTarget, target) {
 }
 
 function validateAutomatedObservationRecords(record, workflow) {
-  const declared = new Set(workflow.automatedObservations.map((observation) => observation.id));
+  const declared = new Set(
+    workflow.automatedObservations.map((observation) => observation.id),
+  );
   if (!Array.isArray(record.automatedObservations)) {
     fail("automatedObservations must be an array");
   }
   const seen = new Set();
   for (const observation of record.automatedObservations) {
-    assertExactKeys(observation, AUTOMATED_OBSERVATION_RECORD_FIELDS, "automated observation record");
+    assertExactKeys(
+      observation,
+      AUTOMATED_OBSERVATION_RECORD_FIELDS,
+      "automated observation record",
+    );
     assertString(observation.id, "automated observation record id");
     if (!declared.has(observation.id)) {
-      fail(`automated observation id ${observation.id} is not declared by the workflow`);
+      fail(
+        `automated observation id ${observation.id} is not declared by the workflow`,
+      );
     }
-    if (seen.has(observation.id)) fail(`duplicate automated observation ${observation.id}`);
+    if (seen.has(observation.id))
+      fail(`duplicate automated observation ${observation.id}`);
     seen.add(observation.id);
     if (!["passed", "failed"].includes(observation.outcome)) {
-      fail(`automated observation ${observation.id} outcome ${observation.outcome} is not supported`);
+      fail(
+        `automated observation ${observation.id} outcome ${observation.outcome} is not supported`,
+      );
     }
-    assertRfc3339(observation.observedAt, `automated observation ${observation.id} observedAt`);
+    assertRfc3339(
+      observation.observedAt,
+      `automated observation ${observation.id} observedAt`,
+    );
   }
   return seen;
 }
@@ -687,7 +831,8 @@ function validateEvidenceArtifacts(record) {
   for (const artifact of record.artifacts) {
     assertExactKeys(artifact, EVIDENCE_ARTIFACT_FIELDS, "evidence artifact");
     assertString(artifact.id, "evidence artifact id");
-    if (seen.has(artifact.id)) fail(`duplicate evidence artifact ${artifact.id}`);
+    if (seen.has(artifact.id))
+      fail(`duplicate evidence artifact ${artifact.id}`);
     seen.add(artifact.id);
     if (artifact.id !== EXECUTION_REPORT_ARTIFACT.id) {
       fail(`evidence artifact id ${artifact.id} is not supported`);
@@ -696,10 +841,14 @@ function validateEvidenceArtifacts(record) {
       fail(`evidence artifact kind ${artifact.kind} is not supported`);
     }
     if (artifact.path !== EXECUTION_REPORT_ARTIFACT.path) {
-      fail("execution-report artifact path must be exactly execution-report.json");
+      fail(
+        "execution-report artifact path must be exactly execution-report.json",
+      );
     }
     if (!SHA256_PATTERN.test(artifact.sha256)) {
-      fail("execution-report artifact sha256 must be a 64-character lowercase hex digest");
+      fail(
+        "execution-report artifact sha256 must be a 64-character lowercase hex digest",
+      );
     }
   }
   return record.artifacts.length === 1 ? record.artifacts[0] : null;
@@ -714,27 +863,47 @@ function validateHumanCheckpointRecords(record, workflow) {
   }
   const seen = new Set();
   for (const checkpoint of record.humanCheckpoints) {
-    assertExactKeys(checkpoint, HUMAN_CHECKPOINT_RECORD_FIELDS, "human checkpoint record");
-    assertString(checkpoint.checkpointId, "human checkpoint record checkpointId");
+    assertExactKeys(
+      checkpoint,
+      HUMAN_CHECKPOINT_RECORD_FIELDS,
+      "human checkpoint record",
+    );
+    assertString(
+      checkpoint.checkpointId,
+      "human checkpoint record checkpointId",
+    );
     const contract = declared.get(checkpoint.checkpointId);
     if (!contract) {
-      fail(`human checkpoint id ${checkpoint.checkpointId} is not declared by the workflow`);
+      fail(
+        `human checkpoint id ${checkpoint.checkpointId} is not declared by the workflow`,
+      );
     }
-    if (seen.has(checkpoint.checkpointId)) fail(`duplicate human checkpoint ${checkpoint.checkpointId}`);
+    if (seen.has(checkpoint.checkpointId))
+      fail(`duplicate human checkpoint ${checkpoint.checkpointId}`);
     seen.add(checkpoint.checkpointId);
     if (!CHECKPOINT_OUTCOME_SET.has(checkpoint.outcome)) {
-      fail(`human checkpoint ${checkpoint.checkpointId} outcome ${checkpoint.outcome} is not supported`);
+      fail(
+        `human checkpoint ${checkpoint.checkpointId} outcome ${checkpoint.outcome} is not supported`,
+      );
     }
     if (!contract.allowedOutcomes.includes(checkpoint.outcome)) {
-      fail(`human checkpoint ${checkpoint.checkpointId} outcome ${checkpoint.outcome} is not allowed by its contract`);
+      fail(
+        `human checkpoint ${checkpoint.checkpointId} outcome ${checkpoint.outcome} is not allowed by its contract`,
+      );
     }
-    assertRfc3339(checkpoint.observedAt, `human checkpoint ${checkpoint.checkpointId} observedAt`);
+    assertRfc3339(
+      checkpoint.observedAt,
+      `human checkpoint ${checkpoint.checkpointId} observedAt`,
+    );
     if (
-      contract.required
-      && checkpoint.outcome === "unable_to_verify"
-      && (record.runValidity !== "invalid" || record.qualificationOutcome !== "not_observed")
+      contract.required &&
+      checkpoint.outcome === "unable_to_verify" &&
+      (record.runValidity !== "invalid" ||
+        record.qualificationOutcome !== "not_observed")
     ) {
-      fail('required checkpoint unable_to_verify requires runValidity "invalid" and qualificationOutcome "not_observed"');
+      fail(
+        'required checkpoint unable_to_verify requires runValidity "invalid" and qualificationOutcome "not_observed"',
+      );
     }
   }
   return seen;
@@ -742,9 +911,12 @@ function validateHumanCheckpointRecords(record, workflow) {
 
 export function validateEvidenceRecord(record, context) {
   assertExactKeys(record, EVIDENCE_RECORD_FIELDS, "evidence record");
-  if (record.schemaVersion !== 2) fail("evidence record schemaVersion must be 2");
-  if (!RUN_ID_PATTERN.test(record.runId)) fail("evidence record runId format is invalid");
-  if (!DIGEST_PATTERN.test(record.recordDigest)) fail("evidence record recordDigest format is invalid");
+  if (record.schemaVersion !== 2)
+    fail("evidence record schemaVersion must be 2");
+  if (!RUN_ID_PATTERN.test(record.runId))
+    fail("evidence record runId format is invalid");
+  if (!DIGEST_PATTERN.test(record.recordDigest))
+    fail("evidence record recordDigest format is invalid");
   assertRfc3339(record.capturedAt, "capturedAt");
   assertString(record.workflowId, "workflowId");
   assertPositiveInteger(record.workflowVersion, "workflowVersion");
@@ -753,47 +925,76 @@ export function validateEvidenceRecord(record, context) {
   );
   if (!workflow) fail(`unknown workflow id ${record.workflowId}`);
   if (record.workflowVersion !== workflow.version) {
-    fail(`workflow version ${record.workflowVersion} does not match catalog version ${workflow.version}`);
+    fail(
+      `workflow version ${record.workflowVersion} does not match catalog version ${workflow.version}`,
+    );
   }
-  const target = context.targets.find((candidate) => candidate.id === record.deviceTarget?.id);
+  const target = context.targets.find(
+    (candidate) => candidate.id === record.deviceTarget?.id,
+  );
   if (!target) fail(`unknown device target id ${record.deviceTarget?.id}`);
-  assertExactKeys(record.deviceTarget, EVIDENCE_DEVICE_TARGET_FIELDS, "evidence device target");
+  assertExactKeys(
+    record.deviceTarget,
+    EVIDENCE_DEVICE_TARGET_FIELDS,
+    "evidence device target",
+  );
   if (!TARGET_ID_PATTERN.test(record.deviceTarget.id)) {
     fail("evidence device target id format is invalid");
   }
   const observedFacts = new Map();
   for (const field of TARGET_FACT_FIELDS) {
-    const validator = field === "androidApi" ? assertPositiveInteger : assertString;
-    observedFacts.set(field, assertFactWrapper(record.deviceTarget, field, validator));
+    const validator =
+      field === "androidApi" ? assertPositiveInteger : assertString;
+    observedFacts.set(
+      field,
+      assertFactWrapper(record.deviceTarget, field, validator),
+    );
   }
   if (!ROOT_STATES.has(observedFacts.get("rootState").value)) {
-    fail(`evidence device target rootState value ${observedFacts.get("rootState").value} is not supported`);
+    fail(
+      `evidence device target rootState value ${observedFacts.get("rootState").value} is not supported`,
+    );
   }
   if (!CONNECTION_TYPES.has(observedFacts.get("connectionType").value)) {
-    fail(`evidence device target connectionType value ${observedFacts.get("connectionType").value} is not supported`);
+    fail(
+      `evidence device target connectionType value ${observedFacts.get("connectionType").value} is not supported`,
+    );
   }
   assertEvidenceDeviceTarget(record.deviceTarget, target);
   validateFingerprint(record.fingerprint);
   if (record.fingerprint.workflowVersion !== workflow.version) {
     fail("fingerprint workflowVersion does not match the workflow version");
   }
-  if (record.fingerprint.deviceProfile !== targetFactValue(target, "profileId")) {
+  if (
+    record.fingerprint.deviceProfile !== targetFactValue(target, "profileId")
+  ) {
     fail("fingerprint deviceProfile does not match the registered target");
   }
   if (
-    record.fingerprint.androidApi !== targetFactValue(target, "androidApi")
-    || record.fingerprint.firmwareBuild !== targetFactValue(target, "firmwareBuild")
-    || record.fingerprint.abiSocClass !== targetFactValue(target, "abiSocClass")
-    || record.fingerprint.rootState !== targetFactValue(target, "rootState")
-    || record.fingerprint.connectionType !== targetFactValue(target, "connectionType")
+    record.fingerprint.androidApi !== targetFactValue(target, "androidApi") ||
+    record.fingerprint.firmwareBuild !==
+      targetFactValue(target, "firmwareBuild") ||
+    record.fingerprint.abiSocClass !== targetFactValue(target, "abiSocClass") ||
+    record.fingerprint.rootState !== targetFactValue(target, "rootState") ||
+    record.fingerprint.connectionType !==
+      targetFactValue(target, "connectionType")
   ) {
     fail("fingerprint device facts do not match the registered target");
   }
-  const actualRecipeIds = record.fingerprint.authoredContent.map((entry) => entry.id);
-  if (JSON.stringify(actualRecipeIds) !== JSON.stringify(workflow.productionRecipes)) {
-    fail("fingerprint authoredContent does not match the workflow production recipes");
+  const actualRecipeIds = record.fingerprint.authoredContent.map(
+    (entry) => entry.id,
+  );
+  if (
+    JSON.stringify(actualRecipeIds) !==
+    JSON.stringify(workflow.productionRecipes)
+  ) {
+    fail(
+      "fingerprint authoredContent does not match the workflow production recipes",
+    );
   }
-  if (record.fingerprintDigest !== evidenceFingerprintDigest(record.fingerprint)) {
+  if (
+    record.fingerprintDigest !== evidenceFingerprintDigest(record.fingerprint)
+  ) {
     fail("fingerprintDigest does not match canonical fingerprint");
   }
   if (record.runId !== qualificationRunId(record)) {
@@ -806,25 +1007,37 @@ export function validateEvidenceRecord(record, context) {
     fail(`runValidity ${record.runValidity} is not supported`);
   }
   if (!QUALIFICATION_OUTCOMES.includes(record.qualificationOutcome)) {
-    fail(`qualificationOutcome ${record.qualificationOutcome} is not supported`);
+    fail(
+      `qualificationOutcome ${record.qualificationOutcome} is not supported`,
+    );
   }
   if (!TARGET_WIDE_FAILURES.includes(record.targetWideFailure)) {
     fail(`targetWideFailure ${record.targetWideFailure} is not supported`);
   }
-  if (!Array.isArray(record.limitations) || record.limitations.some((item) => typeof item !== "string" || item.length === 0)) {
+  if (
+    !Array.isArray(record.limitations) ||
+    record.limitations.some(
+      (item) => typeof item !== "string" || item.length === 0,
+    )
+  ) {
     fail("limitations must be an array of non-empty strings");
   }
   const executionReportArtifact = validateEvidenceArtifacts(record);
   validateAutomatedObservationRecords(record, workflow);
   validateHumanCheckpointRecords(record, workflow);
-  const executionReportObservation = record.automatedObservations.find((observation) => observation.id === EXECUTION_REPORT_ARTIFACT.id);
+  const executionReportObservation = record.automatedObservations.find(
+    (observation) => observation.id === EXECUTION_REPORT_ARTIFACT.id,
+  );
   for (const checkpoint of record.humanCheckpoints) {
     if (
-      PRE_EXECUTION_PREREQUISITE_CHECKPOINTS.has(checkpoint.checkpointId)
-      && checkpoint.outcome !== "pass"
-      && (record.runValidity !== "invalid" || record.qualificationOutcome !== "not_observed")
+      PRE_EXECUTION_PREREQUISITE_CHECKPOINTS.has(checkpoint.checkpointId) &&
+      checkpoint.outcome !== "pass" &&
+      (record.runValidity !== "invalid" ||
+        record.qualificationOutcome !== "not_observed")
     ) {
-      fail(`pre-execution checkpoint ${checkpoint.checkpointId} requires an invalid not_observed record when it does not pass`);
+      fail(
+        `pre-execution checkpoint ${checkpoint.checkpointId} requires an invalid not_observed record when it does not pass`,
+      );
     }
   }
   if (record.runValidity === "invalid") {
@@ -835,7 +1048,9 @@ export function validateEvidenceRecord(record, context) {
       fail("an invalid run cannot record a target-wide failure");
     }
     if (executionReportArtifact === null && executionReportObservation) {
-      fail("invalid run cannot record an execution-report observation without an execution-report artifact");
+      fail(
+        "invalid run cannot record an execution-report observation without an execution-report artifact",
+      );
     }
     return true;
   }
@@ -848,16 +1063,23 @@ export function validateEvidenceRecord(record, context) {
   if (!executionReportObservation) {
     fail("missing required automated observation execution-report");
   }
-  if (record.targetWideFailure !== null && record.qualificationOutcome !== "failed") {
+  if (
+    record.targetWideFailure !== null &&
+    record.qualificationOutcome !== "failed"
+  ) {
     fail("targetWideFailure requires a failed valid record");
   }
-  const observedIds = new Set(record.automatedObservations.map((observation) => observation.id));
+  const observedIds = new Set(
+    record.automatedObservations.map((observation) => observation.id),
+  );
   for (const observation of workflow.automatedObservations) {
     if (observation.required && !observedIds.has(observation.id)) {
       fail(`missing required automated observation ${observation.id}`);
     }
   }
-  const checkpointIds = new Set(record.humanCheckpoints.map((checkpoint) => checkpoint.checkpointId));
+  const checkpointIds = new Set(
+    record.humanCheckpoints.map((checkpoint) => checkpoint.checkpointId),
+  );
   for (const checkpoint of workflow.humanCheckpoints) {
     if (checkpoint.required && !checkpointIds.has(checkpoint.id)) {
       fail(`missing required human checkpoint ${checkpoint.id}`);
@@ -866,7 +1088,9 @@ export function validateEvidenceRecord(record, context) {
   if (record.qualificationOutcome === "passed") {
     for (const observation of workflow.automatedObservations) {
       if (observation.required) {
-        const result = record.automatedObservations.find((item) => item.id === observation.id);
+        const result = record.automatedObservations.find(
+          (item) => item.id === observation.id,
+        );
         if (!result || result.outcome !== "passed") {
           fail(`required automated observation ${observation.id} did not pass`);
         }
@@ -874,24 +1098,29 @@ export function validateEvidenceRecord(record, context) {
     }
     for (const checkpoint of workflow.humanCheckpoints) {
       if (checkpoint.required) {
-        const result = record.humanCheckpoints.find((item) => item.checkpointId === checkpoint.id);
+        const result = record.humanCheckpoints.find(
+          (item) => item.checkpointId === checkpoint.id,
+        );
         if (!result || result.outcome !== "pass") {
           fail(`required human checkpoint ${checkpoint.id} did not pass`);
         }
       }
     }
     if (
-      record.automatedObservations.some((item) => item.outcome === "failed")
-      || record.humanCheckpoints.some((item) => item.outcome === "fail")
+      record.automatedObservations.some((item) => item.outcome === "failed") ||
+      record.humanCheckpoints.some((item) => item.outcome === "fail")
     ) {
       fail("a passed record cannot contain failed observations or checkpoints");
     }
   } else {
-    const hasFailure = record.automatedObservations.some((item) => item.outcome === "failed")
-      || record.humanCheckpoints.some((item) => item.outcome === "fail")
-      || record.targetWideFailure !== null;
+    const hasFailure =
+      record.automatedObservations.some((item) => item.outcome === "failed") ||
+      record.humanCheckpoints.some((item) => item.outcome === "fail") ||
+      record.targetWideFailure !== null;
     if (!hasFailure) {
-      fail("failed record has no failed observation, failed checkpoint, or target-wide failure");
+      fail(
+        "failed record has no failed observation, failed checkpoint, or target-wide failure",
+      );
     }
   }
   return true;
@@ -904,10 +1133,17 @@ export function validateEvidenceBundle(bundle, context) {
   const executionReportArtifact = record.artifacts[0] ?? null;
   if (executionReportArtifact === null) {
     if (reportBytes !== null) {
-      fail("bundle must not include execution report bytes when no execution-report artifact is referenced");
+      fail(
+        "bundle must not include execution report bytes when no execution-report artifact is referenced",
+      );
     }
-    if (record.runValidity !== "invalid" || record.qualificationOutcome !== "not_observed") {
-      fail("only invalid not_observed evidence may omit an execution-report artifact");
+    if (
+      record.runValidity !== "invalid" ||
+      record.qualificationOutcome !== "not_observed"
+    ) {
+      fail(
+        "only invalid not_observed evidence may omit an execution-report artifact",
+      );
     }
     return true;
   }
@@ -925,29 +1161,70 @@ function validateBuildIdentitySchemaContract(schema) {
   const definition = schema.$defs?.qualificationBuildIdentity;
   assertObject(definition, "evidence schema qualificationBuildIdentity");
   if (definition.additionalProperties !== false) {
-    fail("evidence schema qualificationBuildIdentity must reject additional properties");
+    fail(
+      "evidence schema qualificationBuildIdentity must reject additional properties",
+    );
   }
   if (!equalJson(definition.required, BUILD_IDENTITY_FIELDS)) {
-    fail("evidence schema qualificationBuildIdentity required fields drifted from the validator");
+    fail(
+      "evidence schema qualificationBuildIdentity required fields drifted from the validator",
+    );
   }
-  assertObject(definition.properties, "evidence schema qualificationBuildIdentity properties");
+  assertObject(
+    definition.properties,
+    "evidence schema qualificationBuildIdentity properties",
+  );
   if (!equalJson(Object.keys(definition.properties), BUILD_IDENTITY_FIELDS)) {
-    fail("evidence schema qualificationBuildIdentity properties drifted from the validator");
+    fail(
+      "evidence schema qualificationBuildIdentity properties drifted from the validator",
+    );
   }
-  if (!equalJson(definition.properties.appVersion, { type: "string", minLength: 1 })) {
-    fail("evidence schema qualificationBuildIdentity appVersion drifted from the validator");
+  if (
+    !equalJson(definition.properties.appVersion, {
+      type: "string",
+      minLength: 1,
+    })
+  ) {
+    fail(
+      "evidence schema qualificationBuildIdentity appVersion drifted from the validator",
+    );
   }
-  if (!equalJson(definition.properties.gitCommit, { type: "string", pattern: GIT_COMMIT_PATTERN.source })) {
-    fail("evidence schema qualificationBuildIdentity gitCommit drifted from the validator");
+  if (
+    !equalJson(definition.properties.gitCommit, {
+      type: "string",
+      pattern: GIT_COMMIT_PATTERN.source,
+    })
+  ) {
+    fail(
+      "evidence schema qualificationBuildIdentity gitCommit drifted from the validator",
+    );
   }
-  if (!equalJson(definition.properties.materialBuildDigest, { type: "string", pattern: DIGEST_PATTERN.source })) {
-    fail("evidence schema qualificationBuildIdentity materialBuildDigest drifted from the validator");
+  if (
+    !equalJson(definition.properties.materialBuildDigest, {
+      type: "string",
+      pattern: DIGEST_PATTERN.source,
+    })
+  ) {
+    fail(
+      "evidence schema qualificationBuildIdentity materialBuildDigest drifted from the validator",
+    );
   }
-  if (!equalJson(definition.properties.realExecutionEnabled, { type: "boolean" })) {
-    fail("evidence schema qualificationBuildIdentity realExecutionEnabled drifted from the validator");
+  if (
+    !equalJson(definition.properties.realExecutionEnabled, { type: "boolean" })
+  ) {
+    fail(
+      "evidence schema qualificationBuildIdentity realExecutionEnabled drifted from the validator",
+    );
   }
-  if (!equalJson(definition.properties.qualificationContract, { type: "integer", minimum: 1 })) {
-    fail("evidence schema qualificationBuildIdentity qualificationContract drifted from the validator");
+  if (
+    !equalJson(definition.properties.qualificationContract, {
+      type: "integer",
+      minimum: 1,
+    })
+  ) {
+    fail(
+      "evidence schema qualificationBuildIdentity qualificationContract drifted from the validator",
+    );
   }
 }
 
@@ -959,38 +1236,84 @@ export function validateEvidenceSchemaContract(schema) {
   if (!equalJson(schema.properties.runValidity.enum, RUN_VALIDITIES)) {
     fail("evidence schema runValidity enum drifted from the validator");
   }
-  if (!equalJson(schema.properties.qualificationOutcome.enum, QUALIFICATION_OUTCOMES)) {
-    fail("evidence schema qualificationOutcome enum drifted from the validator");
+  if (
+    !equalJson(
+      schema.properties.qualificationOutcome.enum,
+      QUALIFICATION_OUTCOMES,
+    )
+  ) {
+    fail(
+      "evidence schema qualificationOutcome enum drifted from the validator",
+    );
   }
-  if (!equalJson(
-    schema.properties.targetWideFailure.oneOf[1].enum,
-    TARGET_WIDE_FAILURES.filter((value) => value !== null),
-  )) {
+  if (
+    !equalJson(
+      schema.properties.targetWideFailure.oneOf[1].enum,
+      TARGET_WIDE_FAILURES.filter((value) => value !== null),
+    )
+  ) {
     fail("evidence schema targetWideFailure enum drifted from the validator");
   }
   if (!equalJson(schema.$defs.fingerprint.required, FINGERPRINT_FIELDS)) {
     fail("evidence schema fingerprint fields drifted from the validator");
   }
   validateBuildIdentitySchemaContract(schema);
-  if (!equalJson(schema.$defs.deviceTarget.required, EVIDENCE_DEVICE_TARGET_FIELDS)) {
+  if (
+    !equalJson(
+      schema.$defs.deviceTarget.required,
+      EVIDENCE_DEVICE_TARGET_FIELDS,
+    )
+  ) {
     fail("evidence schema deviceTarget fields drifted from the validator");
   }
-  if (!equalJson(schema.$defs.automatedObservation.required, AUTOMATED_OBSERVATION_RECORD_FIELDS)) {
-    fail("evidence schema automated observation fields drifted from the validator");
+  if (
+    !equalJson(
+      schema.$defs.automatedObservation.required,
+      AUTOMATED_OBSERVATION_RECORD_FIELDS,
+    )
+  ) {
+    fail(
+      "evidence schema automated observation fields drifted from the validator",
+    );
   }
-  if (!equalJson(schema.$defs.humanCheckpoint.required, HUMAN_CHECKPOINT_RECORD_FIELDS)) {
+  if (
+    !equalJson(
+      schema.$defs.humanCheckpoint.required,
+      HUMAN_CHECKPOINT_RECORD_FIELDS,
+    )
+  ) {
     fail("evidence schema human checkpoint fields drifted from the validator");
   }
-  if (!equalJson(schema.$defs.automatedObservation.properties.outcome.enum, ["passed", "failed"])) {
-    fail("evidence schema automated observation outcomes drifted from the validator");
+  if (
+    !equalJson(schema.$defs.automatedObservation.properties.outcome.enum, [
+      "passed",
+      "failed",
+    ])
+  ) {
+    fail(
+      "evidence schema automated observation outcomes drifted from the validator",
+    );
   }
-  if (!equalJson(schema.$defs.humanCheckpoint.properties.outcome.enum, CHECKPOINT_OUTCOMES)) {
-    fail("evidence schema human checkpoint outcomes drifted from the validator");
+  if (
+    !equalJson(
+      schema.$defs.humanCheckpoint.properties.outcome.enum,
+      CHECKPOINT_OUTCOMES,
+    )
+  ) {
+    fail(
+      "evidence schema human checkpoint outcomes drifted from the validator",
+    );
   }
-  if (!equalJson(schema.$defs.evidenceArtifact.required, EVIDENCE_ARTIFACT_FIELDS)) {
+  if (
+    !equalJson(schema.$defs.evidenceArtifact.required, EVIDENCE_ARTIFACT_FIELDS)
+  ) {
     fail("evidence schema artifact fields drifted from the validator");
   }
-  if (!equalJson(schema.properties.artifacts.items, { $ref: "#/$defs/evidenceArtifact" })) {
+  if (
+    !equalJson(schema.properties.artifacts.items, {
+      $ref: "#/$defs/evidenceArtifact",
+    })
+  ) {
     fail("evidence schema artifacts item reference drifted from the validator");
   }
   return true;
@@ -1033,14 +1356,19 @@ export function deriveApplicability(workflow, target) {
     (capability) => !target.capabilities.includes(capability),
   );
   if (missing.length > 0) {
-    return { state: "not_applicable", reason: `missing_capabilities:${missing.join(",")}` };
+    return {
+      state: "not_applicable",
+      reason: `missing_capabilities:${missing.join(",")}`,
+    };
   }
   return { state: "required", reason: "production_intent_and_capabilities" };
 }
 
 function byDateThenId(left, right) {
-  return String(left.capturedAt).localeCompare(String(right.capturedAt))
-    || String(left.runId).localeCompare(String(right.runId));
+  return (
+    String(left.capturedAt).localeCompare(String(right.capturedAt)) ||
+    String(left.runId).localeCompare(String(right.runId))
+  );
 }
 
 export function selectCurrentEvidence({
@@ -1050,31 +1378,35 @@ export function selectCurrentEvidence({
   records,
 }) {
   const eligible = records
-    .filter((record) => (
-      record.deviceTarget?.id === target.id
-      && record.workflowId === workflow.id
-      && record.workflowVersion === workflow.version
-      && record.runValidity === "valid"
-      && classifyCompatibility({
-        workflow,
-        currentFingerprint,
-        evidenceFingerprint: record.fingerprint,
-      }) === "compatible"
-    ))
+    .filter(
+      (record) =>
+        record.deviceTarget?.id === target.id &&
+        record.workflowId === workflow.id &&
+        record.workflowVersion === workflow.version &&
+        record.runValidity === "valid" &&
+        classifyCompatibility({
+          workflow,
+          currentFingerprint,
+          evidenceFingerprint: record.fingerprint,
+        }) === "compatible",
+    )
     .sort(byDateThenId);
   return eligible.length > 0 ? eligible[eligible.length - 1] : null;
 }
 
 function newestHistoricalRecord({ workflow, target, records }) {
-  return records
-    .filter((record) => (
-      record.deviceTarget?.id === target.id
-      && record.workflowId === workflow.id
-      && record.workflowVersion === workflow.version
-      && record.runValidity === "valid"
-    ))
-    .sort(byDateThenId)
-    .at(-1) ?? null;
+  return (
+    records
+      .filter(
+        (record) =>
+          record.deviceTarget?.id === target.id &&
+          record.workflowId === workflow.id &&
+          record.workflowVersion === workflow.version &&
+          record.runValidity === "valid",
+      )
+      .sort(byDateThenId)
+      .at(-1) ?? null
+  );
 }
 
 export function deriveWorkflowState({
@@ -1106,7 +1438,8 @@ export function deriveWorkflowState({
       workflowId: workflow.id,
       applicability: "required",
       state: current.qualificationOutcome === "passed" ? "qualified" : "failed",
-      reason: current.limitations.length > 0 ? current.limitations.join("; ") : null,
+      reason:
+        current.limitations.length > 0 ? current.limitations.join("; ") : null,
       runId: current.runId,
       capturedAt: current.capturedAt,
       targetWideFailure: current.targetWideFailure,
@@ -1118,7 +1451,8 @@ export function deriveWorkflowState({
       workflowId: workflow.id,
       applicability: "required",
       state: "stale",
-      reason: "no current compatible evidence; historical valid evidence exists",
+      reason:
+        "no current compatible evidence; historical valid evidence exists",
       runId: historical.runId,
       capturedAt: historical.capturedAt,
       targetWideFailure: null,
@@ -1136,8 +1470,11 @@ export function deriveWorkflowState({
 }
 
 export function deriveDeviceSupportTier(workflowStates) {
-  if (workflowStates.some((row) => row.targetWideFailure !== null)) return "unqualified";
-  const required = workflowStates.filter((row) => row.applicability === "required");
+  if (workflowStates.some((row) => row.targetWideFailure !== null))
+    return "unqualified";
+  const required = workflowStates.filter(
+    (row) => row.applicability === "required",
+  );
   if (required.length === 0) return "unqualified";
   if (required.every((row) => row.state === "qualified")) return "qualified";
   if (required.some((row) => row.state === "qualified")) return "limited";
@@ -1149,16 +1486,32 @@ function qualificationPaths(repoRoot) {
   return {
     repoRoot,
     authoredProfilesDir,
-    workflowCatalogPath: path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"),
-    deviceTargetsPath: path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
-    evidenceRoot: path.join(repoRoot, "docs/testing/device-qualification/evidence"),
-    matrixPath: path.join(repoRoot, "docs/qualification/device-qualification-matrix.md"),
-    candidateRoot: path.join(repoRoot, ".emuchef_runtime/qualification-candidates"),
+    workflowCatalogPath: path.join(
+      repoRoot,
+      "docs/testing/device-qualification/workflow-catalog.json",
+    ),
+    deviceTargetsPath: path.join(
+      repoRoot,
+      "docs/testing/device-qualification/device-targets.json",
+    ),
+    evidenceRoot: path.join(
+      repoRoot,
+      "docs/testing/device-qualification/evidence",
+    ),
+    matrixPath: path.join(
+      repoRoot,
+      "docs/qualification/device-qualification-matrix.md",
+    ),
+    candidateRoot: path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+    ),
   };
 }
 
 function candidateDirectory(candidateId, repoRoot = REPO_ROOT) {
-  if (!CANDIDATE_ID_PATTERN.test(candidateId)) fail("qualification candidate id is invalid");
+  if (!CANDIDATE_ID_PATTERN.test(candidateId))
+    fail("qualification candidate id is invalid");
   return path.join(qualificationPaths(repoRoot).candidateRoot, candidateId);
 }
 
@@ -1180,7 +1533,8 @@ function assertCandidateRootIsSafe(repoRoot) {
     fail("qualification candidate root is outside the repository");
   }
   const repoMetadata = lstatIfPresent(resolvedRepoRoot);
-  if (repoMetadata?.isSymbolicLink()) fail("qualification repository root is a symlink");
+  if (repoMetadata?.isSymbolicLink())
+    fail("qualification repository root is a symlink");
   if (repoMetadata !== null && !repoMetadata?.isDirectory()) {
     fail("qualification repository root is not a directory");
   }
@@ -1188,7 +1542,8 @@ function assertCandidateRootIsSafe(repoRoot) {
   for (const component of relative ? relative.split(path.sep) : []) {
     current = path.join(current, component);
     const metadata = lstatIfPresent(current);
-    if (metadata?.isSymbolicLink()) fail("qualification candidate root contains a symlink");
+    if (metadata?.isSymbolicLink())
+      fail("qualification candidate root contains a symlink");
     if (metadata !== null && !metadata.isDirectory()) {
       fail("qualification candidate root contains a non-directory");
     }
@@ -1226,38 +1581,62 @@ function readRegularCandidateFile(filePath, label, encoding = null) {
 
 function validateCandidateReportMetadata(report, reportBytes) {
   if (report === null) {
-    if (reportBytes !== null) fail("qualification execution report is not declared by the candidate");
+    if (reportBytes !== null)
+      fail("qualification execution report is not declared by the candidate");
     return;
   }
-  assertExactKeys(report, CANDIDATE_REPORT_FIELDS, "qualification candidate report metadata");
+  assertExactKeys(
+    report,
+    CANDIDATE_REPORT_FIELDS,
+    "qualification candidate report metadata",
+  );
   if (report.path !== EXECUTION_REPORT_ARTIFACT.path) {
     fail("qualification candidate report path must be execution-report.json");
   }
   if (!Number.isSafeInteger(report.byteLength) || report.byteLength < 0) {
-    fail("qualification candidate report byteLength must be a non-negative integer");
+    fail(
+      "qualification candidate report byteLength must be a non-negative integer",
+    );
   }
-  if (typeof report.sha256 !== "string" || !SHA256_PATTERN.test(report.sha256)) {
+  if (
+    typeof report.sha256 !== "string" ||
+    !SHA256_PATTERN.test(report.sha256)
+  ) {
     fail("qualification candidate report sha256 is invalid");
   }
   if (reportBytes === null) fail("qualification execution report is missing");
-  if (report.byteLength !== reportBytes.length) fail("qualification execution report byte length does not match metadata");
+  if (report.byteLength !== reportBytes.length)
+    fail("qualification execution report byte length does not match metadata");
   const actualSha256 = createHash("sha256").update(reportBytes).digest("hex");
-  if (report.sha256 !== actualSha256) fail("qualification execution report digest does not match metadata");
+  if (report.sha256 !== actualSha256)
+    fail("qualification execution report digest does not match metadata");
 }
 
 function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
   const directory = candidateDirectory(candidateId, repoRoot);
   assertCandidateRootIsSafe(repoRoot);
   const directoryMetadata = lstatIfPresent(directory);
-  if (directoryMetadata?.isSymbolicLink()) fail("qualification candidate directory is a symlink");
+  if (directoryMetadata?.isSymbolicLink())
+    fail("qualification candidate directory is a symlink");
   if (directoryMetadata === null) {
     fail(`qualification candidate ${candidateId} does not exist`);
   }
-  if (!directoryMetadata.isDirectory()) fail("qualification candidate directory is invalid");
+  if (!directoryMetadata.isDirectory())
+    fail("qualification candidate directory is invalid");
   const candidatePath = path.join(directory, "candidate.json");
   assertRegularCandidateFile(candidatePath, "qualification candidate file");
-  const envelope = JSON.parse(readRegularCandidateFile(candidatePath, "qualification candidate file", "utf8"));
-  assertExactKeys(envelope, CANDIDATE_ENVELOPE_FIELDS, "qualification candidate envelope");
+  const envelope = JSON.parse(
+    readRegularCandidateFile(
+      candidatePath,
+      "qualification candidate file",
+      "utf8",
+    ),
+  );
+  assertExactKeys(
+    envelope,
+    CANDIDATE_ENVELOPE_FIELDS,
+    "qualification candidate envelope",
+  );
   if (envelope.candidateHandle !== candidateId) {
     fail("qualification candidate envelope does not match its directory id");
   }
@@ -1269,7 +1648,8 @@ function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
   if (candidate.candidateId !== candidateId) {
     fail("qualification candidate payload does not match its directory id");
   }
-  if (candidate.kind !== envelope.kind) fail("qualification candidate kind metadata is inconsistent");
+  if (candidate.kind !== envelope.kind)
+    fail("qualification candidate kind metadata is inconsistent");
   if (!equalJson(envelope.capturedAt, candidate.capturedAt ?? null)) {
     fail("qualification candidate capturedAt metadata is inconsistent");
   }
@@ -1277,7 +1657,11 @@ function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
     fail("qualification candidate build metadata is inconsistent");
   }
   const reportPath = path.join(directory, EXECUTION_REPORT_ARTIFACT.path);
-  const reportExists = assertRegularCandidateFile(reportPath, "qualification execution report", { required: false });
+  const reportExists = assertRegularCandidateFile(
+    reportPath,
+    "qualification execution report",
+    { required: false },
+  );
   const reportBytes = reportExists
     ? readRegularCandidateFile(reportPath, "qualification execution report")
     : null;
@@ -1289,17 +1673,27 @@ function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
   };
 }
 
-function assertCandidateMarkersAllowPromotion(candidateId, repoRoot = REPO_ROOT) {
+function assertCandidateMarkersAllowPromotion(
+  candidateId,
+  repoRoot = REPO_ROOT,
+) {
   const directory = candidateDirectory(candidateId, repoRoot);
   assertCandidateRootIsSafe(repoRoot);
   const directoryMetadata = lstatIfPresent(directory);
-  if (directoryMetadata?.isSymbolicLink()) fail("qualification candidate directory is a symlink");
+  if (directoryMetadata?.isSymbolicLink())
+    fail("qualification candidate directory is a symlink");
   if (directoryMetadata === null || !directoryMetadata.isDirectory()) {
     fail("qualification candidate directory is invalid");
   }
   for (const marker of ["session-poison.json", "session-audit-only"]) {
     const markerPath = path.join(directory, marker);
-    if (assertRegularCandidateFile(markerPath, "qualification non-promotable marker", { required: false })) {
+    if (
+      assertRegularCandidateFile(
+        markerPath,
+        "qualification non-promotable marker",
+        { required: false },
+      )
+    ) {
       fail("qualification candidate is marked non-promotable");
     }
   }
@@ -1344,16 +1738,29 @@ function validateQualificationRunCandidate(candidate) {
   }
   validateFingerprint(candidate.fingerprint);
   if (!RUN_VALIDITIES.includes(candidate.runValidity)) {
-    fail(`qualification_run candidate runValidity ${candidate.runValidity} is not supported`);
+    fail(
+      `qualification_run candidate runValidity ${candidate.runValidity} is not supported`,
+    );
   }
   if (!QUALIFICATION_OUTCOMES.includes(candidate.qualificationOutcome)) {
-    fail(`qualification_run candidate qualificationOutcome ${candidate.qualificationOutcome} is not supported`);
+    fail(
+      `qualification_run candidate qualificationOutcome ${candidate.qualificationOutcome} is not supported`,
+    );
   }
   if (!TARGET_WIDE_FAILURES.includes(candidate.targetWideFailure)) {
-    fail(`qualification_run candidate targetWideFailure ${candidate.targetWideFailure} is not supported`);
+    fail(
+      `qualification_run candidate targetWideFailure ${candidate.targetWideFailure} is not supported`,
+    );
   }
-  if (!Array.isArray(candidate.limitations) || candidate.limitations.some((item) => typeof item !== "string" || item.length === 0)) {
-    fail("qualification_run candidate limitations must be an array of non-empty strings");
+  if (
+    !Array.isArray(candidate.limitations) ||
+    candidate.limitations.some(
+      (item) => typeof item !== "string" || item.length === 0,
+    )
+  ) {
+    fail(
+      "qualification_run candidate limitations must be an array of non-empty strings",
+    );
   }
   validateEvidenceArtifacts(candidate);
   return candidate;
@@ -1363,19 +1770,28 @@ function validatePromotionBuildState(candidateBuild, repoRoot) {
   if (trackedWorktreeStatus(repoRoot) !== "") {
     fail("device qualification requires a clean tracked worktree");
   }
-  const currentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+  const currentCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  }).trim();
   if (candidateBuild.gitCommit !== currentCommit) {
     fail("qualification candidate git commit no longer matches HEAD");
   }
   const currentBuild = buildMaterialIdentity({ repoRoot, requireClean: false });
   if (candidateBuild.materialBuildDigest !== currentBuild.materialBuildDigest) {
-    fail("qualification candidate material build digest no longer matches the current repository state");
+    fail(
+      "qualification candidate material build digest no longer matches the current repository state",
+    );
   }
   if (candidateBuild.qualificationContract !== QUALIFICATION_CONTRACT_VERSION) {
-    fail(`qualification candidate qualificationContract must be ${QUALIFICATION_CONTRACT_VERSION}`);
+    fail(
+      `qualification candidate qualificationContract must be ${QUALIFICATION_CONTRACT_VERSION}`,
+    );
   }
   if (candidateBuild.realExecutionEnabled !== true) {
-    fail("qualification candidate must be captured from a real-execution-enabled build");
+    fail(
+      "qualification candidate must be captured from a real-execution-enabled build",
+    );
   }
   return currentBuild;
 }
@@ -1391,15 +1807,24 @@ function writeTemporaryFile(targetPath, content, fsOps) {
   return temporaryPath;
 }
 
-function renderMatrixForState({ workflowCatalog, targets, records, currentBuild, runtimeContract, authoredContentDigests }) {
-  return renderQualificationMatrix(projectQualificationState({
-    workflowCatalog,
-    targets,
-    records,
-    currentBuild,
-    runtimeContract,
-    authoredContentDigests,
-  }));
+function renderMatrixForState({
+  workflowCatalog,
+  targets,
+  records,
+  currentBuild,
+  runtimeContract,
+  authoredContentDigests,
+}) {
+  return renderQualificationMatrix(
+    projectQualificationState({
+      workflowCatalog,
+      targets,
+      records,
+      currentBuild,
+      runtimeContract,
+      authoredContentDigests,
+    }),
+  );
 }
 
 function reserveCreateNewDirectory(targetPath, fsOps) {
@@ -1408,7 +1833,9 @@ function reserveCreateNewDirectory(targetPath, fsOps) {
     fsOps.mkdirSync(targetPath);
   } catch (error) {
     if (error?.code === "EEXIST" || error?.code === "ENOTEMPTY") {
-      fail(`canonical evidence directory ${path.basename(targetPath)} already exists`);
+      fail(
+        `canonical evidence directory ${path.basename(targetPath)} already exists`,
+      );
     }
     throw error;
   }
@@ -1417,12 +1844,17 @@ function reserveCreateNewDirectory(targetPath, fsOps) {
 function currentQualificationContext(repoRoot) {
   const paths = qualificationPaths(repoRoot);
   const workflowCatalog = loadWorkflowCatalog(paths.workflowCatalogPath);
-  const targetFile = loadDeviceTargets(paths.deviceTargetsPath, { authoredProfilesDir: paths.authoredProfilesDir });
+  const targetFile = loadDeviceTargets(paths.deviceTargetsPath, {
+    authoredProfilesDir: paths.authoredProfilesDir,
+  });
   return {
     paths,
     workflowCatalog,
     targets: targetFile.targets,
-    authoredContentDigests: productionAuthoredContentDigests(workflowCatalog, repoRoot),
+    authoredContentDigests: productionAuthoredContentDigests(
+      workflowCatalog,
+      repoRoot,
+    ),
   };
 }
 
@@ -1447,36 +1879,45 @@ function loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode }) {
   const resolved = path.resolve(evidenceDir);
   const fixtureRoot = path.resolve(REPO_ROOT, "tests/fixtures");
   if (
-    !fixtureMode
-    && (resolved === fixtureRoot || resolved.startsWith(`${fixtureRoot}${path.sep}`))
+    !fixtureMode &&
+    (resolved === fixtureRoot ||
+      resolved.startsWith(`${fixtureRoot}${path.sep}`))
   ) {
     fail("synthetic fixture path cannot be used as production evidence");
   }
   if (!existsSync(resolved)) return [];
   const bundles = [];
   const seenRunIds = new Set();
-  for (const entry of readdirSync(resolved, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+  for (const entry of readdirSync(resolved, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  )) {
     if (entry.name === "README.md") continue;
     let bundle;
     if (entry.isDirectory()) {
       bundle = loadEvidenceBundle(path.join(resolved, entry.name));
     } else if (fixtureMode && entry.isFile() && entry.name.endsWith(".json")) {
       bundle = {
-        record: JSON.parse(readFileSync(path.join(resolved, entry.name), "utf8")),
+        record: JSON.parse(
+          readFileSync(path.join(resolved, entry.name), "utf8"),
+        ),
         reportBytes: null,
       };
     } else {
       continue;
     }
     const record = bundle.record;
-    if (seenRunIds.has(record.runId)) fail(`duplicate run identity ${record.runId}`);
+    if (seenRunIds.has(record.runId))
+      fail(`duplicate run identity ${record.runId}`);
     seenRunIds.add(record.runId);
     bundles.push(bundle);
   }
   return bundles;
 }
 
-function loadValidatedEvidenceRecords(evidenceDir, { fixtureMode, workflowCatalog, targets }) {
+function loadValidatedEvidenceRecords(
+  evidenceDir,
+  { fixtureMode, workflowCatalog, targets },
+) {
   const bundles = loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode });
   for (const bundle of bundles) {
     validateEvidenceBundle(bundle, { workflowCatalog, targets });
@@ -1485,7 +1926,9 @@ function loadValidatedEvidenceRecords(evidenceDir, { fixtureMode, workflowCatalo
 }
 
 export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
-  return loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode }).map((bundle) => bundle.record);
+  return loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode }).map(
+    (bundle) => bundle.record,
+  );
 }
 
 export function projectQualificationState({
@@ -1498,18 +1941,20 @@ export function projectQualificationState({
 }) {
   return {
     targets: targets.map((target) => {
-      const rows = workflowCatalog.workflows.map((workflow) => deriveWorkflowState({
-        workflow,
-        target,
-        currentFingerprint: buildCurrentFingerprint({
+      const rows = workflowCatalog.workflows.map((workflow) =>
+        deriveWorkflowState({
           workflow,
           target,
-          currentBuild,
-          runtimeContract,
-          authoredContentDigests,
+          currentFingerprint: buildCurrentFingerprint({
+            workflow,
+            target,
+            currentBuild,
+            runtimeContract,
+            authoredContentDigests,
+          }),
+          records,
         }),
-        records,
-      }));
+      );
       return {
         target,
         tier: deriveDeviceSupportTier(rows),
@@ -1534,7 +1979,9 @@ function renderTargetSection(entry) {
   for (const row of workflows) {
     const evidence = row.runId ? `${row.runId} (${row.capturedAt})` : "—";
     const reason = row.reason ?? "—";
-    lines.push(`| ${row.workflowId} | ${row.state} | ${evidence} | ${reason} |`);
+    lines.push(
+      `| ${row.workflowId} | ${row.state} | ${evidence} | ${reason} |`,
+    );
   }
   return lines.join("\n");
 }
@@ -1559,28 +2006,45 @@ export function renderQualificationMatrix(projection) {
   return lines.join("\n");
 }
 
-function productionAuthoredContentDigests(workflowCatalog, repoRoot = REPO_ROOT) {
+function productionAuthoredContentDigests(
+  workflowCatalog,
+  repoRoot = REPO_ROOT,
+) {
   const digests = {};
   for (const workflow of workflowCatalog.workflows) {
     for (const recipeId of workflow.productionRecipes) {
-      const recipePath = path.join(repoRoot, "authored/recipes", `${recipeId}.yaml`);
-      digests[recipeId] = createHash("sha256").update(readFileSync(recipePath)).digest("hex");
+      const recipePath = path.join(
+        repoRoot,
+        "authored/recipes",
+        `${recipeId}.yaml`,
+      );
+      digests[recipeId] = createHash("sha256")
+        .update(readFileSync(recipePath))
+        .digest("hex");
     }
   }
   return digests;
 }
 
-export function registerQualificationTargetCandidate(candidateId, { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {}) {
+export function registerQualificationTargetCandidate(
+  candidateId,
+  { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {},
+) {
   const { candidate } = loadCandidateJson(candidateId, repoRoot);
   const target = validateTargetRegistrationCandidate(candidate, repoRoot);
   const paths = qualificationPaths(repoRoot);
-  const targetFile = loadDeviceTargets(paths.deviceTargetsPath, { authoredProfilesDir: paths.authoredProfilesDir });
+  const targetFile = loadDeviceTargets(paths.deviceTargetsPath, {
+    authoredProfilesDir: paths.authoredProfilesDir,
+  });
   if (targetFile.targets.some((entry) => entry.id === target.id)) {
     fail(`canonical device target ${target.id} already exists`);
   }
   const currentBuild = validatePromotionBuildState(candidate.build, repoRoot);
   const workflowCatalog = loadWorkflowCatalog(paths.workflowCatalogPath);
-  const authoredContentDigests = productionAuthoredContentDigests(workflowCatalog, repoRoot);
+  const authoredContentDigests = productionAuthoredContentDigests(
+    workflowCatalog,
+    repoRoot,
+  );
   const existingRecords = loadValidatedEvidenceRecords(paths.evidenceRoot, {
     fixtureMode: false,
     workflowCatalog,
@@ -1605,7 +2069,11 @@ export function registerQualificationTargetCandidate(candidateId, { repoRoot = R
     `${JSON.stringify(nextTargets, null, 2)}\n`,
     fsOps,
   );
-  const tempMatrixPath = writeTemporaryFile(paths.matrixPath, matrixText, fsOps);
+  const tempMatrixPath = writeTemporaryFile(
+    paths.matrixPath,
+    matrixText,
+    fsOps,
+  );
   try {
     fsOps.renameSync(tempTargetsPath, paths.deviceTargetsPath);
     fsOps.renameSync(tempMatrixPath, paths.matrixPath);
@@ -1619,15 +2087,23 @@ export function registerQualificationTargetCandidate(candidateId, { repoRoot = R
   return target;
 }
 
-export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {}) {
+export function recordQualificationRunCandidate(
+  candidateId,
+  { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {},
+) {
   const { candidate, reportBytes } = loadCandidateJson(candidateId, repoRoot);
   assertCandidateMarkersAllowPromotion(candidateId, repoRoot);
   validateQualificationRunCandidate(candidate);
-  const { paths, workflowCatalog, targets, authoredContentDigests } = currentQualificationContext(repoRoot);
-  const workflow = workflowCatalog.workflows.find((item) => item.id === candidate.workflowId);
+  const { paths, workflowCatalog, targets, authoredContentDigests } =
+    currentQualificationContext(repoRoot);
+  const workflow = workflowCatalog.workflows.find(
+    (item) => item.id === candidate.workflowId,
+  );
   if (!workflow) fail(`unknown workflow id ${candidate.workflowId}`);
   if (candidate.workflowVersion !== workflow.version) {
-    fail(`qualification candidate workflow version ${candidate.workflowVersion} does not match catalog version ${workflow.version}`);
+    fail(
+      `qualification candidate workflow version ${candidate.workflowVersion} does not match catalog version ${workflow.version}`,
+    );
   }
   const target = targets.find((item) => item.id === candidate.deviceTargetId);
   if (!target) fail(`unknown device target id ${candidate.deviceTargetId}`);
@@ -1651,8 +2127,12 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
     workflowCatalog,
     targets,
   });
-  if (existingRecords.some((record) => record.runId === provisionalRecord.runId)) {
-    fail(`canonical evidence directory ${provisionalRecord.runId} already exists`);
+  if (
+    existingRecords.some((record) => record.runId === provisionalRecord.runId)
+  ) {
+    fail(
+      `canonical evidence directory ${provisionalRecord.runId} already exists`,
+    );
   }
   const currentBuild = validatePromotionBuildState(candidate.build, repoRoot);
   const expectedFingerprint = buildCurrentFingerprint({
@@ -1663,7 +2143,9 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
     authoredContentDigests,
   });
   if (!equalJson(candidate.fingerprint, expectedFingerprint)) {
-    fail("qualification candidate fingerprint no longer matches the current canonical workflow, target, and authored content");
+    fail(
+      "qualification candidate fingerprint no longer matches the current canonical workflow, target, and authored content",
+    );
   }
   const sealedRecord = sealEvidenceRecord({
     schemaVersion: 2,
@@ -1680,7 +2162,10 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
     limitations: structuredClone(candidate.limitations),
     artifacts: structuredClone(candidate.artifacts),
   });
-  validateEvidenceBundle({ record: sealedRecord, reportBytes }, { workflowCatalog, targets });
+  validateEvidenceBundle(
+    { record: sealedRecord, reportBytes },
+    { workflowCatalog, targets },
+  );
   const bundleDir = path.join(paths.evidenceRoot, sealedRecord.runId);
   const matrixText = renderMatrixForState({
     workflowCatalog,
@@ -1695,9 +2180,16 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
   try {
     reserveCreateNewDirectory(bundleDir, fsOps);
     reservedBundleDir = true;
-    fsOps.writeFileSync(path.join(bundleDir, "evidence.json"), `${JSON.stringify(sealedRecord, null, 2)}\n`, "utf8");
+    fsOps.writeFileSync(
+      path.join(bundleDir, "evidence.json"),
+      `${JSON.stringify(sealedRecord, null, 2)}\n`,
+      "utf8",
+    );
     if (reportBytes !== null) {
-      fsOps.writeFileSync(path.join(bundleDir, EXECUTION_REPORT_ARTIFACT.path), reportBytes);
+      fsOps.writeFileSync(
+        path.join(bundleDir, EXECUTION_REPORT_ARTIFACT.path),
+        reportBytes,
+      );
     }
     tempMatrixPath = writeTemporaryFile(paths.matrixPath, matrixText, fsOps);
     fsOps.renameSync(tempMatrixPath, paths.matrixPath);
@@ -1714,15 +2206,16 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
 }
 
 function projectProductionQualification() {
-  const workflowCatalog = loadWorkflowCatalog(path.join(QUALIFICATION_ROOT, "workflow-catalog.json"));
+  const workflowCatalog = loadWorkflowCatalog(
+    path.join(QUALIFICATION_ROOT, "workflow-catalog.json"),
+  );
   const targetsFile = loadDeviceTargets(
     path.join(QUALIFICATION_ROOT, "device-targets.json"),
     { authoredProfilesDir: path.join(REPO_ROOT, "authored/device_profiles") },
   );
-  const schema = JSON.parse(readFileSync(
-    path.join(QUALIFICATION_ROOT, "evidence-schema.json"),
-    "utf8",
-  ));
+  const schema = JSON.parse(
+    readFileSync(path.join(QUALIFICATION_ROOT, "evidence-schema.json"), "utf8"),
+  );
   validateEvidenceSchemaContract(schema);
   return projectQualificationState({
     workflowCatalog,
@@ -1732,7 +2225,10 @@ function projectProductionQualification() {
       workflowCatalog,
       targets: targetsFile.targets,
     }),
-    currentBuild: buildMaterialIdentity({ repoRoot: REPO_ROOT, requireClean: false }),
+    currentBuild: buildMaterialIdentity({
+      repoRoot: REPO_ROOT,
+      requireClean: false,
+    }),
     runtimeContract: RUNTIME_CONTRACT,
     authoredContentDigests: productionAuthoredContentDigests(workflowCatalog),
   });
@@ -1744,7 +2240,9 @@ function repositoryDescription() {
     runtimeContract: RUNTIME_CONTRACT,
     qualificationContract: QUALIFICATION_CONTRACT_VERSION,
     build: buildMaterialIdentity({ repoRoot: REPO_ROOT, requireClean: false }),
-    workflowCatalog: loadWorkflowCatalog(path.join(QUALIFICATION_ROOT, "workflow-catalog.json")),
+    workflowCatalog: loadWorkflowCatalog(
+      path.join(QUALIFICATION_ROOT, "workflow-catalog.json"),
+    ),
     deviceTargets: loadDeviceTargets(
       path.join(QUALIFICATION_ROOT, "device-targets.json"),
       { authoredProfilesDir: path.join(REPO_ROOT, "authored/device_profiles") },
@@ -1752,7 +2250,12 @@ function repositoryDescription() {
   };
 }
 
-function qualificationOperationResult(operation, candidateHandle, candidateKind, payload) {
+function qualificationOperationResult(
+  operation,
+  candidateHandle,
+  candidateKind,
+  payload,
+) {
   return {
     operation,
     candidateHandle,
@@ -1761,67 +2264,114 @@ function qualificationOperationResult(operation, candidateHandle, candidateKind,
   };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
   const args = process.argv.slice(2);
   const candidateActions = new Set(["--register-target", "--record-run"]);
-  const allowedArgs = new Set(["--build-identity", "--require-clean", "--describe", "--check", "--write-matrix", ...candidateActions]);
-  const actionArgs = args.filter((arg) => ["--build-identity", "--describe", "--check", "--write-matrix", ...candidateActions].includes(arg));
+  const allowedArgs = new Set([
+    "--build-identity",
+    "--require-clean",
+    "--describe",
+    "--check",
+    "--write-matrix",
+    ...candidateActions,
+  ]);
+  const actionArgs = args.filter((arg) =>
+    [
+      "--build-identity",
+      "--describe",
+      "--check",
+      "--write-matrix",
+      ...candidateActions,
+    ].includes(arg),
+  );
   const registerTargetIndex = args.indexOf("--register-target");
   const recordRunIndex = args.indexOf("--record-run");
   const candidateValueIndexes = new Set();
-  if (registerTargetIndex !== -1) candidateValueIndexes.add(registerTargetIndex + 1);
+  if (registerTargetIndex !== -1)
+    candidateValueIndexes.add(registerTargetIndex + 1);
   if (recordRunIndex !== -1) candidateValueIndexes.add(recordRunIndex + 1);
   if (
-    args.some((arg, index) => !allowedArgs.has(arg) && !candidateValueIndexes.has(index))
-    || actionArgs.length !== 1
-    || (args.includes("--require-clean") && !args.includes("--build-identity"))
-    || (registerTargetIndex !== -1 && args.length !== 2)
-    || (recordRunIndex !== -1 && args.length !== 2)
+    args.some(
+      (arg, index) =>
+        !allowedArgs.has(arg) && !candidateValueIndexes.has(index),
+    ) ||
+    actionArgs.length !== 1 ||
+    (args.includes("--require-clean") && !args.includes("--build-identity")) ||
+    (registerTargetIndex !== -1 && args.length !== 2) ||
+    (recordRunIndex !== -1 && args.length !== 2)
   ) {
-    process.stderr.write("usage: node tools/device-qualification.mjs [--build-identity [--require-clean]|--describe|--check|--write-matrix|--register-target <candidate-id>|--record-run <candidate-id>]\n");
+    process.stderr.write(
+      "usage: node tools/device-qualification.mjs [--build-identity [--require-clean]|--describe|--check|--write-matrix|--register-target <candidate-id>|--record-run <candidate-id>]\n",
+    );
     process.exitCode = 1;
   } else {
     try {
       if (args.includes("--build-identity")) {
-        process.stdout.write(`${JSON.stringify(buildMaterialIdentity({
-          repoRoot: REPO_ROOT,
-          requireClean: args.includes("--require-clean"),
-        }))}\n`);
+        process.stdout.write(
+          `${JSON.stringify(
+            buildMaterialIdentity({
+              repoRoot: REPO_ROOT,
+              requireClean: args.includes("--require-clean"),
+            }),
+          )}\n`,
+        );
       } else if (args.includes("--describe")) {
         process.stdout.write(`${JSON.stringify(repositoryDescription())}\n`);
       } else if (registerTargetIndex !== -1) {
         const candidateHandle = args[registerTargetIndex + 1];
-        const target = registerQualificationTargetCandidate(candidateHandle, { repoRoot: REPO_ROOT });
-        process.stdout.write(`${JSON.stringify(qualificationOperationResult(
-          "register_target",
-          candidateHandle,
-          "target_registration",
-          target,
-        ))}\n`);
+        const target = registerQualificationTargetCandidate(candidateHandle, {
+          repoRoot: REPO_ROOT,
+        });
+        process.stdout.write(
+          `${JSON.stringify(
+            qualificationOperationResult(
+              "register_target",
+              candidateHandle,
+              "target_registration",
+              target,
+            ),
+          )}\n`,
+        );
       } else if (recordRunIndex !== -1) {
         const candidateHandle = args[recordRunIndex + 1];
-        const record = recordQualificationRunCandidate(candidateHandle, { repoRoot: REPO_ROOT });
-        process.stdout.write(`${JSON.stringify(qualificationOperationResult(
-          "record_run",
-          candidateHandle,
-          "qualification_run",
-          record,
-        ))}\n`);
+        const record = recordQualificationRunCandidate(candidateHandle, {
+          repoRoot: REPO_ROOT,
+        });
+        process.stdout.write(
+          `${JSON.stringify(
+            qualificationOperationResult(
+              "record_run",
+              candidateHandle,
+              "qualification_run",
+              record,
+            ),
+          )}\n`,
+        );
       } else {
         const projection = projectProductionQualification();
         const rendered = renderQualificationMatrix(projection);
-        const matrixPath = path.join(REPO_ROOT, "docs/qualification/device-qualification-matrix.md");
+        const matrixPath = path.join(
+          REPO_ROOT,
+          "docs/qualification/device-qualification-matrix.md",
+        );
         if (args.includes("--write-matrix")) {
           writeFileSync(matrixPath, rendered, "utf8");
         }
         const committed = readFileSync(matrixPath, "utf8");
         if (committed !== rendered) {
-          fail("generated device qualification matrix is out of date; run --write-matrix");
+          fail(
+            "generated device qualification matrix is out of date; run --write-matrix",
+          );
         }
         process.stdout.write("Device qualification check passed.\n");
       }
     } catch (error) {
-      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      );
       process.exitCode = 1;
     }
   }

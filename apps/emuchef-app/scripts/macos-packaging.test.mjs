@@ -23,6 +23,7 @@ import {
   parseOptions,
   qualificationPolicy,
   requireThinArm64,
+  resetBundleOutputForBuild,
   semanticDigest,
   validateDeveloperIdEnvironment,
   validatePackagingConfiguration,
@@ -542,5 +543,63 @@ test("artifact discovery rejects missing or ambiguous outputs", () => {
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bundle reset preserves existing output when the release guard rejects", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-bundle-reset-guard-test-"));
+  const bundleRoot = path.join(
+    root,
+    "apps",
+    "emuchef-app",
+    "src-tauri",
+    "target",
+    "release",
+    "bundle",
+  );
+
+  try {
+    fs.mkdirSync(bundleRoot, { recursive: true });
+    const sentinel = path.join(bundleRoot, "previous-release.txt");
+    fs.writeFileSync(sentinel, "preserve pinned release output");
+
+    assert.throws(
+      () => resetBundleOutputForBuild({
+        paths: { repoRoot: root, bundleRoot },
+        assertBuildAllowed: () => {
+          throw new Error("qualification state is pinned");
+        },
+      }),
+      /qualification state is pinned/,
+    );
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "preserve pinned release output");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bundle reset rejects a symlinked target parent without deleting outside output", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-bundle-reset-symlink-test-"));
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-bundle-external-"));
+  const relativeTarget = path.join("apps", "emuchef-app", "src-tauri", "target");
+  const targetParent = path.join(root, relativeTarget);
+  const externalBundle = path.join(externalRoot, "release", "bundle");
+  const bundleRoot = path.join(targetParent, "release", "bundle");
+
+  try {
+    fs.mkdirSync(path.dirname(targetParent), { recursive: true });
+    fs.mkdirSync(externalBundle, { recursive: true });
+    const sentinel = path.join(externalBundle, "outside-release.txt");
+    fs.writeFileSync(sentinel, "preserve outside output");
+    fs.symlinkSync(externalRoot, targetParent, "dir");
+
+    assert.throws(
+      () => resetBundleOutputForBuild({ paths: { repoRoot: root, bundleRoot } }),
+      /symlink or non-directory component/,
+    );
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "preserve outside output");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(externalRoot, { recursive: true, force: true });
   }
 });

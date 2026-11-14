@@ -2,6 +2,17 @@ use std::io;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--qualification-build-provenance"] {
+        let Some(provenance) = emuchef_rust_backend::qualification_build::sidecar_provenance()
+        else {
+            eprintln!(
+                "qualification provenance requires real-execution and android-copy-commit-helper"
+            );
+            std::process::exit(2);
+        };
+        println!("{provenance}");
+        return;
+    }
     if args.first().is_some_and(|argument| argument == "--sidecar") {
         let config = match sidecar_runtime_config(&args[1..]) {
             Ok(config) => config,

@@ -3,6 +3,7 @@
 - When updating `CONTEXT.md`, always write it as a standalone set of current facts, requirements, and semantics.
 - Do not phrase `CONTEXT.md` entries as a change list or in terms that assume the reader knows prior behavior.
 - Update `CONTEXT.md` each time we make a change that affects functionality, semantics, UI, or other product requirements. You do not need to update it for simple bug fixes that reinforce existing business logic and product decisions.
+- Name durable code, tests, commands, settings, contracts, and checked-in documentation after domain concepts, behavior, or technical responsibility. Keep issue, ticket, milestone, and implementation-slice identifiers in external development records.
 
 
 <!-- headroom:rtk-instructions -->

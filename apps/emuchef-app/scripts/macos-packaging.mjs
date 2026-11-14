@@ -41,6 +41,42 @@ export function workspacePaths() {
   };
 }
 
+export function resetBundleOutputForBuild({
+  paths = workspacePaths(),
+  assertBuildAllowed = () => {},
+  fsApi = fs,
+} = {}) {
+  assertBuildAllowed();
+  const relativeBundlePath = path.join(
+    "apps",
+    "emuchef-app",
+    "src-tauri",
+    "target",
+    "release",
+    "bundle",
+  );
+  const expectedBundleRoot = path.resolve(paths.repoRoot, relativeBundlePath);
+  if (path.resolve(paths.bundleRoot) !== expectedBundleRoot) {
+    throw new Error("macOS bundle output path is outside the configured Tauri release directory");
+  }
+
+  let currentPath = fsApi.realpathSync(paths.repoRoot);
+  for (const component of relativeBundlePath.split(path.sep)) {
+    currentPath = path.join(currentPath, component);
+    let metadata;
+    try {
+      metadata = fsApi.lstatSync(currentPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error("macOS bundle output path contains a symlink or non-directory component");
+    }
+  }
+  fsApi.rmSync(currentPath, { recursive: true, force: true });
+}
+
 /**
  * Produces a local build environment without inspecting or validating Apple
  * credential values. Fixed Tauri variable names are removed and ad-hoc signing

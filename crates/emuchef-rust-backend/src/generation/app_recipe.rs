@@ -2180,6 +2180,7 @@ mod tests {
             catalog_identity: None,
             target_device: None,
             device_plan_presentation: None,
+            config_create_destination: None,
         }
     }
 
