@@ -75,12 +75,13 @@ jobs:
         run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
       - name: Test fixture contract tooling
         run: node --test tools/phase-6c-fixture.test.mjs
-      - name: Validate gated Phase 6D.6 evidence contract without ADB
+      - name: Validate historical, current-source, and base Phase 6D.6 contracts
         run: |
-          node tools/phase-6d6-evidence.mjs
           node --test tools/phase-6d6-evidence.test.mjs
-          node --test tools/phase-6d6-evidence-regression.test.mjs
-          node --test tools/phase-6d6-result.test.mjs
+      - name: Validate Phase 6D.6 evidence regressions
+        run: node --test tools/phase-6d6-evidence-regression.test.mjs
+      - name: Validate Phase 6D.6 result contract
+        run: node --test tools/phase-6d6-result.test.mjs
       - name: Validate device qualification foundation
         run: |
           node --test tools/device-qualification.test.mjs
