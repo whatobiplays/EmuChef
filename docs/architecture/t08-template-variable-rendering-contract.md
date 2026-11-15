@@ -1,6 +1,6 @@
 # T08: Typed Template Variables and Standalone Configuration Rendering
 
-**Status:** Approved design (2026-11-09); implementation and qualification pending.
+**Status:** Approved design (2026-11-09); standalone rendering implemented and T08 closed (2026-11-10). Production device publication and physical qualification remain separate.
 **Scope:** EmuChef Issue #51, the T08 extension to the completed T07 authored App Definition and Recipe contracts.
 **Authority:** ADR 0006, `CONTEXT.md` (app-owned configuration contracts), and the six product-owner-approved decisions of November 9, 2026.
 
@@ -69,4 +69,4 @@ Outside T08: T09 existing-file merging and multi-Recipe composition; T13a create
 5. Current-session path resolution and inherited sensitivity prevent stale-device and diagnostic leakage. Rejected: persisting reusable device-physical paths or publicly fingerprinting sensitive values.
 6. Direct managed edits win; unresolved reset blocks. Rejected: treating reset as clear/default or computing T11 recommendations inside T08.
 
-**Implementation is not yet complete.** This approval is a design contract, not evidence of rendering, review, device execution or release readiness.
+**Implementation status:** The typed standalone renderer is implemented in Rust and covered by host tests; T08 is closed. This design record does not establish existing-file composition (T09), production create-only admission (T13a), physical device qualification, or release readiness.

@@ -22,8 +22,9 @@ defaults:
   # - show_advanced_steps: true | false
   show_advanced_steps: false
 overrides:
-  # Top-level full binding refs can participate in planner binding resolution.
-  example.recipe.template.$example_source_dir: /absolute/path/to/example-assets
+  # Recipe-input overrides use <recipe_ref>/<input_id> (no '$' or 'inputs.' prefix).
+  # The input id must be declared by the named Recipe.
+  example.recipe.template/example_source_dir: /absolute/path/to/example-assets
   # Nested metadata like config_variants is informational unless wired later.
   config_variants:
     vendor_family: example
