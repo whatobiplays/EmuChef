@@ -4,7 +4,7 @@
 
 **Accepted normative product intent:** [EmuChef requirements](docs/product/emuchef-requirements.md) contains Q1–Q83 and UX-1 A, including generated configuration, device-profile OEM root-script execution, **atomic invocation admission/closure**, per-file recovery originals and cleanup. These are **accepted requirements, not yet implemented or physically qualified**; their presence in this document does not attest that the running app supports them.
 
-**Architectural decisions:** [ADRs 0005–0011](docs/adr/) record accepted design boundaries and rationale. **Current implemented runtime behavior:** the detailed sections below and the [architecture documents](docs/architecture/) describe existing Rust/Tauri/sidecar code, which is authoritative for what currently works; do not infer code behavior from future product requirements. **Qualification evidence:** the [qualification-obligation register](docs/product/qualification-obligations.md) indexes open target/phase evidence, while original records, runbooks and validators decide actual passing, missing or deferred status. **Active scheduling/tracking:** [EmuChef wayfinder map #43](https://github.com/whatobiplays/EmuChef/issues/43) and its same 23 child issues own work order and direct body-level blockers, not execution authority or physical evidence.
+**Architectural decisions:** [ADRs 0005–0013](docs/adr/) record accepted design boundaries and rationale. **Current implemented runtime behavior:** the detailed sections below and the [architecture documents](docs/architecture/) describe existing Rust/Tauri/sidecar code, which is authoritative for what currently works; do not infer code behavior from future product requirements. **Qualification evidence:** the [qualification-obligation register](docs/product/qualification-obligations.md) indexes open target/phase evidence, while original records, runbooks and validators decide actual passing, missing or deferred status. **Active scheduling/tracking:** [EmuChef wayfinder map #43](https://github.com/whatobiplays/EmuChef/issues/43) and its 23 original child issues plus three owner-approved additional workstreams own work order and direct body-level blockers, not execution authority or physical evidence.
 
 **Scoped release authority:** The initial EmuChef proper public-release target is Apple Silicon macOS with applicable _current-product_ Developer ID, notarization, Gatekeeper, clean-Mac, host artifact inspection, privacy/accessibility and selected supported-workflow evidence. See [release readiness](docs/release/release-readiness.md). The Config Editor public release and additional host platforms/cross-platform release automation are separately scoped/deferred, not unconditional prerequisites. Historical Config Editor signed artifacts remain evidence for those artifacts alone. This local documentation and GitHub tracking reconciliation does **not** authorize runtime work, commits/pushes, physical device operations, production enablement or release.
 
@@ -13,6 +13,42 @@
 **EmuChef proper**:
 The consumer application for choosing, reviewing, and applying a supported handheld setup. Simulation is optional rather than a prerequisite for an otherwise eligible reviewed apply.
 _Avoid_: Config Editor, technical authoring UI
+
+**Device Profile**:
+An authored description of matching criteria, supported device-level capabilities and execution-feature eligibility. A matching profile does not by itself prove a uniquely identified physical retail model.
+_Avoid_: Verified retail identity
+
+**Device Profile Match**:
+A compatibility result showing that available trusted device observations satisfy a profile's match criteria. Multiple non-generic matches do not determine which model is connected.
+_Avoid_: Confirmed device identity
+
+**Resolved Device Profile**:
+The current-session Device Profile chosen automatically from one eligible non-generic match or selected explicitly by the user from competing eligible profiles. It is not reusable execution authority.
+_Avoid_: Catalog-first profile default
+
+**Explicit Profile Confirmation**:
+The user's affirmative choice of one Device Profile from multiple matching non-generic candidates, without a separate second confirmation action.
+_Avoid_: Highest-confidence automatic selection
+
+**Effective Runtime Capabilities**:
+The capabilities permitted to a specific planned execution after combining authored support, current observed availability and any trusted qualification-only restrictions.
+_Avoid_: Raw observed root facts
+
+**Execution Strategy**:
+The reviewed method for executing typed Recipe actions, such as ordinary unprivileged ADB, verified direct-root ADB or a user-invoked OEM runner stage.
+_Avoid_: Physical device type
+
+**Qualification Capability Restriction**:
+An internal-only, restrictive override that prevents selected observed capabilities or privileged execution routes from being used in a qualification run while leaving device observations truthful.
+_Avoid_: End-user capability toggle
+
+**Qualification Coverage**:
+Evidence that a particular workflow followed a particular execution strategy and established its required postconditions under recorded device and build conditions.
+_Avoid_: Profile-registration proof
+
+**Profile-Scoped Saved Setup Intent**:
+A retained user setup associated with its originating Device Profile and Device Plan, usable only after current-session resolution and fresh review for that profile.
+_Avoid_: Cross-profile migration; reusable execution authority
 
 **App Configuration Definition**:
 An app-owned description of supported configuration settings and their file format, independent of any particular setup procedure.
@@ -161,6 +197,10 @@ _Avoid_: Sync
 This document is the standalone current-state contract for the repository.
 
 ## Product
+
+Device Profile matching establishes compatibility, not unique physical identity. One qualifying non-generic Device Profile may be selected automatically; two or more require explicit user selection with no preselected candidate, and a generic fallback is an independently selected option. The current-session selection is retained by Rust/Tauri, and material device, catalog or firmware identity changes invalidate it with explanation. Saved intent or a frontend recommendation cannot bypass ambiguous matching. Selecting a different Device Profile always starts a fresh setup, with no cross-profile migration or compatibility adjudication. A saved setup remains stored under its originating profile and plan.
+
+Direct ADB root is a runtime-qualified capability; OEM Root Script Runner eligibility is authored in the Device Profile and is uniform for devices represented by that profile. The unprivileged, direct-root and OEM-assisted execution strategies are selected from these independent facts and frozen in the reviewed plan; no new three-state device type or official-support status is required. Development/qualification-only capability restrictions may suppress root and all privileged execution routes in the existing planner/executor without changing observed facts or exposing an end-user switch. Actual success under the restricted path qualifies the tested unprivileged workflow for devices with either OEM eligibility state, not untested model behavior; OEM-script execution requires distinct on-runner evidence. Missing required Recipe operations cannot be treated as success. The KONKR Pocket Advance is an intended full-setup product target with a genuine Device Profile and Device Plan, distinct from its earlier narrow qualification overlay, and remains subject to operation-specific qualification.
 
 EmuChef provisions Android emulation handhelds from authored YAML. A device
 plan selects recipes, the planner emits an execution plan, and the executor
