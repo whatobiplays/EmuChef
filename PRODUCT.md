@@ -46,7 +46,7 @@ trusted plan. Existing apps can be configured without reinstalling when safe.
 
 App Definitions own intrinsic app facts and managed configuration rules;
 Recipes define bounded workflows and exposed per-app settings; Device Profiles
-and Plans determine capabilities and recommendations. The trusted Rust runtime
+and Plans determine capabilities and recommendations. Matching observed device facts yields compatible Profiles, not necessarily a unique retail model: competing non-generic matches require explicit session-bound user selection before choosing a Device Plan. The trusted Rust runtime
 resolves all authority, files and device actions; React presents sanitized
 projections and opaque handles.
 
@@ -98,6 +98,12 @@ Use clear language for nontechnical users: app, device, storage choice, setup
 and permissions rather than raw Recipe IDs, serials and runtime jargon.
 Prefer truthful support information, explicit consent and actionable recovery
 over unsupported automation.
+
+## Device identification and qualification strategy
+
+The KONKR Pocket Advance is an intended first-class full-setup product target, with a genuine Device Profile/Plan and operation-specific qualification required. Where ADB facts match multiple non-generic Profiles, selecting the intended Profile itself confirms it; saved intent, recommendations and reconnects cannot select one silently. Switching Profiles starts a fresh setup without cross-profile migration.
+
+Direct ADB root is runtime authority; an OEM Root Script Runner is a separate Device Profile capability. Qualification-only trusted restriction of all privileged routes on a rooted test unit may exercise the same ordinary unprivileged Rust-planned workflow; it is never an end-user feature. Such evidence qualifies the tested unprivileged path only, not an actual OEM-assisted execution strategy or untested model-specific behavior. The reviewed plan retains immutable strategy, required operations and applicable gates.
 
 ## Evidence on Hand
 
