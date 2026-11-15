@@ -867,6 +867,14 @@ mod tests {
         let first_app = load_app_definition(root.join("apps/retroarch.yaml")).unwrap();
         let mut second_app = first_app.clone();
         second_app.id = "other_app".to_string();
+        second_app
+            .configurations
+            .get_mut("main")
+            .unwrap()
+            .templates
+            .get_mut("default")
+            .unwrap()
+            .path = "other_app/default.cfg".to_string();
         let recipe_refs = vec![first.id.clone(), second.id.clone()];
         let recipes = HashMap::from([(first.id.clone(), first), (second.id.clone(), second)]);
         let apps = HashMap::from([

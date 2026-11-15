@@ -849,7 +849,7 @@ impl ExecutionHandleStore {
     }
 }
 
-trait RuntimeRequester {
+pub(crate) trait RuntimeRequester {
     fn request(&self, request_type: &str, payload: Value) -> Result<Value, String>;
 }
 
@@ -948,6 +948,14 @@ pub fn start_simulated_execution(
     review_handle: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    start_simulated_execution_with_runtime(&review_handle, &state, &state.sidecar)
+}
+
+pub(crate) fn start_simulated_execution_with_runtime<R: RuntimeRequester>(
+    review_handle: &str,
+    state: &AppState,
+    runtime: &R,
+) -> Result<Value, String> {
     // ActivityGate is always acquired before the execution store. The short
     // lease closes the race with an already-reserved browser handoff.
     let _activity = state.update_activity.reserve_execution_start()?;
@@ -966,19 +974,16 @@ pub fn start_simulated_execution(
             )
         })?;
 
-    let outcome = start_simulated_execution_inner(&review_handle, &state, &mut executions);
+    let outcome = start_simulated_execution_inner_with_runtime(
+        review_handle,
+        state,
+        &mut executions,
+        runtime,
+    );
     if outcome.is_err() {
         executions.release_start();
     }
     outcome
-}
-
-fn start_simulated_execution_inner(
-    review_handle: &str,
-    state: &AppState,
-    executions: &mut ExecutionHandleStore,
-) -> Result<Value, String> {
-    start_simulated_execution_inner_with_runtime(review_handle, state, executions, &state.sidecar)
 }
 
 /// Simulated-start seam that lets tests substitute the runtime requester.
@@ -988,7 +993,7 @@ fn start_simulated_execution_inner(
 /// dry-run start request. Any of them can be the first request to discover that
 /// the shared runtime session is gone, so every failure is classified at this
 /// seam before it is sanitized for the frontend.
-fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
+pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
     review_handle: &str,
     state: &AppState,
     executions: &mut ExecutionHandleStore,
@@ -1001,7 +1006,7 @@ fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
         .review(review_handle)?
         .clone();
 
-    validate_review_executable(&review)?;
+    validate_review_executable(&review, "dry_run")?;
     let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
     let _devices =
         list_and_reconcile_preflight_inventory(state, runtime, &platform_tools, Some(executions))
@@ -1048,6 +1053,17 @@ fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
     validate_target(&refreshed_review.target, &serial, &facts)?;
     validate_plan_digest(&refreshed_review)?;
 
+    let reviewed_plan = refreshed_review
+        .response
+        .get("plan")
+        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
+    crate::commands::require_config_create_write_evidence(
+        Some(state),
+        &refreshed_review.device_handle,
+        reviewed_plan,
+        refreshed_review.qualification_context.as_ref(),
+    )?;
+
     let start_result = request_dry_run_start(runtime, &refreshed_review).map_err(|error| {
         resolve_simulated_start_failure(state, executions, &error, || execution_start_error(&error))
     })?;
@@ -1073,23 +1089,27 @@ fn resolve_simulated_start_failure(
     resolve_runtime_request_failure(Some(state), executions, error, ordinary)
 }
 
-fn request_dry_run_start(
+pub(crate) fn request_dry_run_start(
     runtime: &impl RuntimeRequester,
     review: &ReviewedPlanSnapshot,
 ) -> Result<Value, String> {
     // The raw runtime error is preserved so the simulated-start seam can
     // classify a lost runtime session before the error is sanitized for the
     // frontend.
-    runtime_request(
-        runtime,
-        "startExecution",
-        json!({
-            "plan": review.response.get("plan"),
-            "planDigest": review.plan_digest,
-            "mode": "dry_run",
-            "targetDevice": review.target,
-        }),
-    )
+    let mut payload = json!({
+        "plan": review.response.get("plan"),
+        "planDigest": review.plan_digest,
+        "mode": "dry_run",
+        "targetDevice": review.target,
+    });
+    if let Some(review_authority_id) = review
+        .response
+        .get("reviewAuthorityId")
+        .and_then(Value::as_str)
+    {
+        payload["reviewAuthorityId"] = json!(review_authority_id);
+    }
+    runtime_request(runtime, "startExecution", payload)
 }
 
 fn bind_start_result(
@@ -1132,7 +1152,7 @@ pub fn get_simulated_execution(
     get_simulated_execution_with_runtime(&state, &state.sidecar, &execution_handle)
 }
 
-fn get_simulated_execution_with_runtime(
+pub(crate) fn get_simulated_execution_with_runtime(
     state: &AppState,
     runtime: &impl RuntimeRequester,
     execution_handle: &str,
@@ -1630,7 +1650,7 @@ fn start_real_execution_inner(
         .map_err(|_| session_error())?
         .review(review_handle)?
         .clone();
-    validate_review_executable(&review)?;
+    validate_review_executable(&review, "real")?;
 
     let expected_adb = review.platform_tools_identity.as_ref().ok_or_else(|| {
         stale_review(
@@ -1733,7 +1753,7 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         .map_err(|_| session_error())?
         .review(review_handle)?
         .clone();
-    validate_review_executable(&review)?;
+    validate_review_executable(&review, "real")?;
 
     let inventory_request =
         |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
@@ -1979,6 +1999,17 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         false
     };
     validate_final_qualification(&refreshed_review, &current, root_granted)?;
+
+    let reviewed_plan = refreshed_review
+        .response
+        .get("plan")
+        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
+    crate::commands::require_config_create_write_evidence(
+        qualification_state,
+        &refreshed_review.device_handle,
+        reviewed_plan,
+        refreshed_review.qualification_context.as_ref(),
+    )?;
 
     let current_profile_id = qualification_device_plan.as_ref().and_then(|device_plan| {
         let state = qualification_state?;
@@ -3891,7 +3922,29 @@ fn real_execution_state_error() -> String {
 
 /// Rejects retained plans whose backend-authored review cannot faithfully
 /// describe every action. The UI cannot override this trusted decision.
-fn validate_review_executable(review: &ReviewedPlanSnapshot) -> Result<(), String> {
+fn validate_review_executable(
+    review: &ReviewedPlanSnapshot,
+    expected_mode: &str,
+) -> Result<(), String> {
+    let has_retroarch_config_create = review
+        .response
+        .pointer("/plan/steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.ends_with("/seed_retroarch_cfg"))
+            })
+        });
+    if has_retroarch_config_create
+        && review.response.get("executionMode").and_then(Value::as_str) != Some(expected_mode)
+    {
+        return Err(safe_error(
+            "review_execution_mode_mismatch",
+            "The configuration review was prepared for a different execution mode. Generate a fresh review.",
+        ));
+    }
     if review.response.pointer("/review/canExecute") == Some(&Value::Bool(true)) {
         return Ok(());
     }
@@ -4966,18 +5019,78 @@ fn project_step(step: &Value, exact_serial: &str) -> Value {
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("pending");
-    let message = copy_commit_failure_message(step).or_else(|| match status {
-        "failed" => Some("This action did not complete.".to_string()),
-        "blocked" => Some("This action was blocked by required earlier work.".to_string()),
-        "cancelled" => Some(CANCELLED_SAFE_BOUNDARY_TEXT.to_string()),
-        _ => None,
-    });
+    let message = copy_commit_failure_message(step)
+        .or_else(|| configuration_create_report_message(step))
+        .or_else(|| match status {
+            "failed" => Some("This action did not complete.".to_string()),
+            "blocked" => Some("This action was blocked by required earlier work.".to_string()),
+            "cancelled" => Some(CANCELLED_SAFE_BOUNDARY_TEXT.to_string()),
+            _ => None,
+        });
     json!({
         "name": sanitize_text(&name, exact_serial),
         "note": step.get("note").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
         "status": status,
         "message": message,
     })
+}
+
+fn configuration_create_report_message(step: &Value) -> Option<String> {
+    let output = step.get("outputs")?.get("configuration_create_report")?;
+    let report = output.get("value").unwrap_or(output);
+    let outcome = report.get("outcome")?.as_str()?;
+    let mut messages = vec![match outcome {
+        "simulated_create_verified" => {
+            "The configuration file was simulated in a sandbox; no device file was changed."
+        }
+        "created_verified" => "The configuration file was created and its exact bytes were verified.",
+        "blocked_existing_target" => {
+            "An existing destination entry blocked creation; it was left untouched."
+        }
+        "staging_failed_no_target_write" => {
+            "Configuration creation stopped before opening the destination."
+        }
+        "staged_source_hash_mismatch" => {
+            "Staged bytes did not match the reviewed digest; the destination was not opened."
+        }
+        "partial_write_unverified" => {
+            "Configuration creation may have left partial bytes; inspect the destination before retrying."
+        }
+        "completion_uncertain" => {
+            "The final configuration state is uncertain; inspect it before retrying."
+        }
+        "final_readback_mismatch" => {
+            "The configuration file was created, but final byte verification failed."
+        }
+        "created_unverified" => {
+            "The configuration file may have been created, but its final state could not be verified."
+        }
+        "review_parent_changed" | "review_target_stale" | "review_precondition_invalid"
+        | "review_authority_stale" => {
+            "The reviewed destination or authority changed; no configuration file was created."
+        }
+        "target_inspection_failed" => {
+            "The destination could not be inspected; no configuration file was opened."
+        }
+        "simulation_unsupported_host" => {
+            "This host cannot safely simulate configuration creation; no device file was changed."
+        }
+        "create_failed_no_target_write" => {
+            "The destination could not be created; no configuration bytes were written."
+        }
+        _ => return None,
+    }
+    .to_string()];
+
+    match report.pointer("/cleanup/status").and_then(Value::as_str) {
+        Some("warning") => messages.push("Temporary staging cleanup remains pending.".to_string()),
+        Some("deferred_due_uncertain_outcome") => messages.push(
+            "Temporary staging cleanup is deferred because the final outcome is uncertain."
+                .to_string(),
+        ),
+        _ => {}
+    }
+    Some(messages.join(" "))
 }
 
 fn copy_commit_failure_message(step: &Value) -> Option<String> {
@@ -7598,7 +7711,7 @@ pub(crate) mod tests {
         let plan_before_catalog_change = retained.response["plan"].clone();
         retained.catalog_identity["contentDigest"]["value"] = json!("changed");
 
-        validate_review_executable(&retained).unwrap();
+        validate_review_executable(&retained, "dry_run").unwrap();
         validate_plan_digest(&retained).unwrap();
         assert_eq!(retained.response["plan"], plan_before_catalog_change);
     }
@@ -7688,10 +7801,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn qualified_review_cannot_start_in_a_different_execution_mode() {
+        for (review_mode, start_mode) in [("dry_run", "real"), ("real", "dry_run")] {
+            let mut retained = review();
+            retained.response["executionMode"] = json!(review_mode);
+            retained.response["plan"]["steps"] = json!([{
+                "id": "app.retroarch.configure/seed_retroarch_cfg"
+            }]);
+
+            let error = validate_review_executable(&retained, start_mode).unwrap_err();
+            assert!(
+                error.contains("review_execution_mode_mismatch"),
+                "{review_mode} review started as {start_mode}: {error}"
+            );
+            validate_review_executable(&retained, review_mode)
+                .expect("the selected mode should remain valid for its reviewed plan");
+        }
+    }
+
+    #[test]
     fn unsafe_backend_review_cannot_start() {
         let mut retained = review();
         retained.response["review"]["canExecute"] = Value::Bool(false);
-        assert!(validate_review_executable(&retained)
+        assert!(validate_review_executable(&retained, "dry_run")
             .unwrap_err()
             .contains("review_not_executable"));
     }
@@ -12521,6 +12653,353 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn simulated_retroarch_modes_keep_the_reviewed_plan_and_project_backend_reports() {
+        for (source_kind, bytes) in [
+            ("generated", b"video_threaded=false\n".as_slice()),
+            (
+                "uploaded",
+                b"video_threaded = true\ncustom = \"as supplied\"\n".as_slice(),
+            ),
+        ] {
+            let source_digest = format!("{:x}", Sha256::digest(bytes));
+            let package_id = "com.retroarch.aarch64";
+            let catalog_identity = serde_json::to_value(
+                crate::catalog::CatalogDescriptor::for_test()
+                    .expect("the repository catalog should be available to execution tests")
+                    .public_identity(),
+            )
+            .unwrap();
+            let artifact = json!({
+                "type": "configuration_artifact",
+                "schemaVersion": 1,
+                "bytes": bytes,
+                "byteLength": bytes.len(),
+                "sha256": source_digest,
+                "sourceIdentity": {
+                    "recipeId": "app.retroarch.provision",
+                    "kind": source_kind,
+                    "sha256": source_digest,
+                    "byteLength": bytes.len(),
+                },
+                "targetIdentity": {
+                    "appId": "retroarch",
+                    "packageId": package_id,
+                    "targetId": "config",
+                    "target": {
+                        "kind": "file",
+                        "location": "external_app_data",
+                        "path": "files/retroarch.cfg",
+                    },
+                },
+                "absencePrecondition": {
+                    "status": "confirmed_absent",
+                    "authority": "device",
+                    "targetPath": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
+                    "parentPath": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files",
+                    "parentBinding": "reviewed-device-parent",
+                    "entryName": "retroarch.cfg",
+                },
+            });
+            let plan = json!({
+                "kind": "execution_plan",
+                "id": format!("plan.retroarch.{source_kind}"),
+                "source": {
+                    "device_profile_ref": "ayaneo.generic",
+                    "selected_recipe_refs": ["app.retroarch.provision"],
+                    "catalog": catalog_identity,
+                },
+                "resolved_inputs": [{
+                    "recipeId": "app.retroarch.provision",
+                    "inputId": "retroarch_cfg_source",
+                    "value": if source_kind == "generated" { "managed" } else { "uploaded" },
+                }],
+                "apps": [{ "id": "retroarch", "package_id": package_id }],
+                "recipes": [{
+                    "id": "app.retroarch.provision",
+                    "name": "RetroArch provisioning",
+                    "description": "Install and configure RetroArch.",
+                }],
+                "steps": [{
+                    "id": "app.retroarch.provision/seed_retroarch_cfg",
+                    "recipe_ref": "app.retroarch.provision",
+                    "app_id": "retroarch",
+                    "type": "copy_files",
+                    "name": "Create RetroArch configuration",
+                    "note": "Create the reviewed configuration file.",
+                    "dependencies": [],
+                    "constraints": { "capabilities": [], "conflicts_with": [] },
+                    "params": {
+                        "source": { "value": artifact },
+                        "dest": { "value": { "app_target": "config" } },
+                        "copy_policy": { "value": "create_only" },
+                    },
+                    "skip_if": [],
+                    "verify": [],
+                }],
+                "target_device": {
+                    "serial": "sensitive-serial",
+                    "manufacturer": "AYANEO",
+                    "model": "Pocket S",
+                    "android_api_level": 33,
+                },
+            });
+            let (handles, root, initial_review_handle) = prepared_real_review(false);
+            let initial_review_handle =
+                rebind_review_to_test_catalog(&handles, &initial_review_handle);
+            let mut retained = handles
+                .lock()
+                .unwrap()
+                .review(&initial_review_handle)
+                .unwrap()
+                .clone();
+            retained.response["plan"] = plan.clone();
+            retained.response["executionMode"] = json!("dry_run");
+            retained.plan_digest = canonical_json_digest(&plan).unwrap();
+            let device_handle = retained.device_handle.clone();
+            handles
+                .lock()
+                .unwrap()
+                .discard_review(&initial_review_handle)
+                .unwrap();
+            let (_app_root, app) =
+                test_app(Mutex::new(ExecutionHandleStore::default()), handles, root);
+            let state = app.state::<AppState>();
+            install_test_platform_tools(&state);
+            let platform_tools = crate::commands::current_adb_runtime_snapshot(&state).unwrap();
+            let runtime_generation = state.sidecar.try_generation().unwrap();
+            {
+                let mut handles = state.handles.lock().unwrap();
+                let mut context = handles
+                    .qualification_context(&device_handle)
+                    .expect("the current test device should retain qualification context");
+                context.runtime_generation = runtime_generation;
+                context.platform_tools_revision = platform_tools.revision;
+                assert!(handles.set_qualification_context(context));
+            }
+            let preflight_runtime = ScriptedRuntime {
+                responses: Mutex::new(vec![Ok(supported_inventory("transport-1"))]),
+                requests: Mutex::new(Vec::new()),
+            };
+            {
+                let mut executions = state.executions.lock().unwrap();
+                list_and_reconcile_preflight_inventory(
+                    &state,
+                    &preflight_runtime,
+                    &platform_tools,
+                    Some(&mut executions),
+                )
+                .expect("the current device inventory should be reconciled before qualification");
+            }
+            let context = state
+                .handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle)
+                .expect("the current test device should retain qualification context");
+            let initial_root_key = RootQualificationKey::from_context(&context);
+            let root_attempt = state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .begin(initial_root_key.clone())
+                .unwrap();
+            assert!(state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .complete_with_route(
+                    root_attempt,
+                    RootQualificationState::Granted,
+                    Some(crate::device_qualification::RootShellRoute::SuCommand),
+                ));
+            crate::qualification_session::observe_in_transition(
+                &state,
+                crate::qualification_session::QualificationLifecycleObservation::RootChecked {
+                    device_handle: device_handle.clone(),
+                    session_epoch: context.session_epoch,
+                    root_state: RootQualificationState::Granted,
+                },
+            );
+            let current_context = state
+                .handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle)
+                .expect("root observation should retain the current device context");
+            let root_key = RootQualificationKey::from_context(&current_context);
+            if root_key != initial_root_key {
+                let root_attempt = state
+                    .root_qualification
+                    .lock()
+                    .unwrap()
+                    .begin(root_key.clone())
+                    .unwrap();
+                assert!(state
+                    .root_qualification
+                    .lock()
+                    .unwrap()
+                    .complete_with_route(
+                        root_attempt,
+                        RootQualificationState::Granted,
+                        Some(crate::device_qualification::RootShellRoute::SuCommand),
+                    ));
+            }
+            retained.qualification_context = Some(current_context);
+            let write_target =
+                crate::retroarch_config_create_policy::resolve_retroarch_config_create_target(
+                    &plan,
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .mark_config_create_write_probe_verified_for_test(&root_key, write_target.clone());
+            let review_handle = state
+                .handles
+                .lock()
+                .unwrap()
+                .insert_review(retained.clone());
+
+            let configuration_report = json!({
+                "schemaVersion": 1,
+                "operation": "create_only",
+                "outcome": "simulated_create_verified",
+                "sourceKind": source_kind,
+                "sha256": source_digest,
+                "byteLength": bytes.len(),
+                "target": { "appId": "retroarch", "targetId": "config" },
+                "verificationScope": "dry_run_sandbox",
+                "mayHaveChanged": true,
+                "simulated": true,
+                "appliedToDevice": false,
+                "verified": true,
+                "cleanup": { "status": "not_required", "warnings": [] },
+            });
+            let terminal_report = json!({
+                "executionId": format!("sidecar-{source_kind}"),
+                "status": "succeeded",
+                "startedAt": "2026-11-10T00:00:00Z",
+                "finishedAt": "2026-11-10T00:00:01Z",
+                "latestSequence": 1,
+                "recipes": [{
+                    "recipeId": "app.retroarch.provision",
+                    "name": "RetroArch provisioning",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "app.retroarch.provision/seed_retroarch_cfg",
+                        "name": "Create RetroArch configuration",
+                        "note": "Create the reviewed configuration file.",
+                        "status": "succeeded",
+                        "outputs": {
+                            "configuration_create_report": {
+                                "type": "configuration_create_report",
+                                "value": configuration_report,
+                            },
+                        },
+                    }],
+                }],
+                "warnings": [],
+                "errors": [],
+            });
+            let runtime = ScriptedRuntime {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(vec![
+                    Ok(supported_inventory("transport-1")),
+                    Ok(target_facts()),
+                    Ok(json!({
+                        "execution": {
+                            "executionId": format!("sidecar-{source_kind}"),
+                            "status": "running",
+                            "recipes": [],
+                        }
+                    })),
+                    Ok(json!({ "execution": terminal_report })),
+                ]),
+            };
+
+            let started = {
+                let mut executions = state.executions.lock().unwrap();
+                executions.reserve_start(ExecutionKind::Simulated).unwrap();
+                start_simulated_execution_inner_with_runtime(
+                    &review_handle,
+                    &state,
+                    &mut executions,
+                    &runtime,
+                )
+                .unwrap()
+            };
+            let execution_handle = started["executionHandle"].as_str().unwrap();
+            let completed =
+                get_simulated_execution_with_runtime(&state, &runtime, execution_handle).unwrap();
+
+            assert_eq!(completed["status"], "succeeded");
+            assert_eq!(completed["simulated"], true);
+            assert_eq!(completed["verificationScope"], "simulation_only");
+            assert_eq!(
+                completed["recipes"][0]["steps"][0]["message"],
+                "The configuration file was simulated in a sandbox; no device file was changed."
+            );
+            let requests = runtime.requests.lock().unwrap();
+            let start_request = requests
+                .iter()
+                .find(|(request_type, _)| request_type == "startExecution")
+                .unwrap();
+            assert_eq!(start_request.1["mode"], "dry_run");
+            assert_eq!(start_request.1["plan"], retained.response["plan"]);
+            assert_eq!(start_request.1["planDigest"], retained.plan_digest);
+            assert_eq!(
+                start_request.1["plan"]["steps"][0]["params"]["source"]["value"]["sourceIdentity"]
+                    ["kind"],
+                source_kind
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_report_projection_keeps_blocked_partial_and_uncertain_results_distinct() {
+        for (outcome, cleanup, expected) in [
+            (
+                "blocked_existing_target",
+                "not_started",
+                "An existing destination entry blocked creation; it was left untouched.",
+            ),
+            (
+                "partial_write_unverified",
+                "not_required",
+                "Configuration creation may have left partial bytes; inspect the destination before retrying.",
+            ),
+            (
+                "completion_uncertain",
+                "deferred_due_uncertain_outcome",
+                "The final configuration state is uncertain; inspect it before retrying. Temporary staging cleanup is deferred because the final outcome is uncertain.",
+            ),
+            (
+                "staging_failed_no_target_write",
+                "warning",
+                "Configuration creation stopped before opening the destination. Temporary staging cleanup remains pending.",
+            ),
+        ] {
+            let step = json!({
+                "outputs": {
+                    "configuration_create_report": {
+                        "value": {
+                            "outcome": outcome,
+                            "cleanup": { "status": cleanup },
+                        },
+                    },
+                },
+            });
+            assert_eq!(
+                configuration_create_report_message(&step).as_deref(),
+                Some(expected),
+                "unexpected projection for {outcome}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_event_session_releases_only_the_matching_active_mapping() {
         let runtime = FakeRuntime {
             requests: Mutex::new(Vec::new()),
@@ -12641,6 +13120,21 @@ pub(crate) mod tests {
             .unwrap()
             .reserve_start(ExecutionKind::Simulated)
             .is_ok());
+    }
+
+    #[test]
+    fn configuration_report_projection_explains_unsupported_simulation_hosts() {
+        let step = json!({
+            "outputs": {
+                "configuration_create_report": {
+                    "value": { "outcome": "simulation_unsupported_host" },
+                },
+            },
+        });
+        assert_eq!(
+            configuration_create_report_message(&step).as_deref(),
+            Some("This host cannot safely simulate configuration creation; no device file was changed.")
+        );
     }
 
     #[test]

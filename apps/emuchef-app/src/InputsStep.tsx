@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { useState, type RefObject } from "react";
 import { describedBy, stableDomId } from "./accessibility";
 import { diagnosticIsBlocking, groupedInputs } from "./app-helpers";
 import type {
@@ -8,6 +8,7 @@ import type {
   ValidationDiagnostic,
 } from "./types";
 import { inputDiagnosticsForDisplay, pageDiagnosticsForDisplay } from "./workflow";
+import type { ExecutionMode } from "./workflow";
 type ValidationError = ValidationDiagnostic & {
   targetId: string | null;
 };
@@ -45,7 +46,8 @@ interface InputsStepProps {
   ) => void | Promise<void>;
   onRemoveInputEntry: (input: InputDescriptor, entryIndex: number) => void;
   onRefreshValidation: () => void | Promise<void>;
-  onReview: () => void | Promise<void>;
+  realExecutionCompiled?: boolean;
+  onReview: (mode: ExecutionMode) => void | Promise<void>;
 }
 
 export function InputsStep({
@@ -64,14 +66,94 @@ export function InputsStep({
   onPickInput,
   onRemoveInputEntry,
   onRefreshValidation,
+  realExecutionCompiled = false,
   onReview,
 }: InputsStepProps) {
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("simulated");
+  const configurationSource = (recipeId: string) => {
+    const sourceInput = description.inputs.find(
+      (input) =>
+        input.recipeId === recipeId && input.inputId === "retroarch_cfg_source",
+    );
+    if (!sourceInput) return undefined;
+    if (
+      touchedInputKeys.has(sourceInput.key) &&
+      Object.prototype.hasOwnProperty.call(bindings, sourceInput.key)
+    ) {
+      return bindings[sourceInput.key];
+    }
+    return sourceInput.effectiveConfigurationSource ?? sourceInput.value;
+  };
+
+  const hasConfigurationSourceConflict = description.inputs.some(
+    (input) =>
+      input.inputId === "retroarch_cfg_source" &&
+      configurationSource(input.recipeId) === "conflict",
+  );
+
+  const visibleInputs = description.inputs.filter((input) => {
+    if (input.inputId !== "retroarch_video_threaded" && input.inputId !== "retroarch_cfg") {
+      return true;
+    }
+    const source = configurationSource(input.recipeId);
+    return input.inputId === "retroarch_video_threaded"
+      ? source === "managed" || source === "conflict"
+      : source === "uploaded" || source === "conflict";
+  });
+
+  const changeBinding = (key: string, value: unknown) => {
+    const sourceInput = description.inputs.find(
+      (input) => input.key === key && input.inputId === "retroarch_cfg_source",
+    );
+    onBindingChange(key, value);
+    if (!sourceInput) return;
+
+    const sourceInputs = description.inputs.filter(
+      (input) =>
+        input.recipeId === sourceInput.recipeId &&
+        (input.inputId === "retroarch_video_threaded" || input.inputId === "retroarch_cfg"),
+    );
+    const selectedInputId =
+      value === "managed"
+        ? "retroarch_video_threaded"
+        : value === "uploaded"
+          ? "retroarch_cfg"
+          : null;
+    for (const input of sourceInputs) {
+      if (input.inputId !== selectedInputId) onBindingChange(input.key, null);
+    }
+
+    if (value === "managed") {
+      const managedInput = sourceInputs.find(
+        (input) => input.inputId === "retroarch_video_threaded",
+      );
+      if (
+        managedInput &&
+        (!Object.prototype.hasOwnProperty.call(bindings, managedInput.key) ||
+          bindings[managedInput.key] == null)
+      ) {
+        const defaultValue =
+          managedInput.valueSource === "recipe_default" &&
+          typeof managedInput.value === "boolean"
+            ? managedInput.value
+            : false;
+        onBindingChange(managedInput.key, defaultValue);
+      }
+    }
+  };
+
   return (
     <>
       <p className="eyebrow">Required files and choices</p>
       <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
         Provide required files and options
       </h2>
+
+      {hasConfigurationSourceConflict && (
+        <p className="error" role="alert">
+          Saved RetroArch configuration sources conflict. Choose a source to resolve the saved inputs.
+        </p>
+      )}
 
       {validationErrors.length > 0 && (
         <section
@@ -99,7 +181,7 @@ export function InputsStep({
         <p className="success">The selected recipes do not require additional input.</p>
       )}
 
-      {groupedInputs(description.inputs).map((group) => (
+      {groupedInputs(visibleInputs).map((group) => (
         <section
           aria-labelledby={stableDomId("input-group", group.category)}
           className="input-group"
@@ -129,7 +211,12 @@ export function InputsStep({
             );
             const fieldDiagnostics = diagnostics.filter((diagnostic) => diagnostic.entryIndex == null);
             const diagnosticIds = diagnostics.map((_, index) => `${inputId}-error-${index}`);
-            const currentValue = bindings[input.key] ?? input.value;
+            const currentValue = input.inputId === "retroarch_cfg_source" &&
+                !touchedInputKeys.has(input.key)
+              ? input.effectiveConfigurationSource ?? input.value
+              : Object.prototype.hasOwnProperty.call(bindings, input.key)
+                ? bindings[input.key]
+                : input.value;
             const hasValue = currentValue !== null
               && currentValue !== undefined
               && currentValue !== ""
@@ -166,7 +253,7 @@ export function InputsStep({
                   <input
                     aria-describedby={describedBy(input.description && descriptionId, ...diagnosticIds)}
                     aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
-                    checked={Boolean(bindings[input.key] ?? input.value)}
+                    checked={Boolean(currentValue)}
                     id={inputId}
                     onChange={(event) => onBindingChange(input.key, event.target.checked)}
                     type="checkbox"
@@ -183,7 +270,7 @@ export function InputsStep({
                       aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
                       id={inputId}
                       onChange={(event) => onBindingChange(input.key, event.target.value)}
-                      value={String(bindings[input.key] ?? input.value ?? "")}
+                      value={String(currentValue ?? "")}
                     >
                       <option value="">Choose a Setup Location…</option>
                       {typeof currentValue === "string"
@@ -217,11 +304,20 @@ export function InputsStep({
                     )}
                     aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
                     id={inputId}
-                    onChange={(event) => onBindingChange(input.key, event.target.value)}
-                    value={String(bindings[input.key] ?? input.value ?? "")}
+                    onChange={(event) => changeBinding(input.key, event.target.value)}
+                    value={String(currentValue ?? "")}
                   >
+                    {input.inputId === "retroarch_cfg_source" && currentValue === "conflict" && (
+                      <option disabled value="conflict">
+                        Resolve saved source conflict
+                      </option>
+                    )}
                     <option value="">Choose…</option>
-                    {input.options.map((option) => <option key={option}>{option}</option>)}
+                    {input.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 ) : input.pathKind ? (
                   <div aria-labelledby={`${inputId}-label`} className="path-picker" id={inputId} role="group">
@@ -321,7 +417,7 @@ export function InputsStep({
                     id={inputId}
                     onChange={(event) => onBindingChange(input.key, event.target.value)}
                     type={input.sensitive ? "password" : "text"}
-                    value={String(bindings[input.key] ?? input.value ?? "")}
+                    value={String(currentValue ?? "")}
                   />
                 )}
 
@@ -373,10 +469,36 @@ export function InputsStep({
         <button className="secondary" disabled={busy} onClick={() => void onRefreshValidation()}>
           Refresh validation
         </button>
+        {realExecutionCompiled && (
+          <fieldset className="review-execution-mode">
+            <legend>Execution mode for this review</legend>
+            <label>
+              <input
+                checked={executionMode === "simulated"}
+                name="review-execution-mode"
+                onChange={() => setExecutionMode("simulated")}
+                type="radio"
+                value="simulated"
+              />
+              Simulation
+            </label>
+            <label>
+              <input
+                checked={executionMode === "real"}
+                name="review-execution-mode"
+                onChange={() => setExecutionMode("real")}
+                type="radio"
+                value="real"
+              />
+              Apply to device
+            </label>
+            <p>The review and its available action are tied to this mode.</p>
+          </fieldset>
+        )}
         <button
           aria-describedby={busy ? "review-disabled-reason" : undefined}
           disabled={busy}
-          onClick={() => void onReview()}
+          onClick={() => void onReview(executionMode)}
         >
           Review plan
         </button>

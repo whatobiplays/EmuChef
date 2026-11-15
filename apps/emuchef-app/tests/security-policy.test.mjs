@@ -338,7 +338,12 @@ test("runtime startup is independent from ADB and simulation remains review-hand
   assert.ok(app.indexOf("sidecar.initialize()") < app.indexOf("AdbManager::new"));
   assert.match(api, /startSimulatedExecution: \(reviewHandle: string\)/);
   assert.doesNotMatch(api, /startSimulatedExecution:[\s\S]{0,180}\b(?:plan|planDigest|mode|serial|catalog)\b/);
-  assert.match(execution, /"startExecution"[\s\S]*"mode": "dry_run"/);
+  const dryRunStartOffset = execution.indexOf("pub(crate) fn request_dry_run_start");
+  const dryRunStartEnd = execution.indexOf("\n}\n", dryRunStartOffset);
+  const dryRunStart = execution.slice(dryRunStartOffset, dryRunStartEnd);
+  assert.match(dryRunStart, /"mode": "dry_run"/);
+  assert.match(dryRunStart, /runtime_request\(runtime, "startExecution", payload\)/);
+  assert.match(dryRunStart, /get\("reviewAuthorityId"\)/);
   assert.match(execution, /pub fn start_simulated_execution\(\s*review_handle: String,/);
   assert.doesNotMatch(execution, /apply_device/);
 });
@@ -444,7 +449,9 @@ test("real execution is default-disabled with compile-time-only enablement", () 
     `${app}\n${api}`,
     /localStorage|sessionStorage|URLSearchParams|import\.meta\.env|process\.env/,
   );
-  assert.match(reviewStep, /\{realExecutionCompiled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
+  assert.match(reviewStep, /\{simulationReview && \([\s\S]{0,420}>\s*\{executionStarting \? "Starting simulation…" : "Start simulation"\}/);
+  assert.match(reviewStep, /\{realExecutionCompiled && realReview && \([\s\S]{0,260}>\s*Apply to Device\s*<\/button>/);
+  assert.match(app, /mode: mode === "simulated" \? "dry_run" : "real"/);
   assert.match(app, /activeDialog\?\.payload\.kind === "real-execution" && workflow\.review/);
 
   const readinessProbe = sourceSlice(

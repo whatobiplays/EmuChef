@@ -183,7 +183,7 @@ fn validate_expected_digest(digest: &CatalogContentDigest) -> Result<(), Catalog
     Ok(())
 }
 
-/// Hash the top-level authored catalog files in normalized path order.
+/// Hash authored YAML files and app configuration templates in normalized path order.
 ///
 /// Each record is framed as `<path-length>:<path><content-length>:<content>`.
 /// Length framing prevents path/content boundary ambiguity while preserving raw
@@ -192,30 +192,37 @@ pub fn compute_catalog_sha256(root: &Path) -> Result<String, CatalogSourceError>
     let mut files = Vec::new();
     for directory in CATALOG_DIRECTORIES {
         let path = root.join(directory);
-        let entries = fs::read_dir(&path).map_err(|_| {
+        let metadata = fs::symlink_metadata(&path).map_err(|_| {
             CatalogSourceError::new(
                 "catalog_unavailable",
                 "Catalog snapshot is missing a required authored directory.",
             )
         })?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && is_yaml(&path) {
-                files.push(path);
-            }
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CatalogSourceError::new(
+                "catalog_unavailable",
+                "Catalog snapshot is missing a required authored directory.",
+            ));
         }
+        collect_catalog_files(root, &path, &mut files)?;
     }
-    files.sort();
+    let mut files = files
+        .into_iter()
+        .map(|path| {
+            let relative = path.strip_prefix(root).map_err(|_| {
+                CatalogSourceError::new(
+                    "catalog_integrity_failed",
+                    "Catalog file could not be normalized beneath the snapshot root.",
+                )
+            })?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            Ok((relative, path))
+        })
+        .collect::<Result<Vec<_>, CatalogSourceError>>()?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut hasher = Sha256::new();
-    for path in files {
-        let relative = path.strip_prefix(root).map_err(|_| {
-            CatalogSourceError::new(
-                "catalog_integrity_failed",
-                "Catalog file could not be normalized beneath the snapshot root.",
-            )
-        })?;
-        let relative = relative.to_string_lossy().replace('\\', "/");
+    for (relative, path) in files {
         let content = fs::read(&path).map_err(|_| {
             CatalogSourceError::new(
                 "catalog_integrity_failed",
@@ -241,6 +248,74 @@ fn is_yaml(path: &Path) -> bool {
         path.extension().and_then(|extension| extension.to_str()),
         Some("yaml" | "yml")
     )
+}
+
+fn collect_catalog_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), CatalogSourceError> {
+    let entries = fs::read_dir(directory).map_err(|_| {
+        CatalogSourceError::new(
+            "catalog_unavailable",
+            "Catalog snapshot directory is unreadable.",
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|_| {
+            CatalogSourceError::new(
+                "catalog_integrity_failed",
+                "Catalog snapshot entry is unreadable.",
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|_| {
+            CatalogSourceError::new(
+                "catalog_integrity_failed",
+                "Catalog snapshot entry type is unavailable.",
+            )
+        })?;
+        let path = entry.path();
+        if file_type.is_symlink() {
+            return Err(CatalogSourceError::new(
+                "catalog_integrity_failed",
+                "Catalog snapshot must not contain symlinks.",
+            ));
+        }
+        if file_type.is_dir() {
+            collect_catalog_files(root, &path, files)?;
+        } else if file_type.is_file() && entry.file_name() == ".gitkeep" {
+            continue;
+        } else if file_type.is_file()
+            && (is_yaml(&path) || is_app_configuration_template_asset(root, &path))
+        {
+            files.push(path);
+        } else {
+            return Err(CatalogSourceError::new(
+                "catalog_integrity_failed",
+                "Catalog snapshot contains an unsupported entry.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_app_configuration_template_asset(root: &Path, path: &Path) -> bool {
+    let Some(relative) = path.strip_prefix(root).ok().and_then(Path::to_str) else {
+        return false;
+    };
+    let components = relative.split('/').collect::<Vec<_>>();
+    components.len() >= 3
+        && components[0] == "apps"
+        && components[1].bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && components[1]
+            .bytes()
+            .any(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && Path::new(relative)
+            .extension()
+            .and_then(|value| value.to_str())
+            == Some("cfg")
 }
 
 #[cfg(test)]
@@ -272,6 +347,24 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.identity(), Some(&identity));
         assert_eq!(snapshot.root(), root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn catalog_digest_tracks_app_configuration_template_assets() {
+        let root = root();
+        let template_dir = root.path().join("apps/retroarch");
+        fs::create_dir_all(&template_dir).unwrap();
+        let template = template_dir.join("default.cfg");
+        fs::write(&template, "video_threaded=false\n").unwrap();
+
+        let first = compute_catalog_sha256(root.path()).unwrap();
+        fs::write(&template, "video_threaded=true\n").unwrap();
+        let second = compute_catalog_sha256(root.path()).unwrap();
+
+        assert_ne!(
+            first, second,
+            "template bytes must be bound by the catalog digest"
+        );
     }
 
     #[test]

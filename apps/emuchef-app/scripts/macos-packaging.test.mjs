@@ -23,6 +23,7 @@ import {
   parseOptions,
   qualificationPolicy,
   requireThinArm64,
+  resetBundleOutputForBuild,
   semanticDigest,
   validateDeveloperIdEnvironment,
   validatePackagingConfiguration,
@@ -451,6 +452,83 @@ test("tree and catalog digests ignore mtimes but detect content changes", () => 
   }
 });
 
+function createCatalogDirectories(catalog) {
+  for (const directory of ["apps", "device_plans", "device_profiles", "recipes"]) {
+    fs.mkdirSync(path.join(catalog, directory), { recursive: true });
+  }
+}
+
+test("catalog digest hashes safe app configuration templates by relative path and bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-catalog-template-test-"));
+  try {
+    const catalog = path.join(root, "catalog");
+    createCatalogDirectories(catalog);
+    const templateDirectory = path.join(catalog, "apps", "retroarch");
+    fs.mkdirSync(templateDirectory);
+    const template = path.join(templateDirectory, "default.cfg");
+    fs.writeFileSync(template, "video_threaded=false\n");
+
+    const first = catalogDigest(catalog);
+    assert.deepEqual(first, {
+      fileCount: 1,
+      sha256: "0ab78f37bebda1fad655301fa95d6c4d259204c4b7323cc5db1f3e0fe1d6f035",
+    });
+
+    fs.utimesSync(template, new Date(0), new Date(0));
+    assert.deepEqual(catalogDigest(catalog), first);
+
+    const linkedTemplate = path.join(templateDirectory, "linked.cfg");
+    fs.symlinkSync("default.cfg", linkedTemplate);
+    assert.throws(() => catalogDigest(catalog), /symlink/);
+    fs.unlinkSync(linkedTemplate);
+
+    fs.writeFileSync(template, "video_threaded=true\n");
+    const changedBytes = catalogDigest(catalog);
+    assert.notEqual(changedBytes.sha256, first.sha256);
+
+    fs.renameSync(template, path.join(templateDirectory, "alternate.cfg"));
+    assert.notEqual(catalogDigest(catalog).sha256, changedBytes.sha256);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("catalog digest rejects templates outside safe apps app-id paths and unsupported extensions", () => {
+  for (const relative of [
+    "apps/default.cfg",
+    "apps/Retroarch/default.cfg",
+    "apps/retroarch/bad name.cfg",
+    "apps/retroarch/default.txt",
+    "recipes/retroarch/default.cfg",
+    "device_profiles/retroarch/default.cfg",
+  ]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-catalog-invalid-template-test-"));
+    try {
+      const catalog = path.join(root, "catalog");
+      createCatalogDirectories(catalog);
+      const file = path.join(catalog, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "video_threaded=false\n");
+      assert.throws(() => catalogDigest(catalog), /unsupported content/, relative);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("catalog digest rejects a symlinked required catalog directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-catalog-symlink-test-"));
+  try {
+    const catalog = path.join(root, "catalog");
+    createCatalogDirectories(catalog);
+    fs.renameSync(path.join(catalog, "apps"), path.join(catalog, "apps-target"));
+    fs.symlinkSync("apps-target", path.join(catalog, "apps"));
+    assert.throws(() => catalogDigest(catalog), /catalog\/apps is missing/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("artifact discovery rejects missing or ambiguous outputs", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-artifact-test-"));
   try {
@@ -465,5 +543,63 @@ test("artifact discovery rejects missing or ambiguous outputs", () => {
     });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bundle reset preserves existing output when the release guard rejects", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-bundle-reset-guard-test-"));
+  const bundleRoot = path.join(
+    root,
+    "apps",
+    "emuchef-app",
+    "src-tauri",
+    "target",
+    "release",
+    "bundle",
+  );
+
+  try {
+    fs.mkdirSync(bundleRoot, { recursive: true });
+    const sentinel = path.join(bundleRoot, "previous-release.txt");
+    fs.writeFileSync(sentinel, "preserve pinned release output");
+
+    assert.throws(
+      () => resetBundleOutputForBuild({
+        paths: { repoRoot: root, bundleRoot },
+        assertBuildAllowed: () => {
+          throw new Error("qualification state is pinned");
+        },
+      }),
+      /qualification state is pinned/,
+    );
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "preserve pinned release output");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bundle reset rejects a symlinked target parent without deleting outside output", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-bundle-reset-symlink-test-"));
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "emuchef-bundle-external-"));
+  const relativeTarget = path.join("apps", "emuchef-app", "src-tauri", "target");
+  const targetParent = path.join(root, relativeTarget);
+  const externalBundle = path.join(externalRoot, "release", "bundle");
+  const bundleRoot = path.join(targetParent, "release", "bundle");
+
+  try {
+    fs.mkdirSync(path.dirname(targetParent), { recursive: true });
+    fs.mkdirSync(externalBundle, { recursive: true });
+    const sentinel = path.join(externalBundle, "outside-release.txt");
+    fs.writeFileSync(sentinel, "preserve outside output");
+    fs.symlinkSync(externalRoot, targetParent, "dir");
+
+    assert.throws(
+      () => resetBundleOutputForBuild({ paths: { repoRoot: root, bundleRoot } }),
+      /symlink or non-directory component/,
+    );
+    assert.equal(fs.readFileSync(sentinel, "utf8"), "preserve outside output");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(externalRoot, { recursive: true, force: true });
   }
 });

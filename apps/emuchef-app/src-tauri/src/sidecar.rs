@@ -775,10 +775,7 @@ fn resolve_sidecar() -> Result<(PathBuf, Option<PathBuf>), String> {
     if cfg!(debug_assertions) {
         let root =
             repo_root().ok_or_else(|| "The EmuChef repository root was not found.".to_string())?;
-        let candidates = [
-            root.join("crates/emuchef-rust-backend/target/debug/emuchef"),
-            root.join("target/debug/emuchef"),
-        ];
+        let candidates = debug_sidecar_candidates(&root);
         let binary = candidates
             .into_iter()
             .find(|candidate| candidate.is_file())
@@ -799,6 +796,19 @@ fn resolve_sidecar() -> Result<(PathBuf, Option<PathBuf>), String> {
         return Err("The packaged Rust runtime is missing.".to_string());
     }
     Ok((binary, None))
+}
+
+fn debug_sidecar_candidates(root: &Path) -> [PathBuf; 2] {
+    let binary_name = if cfg!(windows) {
+        "emuchef.exe"
+    } else {
+        "emuchef"
+    };
+    [
+        root.join("crates/emuchef-rust-backend/target/debug")
+            .join(binary_name),
+        root.join("target/debug").join(binary_name),
+    ]
 }
 
 fn repo_root() -> Option<PathBuf> {
@@ -833,6 +843,24 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn debug_runtime_prefers_qualified_backend_target() {
+        let root = PathBuf::from("/retroarch-config-create-repository");
+        let candidates = debug_sidecar_candidates(&root);
+        let binary_name = if cfg!(windows) {
+            "emuchef.exe"
+        } else {
+            "emuchef"
+        };
+
+        assert_eq!(
+            candidates[0],
+            root.join("crates/emuchef-rust-backend/target/debug")
+                .join(binary_name)
+        );
+        assert_eq!(candidates[1], root.join("target/debug").join(binary_name));
+    }
 
     fn scripted_process(response: Option<&[u8]>) -> (SidecarProcess, Arc<ScriptedProcessObserver>) {
         scripted_process_with_cleanup(response, SidecarCleanup::Confirmed)

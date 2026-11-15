@@ -143,6 +143,7 @@ export const api = {
     selectedRecipes: string[] | null;
     bindings: Record<string, unknown>;
     requestGeneration: number;
+    mode: "real" | "dry_run";
   }) => invoke<ReviewSummary>("prepare_execution_review", request),
   discardReview: (reviewHandle: string) => invoke<void>("discard_review", { reviewHandle }),
   startSimulatedExecution: (reviewHandle: string) =>

@@ -30,6 +30,8 @@ export function ReviewStep({
   const realStartDisabled =
     startDisabled ||
     (qualification !== undefined && qualification?.state !== "supported");
+const realReview = review.executionMode === "real";
+const simulationReview = !realReview;
   const targetIdentity = [review.target.manufacturer, review.target.model]
     .filter(Boolean)
     .join(" ");
@@ -50,6 +52,9 @@ export function ReviewStep({
       <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
         Review this setup
       </h2>
+      <p className="review-execution-mode" role="status">
+        Reviewed for {realReview ? "application to the device" : "simulation"}.
+      </p>
       {!realExecutionCompiled && (
         <p className="simulation-banner">
           Simulation only. This does not change or verify the real device.
@@ -123,6 +128,46 @@ export function ReviewStep({
                     {action.description && <span>{action.description}</span>}
                     {action.requirement === "conditional" && (
                       <em>Conditional</em>
+                    )}
+                    {action.configurationCreate && (
+                      <section
+                        aria-label="Configuration creation"
+                        className="review-configuration-create"
+                      >
+                        <h5>Configuration creation</h5>
+                        <dl>
+                          <div>
+                            <dt>Source</dt>
+                            <dd>{action.configurationCreate.source}</dd>
+                          </div>
+                          <div>
+                            <dt>SHA-256</dt>
+                            <dd>
+                              <code>{action.configurationCreate.sha256}</code>
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Reviewed bytes</dt>
+                            <dd>{action.configurationCreate.byteLength} bytes</dd>
+                          </div>
+                          <div>
+                            <dt>Destination</dt>
+                            <dd>{action.configurationCreate.targetLabel}</dd>
+                          </div>
+                          <div>
+                            <dt>Target state</dt>
+                            <dd>
+                              {action.configurationCreate.confirmedAbsent
+                                ? "Confirmed absent · create only"
+                                : "Absence not confirmed · creation is blocked"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Verification</dt>
+                            <dd>{action.configurationCreate.verificationScope}</dd>
+                          </div>
+                        </dl>
+                      </section>
                     )}
                     {action.deviceLocation && (
                       <small>Destination: {action.deviceLocation}</small>
@@ -253,16 +298,18 @@ export function ReviewStep({
         <button className="secondary" onClick={onBack}>
           Back
         </button>
-        <button
-          aria-describedby={
-            startDisabled ? "execution-start-reason" : undefined
-          }
-          disabled={startDisabled}
-          onClick={onStartSimulation}
-        >
-          {executionStarting ? "Starting simulation…" : "Start simulation"}
-        </button>
-        {realExecutionCompiled && (
+        {simulationReview && (
+          <button
+            aria-describedby={
+              startDisabled ? "execution-start-reason" : undefined
+            }
+            disabled={startDisabled}
+            onClick={onStartSimulation}
+          >
+            {executionStarting ? "Starting simulation…" : "Start simulation"}
+          </button>
+        )}
+        {realExecutionCompiled && realReview && (
           <button
             className="danger"
             disabled={realStartDisabled}
@@ -284,6 +331,7 @@ export function ReviewStep({
       {!startDisabled &&
         realStartDisabled &&
         realExecutionCompiled &&
+        realReview &&
         qualification !== undefined && (
           <p className="disabled-reason" id="execution-start-reason">
             Complete the current device qualification before applying this

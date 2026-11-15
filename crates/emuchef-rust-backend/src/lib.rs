@@ -55,6 +55,7 @@ mod planner_runtime;
 mod planner_tests;
 mod product_catalog;
 pub mod protocol;
+pub mod qualification_build;
 mod raw_request;
 #[cfg(test)]
 mod recipe_qualification_app_target_tests;

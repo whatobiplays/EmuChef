@@ -1,0 +1,29 @@
+schema_version: 1
+kind: device_profile
+id: konkr.pocket_advance
+name: KONKR Pocket Advance
+description: Explicit qualification profile for the owner-identified KONKR Pocket Advance.
+match:
+  manufacturer_contains:
+    - ARBOR
+  model_patterns:
+    - '^GT78-VN$'
+  android_version:
+    min: 12
+capability_defaults:
+  adb_available: true
+  apk_install: false
+  shared_storage_write: false
+  app_launch: false
+  shell_command: true
+  package_remove_for_user: false
+  root_shell: false
+  app_data_write: false
+device_tags:
+  - handheld_android
+  - brand_konkr
+  - retroarch_config_create_qualification
+metadata:
+  qualification_scope: retroarch_config_create
+  selection_policy: explicit_operator_selection
+  automatic_profile_matching: false

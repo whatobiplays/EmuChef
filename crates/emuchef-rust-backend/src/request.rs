@@ -243,6 +243,16 @@ fn handle_start_execution(
         )
     })?;
     let target = optional_target_device(payload, "targetDevice")?;
+    let review_authority_id = match payload.get("reviewAuthorityId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request field 'reviewAuthorityId' must be a non-empty string.",
+                json!({ "field": "reviewAuthorityId" }),
+            ));
+        }
+    };
     let setup_location_lease = payload
         .get("setupLocationLease")
         .cloned()
@@ -255,12 +265,13 @@ fn handle_start_execution(
             )
         })?;
     Ok(envelope::success(
-        sessions.executions().start_with_setup_location_lease(
+        sessions.executions().start_with_review_authority(
             plan,
             plan_digest,
             mode,
             target,
             setup_location_lease,
+            review_authority_id,
         )?,
     ))
 }
@@ -333,9 +344,14 @@ fn handle_prepare_execution_review(
         })?,
         None => Vec::new(),
     };
-    let plan = sessions
+    let (plan, review_authority_id) = sessions
         .executions()
-        .prepare_review_plan_with_storage_targets(plan, mode, target, storage_targets)?;
+        .prepare_review_plan_with_storage_targets_and_authority(
+            plan,
+            mode,
+            target,
+            storage_targets,
+        )?;
     let plan_digest = crate::plan_digest::execution_plan_digest(&plan).map_err(|error| {
         ApiError::new(
             crate::errors::ApiErrorCode::InvalidExecutionPlan,
@@ -356,11 +372,15 @@ fn handle_prepare_execution_review(
             json!({}),
         )
     })?;
-    Ok(envelope::success(json!({
+    let mut response = json!({
         "plan": plan,
         "planDigest": plan_digest,
         "review": review,
-    })))
+    });
+    if let Some(review_authority_id) = review_authority_id {
+        response["reviewAuthorityId"] = json!(review_authority_id);
+    }
+    Ok(envelope::success(response))
 }
 
 /// Replace the physical Setup Location boundary in each copy action with the
@@ -2559,14 +2579,17 @@ fn optional_runtime_capability_availability(
 ) -> Result<Option<runtime_configuration::RuntimeCapabilityAvailability>, ApiError> {
     match payload.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Object(value)) => serde_json::from_value(Value::Object(value.clone()))
-            .map(Some)
-            .map_err(|error| {
-                ApiError::invalid_request_with_details(
-                    format!("Request field '{field}' is invalid: {error}"),
-                    json!({ "field": field }),
-                )
-            }),
+        Some(Value::Object(value)) => serde_json::from_value::<
+            runtime_configuration::RuntimeCapabilityAvailabilityRequest,
+        >(Value::Object(value.clone()))
+        .map(runtime_configuration::RuntimeCapabilityAvailability::from)
+        .map(Some)
+        .map_err(|error| {
+            ApiError::invalid_request_with_details(
+                format!("Request field '{field}' is invalid: {error}"),
+                json!({ "field": field }),
+            )
+        }),
         Some(_) => Err(ApiError::invalid_request_with_details(
             format!("Request field '{field}' must be an object."),
             json!({ "field": field }),
@@ -3012,6 +3035,7 @@ steps:
                 name: Some("Example Setup Locations".to_string()),
                 description: None,
             }),
+            config_create_destination: None,
         };
         let planning = crate::planner::plan_execution(input);
         assert_eq!(

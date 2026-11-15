@@ -167,6 +167,11 @@ export interface RecipeOption {
   unavailableCapabilities: string[];
 }
 
+export interface InputOption {
+  value: string;
+  label: string;
+}
+
 export interface InputDescriptor {
   key: string;
   recipeId: string;
@@ -177,7 +182,7 @@ export interface InputDescriptor {
   required: boolean;
   multiple?: boolean;
   sensitive: boolean;
-  options?: string[];
+  options?: InputOption[];
   pathKind?: "file" | "directory";
   acceptedExtensions?: string[];
   presentationCategory?: string;
@@ -185,6 +190,8 @@ export interface InputDescriptor {
   entries?: InputEntryDescriptor[];
   value: unknown;
   valueSource: "explicit" | "user_configuration" | "device_plan" | "recipe_default" | null;
+  /** Rust's effective RetroArch source, including legacy saved-binding inference. */
+  effectiveConfigurationSource?: "none" | "managed" | "uploaded" | "conflict" | null;
   diagnostics: ValidationDiagnostic[];
 }
 
@@ -221,8 +228,18 @@ export interface CopyChanges {
   deletions: string[];
 }
 
+/** Frozen, create-only configuration details exposed by the reviewed plan. */
+export interface ConfigurationCreateReview {
+  source: "EmuChef-generated" | "Uploaded file";
+  sha256: string;
+  byteLength: number;
+  targetLabel: string;
+  confirmedAbsent: boolean;
+  verificationScope: string;
+}
 export interface ReviewSummary {
   reviewHandle: string;
+  executionMode: "simulated" | "real";
   setup: {
     name: string;
     description?: string;
@@ -255,6 +272,8 @@ export interface ReviewSummary {
         deviceLocation?: string;
         /** Copy changes shown to the user before applying the reviewed action. */
         copyChanges?: CopyChanges | null;
+        /** Exact configuration artifact reviewed for create-only publication. */
+        configurationCreate?: ConfigurationCreateReview | null;
       }>;
     }>;
   }>;

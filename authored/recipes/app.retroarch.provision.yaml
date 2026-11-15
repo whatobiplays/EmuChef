@@ -22,6 +22,29 @@ inputs:
       - cfg
       path_kind: file
     default: null
+  retroarch_cfg_source:
+    type: enum
+    role: generic
+    label: Configuration source
+    description: Choose whether EmuChef creates a configuration or uses the supplied file.
+    required: false
+    multiple: false
+    default: none
+    options:
+      - value: none
+        label: No configuration
+      - value: managed
+        label: Create from EmuChef setting
+      - value: uploaded
+        label: Use supplied file
+  retroarch_video_threaded:
+    type: boolean
+    role: generic
+    label: Threaded video
+    description: Value written when EmuChef creates the RetroArch configuration.
+    required: false
+    multiple: false
+    default: false
 artifacts:
   retroarch_apk:
     type: app_artifact
@@ -694,7 +717,7 @@ steps:
       ref: inputs.retroarch_cfg
     dest:
       app_target: config
-    copy_policy: replace
+    copy_policy: create_only
   verify:
   - type: file_exists
     params:
@@ -723,3 +746,14 @@ steps:
   skip_if: []
   params: {}
   verify: []
+config:
+  app_ref: retroarch
+  configuration: main
+  target: config
+  base:
+    template: default
+  variables:
+    video_threaded: retroarch_video_threaded
+  properties:
+    video_threaded:
+      label: Threaded video

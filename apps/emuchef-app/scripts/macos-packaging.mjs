@@ -41,6 +41,42 @@ export function workspacePaths() {
   };
 }
 
+export function resetBundleOutputForBuild({
+  paths = workspacePaths(),
+  assertBuildAllowed = () => {},
+  fsApi = fs,
+} = {}) {
+  assertBuildAllowed();
+  const relativeBundlePath = path.join(
+    "apps",
+    "emuchef-app",
+    "src-tauri",
+    "target",
+    "release",
+    "bundle",
+  );
+  const expectedBundleRoot = path.resolve(paths.repoRoot, relativeBundlePath);
+  if (path.resolve(paths.bundleRoot) !== expectedBundleRoot) {
+    throw new Error("macOS bundle output path is outside the configured Tauri release directory");
+  }
+
+  let currentPath = fsApi.realpathSync(paths.repoRoot);
+  for (const component of relativeBundlePath.split(path.sep)) {
+    currentPath = path.join(currentPath, component);
+    let metadata;
+    try {
+      metadata = fsApi.lstatSync(currentPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error("macOS bundle output path contains a symlink or non-directory component");
+    }
+  }
+  fsApi.rmSync(currentPath, { recursive: true, force: true });
+}
+
 /**
  * Produces a local build environment without inspecting or validating Apple
  * credential values. Fixed Tauri variable names are removed and ad-hoc signing
@@ -199,6 +235,18 @@ export function appTreeDigest(appPath, fsApi = fs) {
   return sha256Bytes(records);
 }
 
+/** Matches the packaged-resource path rules for app-owned configuration files. */
+function isAppConfigurationTemplatePath(relative) {
+  const [catalogDirectory, appId, ...templateParts] = relative.split("/");
+  return (
+    catalogDirectory === "apps" &&
+    /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(appId ?? "") &&
+    templateParts.length > 0 &&
+    templateParts.every((part) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(part)) &&
+    templateParts.at(-1).endsWith(".cfg")
+  );
+}
+
 export function catalogDigest(catalogRoot, fsApi = fs) {
   const root = fsApi.realpathSync(catalogRoot);
   const records = [];
@@ -206,15 +254,20 @@ export function catalogDigest(catalogRoot, fsApi = fs) {
     const directoryPath = path.join(root, directory);
     let metadata;
     try {
-      metadata = fsApi.statSync(directoryPath);
+      metadata = fsApi.lstatSync(directoryPath);
     } catch {
       throw new Error(`catalog/${directory} is missing`);
     }
-    if (!metadata.isDirectory()) throw new Error(`catalog/${directory} is missing`);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`catalog/${directory} is missing`);
+    }
     for (const absolute of regularFiles(directoryPath, { rejectSymlinks: true, fsApi })) {
       if (path.basename(absolute) === ".gitkeep") continue;
-      if (!/\.ya?ml$/.test(absolute)) throw new Error("catalog contains unsupported content");
-      records.push({ absolute, relative: path.relative(root, absolute).split(path.sep).join("/") });
+      const relative = path.relative(root, absolute).split(path.sep).join("/");
+      if (!/\.ya?ml$/.test(absolute) && !isAppConfigurationTemplatePath(relative)) {
+        throw new Error("catalog contains unsupported content");
+      }
+      records.push({ absolute, relative });
     }
   }
   records.sort((left, right) => Buffer.compare(Buffer.from(left.relative), Buffer.from(right.relative)));

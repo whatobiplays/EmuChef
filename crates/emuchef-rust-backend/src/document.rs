@@ -2091,6 +2091,13 @@ mod catalog_coordination_tests {
         fs::create_dir_all(&recipes).expect("create Recipe directory");
         fs::write(apps.join("retroarch.yaml"), app_definition)
             .expect("write App Definition fixture");
+        let template_directory = apps.join("retroarch");
+        fs::create_dir_all(&template_directory).expect("create app template directory");
+        fs::write(
+            template_directory.join("default.cfg"),
+            include_str!("../../../authored/apps/retroarch/default.cfg"),
+        )
+        .expect("write app configuration template fixture");
         if include_recipe {
             fs::write(
                 recipes.join("app.retroarch.provision.yaml"),

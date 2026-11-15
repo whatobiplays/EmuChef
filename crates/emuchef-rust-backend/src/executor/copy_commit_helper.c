@@ -30,6 +30,10 @@ static void fail(const char *action) {
     fprintf(stderr, "selected-root helper %s: %s\n", action, strerror(errno));
     exit(1);
 }
+static void fail_with_status(int status, const char *action) {
+    fprintf(stderr, "selected-root helper %s: %s\n", action, strerror(errno));
+    exit(status);
+}
 
 static void sync_directory(int directory_fd, const char *action) {
     int readable = openat(directory_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -40,6 +44,63 @@ static void sync_directory(int directory_fd, const char *action) {
         fail(action);
     }
     close(readable);
+}
+static void test_final_open_race(int parent_fd, const char *name) {
+#ifdef EMUCHEF_COPY_COMMIT_HELPER_TEST
+    const char *race = getenv("EMU_CHEF_TEST_FINAL_OPEN_RACE");
+    if (race != NULL && strcmp(race, "file") == 0) {
+        int fd = openat(parent_fd, name,
+                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                        0644);
+        if (fd >= 0) {
+            const char marker[] = "concurrent target";
+            (void)write(fd, marker, sizeof(marker) - 1);
+            (void)fsync(fd);
+            close(fd);
+        }
+    } else if (race != NULL && strcmp(race, "symlink") == 0) {
+        (void)symlinkat("/emuchef-test-victim", parent_fd, name);
+    }
+#else
+    (void)parent_fd;
+    (void)name;
+#endif
+}
+
+static void test_partial_final_write(int destination_fd) {
+#ifdef EMUCHEF_COPY_COMMIT_HELPER_TEST
+    const char *partial = getenv("EMU_CHEF_TEST_PARTIAL_FINAL_WRITE");
+    if (partial != NULL && strcmp(partial, "1") == 0) {
+        const char marker[] = "partial";
+        if (write(destination_fd, marker, sizeof(marker) - 1) < 0 ||
+            fsync(destination_fd) < 0) {
+            fail_with_status(12, "test injected partial configuration write");
+        }
+        errno = EIO;
+        fail_with_status(12, "test injected partial configuration write");
+    }
+#else
+    (void)destination_fd;
+#endif
+}
+
+/* A raced FIFO must not block final verification. */
+static int open_final_configuration_readback(int parent_fd, const char *name,
+                                             int flags) {
+#ifdef EMUCHEF_COPY_COMMIT_HELPER_TEST
+    const char *race = getenv("EMU_CHEF_TEST_FINAL_READBACK_RACE");
+    if (race != NULL && strcmp(race, "fifo") == 0) {
+        if (unlinkat(parent_fd, name, 0) < 0 ||
+            mkfifoat(parent_fd, name, 0600) < 0) {
+            return -1;
+        }
+        if ((flags & O_NONBLOCK) == 0) {
+            errno = EDEADLK;
+            return -1;
+        }
+    }
+#endif
+    return openat(parent_fd, name, flags);
 }
 
 static bool safe_component(const char *part) {
@@ -482,6 +543,132 @@ static void remove_entry(int root_fd, const char *relative, bool directory,
     free(path.storage);
 }
 
+static void create_file_exclusive(int root_fd, const char *stage_root,
+                                  const char *relative, const char *expected,
+                                  const char *expected_source_sha256) {
+    struct path_parts path = split_relative(relative);
+    if (path.count != 1 || strcmp(expected, "absent") != 0) {
+        errno = EINVAL;
+        fail("create-only configuration arguments");
+    }
+
+    int stage_fd = open_absolute_directory(stage_root);
+    int source_parent = open_relative_parent(stage_fd, &path);
+    int source = openat(source_parent, path.items[0], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) {
+        fail("open staged configuration without links");
+    }
+    struct stat source_status;
+    if (fstat(source, &source_status) < 0 || !S_ISREG(source_status.st_mode)) {
+        errno = EINVAL;
+        fail("validate staged configuration file");
+    }
+    char source_digest[65];
+    sha256_from_fd(source, source_digest);
+    if (strcmp(source_digest, expected_source_sha256) != 0) {
+        errno = ESTALE;
+        fail_with_status(11, "staged configuration digest mismatch");
+    }
+    if (lseek(source, 0, SEEK_SET) < 0) {
+        fail("rewind staged configuration");
+    }
+
+    int destination_parent = open_relative_parent(root_fd, &path);
+    struct stat existing_target;
+    if (fstatat(destination_parent, path.items[0], &existing_target,
+                 AT_SYMLINK_NOFOLLOW) == 0) {
+        fprintf(stderr, "selected-root helper target already exists\n");
+        exit(10);
+    }
+    if (errno != ENOENT) {
+        fail("inspect final configuration target");
+    }
+    test_final_open_race(destination_parent, path.items[0]);
+    int destination = openat(destination_parent, path.items[0],
+                             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                             0644);
+    if (destination < 0) {
+        if (errno == EEXIST) {
+            fprintf(stderr, "selected-root helper target already exists\n");
+            exit(10);
+        }
+        fail("create configuration with exclusive final-path open");
+    }
+    test_partial_final_write(destination);
+
+    /*
+     * From this point onward, failure may leave partial bytes at the final
+     * path. Never unlink or replace that path; report the outcome as
+     * unverified so a later review must inspect it explicitly.
+     */
+    char buffer[65536];
+    for (;;) {
+        ssize_t read_count = read(source, buffer, sizeof(buffer));
+        if (read_count == 0) {
+            break;
+        }
+        if (read_count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fail_with_status(12, "read staged configuration");
+        }
+        ssize_t offset = 0;
+        while (offset < read_count) {
+            ssize_t write_count = write(destination, buffer + offset,
+                                        (size_t)(read_count - offset));
+            if (write_count < 0 && errno == EINTR) {
+                continue;
+            }
+            if (write_count <= 0) {
+                fail_with_status(12, "write final configuration");
+            }
+            offset += write_count;
+        }
+    }
+    if (fchmod(destination, 0644) < 0 || fsync(destination) < 0) {
+        fail_with_status(12, "flush final configuration");
+    }
+    if (close(destination) < 0) {
+        fail_with_status(12, "close final configuration");
+    }
+
+    int directory_fd = openat(destination_parent, ".",
+                              O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory_fd < 0 || fsync(directory_fd) < 0) {
+        fail_with_status(12, "flush configuration parent directory");
+    }
+    close(directory_fd);
+
+    int readback = open_final_configuration_readback(
+        destination_parent, path.items[0],
+        O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (readback < 0) {
+        fail_with_status(12, "reopen final configuration without links");
+    }
+    struct stat readback_status;
+    if (fstat(readback, &readback_status) < 0 ||
+        !S_ISREG(readback_status.st_mode) ||
+        readback_status.st_size != source_status.st_size) {
+        errno = EIO;
+        fail_with_status(12, "validate final configuration length");
+    }
+    char readback_digest[65];
+    sha256_from_fd(readback, readback_digest);
+    if (strcmp(readback_digest, expected_source_sha256) != 0) {
+        errno = ESTALE;
+        fail_with_status(12, "verify final configuration digest");
+    }
+
+    printf("CREATED %s %" PRIdMAX "\n", readback_digest,
+           (intmax_t)readback_status.st_size);
+    close(readback);
+    close(destination_parent);
+    close(source);
+    close(source_parent);
+    close(stage_fd);
+}
+
 static void publish_file(int root_fd, const char *stage_root, const char *relative,
                          const char *expected, const char *expected_source_sha256) {
     struct path_parts path = split_relative(relative);
@@ -584,8 +771,10 @@ static void publish_file(int root_fd, const char *stage_root, const char *relati
 /* Keep canonical path and selected identity in separate argv entries. */
 int main(int argc, char **argv) {
     if ((argc != 8 && argc != 9) ||
-        (argc == 9 && strcmp(argv[5], "publish") != 0) ||
-        (argc == 8 && strcmp(argv[5], "publish") == 0)) {
+(argc == 9 && strcmp(argv[5], "publish") != 0 &&
+ strcmp(argv[5], "create-file") != 0) ||
+(argc == 8 && (strcmp(argv[5], "publish") == 0 ||
+               strcmp(argv[5], "create-file") == 0))) {
         fprintf(stderr, "usage: helper ROOT CANONICAL_PATH SELECTED_IDENTITY STAGE_ROOT ACTION RELATIVE_PATH PRECONDITION [SOURCE_SHA256]\n");
         return 64;
     }
@@ -600,6 +789,8 @@ int main(int argc, char **argv) {
         remove_entry(selected_root_fd, argv[6], true, argv[7]);
     } else if (strcmp(argv[5], "publish") == 0) {
         publish_file(selected_root_fd, argv[4], argv[6], argv[7], argv[8]);
+} else if (strcmp(argv[5], "create-file") == 0) {
+create_file_exclusive(selected_root_fd, argv[4], argv[6], argv[7], argv[8]);
     } else {
         fprintf(stderr, "selected-root helper rejected unsupported action\n");
         close(selected_root_fd);

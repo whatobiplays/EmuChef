@@ -17,6 +17,7 @@ import {
   normalizedBuildEnvironment,
   parseOptions,
   provenance,
+ resetBundleOutputForBuild,
   runChecked,
   runPreflight,
   validateQualificationProbe,
@@ -25,6 +26,8 @@ import {
   workspacePaths,
   writeManifest,
 } from "./macos-packaging.mjs";
+import { assertReleaseSidecarBuildAllowed } from "./prepare-rust-sidecar.mjs";
+import { withReleasePackageLock } from "./sidecar-build-contract.mjs";
 
 function artifactOptions(options, paths) {
   if (options.app && options.dmg) {
@@ -38,33 +41,52 @@ function safeResult(kind, details = {}) {
   console.log(JSON.stringify({ kind, status: "passed", ...details }, null, 2));
 }
 
-function build(options, paths) {
-  runPreflight({ paths });
-  if (options.mode === "developer-id") developerIdBuildEnvironment(process.env);
-  fs.rmSync(paths.bundleRoot, { recursive: true, force: true });
-  const env = normalizedBuildEnvironment(process.env, {
+async function build(options, paths) {
+  return withReleasePackageLock({
     repoRoot: paths.repoRoot,
-    homeDir: os.homedir(),
-    mode: options.mode,
+    env: process.env,
+    artifactPaths: [
+      "apps/emuchef-app/src-tauri/binaries",
+      path.relative(paths.repoRoot, paths.bundleRoot).split(path.sep).join("/"),
+    ],
+    run: async (packageLockEnv, { lockFileDescriptor }) => {
+      runPreflight({ paths });
+      if (options.mode === "developer-id") developerIdBuildEnvironment(process.env);
+      const env = normalizedBuildEnvironment(packageLockEnv, {
+        repoRoot: paths.repoRoot,
+        homeDir: os.homedir(),
+        mode: options.mode,
+      });
+      resetBundleOutputForBuild({
+        paths,
+        assertBuildAllowed: () =>
+          assertReleaseSidecarBuildAllowed({
+            repoRoot: paths.repoRoot,
+            env: packageLockEnv,
+          }),
+      });
+      const tauri = path.join(paths.appDir, "node_modules", ".bin", "tauri");
+      // The shared sidecar lock remains held while Tauri runs its build hook
+      // and copies the release sidecar into the bundle.
+      const result = spawnSync(tauri, ["build", "--bundles", "app,dmg", "--ci"], {
+        cwd: paths.appDir,
+        env,
+        encoding: "utf8",
+        maxBuffer: 128 * 1024 * 1024,
+        stdio: ["inherit", "pipe", "pipe", lockFileDescriptor],
+      });
+      if (result.error || result.status !== 0) {
+        throw new Error("Tauri macOS packaging failed");
+      }
+      const artifacts = discoverArtifacts(paths.bundleRoot);
+      safeResult("macos_package_build", {
+        mode: options.mode,
+        app: path.relative(paths.repoRoot, artifacts.appPath),
+        dmg: path.relative(paths.repoRoot, artifacts.dmgPath),
+      });
+      return artifacts;
+    },
   });
-  const tauri = path.join(paths.appDir, "node_modules", ".bin", "tauri");
-  // Tauri reports its signing-variable search and selected identity in normal
-  // output. Keep child output private in every mode and surface only this
-  // wrapper's fixed success/failure messages.
-  const result = spawnSync(tauri, ["build", "--bundles", "app,dmg", "--ci"], {
-    cwd: paths.appDir,
-    env,
-    encoding: "utf8",
-    maxBuffer: 128 * 1024 * 1024,
-  });
-  if (result.error || result.status !== 0) throw new Error("Tauri macOS packaging failed");
-  const artifacts = discoverArtifacts(paths.bundleRoot);
-  safeResult("macos_package_build", {
-    mode: options.mode,
-    app: path.relative(paths.repoRoot, artifacts.appPath),
-    dmg: path.relative(paths.repoRoot, artifacts.dmgPath),
-  });
-  return artifacts;
 }
 
 function verify(options, paths, artifacts = artifactOptions(options, paths)) {
@@ -188,7 +210,7 @@ function compare(options) {
   if (!result.normalizedContentMatches) process.exitCode = 1;
 }
 
-function main() {
+async function main() {
   const [action, ...argv] = process.argv.slice(2);
   const options = parseOptions(argv);
   const paths = workspacePaths();
@@ -199,7 +221,7 @@ function main() {
       break;
     }
     case "build":
-      build(options, paths);
+      await build(options, paths);
       break;
     case "verify":
       verify(options, paths);
@@ -215,7 +237,7 @@ function main() {
       break;
     }
     case "qualify": {
-      const artifacts = build(options, paths);
+      const artifacts = await build(options, paths);
       const verification = verify(options, paths, artifacts);
       smoke(options, paths, artifacts, verification);
       manifest(options, paths, artifacts, verification);
@@ -238,9 +260,7 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(`macos-package: ${error.message}`);
   process.exit(1);
-}
+});

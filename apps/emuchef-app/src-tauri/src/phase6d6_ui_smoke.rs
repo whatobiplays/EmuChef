@@ -1228,10 +1228,38 @@ mod tests {
     #[cfg(feature = "real-execution")]
     fn temp_roots() -> (TempDir, QualificationRoots) {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let index_source = repo_root().join(UI_BINDING_INDEX_RELATIVE_PATH);
+        let source_repo_root = repo_root();
+        let index_source = source_repo_root.join(UI_BINDING_INDEX_RELATIVE_PATH);
         let index_dest = temp.path().join(UI_BINDING_INDEX_RELATIVE_PATH);
         fs::create_dir_all(index_dest.parent().expect("index parent")).expect("index directory");
         fs::copy(&index_source, &index_dest).expect("copy index");
+
+        // These exact historical sources let the tests inspect archived UI
+        // evidence without treating the current checkout as qualified.
+        const HISTORICAL_SOURCE_FILES: [(&str, &[u8]); 4] = [
+            (
+                "docs/testing/phase-6d6/scenario-manifest.json",
+                include_bytes!("../tests/fixtures/phase6d6-historical-source-root/docs/testing/phase-6d6/scenario-manifest.json"),
+            ),
+            (
+                "docs/testing/phase-6d6/evidence-schema.json",
+                include_bytes!("../tests/fixtures/phase6d6-historical-source-root/docs/testing/phase-6d6/evidence-schema.json"),
+            ),
+            (
+                "apps/emuchef-app/src-tauri/src/execution.rs",
+                include_bytes!("../tests/fixtures/phase6d6-historical-source-root/apps/emuchef-app/src-tauri/src/execution.rs"),
+            ),
+            (
+                "tools/phase-6d6-evidence.mjs",
+                include_bytes!("../tests/fixtures/phase6d6-historical-source-root/tools/phase-6d6-evidence.mjs"),
+            ),
+        ];
+        for (relative_path, contents) in HISTORICAL_SOURCE_FILES {
+            let destination = temp.path().join(relative_path);
+            fs::create_dir_all(destination.parent().expect("source parent"))
+                .expect("source directory");
+            fs::write(destination, contents).expect("write historical source snapshot");
+        }
 
         let evidence_root = temp.path().join("docs/testing/phase-6d6/evidence");
         fs::create_dir_all(evidence_root.join("traces")).expect("trace directory");
@@ -1256,12 +1284,12 @@ mod tests {
                     .to_string_lossy()
                     .into_owned();
                 fs::copy(
-                    repo_root().join(evidence_path),
+                    source_repo_root.join(evidence_path),
                     evidence_root.join(&evidence_name),
                 )
                 .expect("copy evidence");
                 fs::copy(
-                    repo_root().join(trace_path),
+                    source_repo_root.join(trace_path),
                     evidence_root.join("traces").join(&trace_name),
                 )
                 .expect("copy trace");
@@ -1269,7 +1297,7 @@ mod tests {
         }
         let ui_capture_root = evidence_root.join("ui");
         let roots = QualificationRoots {
-            repo_root: repo_root(),
+            repo_root: temp.path().to_path_buf(),
             index_path: index_dest,
             evidence_root,
             ui_capture_root,
@@ -1862,6 +1890,28 @@ mod tests {
             let status = status_inner(&store, &roots).expect("status");
             assert_eq!(status["ready"], false);
             assert!(status["message"].as_str().unwrap().contains("binding"));
+        });
+    }
+
+    #[cfg(feature = "real-execution")]
+    #[test]
+    fn current_candidate_source_rejects_historical_index_without_capture_or_authority() {
+        with_gates(|| {
+            let (_temp, mut roots) = temp_roots();
+            roots.repo_root = repo_root();
+            let store = Phase6d6UiSmokeStore::default();
+
+            let status = status_inner(&store, &roots).expect("status");
+            assert_eq!(status["enabled"], true);
+            assert_eq!(status["ready"], false);
+            assert_eq!(status["message"], "ui_binding_index_invalid");
+            assert_eq!(status["candidates"].as_array().map(Vec::len), Some(0));
+            assert!(!roots.ui_capture_root.exists());
+
+            let state = store.state.lock().expect("store state");
+            assert_eq!(state.session, 0);
+            assert!(state.bindings.is_empty());
+            assert!(state.projections.is_empty());
         });
     }
 

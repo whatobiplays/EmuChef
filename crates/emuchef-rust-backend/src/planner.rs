@@ -168,6 +168,9 @@ fn index_app_definitions(
 
 const SCHEMA_VERSION: i64 = 1;
 
+const RETROARCH_CONFIG_CREATE_RECIPES: [&str; 2] =
+    ["app.retroarch.configure", "app.retroarch.provision"];
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PlanningResult {
     pub status: PlanningStatus,
@@ -409,6 +412,15 @@ impl RuntimeCapability {
         }
     }
 
+    fn is_available_for_step(
+        self,
+        capabilities: &RuntimeCapabilities,
+        config_create_write_authorized_for_step: bool,
+    ) -> bool {
+        self.is_available(capabilities)
+            || (matches!(self, Self::AppDataWrite) && config_create_write_authorized_for_step)
+    }
+
     fn set_available(self, capabilities: &mut RuntimeCapabilities, available: bool) {
         match self {
             Self::AdbAvailable => capabilities.adb_available = available,
@@ -421,6 +433,47 @@ impl RuntimeCapability {
             Self::AppDataWrite => capabilities.app_data_write = available,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct StepAvailabilityContext<'a> {
+    runtime_capabilities: &'a RuntimeCapabilities,
+    config_create_destination: Option<&'a str>,
+}
+
+fn is_retroarch_config_create_operation(
+    recipe: &Recipe,
+    step: &Step,
+    usage: &app_targets::ResolvedStepUsage,
+    config_create_destination: Option<&str>,
+) -> bool {
+    if !RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe.id.as_str())
+        || step.type_name != "copy_files"
+        || step.app_ref.as_deref() != Some("retroarch")
+        || !recipe.config.as_ref().is_some_and(|configuration| {
+            configuration.app_ref == "retroarch" && configuration.target == "config"
+        })
+        || !matches!(
+            step.params.get("source"),
+            Some(ParamValue::Ref(source)) if source == "inputs.retroarch_cfg"
+        )
+        || !matches!(
+            step.params.get("dest"),
+            Some(ParamValue::AppTarget(target)) if target == "config"
+        )
+        || !matches!(
+            step.params.get("copy_policy"),
+            Some(ParamValue::Literal(value)) if value.as_str() == Some("create_only")
+        )
+    {
+        return false;
+    }
+
+    usage.dest_kind == Some(crate::authored_models::AppTargetKind::File)
+        && usage
+            .dest
+            .as_deref()
+            .is_some_and(|destination| config_create_destination == Some(destination))
 }
 
 pub(crate) fn runtime_capability_available(
@@ -758,7 +811,7 @@ pub struct ExecutionStepCondition {
     pub params: OrderedMap<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ExecutionParamValue {
     Ref {
@@ -768,6 +821,29 @@ pub enum ExecutionParamValue {
     Literal {
         value: Value,
     },
+}
+
+impl std::fmt::Debug for ExecutionParamValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ref { ref_value } => formatter
+                .debug_struct("Ref")
+                .field("ref_value", ref_value)
+                .finish(),
+            Self::Literal { value }
+                if value.get("type").and_then(Value::as_str) == Some("configuration_artifact") =>
+            {
+                formatter
+                    .debug_struct("Literal")
+                    .field("value", &"[configuration artifact redacted]")
+                    .finish()
+            }
+            Self::Literal { value } => formatter
+                .debug_struct("Literal")
+                .field("value", value)
+                .finish(),
+        }
+    }
 }
 
 /// Validate an app-context lifecycle step against only the reviewed plan.
@@ -886,6 +962,8 @@ pub struct PlannerInput {
     pub device_profile_ref: String,
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
+    /// Destination authorized by the trusted RetroArch configuration-create planning path.
+    pub(crate) config_create_destination: Option<String>,
     pub catalog_identity: Option<CatalogIdentity>,
     pub target_device: Option<TargetDeviceBinding>,
     /// Optional Device Plan presentation supplied by product planning.
@@ -966,6 +1044,7 @@ impl PlannerInput {
             device_profile_ref,
             device_context,
             runtime_capabilities,
+            config_create_destination: None,
             catalog_identity: None,
             target_device: None,
             device_plan_presentation: None,
@@ -1017,6 +1096,7 @@ impl PlannerInput {
             device_profile_ref: parts.device_profile_ref,
             device_context: parts.device_context,
             runtime_capabilities: parts.runtime_capabilities,
+            config_create_destination: None,
             catalog_identity: None,
             target_device: None,
         })
@@ -1201,7 +1281,10 @@ fn plan_execution_with_app_definitions_inner(
         &recipes,
         &expanded_recipe_refs,
         &effective_input_bindings,
-        &input.runtime_capabilities,
+        StepAvailabilityContext {
+            runtime_capabilities: &input.runtime_capabilities,
+            config_create_destination: input.config_create_destination.as_deref(),
+        },
         &target_usage,
         assume_unrecognized_capabilities_available,
         report_unrecognized_capability_warnings,
@@ -1833,7 +1916,7 @@ fn selected_step_ids(
     recipes: &HashMap<String, Recipe>,
     expanded_recipe_refs: &[String],
     input_bindings: &OrderedMap<Value>,
-    runtime_capabilities: &RuntimeCapabilities,
+    availability_context: StepAvailabilityContext<'_>,
     target_usage: &HashMap<String, app_targets::ResolvedStepUsage>,
     assume_unrecognized_capabilities_available: bool,
     report_unrecognized_capability_warnings: bool,
@@ -1852,7 +1935,14 @@ fn selected_step_ids(
 
         for step in &recipe.steps {
             let step_id = make_execution_step_id(recipe_id, &step.id);
-            let step_capabilities = &target_usage[&step_id].capabilities;
+            let usage = &target_usage[&step_id];
+            let step_capabilities = &usage.capabilities;
+            let config_create_write_authorized_for_step = is_retroarch_config_create_operation(
+                recipe,
+                step,
+                usage,
+                availability_context.config_create_destination,
+            );
             if report_unrecognized_capability_warnings
                 && !assume_unrecognized_capabilities_available
             {
@@ -1875,10 +1965,15 @@ fn selected_step_ids(
                 }
             }
             let available = step_capabilities.iter().all(|name| {
-                RuntimeCapability::from_name(name)
-                    .map_or(assume_unrecognized_capabilities_available, |capability| {
-                        capability.is_available(runtime_capabilities)
-                    })
+                RuntimeCapability::from_name(name).map_or(
+                    assume_unrecognized_capabilities_available,
+                    |capability| {
+                        capability.is_available_for_step(
+                            availability_context.runtime_capabilities,
+                            config_create_write_authorized_for_step,
+                        )
+                    },
+                )
             });
             availability_by_step_id.insert(step_id, available);
             available_by_local_step_id.insert(step.id.clone(), available);
@@ -3240,8 +3335,38 @@ fn validate_copy_files_param_values(
         step,
         normalized,
         "copy_policy",
-        &["merge", "replace", "sync"],
+        &["merge", "replace", "sync", "create_only"],
     ));
+    if matches!(
+        normalized.get("copy_policy"),
+        Some(ParamValue::Literal(Value::String(policy))) if policy == "create_only"
+    ) {
+        let supported_target = matches!(
+            recipe_id,
+            "app.retroarch.provision" | "app.retroarch.configure"
+        ) && step.id == "seed_retroarch_cfg"
+            && step.app_ref.as_deref() == Some("retroarch")
+            && matches!(
+                step.params.get("source"),
+                Some(ParamValue::Ref(reference)) if reference == "inputs.retroarch_cfg"
+            )
+            && matches!(
+                step.params.get("dest"),
+                Some(ParamValue::AppTarget(target)) if target == "config"
+            );
+        if !supported_target {
+            errors.push(PlannerMessage {
+                code: "copy_policy_create_only_scope_invalid".to_string(),
+                message: "The create_only copy policy is supported only for the RetroArch config file action."
+                    .to_string(),
+                details: json!({
+                    "recipe_ref": recipe_id,
+                    "step_id": step.id,
+                    "param": "copy_policy",
+                }),
+            });
+        }
+    }
     errors
 }
 

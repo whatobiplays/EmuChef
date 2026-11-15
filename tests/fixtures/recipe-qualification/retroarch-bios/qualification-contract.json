@@ -7,13 +7,13 @@
       "sourceKind": "recipe",
       "id": "app.retroarch.provision",
       "path": "authored/recipes/app.retroarch.provision.yaml",
-      "sha256": "41c53ffca788d0c56c71e6db7e819f5a73209a2efe7469a59d4190bf9823a83b"
+      "sha256": "8f626cf663790286e0e15721918d713cb1e05ad39bad8976c3d0d3af35b46b7a"
     },
     {
       "sourceKind": "appDefinition",
       "id": "retroarch",
       "path": "authored/apps/retroarch.yaml",
-      "sha256": "795e26f79d6f1eb2edccd76a0774a7ce5dbaa18fdcb13bad0572734640aac263"
+      "sha256": "eb322b675ef8858b833c9b8605dd4a7a371c073c31672d842e6bd1e8a058fa05"
     },
     {
       "sourceKind": "recipe",
@@ -78,7 +78,9 @@
     "feature.copy_bios/bios_source_dir"
   ],
   "optionalInputs": [
-    "app.retroarch.provision/retroarch_cfg"
+    "app.retroarch.provision/retroarch_cfg",
+    "app.retroarch.provision/retroarch_cfg_source",
+    "app.retroarch.provision/retroarch_video_threaded"
   ],
   "requiredOperationFamilies": [
     "resolve_artifacts",

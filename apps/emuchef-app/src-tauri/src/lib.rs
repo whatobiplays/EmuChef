@@ -11,9 +11,11 @@ mod phase6d6_ui_smoke;
 mod qualification;
 pub(crate) mod qualification_build;
 mod qualification_mode;
+mod qualification_process_lease;
 pub(crate) mod qualification_repository;
 mod qualification_session;
 mod recovery;
+mod retroarch_config_create_policy;
 mod saved_configurations;
 mod sidecar;
 mod support;
@@ -25,6 +27,14 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 pub fn run() {
+    let qualification_session =
+        match qualification_process_lease::QualificationProcessLease::start_from_environment() {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("Could not claim the qualification process lease: {error}");
+                std::process::exit(1);
+            }
+        };
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let qualification_probe = qualification::requested(&arguments);
     let app = tauri::Builder::default()
@@ -193,6 +203,12 @@ pub fn run() {
         }
         _ => {}
     });
+    if let Some(session) = qualification_session {
+        if let Err(error) = session.finish() {
+            eprintln!("Could not record the qualified application exit: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 // A clean process shutdown may arrive through different Tauri lifecycle

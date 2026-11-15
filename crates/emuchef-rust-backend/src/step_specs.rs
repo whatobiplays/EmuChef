@@ -358,7 +358,14 @@ pub fn step_spec_for(type_name: &str) -> Option<StepSpecDto> {
 
 /// Return the canonical authoring contract for an authored step.
 pub(crate) fn authored_step_spec_for(step: &Step) -> Option<StepSpecDto> {
-    step_spec_for(&step.type_name)
+    let mut spec = step_spec_for(&step.type_name)?;
+    if step.type_name == "copy_files" {
+        spec.params
+            .get_mut("copy_policy")?
+            .enum_values
+            .push("create_only".to_string());
+    }
+    Some(spec)
 }
 
 pub fn is_supported_step_type(type_name: &str) -> bool {
@@ -593,6 +600,26 @@ mod tests {
         assert!(spec.params.contains_key("permission_set"));
         assert!(!spec.params.contains_key("runtime"));
         assert!(!spec.params.contains_key("appops"));
+    }
+
+    #[test]
+    fn generic_copy_files_spec_does_not_advertise_recipe_scoped_create_only() {
+        let spec = step_spec_for("copy_files").expect("generic copy_files StepSpec");
+        assert_eq!(
+            spec.params["copy_policy"].enum_values,
+            ["merge", "sync", "replace"]
+        );
+    }
+
+    #[test]
+    fn internal_authored_copy_files_contract_retains_create_only_validation() {
+        let mut step = permission_step(None, None);
+        step.type_name = "copy_files".to_string();
+        let spec = authored_step_spec_for(&step).expect("authored copy_files StepSpec");
+        assert_eq!(
+            spec.params["copy_policy"].enum_values,
+            ["merge", "sync", "replace", "create_only"]
+        );
     }
 
     #[test]

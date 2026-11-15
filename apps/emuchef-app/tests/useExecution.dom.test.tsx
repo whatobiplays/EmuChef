@@ -98,6 +98,7 @@ function reviewWorkflow(): WorkflowState {
     step: "review",
     review: {
       reviewHandle: "review-opaque",
+      executionMode: "simulated",
       setup: { name: "Qualification setup" },
       target: { label: "Connected Android device" },
       features: [],

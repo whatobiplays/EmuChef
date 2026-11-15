@@ -13,6 +13,7 @@ mod common;
 const EXPECTED_AUTHORED_RECIPES: &[&str] = &[
     "app.armsx1.install.yaml",
     "app.obtainium.install.yaml",
+    "app.retroarch.configure.yaml",
     "app.retroarch.provision.yaml",
     "app.xaniteog.install.yaml",
     "feature.copy_bios.yaml",

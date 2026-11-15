@@ -1799,6 +1799,10 @@ test("UI smoke requires matching artifacts, backend bindings, safe controls, and
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CHECKED_IN_EVIDENCE_DIR = path.join(REPOSITORY_ROOT, "docs/testing/phase-6d6/evidence");
+const HISTORICAL_SOURCE_ROOT = path.join(
+  REPOSITORY_ROOT,
+  "apps/emuchef-app/src-tauri/tests/fixtures/phase6d6-historical-source-root",
+);
 
 function checkedInRecordObjects() {
   const names = [
@@ -1876,7 +1880,7 @@ test("ui binding index derivation is deterministic and contains no authored UI s
   }
 });
 
-test("checked-in ui binding index verifies against the current evidence contract", () => {
+test("historical ui binding index verifies against immutable historical sources", () => {
   const records = checkedInRecordObjects();
   const indexPath = path.join(REPOSITORY_ROOT, "docs/testing/phase-6d6/ui-binding-index.json");
   const index = JSON.parse(readFileSync(indexPath, "utf8"));
@@ -1884,8 +1888,41 @@ test("checked-in ui binding index verifies against the current evidence contract
     index,
     records,
     evidenceDir: CHECKED_IN_EVIDENCE_DIR,
-    sourceRoot: REPOSITORY_ROOT,
+    sourceRoot: HISTORICAL_SOURCE_ROOT,
   }));
+});
+
+test("historical ui binding index rejects the current execution source by digest", () => {
+  const records = checkedInRecordObjects();
+  const indexPath = path.join(REPOSITORY_ROOT, "docs/testing/phase-6d6/ui-binding-index.json");
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  const options = { records, evidenceDir: CHECKED_IN_EVIDENCE_DIR, sourceRoot: REPOSITORY_ROOT };
+  const current = deriveUiBindingIndex(options);
+  const historical = deriveUiBindingIndex({
+    ...options,
+    sourceRoot: HISTORICAL_SOURCE_ROOT,
+  });
+  const mismatchedSources = Object.keys(index.sourceDigests).filter((source) =>
+    index.sourceDigests[source] !== current.sourceDigests[source]);
+
+  assert.deepEqual(index, historical);
+  assert.deepEqual(index.bindings, current.bindings);
+  assert.deepEqual(mismatchedSources, ["apps/emuchef-app/src-tauri/src/execution.rs"]);
+  assert.throws(
+    () => verifyUiBindingIndex({ index, ...options }),
+    /ui-binding-index is stale or tampered/,
+  );
+  assert.throws(
+    () => validateRepositoryContract([]),
+    /ui-binding-index is stale or tampered/,
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, ["tools/phase-6d6-evidence.mjs"], {
+      cwd: REPOSITORY_ROOT,
+      encoding: "utf8",
+    }),
+    /ui-binding-index is stale or tampered/,
+  );
 });
 
 test("ui binding index rejects tampering and stale source digests", () => {
@@ -1930,12 +1967,10 @@ test("ui binding index rejects raw evidence or trace digest mismatch", () => {
 
 test("base validation separates evidence validation from binding-index verification", () => {
   const base = validateBaseRepositoryContract([]);
-  assert.equal(typeof base.complete, "boolean");
+  assert.equal(base.complete, false);
   assert.ok(Array.isArray(base.records));
   assert.ok(base.recordCount > 0);
-  const full = validateRepositoryContract([]);
-  assert.equal(full.complete, base.complete);
-  assert.equal(full.recordCount, base.recordCount);
+  assert.deepEqual(base.missing, ["identity_replacement:1", "identity_replacement:2"]);
 });
 
 test("index regeneration refuses invalid evidence and repairs a stale or missing index", () => {

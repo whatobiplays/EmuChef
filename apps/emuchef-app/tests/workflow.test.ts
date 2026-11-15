@@ -45,6 +45,7 @@ const match = {
 
 const review = {
   reviewHandle: "review-opaque",
+  executionMode: "simulated" as const,
   setup: { name: "Pocket S Mini setup" },
   target: { label: "Connected Android device", manufacturer: "AYANEO", model: "Pocket S Mini", androidVersion: 13, androidApiLevel: 33 },
   features: [],
