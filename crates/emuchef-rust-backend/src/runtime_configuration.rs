@@ -44,13 +44,59 @@ pub(crate) struct ConfigurationContextRequest {
     pub runtime_capability_availability: Option<RuntimeCapabilityAvailability>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RuntimeCapabilityAvailability {
+    pub root_shell: bool,
+    pub app_data_write: bool,
+    pub root_shell_route: Option<crate::planner::RootShellRoute>,
+    pub(crate) config_create_write_evidence: Option<ConfigCreateWriteEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ConfigCreateWriteEvidence {
+    target_identity: Value,
+}
+
+impl ConfigCreateWriteEvidence {
+    fn authorizes_target(&self, target_identity: &Value) -> bool {
+        self.target_identity == *target_identity
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct RuntimeCapabilityAvailability {
+pub(crate) struct RuntimeCapabilityAvailabilityRequest {
     pub root_shell: bool,
     pub app_data_write: bool,
     #[serde(default)]
     pub root_shell_route: Option<crate::planner::RootShellRoute>,
+}
+
+impl From<RuntimeCapabilityAvailabilityRequest> for RuntimeCapabilityAvailability {
+    fn from(request: RuntimeCapabilityAvailabilityRequest) -> Self {
+        Self {
+            root_shell: request.root_shell,
+            app_data_write: request.app_data_write,
+            root_shell_route: request.root_shell_route,
+            config_create_write_evidence: None,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_config_create_write_evidence() -> ConfigCreateWriteEvidence {
+    ConfigCreateWriteEvidence {
+        target_identity: json!({
+            "appId": "retroarch",
+            "packageId": "com.retroarch.aarch64",
+            "targetId": "config",
+            "target": {
+                "kind": "file",
+                "location": "external_app_data",
+                "path": "files/retroarch.cfg"
+            }
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -87,6 +133,7 @@ pub(crate) struct PreparedConfiguration {
     pub device_plan_input_bindings: OrderedMap<Value>,
     pub device_plan_parts: Option<PlannerInputParts>,
     pub runtime_capabilities: crate::planner::RuntimeCapabilities,
+    pub runtime_capability_availability: Option<RuntimeCapabilityAvailability>,
     pub device_context: Option<DeviceContextOverride>,
     pub target_device: Option<TargetDeviceBinding>,
     pub binding_resolution: BindingResolution,
@@ -854,6 +901,7 @@ pub(crate) fn prepare_configuration(
             app_data_write: false,
             root_shell_route: None,
         }),
+        runtime_capability_availability: request.runtime_capability_availability,
         device_context: request.device_context,
         target_device: request.target_device,
         binding_resolution,
@@ -882,7 +930,7 @@ impl PreparedConfiguration {
                 device_context.device_tags = device_tags.clone();
             }
         }
-        Some(PlannerInput {
+        let input = PlannerInput {
             recipes: self.recipes.clone(),
             selected_recipe_refs: self.selected_recipe_refs.clone(),
             explicit_input_bindings: self.explicit_bindings.clone(),
@@ -893,6 +941,7 @@ impl PreparedConfiguration {
             device_profile_ref: parts.device_profile_ref.clone(),
             device_context,
             runtime_capabilities: self.runtime_capabilities.clone(),
+            config_create_destination: None,
             catalog_identity: self.catalog.identity().cloned(),
             target_device: self.target_device.clone(),
             device_plan_presentation: Some(crate::planner::ExecutionDevicePlanSnapshot {
@@ -900,7 +949,8 @@ impl PreparedConfiguration {
                 name: parts.device_plan_name.clone(),
                 description: parts.device_plan_description.clone(),
             }),
-        })
+        };
+        Some(input)
     }
 }
 
@@ -991,6 +1041,50 @@ pub(crate) fn plan_configuration(
         None => None,
     };
 
+    let retroarch_config_create_target = match retroarch_config_create_target_identity(
+        &prepared,
+        selected_configuration.as_ref(),
+        frozen_configuration.as_ref(),
+    ) {
+        Ok(target) => target,
+        Err(code) => {
+            let mut diagnostics = prepared.diagnostics.clone();
+            diagnostics.push(configuration_diagnostic(
+                code,
+                "The selected configuration artifact does not resolve to the authorized RetroArch App Target.",
+            ));
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
+        }
+    };
+    let retroarch_config_create_selected = retroarch_config_create_target.is_some();
+    if retroarch_config_create_selected
+        && !config_create_write_evidence_available(
+            prepared.runtime_capability_availability.as_ref(),
+            retroarch_config_create_target.as_ref().unwrap(),
+        )
+    {
+        let mut diagnostics = prepared.diagnostics.clone();
+        diagnostics.push(configuration_diagnostic(
+            "config_create_write_unverified",
+            "The selected RetroArch configuration target has no current write-probe evidence.",
+        ));
+        return Ok(PlanConfigurationResult {
+            plan: None,
+            plan_digest: None,
+            review: None,
+            copy_commit_preparation_required: false,
+            resolved_inputs,
+            diagnostics,
+        });
+    }
+
     let plan_id = format!("plan.{}.001", prepared.effective_device_plan);
     let Some(mut input) = prepared.planner_input(plan_id) else {
         return Ok(PlanConfigurationResult {
@@ -1002,6 +1096,49 @@ pub(crate) fn plan_configuration(
             diagnostics: prepared.diagnostics,
         });
     };
+    if let Some(target_identity) = retroarch_config_create_target.as_ref() {
+        let Some(package_id) = target_identity
+            .get("packageId")
+            .and_then(Value::as_str)
+            .filter(|package_id| !package_id.trim().is_empty())
+        else {
+            let mut diagnostics = prepared.diagnostics.clone();
+            diagnostics.push(configuration_diagnostic(
+                "retroarch_config_create_target_invalid",
+                "The selected configuration target has no resolved package identity.",
+            ));
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
+        };
+        let Some(target_path) = target_identity
+            .pointer("/target/path")
+            .and_then(Value::as_str)
+            .filter(|target_path| !target_path.trim().is_empty())
+        else {
+            let mut diagnostics = prepared.diagnostics.clone();
+            diagnostics.push(configuration_diagnostic(
+                "retroarch_config_create_target_invalid",
+                "The selected configuration target has no resolved path.",
+            ));
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
+        };
+        input.config_create_destination = Some(format!(
+            "/storage/emulated/0/Android/data/{package_id}/{target_path}"
+        ));
+    }
     let mut generated_input_file = None;
     if let (Some(RetroArchConfigurationSource::Generated { recipe_id, .. }), Some(frozen)) =
         (&selected_configuration, &frozen_configuration)
@@ -1036,24 +1173,19 @@ pub(crate) fn plan_configuration(
     );
     let mut execution_plan = result.execution_plan;
     if let (Some(selected), Some(frozen)) = (&selected_configuration, &frozen_configuration) {
-        let target_identity = match retroarch_app_definition(&prepared)
-            .and_then(|app| retroarch_target_identity(&app))
-        {
-            Ok(identity) => identity,
-            Err(code) => {
-                diagnostics.push(configuration_diagnostic(
-                    code,
-                    "The RetroArch configuration target identity could not be captured.",
-                ));
-                return Ok(PlanConfigurationResult {
-                    plan: None,
-                    plan_digest: None,
-                    review: None,
-                    copy_commit_preparation_required: false,
-                    resolved_inputs,
-                    diagnostics,
-                });
-            }
+        let Some(target_identity) = retroarch_config_create_target else {
+            diagnostics.push(configuration_diagnostic(
+                "retroarch_config_create_target_invalid",
+                "The selected configuration is missing its validated RetroArch App Target.",
+            ));
+            return Ok(PlanConfigurationResult {
+                plan: None,
+                plan_digest: None,
+                review: None,
+                copy_commit_preparation_required: false,
+                resolved_inputs,
+                diagnostics,
+            });
         };
         let Some(plan) = execution_plan.as_mut() else {
             return Ok(PlanConfigurationResult {
@@ -1118,6 +1250,90 @@ pub(crate) fn plan_configuration(
         resolved_inputs,
         diagnostics,
     })
+}
+
+const RETROARCH_CONFIG_CREATE_RECIPES: [&str; 2] =
+    ["app.retroarch.configure", "app.retroarch.provision"];
+
+#[cfg(test)]
+fn retroarch_config_create_selected(resolved_inputs: &[ResolvedInputBinding]) -> bool {
+    matches!(
+        select_retroarch_configuration_source(resolved_inputs),
+        Ok(Some(selected)) if RETROARCH_CONFIG_CREATE_RECIPES.contains(&selected.recipe_id())
+    )
+}
+
+fn config_create_write_evidence_available(
+    availability: Option<&RuntimeCapabilityAvailability>,
+    target_identity: &Value,
+) -> bool {
+    availability.is_some_and(|availability| {
+        availability.root_shell
+            && availability.app_data_write
+            && availability.root_shell_route.is_some()
+            && availability
+                .config_create_write_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.authorizes_target(target_identity))
+    })
+}
+
+fn retroarch_config_create_target_identity(
+    prepared: &PreparedConfiguration,
+    selected: Option<&RetroArchConfigurationSource>,
+    frozen: Option<&FrozenRetroArchConfiguration>,
+) -> Result<Option<Value>, &'static str> {
+    let Some(selected) = selected else {
+        return if frozen.is_none() {
+            Ok(None)
+        } else {
+            Err("retroarch_config_create_artifact_invalid")
+        };
+    };
+    let recipe_id = selected.recipe_id();
+    if !RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe_id) {
+        return Ok(None);
+    }
+    let expected_source_kind = match selected {
+        RetroArchConfigurationSource::Generated { .. } => "generated",
+        RetroArchConfigurationSource::Uploaded { .. } => "uploaded",
+    };
+    let frozen = frozen.ok_or("retroarch_config_create_artifact_invalid")?;
+    if frozen
+        .source_identity
+        .get("recipeId")
+        .and_then(Value::as_str)
+        != Some(recipe_id)
+        || frozen.source_identity.get("kind").and_then(Value::as_str) != Some(expected_source_kind)
+    {
+        return Err("retroarch_config_create_artifact_invalid");
+    }
+
+    let target_identity = retroarch_target_identity(&retroarch_app_definition(prepared)?)?;
+    let target = target_identity.get("target");
+    let package_id = target_identity
+        .get("packageId")
+        .and_then(Value::as_str)
+        .filter(|package_id| !package_id.trim().is_empty());
+    if target_identity.get("appId").and_then(Value::as_str) != Some("retroarch")
+        || target_identity.get("targetId").and_then(Value::as_str) != Some("config")
+        || package_id.is_none()
+        || target
+            .and_then(|target| target.get("kind"))
+            .and_then(Value::as_str)
+            != Some("file")
+        || target
+            .and_then(|target| target.get("location"))
+            .and_then(Value::as_str)
+            != Some("external_app_data")
+        || target
+            .and_then(|target| target.get("path"))
+            .and_then(Value::as_str)
+            != Some("files/retroarch.cfg")
+    {
+        return Err("retroarch_config_create_target_invalid");
+    }
+    Ok(Some(target_identity))
 }
 
 /// Plan against the App Definitions owned by the same catalog snapshot as the
@@ -1775,6 +1991,7 @@ mod tests {
                 root_shell: false,
                 app_data_write: false,
                 root_shell_route: None,
+                config_create_write_evidence: None,
             }),
         );
         assert!(!masked.root_shell);
@@ -1804,6 +2021,7 @@ mod tests {
                 root_shell: false,
                 app_data_write: false,
                 root_shell_route: None,
+                config_create_write_evidence: None,
             }),
         })
         .unwrap();
@@ -1821,6 +2039,7 @@ mod tests {
                 root_shell: true,
                 app_data_write: true,
                 root_shell_route: None,
+                config_create_write_evidence: None,
             }),
         );
         assert!(!masked.root_shell);
@@ -1833,6 +2052,7 @@ mod tests {
                 root_shell: true,
                 app_data_write: true,
                 root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
+                config_create_write_evidence: None,
             }),
         );
         assert!(selected.root_shell);
@@ -1849,5 +2069,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "runtime_configuration_t13a_tests.rs"]
-mod t13a_tests;
+#[path = "runtime_configuration_retroarch_config_create_tests.rs"]
+mod config_create_tests;

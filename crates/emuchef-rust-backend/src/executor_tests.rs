@@ -20,12 +20,14 @@ use crate::executor::{
 use crate::model::OrderedMap;
 use crate::owned_process::{ProcessCleanup, ProcessFailureKind, ProcessOperation};
 use crate::planner::{
-    plan_execution, DeviceContext, ExecutionAppSnapshot, ExecutionArtifact, ExecutionInputValue,
-    ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep, ExecutionStepCondition,
+    plan_execution, DeviceContext, ExecutionAppSnapshot, ExecutionArtifact,
+    ExecutionDevicePlanSnapshot, ExecutionInputValue, ExecutionParamValue, ExecutionPlan,
+    ExecutionPlanSource, ExecutionResolvedInputSnapshot, ExecutionStep, ExecutionStepCondition,
     ExecutionStepConstraints, PermissionActionApplicability, PermissionFailurePolicy,
     PermissionNotApplicableReason, PermissionPlan, PermissionPlanAction, PermissionSetKind,
     PlannerInput, RuntimeCapabilities, RuntimeValue, TargetDeviceBinding,
 };
+use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
 
 fn local_input_app_install_plan(
     apk_path: &Path,
@@ -5688,6 +5690,1033 @@ fn copy_rejects_destination_traversal_before_writing() {
 
     assert_eq!(actual["success"], false);
     assert!(!fake_device_root.join("escape.so").exists());
+}
+
+#[test]
+fn root_escaping_copy_is_rejected_before_fake_device_mutation() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let source = fixture_root.join("config.cfg");
+    fs::write(&source, "configuration").unwrap();
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "file_path",
+            json!(source.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert(
+        "dest".to_string(),
+        literal(json!(
+            "/../storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg"
+        )),
+    );
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "app.retroarch.provision/copy_cores".to_string(),
+        recipe_ref: "app.retroarch.provision".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Copy configuration".to_string(),
+        note: "Copy configuration".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        permission_plan: None,
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+    let (actual, runner) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(
+        actual
+            .to_string()
+            .contains("destination escapes the device filesystem root"),
+        "actual run result: {actual:#}"
+    );
+    assert!(!fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg")
+        .exists());
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+fn retroarch_provision_with_generic_copy(
+    profile: &str,
+    source: RuntimeValue,
+    destination: &str,
+    copy_policy: &str,
+    destination_kind: Option<&str>,
+) -> ExecutionPlan {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(serde_json::to_value(source).unwrap()),
+    );
+    params.insert("dest".to_string(), literal(json!(destination)));
+    params.insert("copy_policy".to_string(), literal(json!(copy_policy)));
+    if let Some(kind) = destination_kind {
+        params.insert("dest_kind".to_string(), literal(json!(kind)));
+    }
+    let step = ExecutionStep {
+        id: "feature.copy_roms/import_content".to_string(),
+        recipe_ref: "feature.copy_roms".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Import content".to_string(),
+        note: "Import content".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        permission_plan: None,
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let mut execution_plan = plan(vec![step]);
+    execution_plan.source.device_profile_ref = profile.to_string();
+    execution_plan.source.selected_recipe_refs = vec![
+        "app.retroarch.provision".to_string(),
+        "feature.copy_roms".to_string(),
+    ];
+    execution_plan.source.expanded_recipe_refs = execution_plan.source.selected_recipe_refs.clone();
+    execution_plan.apps.push(ExecutionAppSnapshot {
+        id: "retroarch".to_string(),
+        name: "RetroArch".to_string(),
+        description: None,
+        category: None,
+        package_id: "com.retroarch.aarch64".to_string(),
+    });
+    execution_plan.resolved_inputs = vec![ExecutionResolvedInputSnapshot {
+        key: "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        recipe_id: "app.retroarch.provision".to_string(),
+        input_id: "retroarch_cfg_source".to_string(),
+        type_name: "string".to_string(),
+        value: Some(json!("none")),
+        source: None,
+        label: "Configuration source".to_string(),
+        description: None,
+        required: false,
+        sensitive: false,
+        selected_enum_label: Some("None".to_string()),
+    }];
+    execution_plan.runtime_capabilities.shared_storage_write = true;
+    execution_plan.runtime_capabilities.app_data_write = true;
+    execution_plan
+}
+
+fn retroarch_source(type_name: &str, path: &Path, location: &str) -> RuntimeValue {
+    RuntimeValue {
+        type_name: type_name.to_string(),
+        value: json!(path.to_string_lossy().to_string()),
+        location: Some(location.to_string()),
+    }
+}
+
+#[test]
+fn generic_directory_copy_cannot_replace_retroarch_config_for_either_profile() {
+    const CONFIG_DESTINATION: &str = "/storage/emulated/0/Android/data/com.retroarch.aarch64/files";
+    const SENTINEL: &[u8] = b"existing configuration sentinel";
+
+    for profile in ["konkr.pocket_advance", "konkr.pocket_fit"] {
+        let tmp = tempfile::tempdir().expect("temp root should be created");
+        let fixture_root = tmp.path().join("fixtures");
+        let source_root = fixture_root.join("rom-import");
+        let runtime_root = tmp.path().join(".emuchef_runtime");
+        let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+        let fake_device_root = tmp.path().join("fake_device");
+        let config_path = fake_device_root
+            .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+        fs::create_dir_all(&source_root).expect("source directory should be created");
+        fs::write(source_root.join("retroarch.cfg"), b"generic copy payload")
+            .expect("source configuration should be written");
+        fs::create_dir_all(config_path.parent().unwrap())
+            .expect("fake device destination should be created");
+        fs::write(&config_path, SENTINEL).expect("existing sentinel should be written");
+
+        let mut execution_plan = retroarch_provision_with_generic_copy(
+            profile,
+            retroarch_source("directory_path", &source_root, "host"),
+            CONFIG_DESTINATION,
+            "merge",
+            None,
+        );
+        let adapters = sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        );
+        let mut runner = ExecutorRunner::new(adapters);
+        let review = runner.prepare_copy_commit_snapshots(&mut execution_plan);
+        assert!(
+            review.is_err(),
+            "review must reject a directory writer whose output contains the protected target for {profile}"
+        );
+        let actual = serde_json::to_value(runner.run(&execution_plan))
+            .expect("execution result should serialize");
+        let after = fs::read(&config_path).expect("existing target should remain readable");
+        let commands = runner.adapters().device().commands();
+
+        assert!(
+            actual["success"] == false && after == SENTINEL && commands.is_empty(),
+            "generic configuration writes must be rejected before mutation for {profile}; execution={actual:#}, target={after:?}, device_commands={commands:?}"
+        );
+    }
+}
+
+#[test]
+fn setup_location_directory_copy_cannot_write_retroarch_config() {
+    const LOCATION_ID: &str = "internal-config-location";
+
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source_root = fixture_root.join("rom-import");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let target = fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+    fs::create_dir_all(&source_root).expect("source directory should be created");
+    fs::create_dir_all(fake_device_root.join("storage/emulated/0"))
+        .expect("fake internal storage root should be created");
+    fs::write(
+        source_root.join("retroarch.cfg"),
+        b"generic Setup Location payload",
+    )
+    .expect("source configuration should be written");
+
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("directory_path", &source_root, "host"),
+        "unused-destination",
+        "merge",
+        Some("directory"),
+    );
+    plan.steps[0].params.insert(
+        "dest".to_string(),
+        literal(json!({
+            "type": "setup_location_ref",
+            "value": LOCATION_ID,
+            "location": "device"
+        })),
+    );
+    plan.device_plan = Some(ExecutionDevicePlanSnapshot {
+        id: "test.device_plan".to_string(),
+        name: None,
+        description: None,
+    });
+    plan.source.device_plan_ref = "test.device_plan".to_string();
+    let binding = StorageTargetBinding {
+        id: LOCATION_ID.to_string(),
+        device_plan: "test.device_plan".to_string(),
+        session_epoch: 1,
+        name: "Internal config path".to_string(),
+        relative_path: "Android/data/com.retroarch.aarch64/files".to_string(),
+        volume_handle: "1".repeat(32),
+        volume_kind: StorageTargetVolumeKind::InternalShared,
+        mount_root: "/storage/emulated/0".to_string(),
+        volume_identity: "2".repeat(32),
+        volume_continuity: "3".repeat(32),
+        observation_token: "4".repeat(32),
+    };
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    ));
+
+    let review = runner.prepare_copy_commit_snapshots_with_storage_targets(&mut plan, &[binding]);
+    let actual = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+    let target_exists = target.exists();
+    let commands = runner.adapters().device().commands();
+    let review_error = review.expect_err("generic Setup Location writer must fail review");
+
+    assert!(
+        review_error.contains("protected RetroArch configuration target")
+            && actual["success"] == false
+            && !target_exists
+            && commands.is_empty(),
+        "generic Setup Location configuration write must be rejected before mutation; review={review_error}, execution={actual:#}, target_exists={target_exists}, device_commands={commands:?}"
+    );
+}
+
+#[test]
+fn generic_file_and_path_list_copies_cannot_reach_retroarch_config_aliases() {
+    const SENTINEL: &[u8] = b"configuration sentinel";
+
+    for (source_type, alias_destination, destination_kind) in [
+        (
+            "file_path",
+            "/storage/self/primary/Android/data/com.retroarch.aarch64/files/./retroarch.cfg",
+            None,
+        ),
+        (
+            "path_list",
+            "/sdcard/Android/data/com.retroarch.aarch64/files/../files",
+            Some("directory"),
+        ),
+    ] {
+        let tmp = tempfile::tempdir().expect("temp root should be created");
+        let fixture_root = tmp.path().join("fixtures");
+        let source_path = fixture_root.join("retroarch.cfg");
+        let runtime_root = tmp.path().join(".emuchef_runtime");
+        let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+        let fake_device_root = tmp.path().join("fake_device");
+        let target_path = fake_device_root
+            .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+        fs::create_dir_all(&fixture_root).expect("source directory should be created");
+        fs::write(&source_path, b"generic source bytes").expect("source should be written");
+        fs::create_dir_all(target_path.parent().unwrap())
+            .expect("fake device destination should be created");
+        fs::write(&target_path, SENTINEL).expect("sentinel should be written");
+
+        let source = if source_type == "path_list" {
+            RuntimeValue {
+                type_name: source_type.to_string(),
+                value: json!([source_path.to_string_lossy().to_string()]),
+                location: Some("host".to_string()),
+            }
+        } else {
+            retroarch_source(source_type, &source_path, "host")
+        };
+        let plan = retroarch_provision_with_generic_copy(
+            "konkr.pocket_advance",
+            source,
+            alias_destination,
+            "merge",
+            destination_kind,
+        );
+        let (actual, runner) = run_value(
+            &plan,
+            sandbox_adapters(
+                &runtime_root,
+                &cache_root,
+                &fake_device_root,
+                vec![fixture_root],
+            ),
+        );
+
+        assert!(
+            actual["success"] == false
+                && fs::read(&target_path).unwrap() == SENTINEL
+                && runner.adapters().device().commands().is_empty(),
+            "generic {source_type} write through {alias_destination} must fail before mutation; execution={actual:#}, commands={:?}",
+            runner.adapters().device().commands()
+        );
+    }
+}
+
+#[test]
+fn nested_directory_copy_cannot_reach_retroarch_config_from_android_data_root() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source_root = fixture_root.join("nested-app-tree");
+    let source_config = source_root
+        .join("com.retroarch.aarch64")
+        .join("files")
+        .join("retroarch.cfg");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let target = fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+    fs::create_dir_all(source_config.parent().unwrap()).expect("nested source should be created");
+    fs::write(&source_config, b"nested generic config").expect("nested config should be written");
+    fs::write(source_root.join("safe.rom"), b"unrelated file")
+        .expect("unrelated source file should be written");
+    fs::create_dir_all(target.parent().unwrap()).expect("target parent should be created");
+    let sentinel = b"pre-existing config";
+    fs::write(&target, sentinel).expect("target sentinel should be written");
+
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("directory_path", &source_root, "host"),
+        "/storage/emulated/0/Android/data",
+        "merge",
+        None,
+    );
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    ));
+
+    assert!(
+        runner.prepare_copy_commit_snapshots(&mut plan).is_err(),
+        "a nested source tree must not reach the protected target through an ancestor destination"
+    );
+    let actual = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+
+    assert_eq!(actual["success"], false, "execution={actual:#}");
+    assert_eq!(fs::read(&target).unwrap(), sentinel);
+    assert!(
+        !fake_device_root
+            .join("storage/emulated/0/Android/data/safe.rom")
+            .exists(),
+        "rejected writer must not publish earlier safe entries"
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn generic_file_copy_cannot_create_absent_retroarch_config() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source = fixture_root.join("retroarch.cfg");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let target = fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+    fs::create_dir_all(&fixture_root).expect("source root should be created");
+    fs::write(&source, b"generic file payload").expect("source should be written");
+
+    let plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("file_path", &source, "host"),
+        "/storage/self/primary/Android/data/com.retroarch.aarch64/files/./retroarch.cfg",
+        "merge",
+        Some("file"),
+    );
+    let (actual, runner) = run_value(
+        &plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false, "execution={actual:#}");
+    assert!(
+        !target.exists(),
+        "rejected copy must leave the target absent"
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+
+fn unrelated_core_file_copy_to_retroarch_files_parent_remains_available() {
+    const FILES_DESTINATION: &str = "/storage/emulated/0/Android/data/com.retroarch.aarch64/files";
+    const CONFIG_SENTINEL: &[u8] = b"existing configuration sentinel";
+
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let fixture_root = workspace.path().join("fixtures");
+    let source = fixture_root.join("core.so");
+    let runtime_root = workspace.path().join("runtime");
+    let cache_root = workspace.path().join("cache");
+    let fake_device_root = workspace.path().join("fake-device");
+    let files_path =
+        fake_device_root.join("storage/emulated/0/Android/data/com.retroarch.aarch64/files");
+    let core_path = files_path.join("core.so");
+    let config_path = files_path.join("retroarch.cfg");
+    fs::create_dir_all(&fixture_root).expect("source root should be created");
+    fs::write(&source, b"core bytes").expect("core source should be written");
+    fs::create_dir_all(&files_path).expect("fake files directory should be created");
+    fs::write(&config_path, CONFIG_SENTINEL).expect("configuration sentinel should be written");
+
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("file_path", &source, "host"),
+        FILES_DESTINATION,
+        "merge",
+        None,
+    );
+    let mut adapters = sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    );
+    adapters
+        .device_mut()
+        .remote_dirs_mut()
+        .insert(FILES_DESTINATION.to_string());
+    let mut runner = ExecutorRunner::new(adapters);
+
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("a single core file has a disjoint files-directory target");
+    let result =
+        serde_json::to_value(runner.run(&plan)).expect("execution result should serialize");
+
+    assert_eq!(result["success"], true, "execution={result:#}");
+    assert_eq!(
+        fs::read(&core_path).expect("core file should be copied into the files directory"),
+        b"core bytes"
+    );
+    assert_eq!(
+        fs::read(&config_path).expect("configuration sentinel should remain readable"),
+        CONFIG_SENTINEL
+    );
+    assert!(
+        runner.adapters().device().commands().iter().all(|command| {
+            command
+                .get(2)
+                .is_none_or(|path| !path.ends_with("/files/retroarch.cfg"))
+        }),
+        "the generic writer must never target retroarch.cfg"
+    );
+}
+
+#[test]
+fn unrelated_core_file_copy_rejects_a_symlinked_files_parent_before_mutation() {
+    const FILES_DESTINATION: &str = "/storage/emulated/0/Android/data/com.retroarch.aarch64/files";
+    const CONFIG_SENTINEL: &[u8] = b"existing configuration sentinel";
+
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let fixture_root = workspace.path().join("fixtures");
+    let source = fixture_root.join("core.so");
+    let runtime_root = workspace.path().join("runtime");
+    let cache_root = workspace.path().join("cache");
+    let fake_device_root = workspace.path().join("fake-device");
+    let files_path =
+        fake_device_root.join("storage/emulated/0/Android/data/com.retroarch.aarch64/files");
+    let core_path = files_path.join("core.so");
+    let config_path = files_path.join("retroarch.cfg");
+    fs::create_dir_all(&fixture_root).expect("source root should be created");
+    fs::write(&source, b"core bytes").expect("core source should be written");
+    fs::create_dir_all(&files_path).expect("fake files directory should be created");
+    fs::write(&config_path, CONFIG_SENTINEL).expect("configuration sentinel should be written");
+
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("file_path", &source, "host"),
+        FILES_DESTINATION,
+        "merge",
+        None,
+    );
+    let mut adapters = sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    );
+    adapters
+        .device_mut()
+        .remote_dirs_mut()
+        .insert(FILES_DESTINATION.to_string());
+    adapters
+        .device_mut()
+        .remote_symlinks_mut()
+        .insert(FILES_DESTINATION.to_string());
+    let mut runner = ExecutorRunner::new(adapters);
+
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("the static single-file effect is disjoint");
+    let result =
+        serde_json::to_value(runner.run(&plan)).expect("execution result should serialize");
+    let commands = runner.adapters().device().commands();
+
+    assert_eq!(result["success"], false, "execution={result:#}");
+    assert!(
+        !core_path.exists(),
+        "a symlinked parent must not receive a copy"
+    );
+    assert_eq!(
+        fs::read(&config_path).expect("configuration sentinel should remain readable"),
+        CONFIG_SENTINEL
+    );
+    assert!(
+        commands.iter().all(|command| {
+            !command.first().is_some_and(|operation| {
+                matches!(
+                    operation.as_str(),
+                    "remove_tree" | "mkdir_p" | "push" | "copy_on_device"
+                )
+            })
+        }),
+        "symbolic-link rejection must precede copy mutations: {commands:?}"
+    );
+}
+
+#[test]
+fn directory_source_cannot_claim_the_single_file_copy_effect() {
+    const FILES_DESTINATION: &str = "/storage/emulated/0/Android/data/com.retroarch.aarch64/files";
+
+    let workspace = tempfile::tempdir().expect("executor temp root should be created");
+    let fixture_root = workspace.path().join("fixtures");
+    let disguised_source = fixture_root.join("core.so");
+    let runtime_root = workspace.path().join("runtime");
+    let cache_root = workspace.path().join("cache");
+    let fake_device_root = workspace.path().join("fake-device");
+    fs::create_dir_all(&disguised_source).expect("directory source should be created");
+    fs::write(
+        disguised_source.join("retroarch.cfg"),
+        b"nested configuration",
+    )
+    .expect("nested configuration should be written");
+    fs::create_dir_all(&fake_device_root).expect("fake device root should be created");
+
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_fit",
+        retroarch_source("file_path", &disguised_source, "host"),
+        FILES_DESTINATION,
+        "merge",
+        None,
+    );
+    let mut adapters = sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    );
+    adapters
+        .device_mut()
+        .remote_dirs_mut()
+        .insert(FILES_DESTINATION.to_string());
+    let mut runner = ExecutorRunner::new(adapters);
+
+    let review_error = runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect_err("a directory mislabeled as file_path is not a proven single-file effect");
+    assert!(
+        review_error.contains("protected RetroArch configuration target"),
+        "unexpected review result: {review_error}"
+    );
+    let result = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+    let commands = runner.adapters().device().commands();
+
+    assert_eq!(result["success"], false, "execution={result:#}");
+    assert!(
+        !fake_device_root
+            .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/core.so")
+            .exists(),
+        "rejected directory source must not be published"
+    );
+    assert!(
+        commands.is_empty(),
+        "rejection must precede mutation: {commands:?}"
+    );
+}
+
+#[test]
+fn destructive_single_file_policies_do_not_use_the_disjoint_copy_allowance() {
+    const FILES_DESTINATION: &str = "/storage/emulated/0/Android/data/com.retroarch.aarch64/files";
+    const CONFIG_SENTINEL: &[u8] = b"existing configuration sentinel";
+
+    for copy_policy in ["replace", "sync"] {
+        let workspace = tempfile::tempdir().expect("executor temp root should be created");
+        let fixture_root = workspace.path().join("fixtures");
+        let source = fixture_root.join("core.so");
+        let runtime_root = workspace.path().join("runtime");
+        let cache_root = workspace.path().join("cache");
+        let fake_device_root = workspace.path().join("fake-device");
+        let files_path =
+            fake_device_root.join("storage/emulated/0/Android/data/com.retroarch.aarch64/files");
+        let config_path = files_path.join("retroarch.cfg");
+        fs::create_dir_all(&fixture_root).expect("source root should be created");
+        fs::write(&source, b"core bytes").expect("core source should be written");
+        fs::create_dir_all(&files_path).expect("fake files directory should be created");
+        fs::write(&config_path, CONFIG_SENTINEL).expect("sentinel should be written");
+
+        let mut plan = retroarch_provision_with_generic_copy(
+            "konkr.pocket_fit",
+            retroarch_source("file_path", &source, "host"),
+            FILES_DESTINATION,
+            copy_policy,
+            None,
+        );
+        let mut adapters = sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        );
+        adapters
+            .device_mut()
+            .remote_dirs_mut()
+            .insert(FILES_DESTINATION.to_string());
+        let mut runner = ExecutorRunner::new(adapters);
+
+        let review_error = runner
+            .prepare_copy_commit_snapshots(&mut plan)
+            .expect_err("destructive policies must keep the overlapping parent blocked");
+        assert!(
+            review_error.contains("protected RetroArch configuration target"),
+            "{copy_policy}: {review_error}"
+        );
+        let result = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+        let commands = runner.adapters().device().commands();
+
+        assert_eq!(result["success"], false, "{copy_policy}: {result:#}");
+        assert_eq!(
+            fs::read(&config_path).expect("sentinel should remain readable"),
+            CONFIG_SENTINEL,
+            "{copy_policy} must preserve RetroArch configuration"
+        );
+        assert!(
+            commands.is_empty(),
+            "{copy_policy} must not mutate: {commands:?}"
+        );
+    }
+}
+
+#[test]
+fn device_archive_extraction_cannot_write_retroarch_config() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("fake-device");
+    let archive = tmp.path().join("archive.zip");
+    write_zip(
+        &archive,
+        &[(
+            "com.retroarch.aarch64/files/retroarch.cfg",
+            "archive config",
+        )],
+    );
+    let target = fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+    fs::create_dir_all(target.parent().unwrap()).expect("target parent should be created");
+    let sentinel = b"archive sentinel";
+    fs::write(&target, sentinel).expect("target sentinel should be written");
+    let mut step = extract_archive_step("example.recipe/extract-device", &archive);
+    step.params
+        .insert("extract_on".to_string(), literal(json!("device")));
+    step.params.insert(
+        "dest".to_string(),
+        literal(json!("/storage/emulated/0/Android/data")),
+    );
+
+    let (actual, runner) = run_value(
+        &plan(vec![step]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![tmp.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], false, "execution={actual:#}");
+    assert_eq!(fs::read(&target).unwrap(), sentinel);
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn reviewed_directory_source_changes_fail_before_device_mutation() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source_root = fixture_root.join("roms");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&source_root).expect("source directory should be created");
+    fs::write(source_root.join("game.nes"), b"reviewed source")
+        .expect("source file should be written");
+    fs::create_dir_all(&fake_device_root).expect("fake device root should be created");
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_fit",
+        retroarch_source("directory_path", &source_root, "host"),
+        "/storage/emulated/0/RetroArch/ROMs",
+        "merge",
+        None,
+    );
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    ));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("unrelated ROM write should be reviewable");
+    fs::write(source_root.join("game.nes"), b"changed after review")
+        .expect("source should change after review");
+
+    let actual = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+    let copied_game = fake_device_root.join("storage/emulated/0/RetroArch/ROMs/game.nes");
+
+    assert_eq!(actual["success"], false, "execution={actual:#}");
+    assert!(
+        !copied_game.exists(),
+        "stale reviewed source must not be copied"
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn typed_device_path_input_cannot_bypass_retroarch_config_destination_guard() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source = fixture_root.join("payload.cfg");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let target = fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+    fs::create_dir_all(&fixture_root).expect("source root should be created");
+    fs::write(&source, b"typed input payload").expect("source should be written");
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("file_path", &source, "host"),
+        "/storage/emulated/0/RetroArch/ROMs",
+        "merge",
+        Some("file"),
+    );
+    plan.steps[0].params.insert(
+        "dest".to_string(),
+        literal(json!({
+            "type": "device_path",
+            "value": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
+            "location": "device"
+        })),
+    );
+
+    let (actual, runner) = run_value(
+        &plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false, "execution={actual:#}");
+    let failure = actual["steps"][0]["message"].as_str().unwrap_or_default();
+    assert!(
+        failure.contains("protected RetroArch configuration target"),
+        "typed device destination should fail at the protected-target guard: {actual:#}"
+    );
+    assert!(
+        !target.exists(),
+        "rejected copy must leave the target absent"
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn input_bound_device_path_cannot_bypass_retroarch_config_destination_guard() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source = fixture_root.join("payload.cfg");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let target = fake_device_root
+        .join("storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg");
+    fs::create_dir_all(&fixture_root).expect("source root should be created");
+    fs::write(&source, b"input-bound payload").expect("source should be written");
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_advance",
+        retroarch_source("file_path", &source, "host"),
+        "/storage/emulated/0/RetroArch/ROMs",
+        "merge",
+        Some("file"),
+    );
+    plan.inputs.push(crate::planner::ExecutionInputValue {
+        id: "retroarch.config_destination".to_string(),
+        value: crate::planner::RuntimeValue {
+            type_name: "device_path".to_string(),
+            value: json!(
+                "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg"
+            ),
+            location: Some("device".to_string()),
+        },
+    });
+    plan.steps[0].params.insert(
+        "dest".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "inputs.retroarch.config_destination".to_string(),
+        },
+    );
+
+    let (actual, runner) = run_value(
+        &plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false, "execution={actual:#}");
+    let failure = actual["steps"][0]["message"].as_str().unwrap_or_default();
+    assert!(
+        failure.contains("protected RetroArch configuration target"),
+        "input-bound device destination should fail at the protected-target guard: {actual:#}"
+    );
+    assert!(
+        !target.exists(),
+        "rejected copy must leave the target absent"
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn runtime_extraction_output_cannot_feed_generic_retroarch_config_copy() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.extract.outputs.extracted_paths".to_string(),
+        },
+    );
+    params.insert(
+        "dest".to_string(),
+        literal(json!(
+            "/sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg"
+        )),
+    );
+    params.insert("copy_policy".to_string(), literal(json!("merge")));
+    let step = ExecutionStep {
+        id: "feature.copy_roms/import-extracted".to_string(),
+        recipe_ref: "feature.copy_roms".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Copy extracted files".to_string(),
+        note: "Copy extracted files".to_string(),
+        dependencies: vec!["example.recipe/extract".to_string()],
+        constraints: constraints(),
+        permission_plan: None,
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+
+    let error = crate::executor::validate_supported_copy_plan(&plan(vec![step]))
+        .expect_err("an extraction output must not authorize a generic config writer");
+
+    assert!(
+        error.contains("protected RetroArch configuration target"),
+        "{error}"
+    );
+}
+
+#[test]
+fn generic_copy_with_unresolved_destination_fails_closed() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        ExecutionParamValue::Literal {
+            value: serde_json::to_value(retroarch_source(
+                "file_path",
+                Path::new("/tmp/game.rom"),
+                "host",
+            ))
+            .unwrap(),
+        },
+    );
+    params.insert(
+        "dest".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.resolve.outputs.device_path".to_string(),
+        },
+    );
+    let step = ExecutionStep {
+        id: "feature.copy_roms/import-dynamic".to_string(),
+        recipe_ref: "feature.copy_roms".to_string(),
+        app_id: None,
+        type_name: "copy_files".to_string(),
+        name: "Copy file".to_string(),
+        note: "Copy file".to_string(),
+        dependencies: vec!["example.recipe/resolve".to_string()],
+        constraints: constraints(),
+        permission_plan: None,
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+
+    let error = crate::executor::validate_supported_copy_plan(&plan(vec![step]))
+        .expect_err("an unresolved writer destination cannot be proven safe");
+
+    assert!(error.contains("unresolved destination"), "{error}");
+}
+
+#[test]
+fn generic_bios_copy_remains_available_with_configuration_opted_out() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source_root = fixture_root.join("bios");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let bios_bytes = b"bios image";
+    fs::create_dir_all(&source_root).expect("BIOS source directory should be created");
+    fs::write(source_root.join("scph1001.bin"), bios_bytes).expect("BIOS source should be written");
+    fs::create_dir_all(&fake_device_root).expect("fake device root should be created");
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_fit",
+        retroarch_source("directory_path", &source_root, "host"),
+        "/storage/emulated/0/RetroArch/system",
+        "merge",
+        None,
+    );
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    ));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("unrelated BIOS destination should be reviewable");
+
+    let actual = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+    let copied_bios = fake_device_root.join("storage/emulated/0/RetroArch/system/scph1001.bin");
+
+    assert_eq!(actual["success"], true, "execution={actual:#}");
+    assert_eq!(fs::read(copied_bios).unwrap(), bios_bytes);
+}
+
+#[test]
+fn generic_rom_copy_remains_available_with_configuration_opted_out() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let source_root = fixture_root.join("roms");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&source_root).expect("source directory should be created");
+    fs::write(source_root.join("game.nes"), b"rom bytes").expect("ROM should be written");
+    fs::create_dir_all(&fake_device_root).expect("fake device root should be created");
+    let mut plan = retroarch_provision_with_generic_copy(
+        "konkr.pocket_fit",
+        retroarch_source("directory_path", &source_root, "host"),
+        "/storage/emulated/0/RetroArch/ROMs",
+        "merge",
+        None,
+    );
+    let mut runner = ExecutorRunner::new(sandbox_adapters(
+        &runtime_root,
+        &cache_root,
+        &fake_device_root,
+        vec![fixture_root],
+    ));
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("unrelated ROM write should be reviewable");
+
+    let actual = serde_json::to_value(runner.run(&plan)).expect("result should serialize");
+
+    assert_eq!(actual["success"], true, "execution={actual:#}");
+    assert_eq!(
+        fs::read(fake_device_root.join("storage/emulated/0/RetroArch/ROMs/game.nes"))
+            .expect("ROM copy should be present"),
+        b"rom bytes"
+    );
 }
 
 #[cfg(unix)]

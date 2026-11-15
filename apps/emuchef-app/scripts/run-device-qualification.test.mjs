@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { APP_ROOT, runQualification } from "./run-device-qualification.mjs";
 
-test("qualification launcher runs the clean build, sidecar, and pinned real app in order", () => {
+test("canonical qualification launcher runs the clean build, sidecar, and pinned real app in order", () => {
   const calls = [];
   const environment = { PATH: "/test/bin" };
 
@@ -33,7 +33,6 @@ test("qualification launcher runs the clean build, sidecar, and pinned real app 
     EMUCHEF_DEVICE_QUALIFICATION: "1",
   });
 });
-
 test("qualification launcher stops at the first failed step", () => {
   const calls = [];
   let exitStatus = null;

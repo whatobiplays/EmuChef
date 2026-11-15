@@ -25,9 +25,7 @@ use crate::planner::{
     BindingSource, ExecutionArtifact, ExecutionArtifactSource, ExecutionParamValue, ExecutionPlan,
     ExecutionStep,
 };
-use crate::runtime_configuration::{
-    DeviceContextOverride, PlanConfigurationResult, RuntimeCapabilityAvailability,
-};
+use crate::runtime_configuration::{DeviceContextOverride, PlanConfigurationResult};
 
 const TARGET_RECIPE: &str = "app.retroarch.provision";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.konkr_pocket_fit.base";
@@ -149,7 +147,9 @@ fn plan_retroarch_with_permissions(
 ) -> PlanConfigurationResult {
     use crate::catalog_source::CatalogSnapshot;
     use crate::model::OrderedMap;
-    use crate::runtime_configuration::{plan_configuration, ConfigurationContextRequest};
+    use crate::runtime_configuration::{
+        plan_configuration, ConfigurationContextRequest, RuntimeCapabilityAvailability,
+    };
 
     let catalog = CatalogSnapshot::legacy_local(authored_root())
         .expect("real authored catalog should be admitted");
@@ -161,6 +161,23 @@ fn plan_retroarch_with_permissions(
         );
     }
 
+    let runtime_capability_availability = match root_shell {
+        Some(root_shell) => Some(RuntimeCapabilityAvailability {
+            root_shell,
+            app_data_write: root_shell,
+            root_shell_route: root_shell.then_some(crate::planner::RootShellRoute::SuCommand),
+            config_create_write_evidence: None,
+        }),
+        None if config_path.is_some() => Some(RuntimeCapabilityAvailability {
+            root_shell: true,
+            app_data_write: true,
+            root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
+            config_create_write_evidence: Some(
+                crate::runtime_configuration::test_config_create_write_evidence(),
+            ),
+        }),
+        None => None,
+    };
     plan_configuration(ConfigurationContextRequest {
         catalog,
         configuration_root: None,
@@ -173,13 +190,7 @@ fn plan_retroarch_with_permissions(
             ..DeviceContextOverride::default()
         }),
         target_device: None,
-        runtime_capability_availability: root_shell.map(|root_shell| {
-            RuntimeCapabilityAvailability {
-                root_shell,
-                app_data_write: root_shell,
-                root_shell_route: root_shell.then_some(crate::planner::RootShellRoute::SuCommand),
-            }
-        }),
+        runtime_capability_availability,
     })
     .expect("real authored RetroArch configuration should prepare")
 }

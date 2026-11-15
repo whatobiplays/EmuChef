@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::State;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -22,6 +22,7 @@ use crate::device_observation::{
     refresh_current_qualification, DeviceQualificationState, QualificationContextKey,
 };
 use crate::handles::{DeviceDto, SessionHandles};
+use crate::retroarch_config_create_policy::RetroArchConfigCreateTarget;
 
 /// Apply one inventory to native session and root authority using explicit
 /// generation inputs. The execution seam uses this same function with a
@@ -138,6 +139,7 @@ pub(crate) struct RootQualificationInvalidation {
 pub(crate) struct RootQualificationStore {
     records: HashMap<RootQualificationKey, RootQualificationState>,
     routes: HashMap<RootQualificationKey, RootShellRoute>,
+    config_create_write_evidence: HashSet<(RootQualificationKey, RetroArchConfigCreateTarget)>,
     in_flight: Option<RootQualificationAttempt>,
     next_id: u64,
 }
@@ -150,6 +152,8 @@ impl RootQualificationStore {
         if self.in_flight.is_some() {
             return Err("root_check_in_progress");
         }
+        self.config_create_write_evidence
+            .retain(|(verified_key, _)| verified_key != &key);
         self.next_id = self.next_id.saturating_add(1).max(1);
         let attempt = RootQualificationAttempt {
             key,
@@ -179,6 +183,8 @@ impl RootQualificationStore {
         }
         self.in_flight = None;
         self.routes.remove(&attempt.key);
+        self.config_create_write_evidence
+            .retain(|(verified_key, _)| verified_key != &attempt.key);
         if result == RootQualificationState::Granted {
             if let Some(route) = route {
                 self.routes.insert(attempt.key.clone(), route);
@@ -207,11 +213,42 @@ impl RootQualificationStore {
         self.routes.get(key).copied()
     }
 
+    pub(crate) fn config_create_write_is_verified_for_target(
+        &self,
+        key: &RootQualificationKey,
+        target: &RetroArchConfigCreateTarget,
+    ) -> bool {
+        self.records.get(key) == Some(&RootQualificationState::Granted)
+            && self.routes.contains_key(key)
+            && self
+                .config_create_write_evidence
+                .contains(&(key.clone(), target.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_config_create_write_probe_verified_for_test(
+        &mut self,
+        key: &RootQualificationKey,
+        target: RetroArchConfigCreateTarget,
+    ) {
+        if self.records.get(key) == Some(&RootQualificationState::Granted)
+            && self.routes.contains_key(key)
+        {
+            self.config_create_write_evidence
+                .insert((key.clone(), target));
+        }
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.records.clear();
         self.routes.clear();
+        self.config_create_write_evidence.clear();
         self.in_flight = None;
         self.next_id = self.next_id.saturating_add(1).max(1);
+    }
+
+    pub(crate) fn invalidate_config_create_write_evidence(&mut self) {
+        self.config_create_write_evidence.clear();
     }
 
     /// Invalidate completed and in-flight root evidence for one device handle.
@@ -230,6 +267,8 @@ impl RootQualificationStore {
                 .retain(|key, _| key.device_handle != device_handle);
             self.routes
                 .retain(|key, _| key.device_handle != device_handle);
+            self.config_create_write_evidence
+                .retain(|(key, _)| key.device_handle != device_handle);
             invalidation.device_handle = Some(device_handle.to_string());
         }
         if self
@@ -261,6 +300,8 @@ impl RootQualificationStore {
                 .retain(|record_key, _| key.is_some_and(|expected| record_key == expected));
             self.routes
                 .retain(|record_key, _| key.is_some_and(|expected| record_key == expected));
+            self.config_create_write_evidence
+                .retain(|(record_key, _)| key.is_some_and(|expected| record_key == expected));
             invalidation.device_handle = removed_device;
         }
         let attempt_matches = self
@@ -575,6 +616,55 @@ mod tests {
     use super::*;
     use crate::device_observation::QualificationContextKey;
     use serde_json::json;
+
+    #[test]
+    fn config_create_write_probe_evidence_is_bound_to_the_current_root_context_and_cleared_on_refresh(
+    ) {
+        let mut store = RootQualificationStore::default();
+        let key = RootQualificationKey::new("device-one", 3, 7);
+        let attempt = store.begin(key.clone()).unwrap();
+        assert!(store.complete_with_route(
+            attempt,
+            RootQualificationState::Granted,
+            Some(RootShellRoute::SuCommand),
+        ));
+        let target = RetroArchConfigCreateTarget {
+            app_id: "retroarch".to_string(),
+            package_id: "com.retroarch.aarch64".to_string(),
+            target_id: "config".to_string(),
+            target_kind: "file".to_string(),
+            target_location: "external_app_data".to_string(),
+            target_path: "files/retroarch.cfg".to_string(),
+            destination:
+                "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg"
+                    .to_string(),
+            catalog_identity: "{\"id\":\"test\",\"version\":\"1\"}".to_string(),
+        };
+        store.mark_config_create_write_probe_verified_for_test(&key, target.clone());
+        assert!(store.config_create_write_is_verified_for_target(&key, &target));
+        let refresh_attempt = store.begin(key.clone()).unwrap();
+        assert!(!store.config_create_write_is_verified_for_target(&key, &target));
+        assert!(store.cancel(&refresh_attempt));
+        let stale_session = RootQualificationKey {
+            session_epoch: 1,
+            ..key.clone()
+        };
+        assert!(!store.config_create_write_is_verified_for_target(&stale_session, &target));
+        let wrong_device = RootQualificationKey {
+            device_handle: "device-two".to_string(),
+            ..key.clone()
+        };
+        assert!(!store.config_create_write_is_verified_for_target(&wrong_device, &target));
+        let mut wrong_target = target.clone();
+        wrong_target.package_id = "com.other.app".to_string();
+        assert!(!store.config_create_write_is_verified_for_target(&key, &wrong_target));
+        let mut wrong_catalog = target.clone();
+        wrong_catalog.catalog_identity = "{\"id\":\"other\",\"version\":\"1\"}".to_string();
+        assert!(!store.config_create_write_is_verified_for_target(&key, &wrong_catalog));
+
+        store.invalidate_for_device("device-one");
+        assert!(!store.config_create_write_is_verified_for_target(&key, &target));
+    }
 
     #[test]
     fn root_qualification_serializes_the_approved_compact_shape() {

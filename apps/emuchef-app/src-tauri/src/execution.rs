@@ -1053,6 +1053,17 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
     validate_target(&refreshed_review.target, &serial, &facts)?;
     validate_plan_digest(&refreshed_review)?;
 
+    let reviewed_plan = refreshed_review
+        .response
+        .get("plan")
+        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
+    crate::commands::require_config_create_write_evidence(
+        Some(state),
+        &refreshed_review.device_handle,
+        reviewed_plan,
+        refreshed_review.qualification_context.as_ref(),
+    )?;
+
     let start_result = request_dry_run_start(runtime, &refreshed_review).map_err(|error| {
         resolve_simulated_start_failure(state, executions, &error, || execution_start_error(&error))
     })?;
@@ -1988,6 +1999,17 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         false
     };
     validate_final_qualification(&refreshed_review, &current, root_granted)?;
+
+    let reviewed_plan = refreshed_review
+        .response
+        .get("plan")
+        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
+    crate::commands::require_config_create_write_evidence(
+        qualification_state,
+        &refreshed_review.device_handle,
+        reviewed_plan,
+        refreshed_review.qualification_context.as_ref(),
+    )?;
 
     let current_profile_id = qualification_device_plan.as_ref().and_then(|device_plan| {
         let state = qualification_state?;
@@ -3904,7 +3926,7 @@ fn validate_review_executable(
     review: &ReviewedPlanSnapshot,
     expected_mode: &str,
 ) -> Result<(), String> {
-    let has_t13a_configuration_create = review
+    let has_retroarch_config_create = review
         .response
         .pointer("/plan/steps")
         .and_then(Value::as_array)
@@ -3915,7 +3937,7 @@ fn validate_review_executable(
                     .is_some_and(|id| id.ends_with("/seed_retroarch_cfg"))
             })
         });
-    if has_t13a_configuration_create
+    if has_retroarch_config_create
         && review.response.get("executionMode").and_then(Value::as_str) != Some(expected_mode)
     {
         return Err(safe_error(
@@ -7779,7 +7801,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn t13a_review_cannot_start_in_a_different_execution_mode() {
+    fn qualified_review_cannot_start_in_a_different_execution_mode() {
         for (review_mode, start_mode) in [("dry_run", "real"), ("real", "dry_run")] {
             let mut retained = review();
             retained.response["executionMode"] = json!(review_mode);
@@ -12640,6 +12662,13 @@ pub(crate) mod tests {
             ),
         ] {
             let source_digest = format!("{:x}", Sha256::digest(bytes));
+            let package_id = "com.retroarch.aarch64";
+            let catalog_identity = serde_json::to_value(
+                crate::catalog::CatalogDescriptor::for_test()
+                    .expect("the repository catalog should be available to execution tests")
+                    .public_identity(),
+            )
+            .unwrap();
             let artifact = json!({
                 "type": "configuration_artifact",
                 "schemaVersion": 1,
@@ -12647,16 +12676,26 @@ pub(crate) mod tests {
                 "byteLength": bytes.len(),
                 "sha256": source_digest,
                 "sourceIdentity": {
+                    "recipeId": "app.retroarch.provision",
                     "kind": source_kind,
                     "sha256": source_digest,
                     "byteLength": bytes.len(),
                 },
-                "targetIdentity": { "appId": "retroarch", "targetId": "config" },
+                "targetIdentity": {
+                    "appId": "retroarch",
+                    "packageId": package_id,
+                    "targetId": "config",
+                    "target": {
+                        "kind": "file",
+                        "location": "external_app_data",
+                        "path": "files/retroarch.cfg",
+                    },
+                },
                 "absencePrecondition": {
                     "status": "confirmed_absent",
                     "authority": "device",
-                    "targetPath": "/data/data/com.retroarch.aarch64/files/retroarch.cfg",
-                    "parentPath": "/data/data/com.retroarch.aarch64/files",
+                    "targetPath": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
+                    "parentPath": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files",
                     "parentBinding": "reviewed-device-parent",
                     "entryName": "retroarch.cfg",
                 },
@@ -12664,6 +12703,17 @@ pub(crate) mod tests {
             let plan = json!({
                 "kind": "execution_plan",
                 "id": format!("plan.retroarch.{source_kind}"),
+                "source": {
+                    "device_profile_ref": "ayaneo.generic",
+                    "selected_recipe_refs": ["app.retroarch.provision"],
+                    "catalog": catalog_identity,
+                },
+                "resolved_inputs": [{
+                    "recipeId": "app.retroarch.provision",
+                    "inputId": "retroarch_cfg_source",
+                    "value": if source_kind == "generated" { "managed" } else { "uploaded" },
+                }],
+                "apps": [{ "id": "retroarch", "package_id": package_id }],
                 "recipes": [{
                     "id": "app.retroarch.provision",
                     "name": "RetroArch provisioning",
@@ -12672,12 +12722,17 @@ pub(crate) mod tests {
                 "steps": [{
                     "id": "app.retroarch.provision/seed_retroarch_cfg",
                     "recipe_ref": "app.retroarch.provision",
+                    "app_id": "retroarch",
                     "type": "copy_files",
                     "name": "Create RetroArch configuration",
                     "note": "Create the reviewed configuration file.",
                     "dependencies": [],
                     "constraints": { "capabilities": [], "conflicts_with": [] },
-                    "params": { "source": { "value": artifact } },
+                    "params": {
+                        "source": { "value": artifact },
+                        "dest": { "value": { "app_target": "config" } },
+                        "copy_policy": { "value": "create_only" },
+                    },
                     "skip_if": [],
                     "verify": [],
                 }],
@@ -12700,15 +12755,112 @@ pub(crate) mod tests {
             retained.response["plan"] = plan.clone();
             retained.response["executionMode"] = json!("dry_run");
             retained.plan_digest = canonical_json_digest(&plan).unwrap();
-            let review_handle = {
-                let mut handles = handles.lock().unwrap();
-                handles.discard_review(&initial_review_handle).unwrap();
-                handles.insert_review(retained.clone())
-            };
+            let device_handle = retained.device_handle.clone();
+            handles
+                .lock()
+                .unwrap()
+                .discard_review(&initial_review_handle)
+                .unwrap();
             let (_app_root, app) =
                 test_app(Mutex::new(ExecutionHandleStore::default()), handles, root);
             let state = app.state::<AppState>();
             install_test_platform_tools(&state);
+            let platform_tools = crate::commands::current_adb_runtime_snapshot(&state).unwrap();
+            let runtime_generation = state.sidecar.try_generation().unwrap();
+            {
+                let mut handles = state.handles.lock().unwrap();
+                let mut context = handles
+                    .qualification_context(&device_handle)
+                    .expect("the current test device should retain qualification context");
+                context.runtime_generation = runtime_generation;
+                context.platform_tools_revision = platform_tools.revision;
+                assert!(handles.set_qualification_context(context));
+            }
+            let preflight_runtime = ScriptedRuntime {
+                responses: Mutex::new(vec![Ok(supported_inventory("transport-1"))]),
+                requests: Mutex::new(Vec::new()),
+            };
+            {
+                let mut executions = state.executions.lock().unwrap();
+                list_and_reconcile_preflight_inventory(
+                    &state,
+                    &preflight_runtime,
+                    &platform_tools,
+                    Some(&mut executions),
+                )
+                .expect("the current device inventory should be reconciled before qualification");
+            }
+            let context = state
+                .handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle)
+                .expect("the current test device should retain qualification context");
+            let initial_root_key = RootQualificationKey::from_context(&context);
+            let root_attempt = state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .begin(initial_root_key.clone())
+                .unwrap();
+            assert!(state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .complete_with_route(
+                    root_attempt,
+                    RootQualificationState::Granted,
+                    Some(crate::device_qualification::RootShellRoute::SuCommand),
+                ));
+            crate::qualification_session::observe_in_transition(
+                &state,
+                crate::qualification_session::QualificationLifecycleObservation::RootChecked {
+                    device_handle: device_handle.clone(),
+                    session_epoch: context.session_epoch,
+                    root_state: RootQualificationState::Granted,
+                },
+            );
+            let current_context = state
+                .handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle)
+                .expect("root observation should retain the current device context");
+            let root_key = RootQualificationKey::from_context(&current_context);
+            if root_key != initial_root_key {
+                let root_attempt = state
+                    .root_qualification
+                    .lock()
+                    .unwrap()
+                    .begin(root_key.clone())
+                    .unwrap();
+                assert!(state
+                    .root_qualification
+                    .lock()
+                    .unwrap()
+                    .complete_with_route(
+                        root_attempt,
+                        RootQualificationState::Granted,
+                        Some(crate::device_qualification::RootShellRoute::SuCommand),
+                    ));
+            }
+            retained.qualification_context = Some(current_context);
+            let write_target =
+                crate::retroarch_config_create_policy::resolve_retroarch_config_create_target(
+                    &plan,
+                )
+                .unwrap()
+                .unwrap();
+            state
+                .root_qualification
+                .lock()
+                .unwrap()
+                .mark_config_create_write_probe_verified_for_test(&root_key, write_target.clone());
+            let review_handle = state
+                .handles
+                .lock()
+                .unwrap()
+                .insert_review(retained.clone());
 
             let configuration_report = json!({
                 "schemaVersion": 1,
