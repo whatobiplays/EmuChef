@@ -3586,8 +3586,17 @@ fn repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order(
 }
 
 #[test]
-fn konkre_product_plan_keeps_unavailable_defaults_selected_and_blocks_completion() {
-    let input = repo_device_plan_planner_input_with_bindings("konkr.pocket_advance.base", &[]);
+fn konkr_bios_copy_with_valid_source_reports_unavailable_shared_storage() {
+    let bios_source = tempfile::tempdir().unwrap();
+    let bios_source_path = bios_source.path().join("bios");
+    let mut input = repo_device_plan_planner_input_with_bindings(
+        "konkr.pocket_advance.base",
+        &[(
+            "feature.copy_bios/bios_source_dir",
+            json!(bios_source_path.to_string_lossy().to_string()),
+        )],
+    );
+    assert!(bios_source_path.is_dir());
 
     assert_eq!(input.device_plan_ref, "konkr.pocket_advance.base");
     assert_eq!(input.device_profile_ref, "konkr.pocket_advance");
@@ -3601,13 +3610,50 @@ fn konkre_product_plan_keeps_unavailable_defaults_selected_and_blocks_completion
     assert_eq!(input.device_context.manufacturer, "ARBOR");
     assert_eq!(input.device_context.model, "KONKR Pocket Advance");
     assert_eq!(input.device_context.android_version, 12);
+    assert!(!input.runtime_capabilities.shared_storage_write);
+
+    input.selected_recipe_refs = vec!["feature.copy_bios".to_string()];
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert_eq!(result["errors"][0]["code"], "empty_execution_plan");
+    assert!(
+        result["execution_plan"].is_null(),
+        "an unavailable selected BIOS copy must not produce a plan: {result:#}"
+    );
+}
+
+#[test]
+fn konkr_provisioning_reports_unavailable_required_capabilities() {
+    let mut input = repo_device_plan_planner_input_with_bindings("konkr.pocket_advance.base", &[]);
+    input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
+    input.device_context.android_api_level = Some(31);
+
+    assert!(!input.runtime_capabilities.apk_install);
+    assert!(!input.runtime_capabilities.app_launch);
 
     let result = planning_result_value(input);
     assert_eq!(result["status"], "error", "{result:#}");
-    assert!(
-        result["execution_plan"].is_null(),
-        "unavailable selected defaults must not yield a completed plan: {result:#}"
-    );
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+
+    let errors = result["errors"]
+        .as_array()
+        .expect("planner errors should be an array");
+    for (step_id, capability) in [
+        ("install_retroarch", "apk_install"),
+        ("launch_retroarch_bootstrap", "app_launch"),
+    ] {
+        let error = errors
+            .iter()
+            .find(|error| {
+                error["code"] == "required_step_capability_unavailable"
+                    && error["details"]["recipe_ref"] == "app.retroarch.provision"
+                    && error["details"]["step_id"] == step_id
+            })
+            .unwrap_or_else(|| {
+                panic!("missing unavailable capability diagnostic for {step_id}: {errors:#?}")
+            });
+        assert_eq!(error["details"]["capability"], capability);
+    }
 }
 
 #[test]

@@ -137,7 +137,7 @@ fn config_create_plan_request(
 }
 
 #[test]
-fn konkre_product_plan_supports_managed_configuration_only_override() {
+fn konkr_product_plan_supports_managed_configuration_only_override() {
     let authored_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
     let mut bindings = OrderedMap::new();
     bindings.insert(
@@ -356,10 +356,13 @@ fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
     );
     let request =
         config_create_plan_request(&authored_root, "app.retroarch.provision", bindings, true);
-    let plan = plan_configuration(request)
-        .unwrap()
-        .plan
-        .expect("verified configuration-create evidence should admit configuration creation");
+    let response = plan_configuration(request).unwrap();
+    assert!(
+        response.plan.is_some(),
+        "verified configuration-create evidence should admit configuration creation: {:#?}",
+        response.diagnostics
+    );
+    let plan = response.plan.unwrap();
 
     assert!(!plan.runtime_capabilities.app_data_write);
     assert!(plan

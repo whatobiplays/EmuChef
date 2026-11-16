@@ -1975,6 +1975,38 @@ fn selected_step_ids(
                     },
                 )
             });
+            if !available && !step.user_toggleable {
+                for name in step_capabilities {
+                    let Some(capability) = RuntimeCapability::from_name(name) else {
+                        continue;
+                    };
+                    // A selected recipe cannot succeed if a required install or launch action is omitted.
+                    if !matches!(
+                        capability,
+                        RuntimeCapability::ApkInstall | RuntimeCapability::AppLaunch
+                    ) {
+                        continue;
+                    }
+                    if capability.is_available_for_step(
+                        availability_context.runtime_capabilities,
+                        config_create_write_authorized_for_step,
+                    ) {
+                        continue;
+                    }
+                    errors.push(PlannerMessage {
+                        code: "required_step_capability_unavailable".to_string(),
+                        message: format!(
+                            "Required step '{}' in recipe '{}' needs unavailable runtime capability '{}'.",
+                            step.id, recipe_id, name
+                        ),
+                        details: json!({
+                            "recipe_ref": recipe_id,
+                            "step_id": step.id,
+                            "capability": name,
+                        }),
+                    });
+                }
+            }
             availability_by_step_id.insert(step_id, available);
             available_by_local_step_id.insert(step.id.clone(), available);
             if available {
