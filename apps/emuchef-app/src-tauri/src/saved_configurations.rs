@@ -219,6 +219,17 @@ impl SavedConfigurationStore {
         Ok(preview)
     }
 
+    fn require_preview_revision(&self, handle: &str, expected_revision: u64) -> Result<(), String> {
+        let current = self.current_preview(handle)?;
+        if current.preview_revision != expected_revision {
+            return Err(safe_error(
+                "configuration_preview_stale",
+                "This setup preview changed while the picker was open. Review it again.",
+            ));
+        }
+        Ok(())
+    }
+
     fn update_preview(
         &mut self,
         handle: &str,
@@ -930,6 +941,11 @@ pub async fn apply_saved_configuration_preview_repair(
                 )
                 .await?
             };
+            state
+                .saved_configurations
+                .lock()
+                .map_err(|_| state_error())?
+                .require_preview_revision(&request.preview_handle, preview.preview_revision)?;
             let Some(selected) = selected else {
                 return project_preview(
                     &state,
@@ -2336,6 +2352,33 @@ mod tests {
             path: PathBuf::from(format!("/private/{handle}.yaml")),
             last_opened_epoch_ms: 1,
         }
+    }
+
+    #[test]
+    fn replacement_preview_rejects_a_delayed_picker_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = SavedConfigurationStore::load(root.path().join("recents.json"));
+        let (handle, _) = store.replace_preview(
+            root.path().join("setup.yaml"),
+            "source".into(),
+            "catalog".into(),
+            json!({"documentId":"one"}),
+            HashMap::new(),
+        );
+        let revision = store.current_preview(&handle).unwrap().preview_revision;
+        assert!(store.require_preview_revision(&handle, revision).is_ok());
+        store
+            .update_preview(
+                &handle,
+                revision,
+                json!({"documentId":"one"}),
+                HashMap::new(),
+            )
+            .unwrap();
+        assert!(store
+            .require_preview_revision(&handle, revision)
+            .unwrap_err()
+            .contains("configuration_preview_stale"));
     }
 
     #[test]

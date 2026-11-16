@@ -1329,7 +1329,15 @@ pub(crate) fn list_setup_locations(
     state: tauri::State<'_, AppState>,
     device_handle: &str,
     device_plan: &str,
+    selection_handle: Option<&str>,
 ) -> Result<Vec<SetupLocationProjection>, String> {
+    let _transition = crate::commands::qualification_transition_lock(&state);
+    crate::commands::require_profile_selection(
+        &state,
+        device_handle,
+        Some(selection_handle.unwrap_or("")),
+        Some(device_plan),
+    )?;
     let context = volume_probe_context(&state, device_handle)?;
     let mut guard = lock_handles(&state)?;
     let record = guard
@@ -1353,12 +1361,20 @@ pub(crate) fn save_setup_location(
     state: tauri::State<'_, AppState>,
     device_handle: &str,
     device_plan: &str,
+    selection_handle: Option<&str>,
     observation_token: &str,
     volume_handle: &str,
     existing_id: Option<&str>,
     name: &str,
     relative_path: &str,
 ) -> Result<Vec<SetupLocationProjection>, String> {
+    let _transition = crate::commands::qualification_transition_lock(&state);
+    crate::commands::require_profile_selection(
+        &state,
+        device_handle,
+        Some(selection_handle.unwrap_or("")),
+        Some(device_plan),
+    )?;
     let context = volume_probe_context(&state, device_handle)?;
     let mut guard = lock_handles(&state)?;
     let record = guard
@@ -1387,8 +1403,16 @@ pub(crate) fn remove_setup_location(
     state: tauri::State<'_, AppState>,
     device_handle: &str,
     device_plan: &str,
+    selection_handle: Option<&str>,
     id: &str,
 ) -> Result<Vec<SetupLocationProjection>, String> {
+    let _transition = crate::commands::qualification_transition_lock(&state);
+    crate::commands::require_profile_selection(
+        &state,
+        device_handle,
+        Some(selection_handle.unwrap_or("")),
+        Some(device_plan),
+    )?;
     let context = volume_probe_context(&state, device_handle)?;
     let mut guard = lock_handles(&state)?;
     let record = guard

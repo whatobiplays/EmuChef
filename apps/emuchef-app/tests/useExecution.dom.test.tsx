@@ -61,6 +61,9 @@ function terminalWorkflow(
   latestSequence = 1,
 ): WorkflowState {
   return {
+    stagedIntent: null,
+    selectionHandle: null,
+    selectedProfileId: null,
     step: "execution",
     deviceHandle: "device-opaque",
     facts: null,

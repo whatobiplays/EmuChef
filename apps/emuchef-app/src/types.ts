@@ -142,7 +142,30 @@ export interface PlanCandidate {
   selectionMode?: "blank";
 }
 
-export interface DeviceMatch {
+export interface ProfileCandidate {
+  profileId: string;
+  profileName: string;
+  profileDescription: string | null;
+  generic: boolean;
+  eligibility: "eligible" | "incomplete" | "incompatible";
+  requiresExplicitChoice: boolean;
+  reasons: string[];
+  plans: PlanCandidate[];
+}
+
+export interface ProfileSelection {
+  profileSelectionNotice?: string | null;
+  resolutionHandle: string | null;
+  selectionHandle: string | null;
+  selectedProfileId: string | null;
+  setupGeneration: number;
+  profileChangeAllowed: boolean;
+  profileChangeReason: string | null;
+}
+
+export interface DeviceMatch extends Partial<ProfileSelection> {
+  profiles?: ProfileCandidate[];
+  resolutionStatus?: "resolved" | "choice_required" | "incomplete" | "unsupported";
   confidence: "exact" | "high" | "low" | "none";
   recommendedPlanId: string | null;
   requiresExplicitChoice: boolean;

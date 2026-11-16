@@ -6,6 +6,8 @@
 
 **Delivery specification:** [EmuChef proper reviewed setup and OEM-assisted execution](../superpowers/specs/2026-10-25-emuchef-proper-delivery-spec.md) (locally authored implementation/test synthesis, subordinate to these requirements and accepted ADRs); complete [GitHub reference spec #67](https://github.com/whatobiplays/EmuChef/issues/67) is readable remotely. The original 23-ticket / 33-direct-blocker hierarchy is the historical baseline; [GitHub map #43](https://github.com/whatobiplays/EmuChef/issues/43) now records three additional approved workstreams (#82, #83, #84) and is authoritative for current issue scope and dependencies. This added spec changes no execution or release authority.
 
+Device Profile eligibility is evaluated independently of Device Plan availability. A profile without a plan still participates in ambiguity. Every declared criterion needs evidence; a known conflict excludes a profile even when other facts are missing. A plausible incomplete non-generic competitor requires identification retry, even if another profile is fully eligible. Generic profiles need their own complete eligibility evidence and explicit acknowledgment. Profile resolution does not choose arbitrarily among multiple plans within the selected profile.
+
 ## 1. End-user path and ownership
 
 - One guided, accessible **Set up <app>** journey: identify/confirm one supported Android handheld; choose compatible apps and model/brand recommendations; choose ROM/BIOS content, logical internal/SD Setup Locations and a few exposed app settings; review the **exact planned impact**; execute **only on supported qualified target/strategy and with explicit review**; report completed, failed, skipped, possibly changed/unverified and cleanup-pending results truthfully.

@@ -1,3 +1,4 @@
+import { DeviceProfileSelection } from "./DeviceProfileSelection";
 import {
   useCallback,
   useEffect,
@@ -79,10 +80,12 @@ import {
   realExecutionConfirmationComplete,
 } from "./realExecution";
 import {
+  profileAuthorityReadIsCurrent,
+  filterRepairBindings,
   initialWorkflowState,
+  executionBlocksProfileChange,
   bindingsForPersistence,
   configurationDescriptionMatchesIntent,
-  filterRepairBindings,
   deviceIsUnsupported,
   inputDiagnosticsForDisplay,
   pageDiagnosticsForDisplay,
@@ -111,6 +114,7 @@ import {
 const WORKFLOW_STEPS = [
   { step: "connect", label: "Connect" },
   { step: "device", label: "Device" },
+  { step: "profile", label: "Choose Device Profile" },
   { step: "setup", label: "Setup" },
   { step: "inputs", label: "Customize" },
   { step: "review", label: "Review" },
@@ -440,7 +444,7 @@ export function App({
   );
   const setupLocationContextKey =
     workflow.deviceHandle && workflow.devicePlan
-      ? JSON.stringify([workflow.deviceHandle, workflow.devicePlan])
+      ? JSON.stringify([workflow.deviceHandle, workflow.devicePlan, workflow.selectionHandle])
       : null;
   const setupLocations =
     setupLocationProjectionState.contextKey === setupLocationContextKey
@@ -502,6 +506,8 @@ export function App({
   const recoveryRecordGenerationRef = useRef<number | null>(null);
   const recoveryRequestGenerationRef = useRef(0);
   const inputOperationGenerationRef = useRef(0);
+  const setupOperationGenerationRef = useRef(0);
+  const profileAcceptanceFocusRef = useRef<string | null>(null);
   const recoveryDraftGenerationRef = useRef(0);
   const lastRecoverySignatureRef = useRef<string | null>(null);
   const updateInteractionSessionRef = useRef<UpdateInteractionSession | null>(
@@ -867,6 +873,9 @@ export function App({
     includeClean = false,
   ): Promise<RecoveryWriteAck | null> => {
     const current = workflowRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const selectionHandle = current.selectionHandle;
+    const setupGeneration = current.requestGeneration;
     const sessionGeneration = recoverySessionGenerationRef.current;
     const dirty =
       current.portableIntentDirty ||
@@ -912,6 +921,7 @@ export function App({
       selectedRecipes: current.selectedRecipes ?? [],
       bindings,
     });
+    if (runtimeGenerationRef.current !== runtimeGeneration || workflowRef.current.selectionHandle !== selectionHandle || workflowRef.current.requestGeneration !== setupGeneration) return null;
     if (!recoveryResultIsCurrent(result, requestGeneration, draftGeneration))
       return null;
     recoveryRecordGenerationRef.current = result.recordGeneration;
@@ -939,6 +949,11 @@ export function App({
       return;
     }
     cancelPendingDialog();
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const operation = ++deviceSelectionGenerationRef.current;
+    setupOperationGenerationRef.current += 1; inputOperationGenerationRef.current += 1; setupLocationGenerationRef.current += 1;
+    await api.resetDeviceProfileSelection();
+    if (runtimeGenerationRef.current !== runtimeGeneration || deviceSelectionGenerationRef.current !== operation) return;
     const previous = savedConfigurationRef.current;
     if (
       previous &&
@@ -948,10 +963,12 @@ export function App({
         .closeSavedConfiguration(previous.configurationHandle)
         .catch(() => undefined);
     }
+    if (runtimeGenerationRef.current !== runtimeGeneration || deviceSelectionGenerationRef.current !== operation) return;
     savedConfigurationRef.current = document;
     setSavedConfiguration(document);
     dispatch({
       type: "load-portable-intent",
+      activationAllowed: !savedConfigurationBlocksProgress(document),
       devicePlan: document.devicePlan,
       selectedRecipes: document.selectedRecipes,
       bindings: document.bindings,
@@ -974,6 +991,11 @@ export function App({
       );
       return;
     }
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const operation = ++deviceSelectionGenerationRef.current;
+    setupOperationGenerationRef.current += 1; inputOperationGenerationRef.current += 1; setupLocationGenerationRef.current += 1;
+    await api.resetDeviceProfileSelection();
+    if (runtimeGenerationRef.current !== runtimeGeneration || deviceSelectionGenerationRef.current !== operation) return;
     const previous = savedConfigurationRef.current;
     if (
       previous &&
@@ -983,6 +1005,7 @@ export function App({
         .closeSavedConfiguration(previous.configurationHandle)
         .catch(() => undefined);
     }
+    if (runtimeGenerationRef.current !== runtimeGeneration || deviceSelectionGenerationRef.current !== operation) return;
     savedConfigurationRef.current = result.document;
     setSavedConfiguration(result.document);
     setRecoveredName(
@@ -994,6 +1017,7 @@ export function App({
     );
     dispatch({
       type: "load-portable-intent",
+      activationAllowed: result.document ? !savedConfigurationBlocksProgress(result.document) : result.sourceStatus !== "missing",
       devicePlan: result.intent.devicePlan,
       selectedRecipes: result.intent.selectedRecipes,
       bindings: result.intent.bindings,
@@ -1762,9 +1786,11 @@ export function App({
       }
     }
     const runtimeGeneration = runtimeGenerationRef.current;
+    const selectedHandle = workflowRef.current.selectionHandle;
+    const setupGeneration = workflowRef.current.match?.setupGeneration;
     const queuedMutation = configurationMutationQueue.current
       .then(async () => {
-        if (runtimeGenerationRef.current !== runtimeGeneration) return false;
+        if (runtimeGenerationRef.current !== runtimeGeneration || workflowRef.current.selectionHandle !== selectedHandle || workflowRef.current.match?.setupGeneration !== setupGeneration) return false;
         const current = savedConfigurationRef.current;
         if (!current || current.configurationHandle !== configurationHandle) {
           if (runtimeGenerationRef.current === runtimeGeneration)
@@ -1778,7 +1804,7 @@ export function App({
           current.revision,
           mutation,
         );
-        if (runtimeGenerationRef.current !== runtimeGeneration) return false;
+        if (runtimeGenerationRef.current !== runtimeGeneration || workflowRef.current.selectionHandle !== selectedHandle || workflowRef.current.match?.setupGeneration !== setupGeneration) return false;
         if (
           savedConfigurationRef.current?.configurationHandle !==
             configurationHandle ||
@@ -2431,7 +2457,7 @@ export function App({
       devicePlan: string,
       preserveCurrentError = false,
     ): Promise<SetupLocationProjection[] | null> => {
-      const contextKey = JSON.stringify([deviceHandle, devicePlan]);
+      const contextKey = JSON.stringify([deviceHandle, devicePlan, workflowRef.current.selectionHandle]);
       if (setupLocationMutationRef.current) {
         if (setupLocationMutationContextRef.current !== contextKey) {
           // A mutation error belongs to the plan that started it. Fence that
@@ -2464,6 +2490,7 @@ export function App({
         const locations = await api.listSetupLocations(
           deviceHandle,
           devicePlan,
+          workflowRef.current.selectionHandle,
         );
         const active = workflowRef.current;
         if (
@@ -2635,7 +2662,7 @@ currentSession.sessionEpoch !== capturedSessionEpoch
         return false;
       }
 
-      const contextKey = JSON.stringify([deviceHandle, devicePlan]);
+      const contextKey = JSON.stringify([deviceHandle, devicePlan, workflowRef.current.selectionHandle]);
       setupLocationMutationRef.current = true;
       setupLocationMutationContextRef.current = contextKey;
       pendingSetupLocationRefreshRef.current = null;
@@ -2658,6 +2685,7 @@ currentSession.sessionEpoch !== capturedSessionEpoch
           existingId,
           name,
           relativePath,
+          workflowRef.current.selectionHandle,
         );
         const active = workflowRef.current;
         if (
@@ -2724,7 +2752,7 @@ active.devicePlan === devicePlan
       const { deviceHandle, devicePlan } = workflowRef.current;
       if (!deviceHandle || !devicePlan || setupLocationMutationRef.current)
         return;
-      const contextKey = JSON.stringify([deviceHandle, devicePlan]);
+      const contextKey = JSON.stringify([deviceHandle, devicePlan, workflowRef.current.selectionHandle]);
       const sessionAtStart = deviceSessionRef.current;
       if (
         setupLocationProjectionState.contextKey !== contextKey ||
@@ -2747,6 +2775,7 @@ active.devicePlan === devicePlan
           deviceHandle,
           devicePlan,
           id,
+          workflowRef.current.selectionHandle,
         );
         const active = workflowRef.current;
         if (
@@ -2942,6 +2971,7 @@ active.devicePlan === devicePlan
                 ? JSON.stringify([
                     workflowBeforeQualification.deviceHandle,
                     workflowBeforeQualification.devicePlan,
+                    workflowBeforeQualification.selectionHandle,
                   ])
                 : "";
             setSetupLocationProjectionState((previous) =>
@@ -2968,7 +2998,7 @@ active.devicePlan === devicePlan
             }
             const setupLocationContextKey =
               deviceHandle && devicePlan
-                ? JSON.stringify([deviceHandle, devicePlan])
+                ? JSON.stringify([deviceHandle, devicePlan, workflowRef.current.selectionHandle])
                 : "";
             setSetupLocationProjectionState((previous) =>
               previous.contextKey === setupLocationContextKey
@@ -3009,6 +3039,7 @@ active.devicePlan === devicePlan
             ? JSON.stringify([
                 workflowBeforeQualification.deviceHandle,
                 workflowBeforeQualification.devicePlan,
+                workflowBeforeQualification.selectionHandle,
               ])
             : "";
         setSetupLocationProjectionState((previous) =>
@@ -3420,6 +3451,7 @@ if (rejectSetupActionDuringRepair()) return;
       return;
     }
     const before = workflowRef.current;
+    if (executionBlocksProfileChange(before)) { setNotice("Execution is active or unresolved. Finish reconciliation before choosing another profile."); return; }
     const sameReconnect = before.reconnectDeviceHandle === deviceHandle;
     if (before.reconnectDeviceHandle && !sameReconnect) {
       const confirmed = await requestAppDialog(
@@ -3441,15 +3473,17 @@ if (rejectSetupActionDuringRepair()) return;
     setNotice(null);
     announce("Reading the selected device properties.");
     try {
-      const [facts, match] = await Promise.all([
-        api.probeDevice(deviceHandle),
-        api.matchDevice(deviceHandle),
-      ]);
+      const facts = await api.probeDevice(deviceHandle);
+      if (deviceSelectionGenerationRef.current !== generation || runtimeGenerationRef.current !== runtimeGeneration) return;
+      const match = await api.matchDevice(deviceHandle);
       if (
         deviceSelectionGenerationRef.current !== generation ||
         runtimeGenerationRef.current !== runtimeGeneration
       )
         return;
+      if (match.selectionHandle && before.stagedIntent && !match.profiles?.some((p) => p.profileId === match.selectedProfileId && p.plans.some((plan) => plan.planId === before.stagedIntent?.devicePlan))) {
+        savedConfigurationRef.current = null; setSavedConfiguration(null); setRecoveredName(null);
+      }
       dispatch({ type: "device-probed", facts, match });
       announce(
         deviceIsUnsupported(match)
@@ -3502,6 +3536,87 @@ if (rejectSetupActionDuringRepair()) return;
     }
   };
 
+  useEffect(() => {
+    if (workflow.step === "profile" && operationError) validationSummaryRef.current?.focus();
+  }, [workflow.step, operationError]);
+
+  useEffect(() => {
+    if (busy || !workflow.deviceHandle || !workflow.match || runtime.status !== "ready") return;
+    let active = true;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const requestGeneration = workflow.requestGeneration;
+    const selectionHandle = workflow.selectionHandle;
+    const captured = { runtimeGeneration, requestGeneration, selectionHandle };
+    const currentRead = () => active && profileAuthorityReadIsCurrent({
+      runtimeGeneration: runtimeGenerationRef.current,
+      requestGeneration: workflowRef.current.requestGeneration,
+      selectionHandle: workflowRef.current.selectionHandle,
+    }, captured);
+    api.deviceProfileSelection(workflow.deviceHandle).then((selection) => {
+      if (!currentRead()) return;
+      if (selection.selectionHandle !== selectionHandle) {
+        setupOperationGenerationRef.current += 1; inputOperationGenerationRef.current += 1; setupLocationGenerationRef.current += 1;
+        setOperationError(null); setTouchedInputKeys(new Set()); setValidationRequested(false); setRealConfirmation(emptyRealExecutionConfirmation); cancelPendingDialog();
+      }
+      dispatch({ type: "profile-observed", selection });
+    }).catch(() => {
+      if (!currentRead()) return;
+      dispatch({ type: "profile-observed", selection: { resolutionHandle:null, selectionHandle:null, selectedProfileId:null, setupGeneration:0, profileChangeAllowed:false,profileChangeReason:"Profile authority is unavailable. Read device information again." } });
+    });
+    return () => { active = false; };
+  }, [busy, workflow.deviceHandle, workflow.requestGeneration, qualificationInventoryRevision, runtime.status]);
+
+  useEffect(() => {
+    if (workflow.step === "setup" && workflow.selectionHandle && profileAcceptanceFocusRef.current === workflow.selectionHandle) {
+      profileAcceptanceFocusRef.current = null;
+      mainRef.current?.querySelector<HTMLElement>("[data-step-heading]")?.focus();
+    }
+  }, [workflow.step, workflow.selectionHandle]);
+
+  useEffect(() => {
+    inputOperationGenerationRef.current += 1;
+    setBusy(false);
+  }, [workflow.step]);
+
+  const selectDeviceProfile = async (profileId: string, genericAcknowledged: boolean) => {
+    const prior = workflowRef.current;
+    if (!prior.deviceHandle || !prior.match?.resolutionHandle || prior.match.profileChangeAllowed !== true) return;
+    const operation = ++deviceSelectionGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const requestGeneration = prior.requestGeneration;
+    const current = () => operation === deviceSelectionGenerationRef.current && runtimeGenerationRef.current === runtimeGeneration && workflowRef.current.requestGeneration === requestGeneration;
+    setBusy(true); setNotice(null); setOperationError(null);
+    try {
+      const selection = await api.selectDeviceProfile(prior.deviceHandle, prior.match.resolutionHandle, profileId, genericAcknowledged);
+      if (!current()) return;
+      if (selection.selectionHandle !== prior.selectionHandle) {
+        const pendingPlan = prior.stagedIntent?.devicePlan;
+        const sameSavedProfile = prior.stagedIntent?.activationAllowed && prior.match.profiles?.some((p) => p.profileId === profileId && p.plans.some((plan) => plan.planId === pendingPlan));
+        if (!sameSavedProfile) {
+          const oldDocument = savedConfigurationRef.current;
+          savedConfigurationRef.current = null; setSavedConfiguration(null); setRecoveredName(null);
+          if (oldDocument) void api.closeSavedConfiguration(oldDocument.configurationHandle).catch(() => undefined);
+        }
+        inputOperationGenerationRef.current += 1;
+        setupOperationGenerationRef.current += 1;
+        setupLocationGenerationRef.current += 1;
+        recoveryRequestGenerationRef.current += 1;
+        setSetupLocationProjectionState({ contextKey: "", locations: [], listStatus: "loading" });
+        setTouchedInputKeys(new Set()); setValidationRequested(false);
+        setRealConfirmation(emptyRealExecutionConfirmation); cancelPendingDialog();
+        resetExecutionPresentation();
+      }
+      profileAcceptanceFocusRef.current = selection.selectionHandle;
+      dispatch({ type: "profile-selected", selection });
+      announce("Device Profile selected. Choose Setup.");
+    } catch (error) {
+      if (!current()) return;
+      const message = errorMessage(error); setNotice(message); setOperationError(message); announce(message, true);
+      const focusGeneration = claimFocusTransition();
+      queueMicrotask(() => { if (current()) restoreAccessibleFocus({ preferred: [validationSummaryRef.current], generation: focusGeneration }); });
+    } finally { if (current()) setBusy(false); }
+  };
+
   const describe = async () => {
     if (rejectSetupActionDuringRepair()) return;
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
@@ -3510,16 +3625,21 @@ if (rejectSetupActionDuringRepair()) return;
     setNotice(null);
     setOperationError(null);
     const runtimeGeneration = runtimeGenerationRef.current;
+    const operation = ++setupOperationGenerationRef.current;
+    const setupGeneration = workflow.requestGeneration;
+    const selectionHandle = workflow.selectionHandle;
+    const currentRequest = () => setupOperationGenerationRef.current === operation && runtimeGenerationRef.current === runtimeGeneration && workflowRef.current.requestGeneration === setupGeneration && workflowRef.current.selectionHandle === selectionHandle;
     try {
       const generation = workflow.requestGeneration;
       const description = await api.describeConfiguration({
         deviceHandle: workflow.deviceHandle,
+        selectionHandle: workflow.selectionHandle,
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
         requestGeneration: generation,
       });
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (!currentRequest()) return;
       dispatch({ type: "description", description, generation });
       if (workflowRef.current.requestGeneration === generation) {
         if (workflow.selectedRecipes === null) {
@@ -3544,19 +3664,19 @@ if (rejectSetupActionDuringRepair()) return;
         announce("An outdated validation response was ignored.");
       }
     } catch (error) {
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (!currentRequest()) return;
       const message = errorMessage(error);
       setNotice(message);
       setOperationError(message);
       const generation = claimFocusTransition();
       queueMicrotask(() =>
-        restoreAccessibleFocus({
+        currentRequest() && restoreAccessibleFocus({
           preferred: [validationSummaryRef.current],
           generation,
         }),
       );
     } finally {
-      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
+      if (currentRequest()) setBusy(false);
     }
   };
 
@@ -3573,16 +3693,21 @@ if (rejectSetupActionDuringRepair()) return;
     setNotice(null);
     setOperationError(null);
     const runtimeGeneration = runtimeGenerationRef.current;
+    const operation = ++setupOperationGenerationRef.current;
+    const setupGeneration = workflow.requestGeneration;
+    const selectionHandle = workflow.selectionHandle;
+    const currentRequest = () => setupOperationGenerationRef.current === operation && runtimeGenerationRef.current === runtimeGeneration && workflowRef.current.requestGeneration === setupGeneration && workflowRef.current.selectionHandle === selectionHandle;
     try {
       const generation = workflow.requestGeneration;
       const description = await api.describeConfiguration({
         deviceHandle: workflow.deviceHandle,
+        selectionHandle: workflow.selectionHandle,
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
         requestGeneration: generation,
       });
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (!currentRequest()) return;
       dispatch({ type: "description", description, generation });
       if (workflowRef.current.requestGeneration !== generation) {
         announce("An outdated validation response was ignored.");
@@ -3600,12 +3725,12 @@ if (rejectSetupActionDuringRepair()) return;
           : "Recipe selection validated. No additional setup inputs are required.",
       );
     } catch (error) {
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (!currentRequest()) return;
       const message = errorMessage(error);
       setNotice(message);
       setOperationError(message);
     } finally {
-      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
+      if (currentRequest()) setBusy(false);
     }
   };
 
@@ -3620,25 +3745,25 @@ if (rejectSetupActionDuringRepair()) return;
     const generation = workflow.requestGeneration;
     const runtimeGeneration = runtimeGenerationRef.current;
     const timer = window.setTimeout(() => {
+      const operation = ++setupOperationGenerationRef.current;
       api
         .describeConfiguration({
           deviceHandle: workflow.deviceHandle!,
+          selectionHandle: workflow.selectionHandle,
           devicePlan: workflow.devicePlan!,
           selectedRecipes: workflow.selectedRecipes,
           bindings: workflow.bindings,
           requestGeneration: generation,
         })
         .then((description) => {
-          if (runtimeGenerationRef.current !== runtimeGeneration) return;
+          if (runtimeGenerationRef.current !== runtimeGeneration || workflowRef.current.requestGeneration !== generation || workflowRef.current.selectionHandle !== workflow.selectionHandle || setupOperationGenerationRef.current !== operation) return;
           dispatch({ type: "description", description, generation });
           if (workflowRef.current.requestGeneration === generation) {
             applyDescriptionValidation(description);
-          } else {
-            announce("An outdated validation response was ignored.");
           }
         })
         .catch((error) => {
-          if (runtimeGenerationRef.current === runtimeGeneration)
+          if (runtimeGenerationRef.current === runtimeGeneration && setupOperationGenerationRef.current === operation && workflowRef.current.requestGeneration === generation && workflowRef.current.selectionHandle === workflow.selectionHandle)
             setNotice(errorMessage(error));
         });
     }, 250);
@@ -3671,36 +3796,38 @@ const generateReview = async (mode: ExecutionMode) => {
     announce("Creating a fresh reviewed plan.");
     const requestGeneration = workflow.requestGeneration;
     const runtimeGeneration = runtimeGenerationRef.current;
+    const operation = ++setupOperationGenerationRef.current;
+    const setupGeneration = workflow.requestGeneration;
+    const selectionHandle = workflow.selectionHandle;
+    const currentRequest = () => setupOperationGenerationRef.current === operation && runtimeGenerationRef.current === runtimeGeneration && workflowRef.current.requestGeneration === setupGeneration && workflowRef.current.selectionHandle === selectionHandle;
     try {
       const review = await api.prepareExecutionReview({
         deviceHandle: workflow.deviceHandle,
+        selectionHandle: workflow.selectionHandle,
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
         requestGeneration,
         mode: mode === "simulated" ? "dry_run" : "real",
       });
-      if (
-        runtimeGenerationRef.current !== runtimeGeneration ||
-        workflowRef.current.requestGeneration !== requestGeneration
-      )
+      if (!currentRequest())
         return;
       dispatch({ type: "review", review });
       announce("The reviewed plan is ready.");
     } catch (error) {
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (!currentRequest()) return;
       const message = errorMessage(error);
       setNotice(message);
       setOperationError(message);
       const generation = claimFocusTransition();
       queueMicrotask(() =>
-        restoreAccessibleFocus({
+        currentRequest() && restoreAccessibleFocus({
           preferred: [validationSummaryRef.current],
           generation,
         }),
       );
     } finally {
-      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
+      if (currentRequest()) setBusy(false);
     }
   };
 
@@ -3722,16 +3849,25 @@ const generateReview = async (mode: ExecutionMode) => {
   };
 
   const prepareRepair = async () => {
-    if (repairPreparing || qualificationLocksIntent) return;
+    if (repairPreparing || qualificationLocksIntent || executionBlocksProfileChange(workflowRef.current)) return;
     const prior = workflow;
     const runtimeGeneration = runtimeGenerationRef.current;
+    const operation = ++setupOperationGenerationRef.current;
+    // Keep the immediate async snapshot in step with the ordered reducer actions.
+    // A resolved native promise may return before React commits the next render.
+    const transitionIntent = (action: Parameters<typeof workflowReducer>[1]) => {
+      workflowRef.current = workflowReducer(workflowRef.current, action);
+      dispatch(action);
+    };
     setRepairPreparing(true);
-    resetExecutionPresentation();
-    cancelPendingDialog();
-    setRealConfirmation(emptyRealExecutionConfirmation);
-    dispatch({ type: "prepare-repair" });
     setNotice(null);
     try {
+      await api.resetDeviceProfileSelection();
+      if (runtimeGenerationRef.current !== runtimeGeneration || setupOperationGenerationRef.current !== operation) return;
+      resetExecutionPresentation();
+      cancelPendingDialog();
+      setRealConfirmation(emptyRealExecutionConfirmation);
+      transitionIntent({ type: "prepare-repair" });
       if (prior.review) {
         await api
           .discardReview(prior.review.reviewHandle)
@@ -3741,7 +3877,7 @@ const generateReview = async (mode: ExecutionMode) => {
         api.catalog(),
         api.pollDevices(),
       ]);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (runtimeGenerationRef.current !== runtimeGeneration || setupOperationGenerationRef.current !== operation) return;
       setCatalog(freshCatalog);
       setDevices(freshDevices);
       if (
@@ -3755,88 +3891,36 @@ const generateReview = async (mode: ExecutionMode) => {
         );
         return;
       }
-      const [facts, match] = await Promise.all([
-        api.probeDevice(prior.deviceHandle),
-        api.matchDevice(prior.deviceHandle),
-      ]);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      if (deviceIsUnsupported(match)) {
-        dispatch({
-          type: "select-device",
-          deviceHandle: prior.deviceHandle,
-          preserveIntent: true,
-        });
-        dispatch({ type: "device-probed", facts, match });
-        setNotice(
-          "This device is not officially supported. Acknowledge that any offered generic setup is not device-specific before choosing one.",
-        );
+      const facts = await api.probeDevice(prior.deviceHandle);
+      if (runtimeGenerationRef.current !== runtimeGeneration || setupOperationGenerationRef.current !== operation) return;
+      const match = await api.matchDevice(prior.deviceHandle);
+      if (runtimeGenerationRef.current !== runtimeGeneration || setupOperationGenerationRef.current !== operation) return;
+      transitionIntent({ type: "select-device", deviceHandle: prior.deviceHandle, preserveIntent: true });
+      transitionIntent({ type: "device-probed", facts, match });
+      const sameProfile = !!match.selectionHandle && prior.selectedProfileId === match.selectedProfileId;
+      const samePlan = sameProfile && prior.devicePlan && match.profiles?.some((profile) => profile.profileId === match.selectedProfileId && profile.plans.some((plan) => plan.planId === prior.devicePlan));
+      if (!samePlan || !prior.devicePlan || !match.selectionHandle) {
+        setNotice("Choose a Device Profile and setup before creating a fresh review.");
         return;
       }
-      const devicePlan =
-        prior.devicePlan &&
-        match.candidates.some((plan) => plan.planId === prior.devicePlan)
-          ? prior.devicePlan
-          : match.recommendedPlanId;
-      if (!devicePlan) {
-        dispatch({ type: "select-device", deviceHandle: prior.deviceHandle });
-        dispatch({ type: "device-probed", facts, match });
-        setNotice(
-          "Choose a current device setup before preparing this setup again.",
-        );
-        return;
-      }
-      const catalogRecipes = new Set(
-        freshCatalog.recipes.map((recipe) => recipe.id),
-      );
-      const selectedRecipes = (prior.selectedRecipes ?? []).filter((recipe) =>
-        catalogRecipes.has(recipe),
-      );
-      const baseline = await api.describeConfiguration({
-        deviceHandle: prior.deviceHandle,
-        devicePlan,
-        selectedRecipes,
-        bindings: {},
-        requestGeneration: prior.requestGeneration,
-      });
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      const bindings = filterRepairBindings(
-        prior.description,
-        baseline,
-        prior.bindings,
-      );
-      const description = await api.describeConfiguration({
-        deviceHandle: prior.deviceHandle,
-        devicePlan,
-        selectedRecipes,
-        bindings,
-        requestGeneration: prior.requestGeneration,
-      });
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      dispatch({
-        type: "repair-ready",
-        facts,
-        match,
-        devicePlan,
-        description,
-        selectedRecipes: description.selectedRecipes,
-        bindings,
-      });
-      const savedIntentSynchronized = await syncSavedIntent(
-        devicePlan,
-        description.selectedRecipes,
-        bindings,
-        description,
-      );
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      if (!savedIntentSynchronized) return;
-      setNotice(
-        "Setup refreshed. Resolve any remaining issues, then create and review a new plan.",
-      );
+      const generation = workflowRef.current.requestGeneration;
+      const selectionHandle = match.selectionHandle;
+      const currentRepair = () => runtimeGenerationRef.current === runtimeGeneration && setupOperationGenerationRef.current === operation && workflowRef.current.selectionHandle === selectionHandle && workflowRef.current.requestGeneration === generation;
+      const selectedRecipes = (prior.selectedRecipes ?? []).filter((recipe) => freshCatalog.recipes.some((option) => option.id === recipe));
+      const baseline = await api.describeConfiguration({deviceHandle:prior.deviceHandle,selectionHandle,devicePlan:prior.devicePlan,selectedRecipes,bindings:{},requestGeneration:generation});
+      if (!currentRepair()) return;
+      const bindings = filterRepairBindings(prior.description, baseline, portableBindingsForTransition(prior.description, prior.bindings).bindings);
+      const description = await api.describeConfiguration({deviceHandle:prior.deviceHandle,selectionHandle,devicePlan:prior.devicePlan,selectedRecipes,bindings,requestGeneration:generation});
+      if (!currentRepair()) return;
+      dispatch({type:"repair-ready", facts, match, devicePlan:prior.devicePlan, description, selectedRecipes:description.selectedRecipes, bindings, generation});
+      const synchronized = await syncSavedIntent(prior.devicePlan, description.selectedRecipes, bindings, description);
+      if (!currentRepair() || !synchronized) return;
+      setNotice("Setup refreshed. Resolve any remaining issues, then create and review a new plan.");
     } catch (error) {
-      if (runtimeGenerationRef.current === runtimeGeneration)
+      if (runtimeGenerationRef.current === runtimeGeneration && setupOperationGenerationRef.current === operation)
         setNotice(errorMessage(error));
     } finally {
-      if (runtimeGenerationRef.current === runtimeGeneration)
+      if (runtimeGenerationRef.current === runtimeGeneration && setupOperationGenerationRef.current === operation)
         setRepairPreparing(false);
     }
   };
@@ -3852,10 +3936,13 @@ const generateReview = async (mode: ExecutionMode) => {
     const operationGeneration = ++inputOperationGenerationRef.current;
     const requestGeneration = workflowRef.current.requestGeneration;
     const runtimeGeneration = runtimeGenerationRef.current;
+    const selectionHandle = workflowRef.current.selectionHandle;
     try {
       const value = await withNativeDialogFocus(
         () =>
           api.pickInputPath({
+            deviceHandle: workflowRef.current.deviceHandle!,
+            selectionHandle: workflowRef.current.selectionHandle,
             inputKey: input.key,
             requestGeneration,
             mode,
@@ -3867,6 +3954,8 @@ const generateReview = async (mode: ExecutionMode) => {
       );
       const current = workflowRef.current;
       if (
+        inputOperationGenerationRef.current !== operationGeneration ||
+        current.selectionHandle !== selectionHandle ||
         runtimeGenerationRef.current !== runtimeGeneration ||
         current.requestGeneration !== requestGeneration ||
         current.step !== "inputs" ||
@@ -3874,18 +3963,19 @@ const generateReview = async (mode: ExecutionMode) => {
           (candidate) => candidate.key === input.key,
         )
       ) {
-        announce("An outdated file selection was ignored.");
         return;
       }
       if (value !== null) updateBindingIntent(input.key, value);
     } catch (error) {
       if (
         runtimeGenerationRef.current === runtimeGeneration &&
-        workflowRef.current.requestGeneration === requestGeneration
+        workflowRef.current.requestGeneration === requestGeneration &&
+        workflowRef.current.selectionHandle === selectionHandle && workflowRef.current.step === "inputs" &&
+        inputOperationGenerationRef.current === operationGeneration
       )
         setNotice(errorMessage(error));
     } finally {
-      if (inputOperationGenerationRef.current === operationGeneration)
+      if (inputOperationGenerationRef.current === operationGeneration && runtimeGenerationRef.current === runtimeGeneration && workflowRef.current.selectionHandle === selectionHandle && workflowRef.current.step === "inputs" && workflowRef.current.requestGeneration === requestGeneration)
         setBusy(false);
     }
   };
@@ -3967,12 +4057,10 @@ const generateReview = async (mode: ExecutionMode) => {
   const planOptions = useMemo(() => {
     if (!workflow.match) return [];
     if (deviceIsUnsupported(workflow.match)) {
-      return workflow.unsupportedAcknowledged
-        ? workflow.match.safeGenericPlans
-        : [];
+      return workflow.match.safeGenericPlans.filter((plan) => plan.profileId === workflow.selectedProfileId);
     }
     const byPlanId = new Map(
-      [...workflow.match.candidates, ...workflow.match.safeGenericPlans].map(
+      [...workflow.match.candidates.filter((plan) => plan.profileId === workflow.selectedProfileId), ...workflow.match.safeGenericPlans.filter((plan) => plan.profileId === workflow.selectedProfileId)].map(
         (plan) => [plan.planId, plan] as const,
       ),
     );
@@ -4645,7 +4733,7 @@ const generateReview = async (mode: ExecutionMode) => {
                     rootCheckPhase={rootCheckPhase}
                     onCheckRoot={() => void checkDeviceRoot()}
                   />
-                  {workflow.match.safeGenericPlans.length > 0 ? (
+                  {workflow.match.safeGenericPlans.filter((plan) => plan.profileId === workflow.selectedProfileId).length > 0 ? (
                     <>
                       <label className="acknowledgment">
                         <input
@@ -4694,16 +4782,19 @@ const generateReview = async (mode: ExecutionMode) => {
                 </>
               )}
 
-            {workflow.step === "setup" && workflow.facts && workflow.match && (
+            {workflow.step === "profile" && operationError && <section ref={validationSummaryRef} role="alert" tabIndex={-1}><h2>Profile selection needs attention</h2><p>{operationError}</p></section>}
+            {workflow.step === "profile" && workflow.facts && workflow.match && <DeviceProfileSelection match={workflow.match} facts={workflow.facts} busy={busy} onSelect={(id, acknowledged) => void selectDeviceProfile(id, acknowledged)} onRetry={() => workflow.deviceHandle && void selectDevice(workflow.deviceHandle)} onChooseDevice={() => dispatch({type:"back"})} />}
+            {workflow.step === "setup" && workflow.facts && workflow.match && workflow.selectionHandle && (
               <>
-                <p className="eyebrow">Confirm device</p>
+                <p className="eyebrow">Choose Setup</p>
+                {workflow.match.profileSelectionNotice && <p role="status">{workflow.match.profileSelectionNotice}</p>}
+                <button disabled={busy || workflow.match.profileChangeAllowed !== true} onClick={() => dispatch({ type: "choose-profile" })}>Change Device Profile</button>
                 <h2
                   data-focus-fallback="workflow"
                   data-step-heading
                   tabIndex={-1}
                 >
-                  {workflow.facts.manufacturer ?? "Android"}{" "}
-                  {workflow.facts.model ?? "device"}
+                  Choose Setup
                 </h2>
                 <p>
                   Android {workflow.facts.androidVersion ?? "unknown"} · API{" "}

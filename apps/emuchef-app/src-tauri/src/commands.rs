@@ -1459,6 +1459,279 @@ where
     })
 }
 
+#[cfg(test)]
+fn select_plan_fixture(state: &AppState, device: &str, plan: &str) {
+    let mut handles = state.handles.lock().unwrap();
+    let binding = profile_binding(state, &handles, device).unwrap();
+    handles.profile_selection.observe(binding, json!({
+        "selectedProfileId":"fixture.profile", "resolutionStatus":"resolved",
+        "profiles":[{"profileId":"fixture.profile","generic":false,"eligibility":"eligible","plans":[{"planId":plan}]}]
+    }), true);
+}
+
+/// Capture only material qualification evidence; polling revisions do not
+/// change the meaning of an otherwise equivalent observation.
+pub(crate) fn profile_binding(
+    state: &AppState,
+    handles: &SessionHandles,
+    device_handle: &str,
+) -> Result<crate::profile_selection::ProfileBinding, String> {
+    let device = handles.device(device_handle)?;
+    if device.state != "available"
+        || handles.single_available_device_handle().as_deref() != Some(device_handle)
+    {
+        return Err(safe_error(
+            "device_changed",
+            "Connect one available device and choose its Device Profile again.",
+        ));
+    }
+    let facts = crate::profile_selection::normalized_facts(handles.facts(device_handle)?);
+    let context = handles.qualification_context(device_handle);
+    Ok(crate::profile_selection::ProfileBinding {
+        device_handle: device_handle.to_string(),
+        session_epoch: device.session_epoch,
+        runtime_generation: state
+            .sidecar
+            .try_generation()
+            .map_err(|_| safe_error("runtime_unavailable", "The runtime is unavailable."))?,
+        platform_tools_revision: state
+            .adb
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "adb_state_unavailable",
+                    "Platform-Tools state is unavailable.",
+                )
+            })?
+            .revision(),
+        facts,
+        catalog: catalog(state)?.internal_payload(),
+        qualification: context.map(|c| c.capability_fingerprint),
+    })
+}
+
+/// Retire observed catalog loss without taking the transition gate. Callers
+/// also use this inside an existing transition; execution fences stay intact.
+pub(crate) fn verified_profile_catalog(state: &AppState) -> Result<&CatalogDescriptor, String> {
+    let result = catalog(state).and_then(|catalog| {
+        catalog.verify_integrity()?;
+        Ok(catalog)
+    });
+    if result.is_err() {
+        state.handles.lock().map_err(|_| safe_error("session_state_unavailable", "Device session state is unavailable."))?
+            .retire_profile_authority("The setup catalog changed or is unavailable. Restart EmuChef and choose a Device Profile again.");
+    }
+    result
+}
+
+pub(crate) fn require_profile_selection(
+    state: &AppState,
+    device: &str,
+    handle: Option<&str>,
+    plan: Option<&str>,
+) -> Result<crate::profile_selection::SelectedProfile, String> {
+    verified_profile_catalog(state)?;
+    let mut handles = state.handles.lock().map_err(|_| {
+        safe_error(
+            "session_state_unavailable",
+            "Device session state is unavailable.",
+        )
+    })?;
+    let binding = match profile_binding(state, &handles, device) {
+        Ok(binding) => binding,
+        Err(error) => {
+            handles.profile_selection.invalidate_device(device, "The device session is unavailable or changed. Read device information and choose a Device Profile again.");
+            handles.invalidate_reviews_for_device_if(device, "review_stale", |_| true);
+            return Err(error);
+        }
+    };
+    if handles
+        .profile_selection
+        .require_resolution_binding(&binding)
+        .is_err()
+    {
+        handles.profile_selection.invalidate_device(device, "Device identity, firmware, runtime, tools or capabilities changed. Read device information and choose a Device Profile again.");
+        handles.invalidate_reviews_for_device_if(device, "review_stale", |_| true);
+    }
+    handles.profile_selection.require(&binding, handle, plan)
+}
+
+#[tauri::command]
+pub fn reset_device_profile_selection(state: State<'_, AppState>) -> Result<(), String> {
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    if !executions.profile_change_allowed() {
+        return Err(safe_error("profile_change_blocked", "An execution is active or unresolved. Finish reconciliation before starting a new setup."));
+    }
+    let transition = qualification_transition_lock(&state);
+    let mut handles = state.handles.lock().map_err(|_| {
+        safe_error(
+            "session_state_unavailable",
+            "Device session state is unavailable.",
+        )
+    })?;
+    handles.reset_profile_setup();
+    state
+        .input_contracts
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "input_state_unavailable",
+                "Input requirements are unavailable.",
+            )
+        })?
+        .clear();
+    state
+        .recovery
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "recovery_state_unavailable",
+                "Recovery state is unavailable.",
+            )
+        })?
+        .clear_profile_intent();
+    drop(handles);
+    transition.release_and_retry_best_effort();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_device_profile_selection(
+    device_handle: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let catalog_valid = verified_profile_catalog(&state).is_ok();
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    let transition = qualification_transition_lock(&state);
+    let mut handles = state.handles.lock().map_err(|_| {
+        safe_error(
+            "session_state_unavailable",
+            "Device session state is unavailable.",
+        )
+    })?;
+    if !catalog_valid {
+        handles.profile_selection.invalidate_with_reason("The setup catalog changed or is unavailable. Restart EmuChef before choosing a Device Profile.");
+        handles.invalidate_reviews_for_device_if(&device_handle, "review_stale", |_| true);
+    } else {
+        let binding = profile_binding(&state, &handles, &device_handle);
+        if binding.as_ref().map_or(true, |binding| {
+            handles
+                .profile_selection
+                .require_resolution_binding(binding)
+                .is_err()
+        }) {
+            handles.profile_selection.invalidate_device(&device_handle, "The device session, runtime, tools or capabilities changed. Read device information and choose a Device Profile again.");
+            handles.invalidate_reviews_for_device_if(&device_handle, "review_stale", |_| true);
+        }
+    }
+    let result = handles
+        .profile_selection
+        .projection(executions.profile_change_allowed());
+    drop(handles);
+    transition.release_and_retry_best_effort();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn select_device_profile(
+    device_handle: String,
+    resolution_handle: String,
+    profile_id: String,
+    generic_acknowledged: bool,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    {
+        let executions = state.executions.lock().map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Execution state is unavailable.",
+            )
+        })?;
+        if !executions.profile_change_allowed() {
+            return Err(safe_error(
+                "profile_change_blocked",
+                "An execution is active or unresolved. Finish reconciliation before changing profiles.",
+            ));
+        }
+    }
+    // Release the preflight lock before matching; recheck execution at commit.
+    match_device_result(&device_handle, &state)?;
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    if !executions.profile_change_allowed() {
+        return Err(safe_error(
+            "profile_change_blocked",
+            "An execution is active or unresolved. Finish reconciliation before changing profiles.",
+        ));
+    }
+    let transition = qualification_transition_lock(&state);
+    let mut handles = state.handles.lock().map_err(|_| {
+        safe_error(
+            "session_state_unavailable",
+            "Device session state is unavailable.",
+        )
+    })?;
+    let binding = profile_binding(&state, &handles, &device_handle)?;
+    handles
+        .profile_selection
+        .require_resolution_binding(&binding)?;
+    let before = handles.profile_selection.projection(true)["selectionHandle"].clone();
+    let selected =
+        handles
+            .profile_selection
+            .select(&resolution_handle, &profile_id, generic_acknowledged)?;
+    if selected.binding != binding {
+        return Err(safe_error(
+            "profile_selection_stale",
+            "Read device information and choose a profile again.",
+        ));
+    }
+    if before != selected.handle {
+        handles.invalidate_reviews_for_device_if(&device_handle, "review_stale", |_| true);
+        handles
+            .device_storage_mut()
+            .clear_device_after_authority_loss(&device_handle);
+        state
+            .recovery
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "recovery_state_unavailable",
+                    "Recovery state is unavailable.",
+                )
+            })?
+            .clear_profile_intent();
+        state
+            .input_contracts
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "input_state_unavailable",
+                    "Input requirements are unavailable.",
+                )
+            })?
+            .clear();
+    }
+    let public = handles.profile_selection.projection(true);
+    drop(handles);
+    transition.release_and_retry_best_effort();
+    Ok(public)
+}
+
 #[tauri::command]
 pub fn match_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
     match_device_observation(&device_handle, &state)
@@ -1489,22 +1762,63 @@ fn match_device_result(
     device_handle: &str,
     state: &AppState,
 ) -> Result<(Value, crate::device_observation::DeviceMatchProjection), String> {
-    let (facts, session_epoch) = {
-        let handles = state.handles.lock().map_err(|_| {
+    match_device_result_with_runtime(device_handle, state, &mut |operation, payload| {
+        state.sidecar.request(operation, payload)
+    })
+}
+
+fn match_device_result_with_runtime<F>(
+    device_handle: &str,
+    state: &AppState,
+    request: &mut F,
+) -> Result<(Value, crate::device_observation::DeviceMatchProjection), String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    match_device_result_with_commit_hook(device_handle, state, request, || {})
+}
+
+fn match_device_result_with_commit_hook<F, H>(
+    device_handle: &str,
+    state: &AppState,
+    request: &mut F,
+    after_observation: H,
+) -> Result<(Value, crate::device_observation::DeviceMatchProjection), String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+    H: FnOnce(),
+{
+    let catalog = verified_profile_catalog(state)?;
+    let (facts, session_epoch, expected_binding) = {
+        let mut handles = state.handles.lock().map_err(|_| {
             safe_error(
                 "session_state_unavailable",
                 "Device session state is unavailable.",
             )
         })?;
-        let device = handles.device(device_handle)?;
-        if device.state != "available" {
-            return Err(safe_error(
-                "device_changed",
-                "The selected device changed. Refresh device discovery and try again.",
-            ));
+        let captured = (|| {
+            let device = handles.device(device_handle)?;
+            if device.state != "available" {
+                return Err(safe_error(
+                    "device_changed",
+                    "The selected device changed. Refresh device discovery and try again.",
+                ));
+            }
+            let (facts, epoch) = handles.facts_with_epoch(device_handle)?;
+            Ok((
+                facts.clone(),
+                epoch,
+                profile_binding(state, &handles, device_handle)?,
+            ))
+        })();
+        match captured {
+            Ok(captured) => captured,
+            Err(error) => {
+                handles.profile_selection.invalidate_device(device_handle, "The device session, runtime or eligibility evidence is unavailable. Read device information and choose a Device Profile again.");
+                handles.invalidate_reviews_for_device_if(device_handle, "review_stale", |_| true);
+                return Err(error);
+            }
         }
-        let (facts, epoch) = handles.facts_with_epoch(device_handle)?;
-        (facts.clone(), epoch)
     };
     let qualification_device_plan = crate::qualification_session::active_device_plan(state);
     let observation_failure_target =
@@ -1513,23 +1827,28 @@ fn match_device_result(
             device_handle,
             session_epoch,
         );
-    let catalog = catalog(state)?;
     let exact_serial = facts
         .get("serial")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let result = state
-        .sidecar
-        .request(
-            "matchDevice",
-            json!({ "catalog": catalog.internal_payload(), "facts": facts }),
+    let result = request(
+        "matchDevice",
+        json!({ "catalog": catalog.internal_payload(), "facts": facts }),
+    )
+    .map_err(|_| {
+        safe_error(
+            "device_match_failed",
+            "The device could not be matched to the setup catalog.",
         )
-        .map_err(|_| {
-            safe_error(
-                "device_match_failed",
-                "The device could not be matched to the setup catalog.",
-            )
-        })?;
+    })?;
+    verified_profile_catalog(state)?;
+    let executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Execution state is unavailable.",
+        )
+    })?;
+    let change_allowed = executions.profile_change_allowed();
     let transition = qualification_transition_lock(state);
     {
         let handles = state.handles.lock().map_err(|_| {
@@ -1547,6 +1866,8 @@ fn match_device_result(
         if device.state != "available"
             || device.session_epoch != session_epoch
             || device.facts_session_epoch != Some(session_epoch)
+            || handles.facts(device_handle)? != &facts
+            || profile_binding(state, &handles, device_handle)? != expected_binding
         {
             return Err(safe_error(
                 "device_changed",
@@ -1554,7 +1875,7 @@ fn match_device_result(
             ));
         }
     }
-    let public = public_match(&result, exact_serial.as_deref());
+    let mut public = public_match(&result, exact_serial.as_deref());
     let projection =
         crate::device_observation::DeviceMatchProjection::decode(&public).ok_or_else(|| {
             safe_error(
@@ -1573,6 +1894,57 @@ fn match_device_result(
         matched_profile_id.as_deref(),
         observation_failure_target,
     )?;
+    after_observation();
+    verified_profile_catalog(state)?;
+    {
+        let mut handles = state.handles.lock().map_err(|_| {
+            safe_error(
+                "session_state_unavailable",
+                "Device session state is unavailable.",
+            )
+        })?;
+        let binding = profile_binding(state, &handles, device_handle)?;
+        if binding != expected_binding {
+            return Err(safe_error(
+                "profile_selection_stale",
+                "Device information changed. Read it again.",
+            ));
+        }
+        let before =
+            handles.profile_selection.projection(change_allowed)["selectionHandle"].clone();
+        let projection = handles
+            .profile_selection
+            .observe(binding, result.clone(), change_allowed);
+        if before != projection["selectionHandle"] {
+            handles.invalidate_reviews_for_device_if(device_handle, "review_stale", |_| true);
+            handles
+                .device_storage_mut()
+                .clear_device_after_authority_loss(device_handle);
+            state
+                .input_contracts
+                .lock()
+                .map_err(|_| {
+                    safe_error(
+                        "input_state_unavailable",
+                        "Input requirements are unavailable.",
+                    )
+                })?
+                .clear();
+            state
+                .recovery
+                .lock()
+                .map_err(|_| {
+                    safe_error(
+                        "recovery_state_unavailable",
+                        "Recovery state is unavailable.",
+                    )
+                })?
+                .clear_profile_intent();
+        }
+        for (key, value) in projection.as_object().unwrap() {
+            public[key] = value.clone();
+        }
+    }
     transition.release_and_retry_best_effort();
     Ok((public, projection))
 }
@@ -1610,12 +1982,20 @@ pub(crate) fn commit_match_device_observation_in_transition(
 #[tauri::command]
 pub fn describe_configuration(
     device_handle: String,
+    selection_handle: Option<String>,
     device_plan: String,
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
     request_generation: u64,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let authority = require_profile_selection(
+        &state,
+        &device_handle,
+        Some(selection_handle.as_deref().unwrap_or("")),
+        Some(&device_plan),
+    )?;
+
     let binding_keys = bindings.keys().cloned().collect::<HashSet<_>>();
     let payload = configuration_payload(
         &state,
@@ -1639,6 +2019,13 @@ pub fn describe_configuration(
         .sidecar
         .request("describeConfiguration", payload)
         .map_err(|error| configuration_sidecar_error(&error, &exact_serial))?;
+    let transition = qualification_transition_lock(&state);
+    require_profile_selection(
+        &state,
+        &device_handle,
+        Some(&authority.handle),
+        Some(&device_plan),
+    )?;
     let accepted = state
         .input_contracts
         .lock()
@@ -1664,6 +2051,7 @@ pub fn describe_configuration(
     };
     let mut public = public_configuration_description(&result, &exact_serial);
     add_recovery_reentry_diagnostics(&mut public, &required_reentry, &binding_keys);
+    transition.release_and_retry_best_effort();
     Ok(public)
 }
 
@@ -1719,6 +2107,7 @@ where
 #[tauri::command]
 pub fn prepare_execution_review(
     device_handle: String,
+    selection_handle: Option<String>,
     device_plan: String,
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
@@ -1726,6 +2115,13 @@ pub fn prepare_execution_review(
     mode: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let authority = require_profile_selection(
+        &state,
+        &device_handle,
+        Some(selection_handle.as_deref().unwrap_or("")),
+        Some(&device_plan),
+    )?;
+
     let sidecar = &state.sidecar;
     prepare_execution_review_with_runtime(
         device_handle,
@@ -1735,6 +2131,7 @@ pub fn prepare_execution_review(
         request_generation,
         &mode,
         &state,
+        &authority,
         &mut |operation, payload| sidecar.request(operation, payload),
     )
 }
@@ -1747,11 +2144,18 @@ fn prepare_execution_review_with_runtime<F>(
     request_generation: u64,
     mode: &str,
     state: &AppState,
+    authority: &crate::profile_selection::SelectedProfile,
     request: &mut F,
 ) -> Result<Value, String>
 where
     F: FnMut(&str, Value) -> Result<Value, String>,
 {
+    require_profile_selection(
+        state,
+        &device_handle,
+        Some(&authority.handle),
+        Some(&device_plan),
+    )?;
     if !matches!(mode, "real" | "dry_run") {
         return Err(safe_error(
             "execution_mode_invalid",
@@ -1905,6 +2309,8 @@ where
             })
     })?;
     result["executionMode"] = json!(mode);
+    result["profileSelectionHandle"] = json!(authority.handle);
+    result["profileSetupGeneration"] = json!(authority.setup_generation);
     let plan = result
         .get("plan")
         .filter(|value| !value.is_null())
@@ -1966,6 +2372,12 @@ where
         last_access: Instant::now(),
     };
     let transition = qualification_transition_lock(state);
+    require_profile_selection(
+        state,
+        &device_handle,
+        Some(&authority.handle),
+        Some(&device_plan),
+    )?;
     let mut handles = state.handles.lock().map_err(|_| {
         safe_error(
             "session_state_unavailable",
@@ -2070,11 +2482,19 @@ pub fn get_review_status(
 pub async fn pick_input_path(
     app: AppHandle,
     input_key: String,
+    device_handle: String,
+    selection_handle: String,
     request_generation: u64,
     mode: String,
     current_value: Value,
     entry_index: Option<usize>,
 ) -> Result<Option<Value>, String> {
+    require_profile_selection(
+        &app.state::<AppState>(),
+        &device_handle,
+        Some(&selection_handle),
+        None,
+    )?;
     let contract = app
         .state::<AppState>()
         .input_contracts
@@ -2136,6 +2556,12 @@ pub async fn pick_input_path(
             ))
         }
     };
+    require_profile_selection(
+        &app.state::<AppState>(),
+        &device_handle,
+        Some(&selection_handle),
+        None,
+    )?;
     let Some(selected) = selected else {
         return Ok(None);
     };
@@ -2557,6 +2983,8 @@ pub(crate) fn public_match(result: &Value, exact_serial: Option<&str>) -> Value 
             .collect::<Vec<_>>()
     };
     let mut public = json!({
+        "profiles": result.get("profiles"),
+        "resolutionStatus": result.get("resolutionStatus"),
         "confidence": result.get("confidence"),
         "recommendedPlanId": result.get("recommendedPlanId"),
         "requiresExplicitChoice": result.get("requiresExplicitChoice"),
@@ -3730,6 +4158,544 @@ mod tests {
         }
     }
 
+    fn profile_race_fixture(root: &std::path::Path) -> (AppState, String) {
+        let mut state = reset_test_state(root);
+        state.catalog = CatalogDescriptor::for_test();
+        let device = {
+            let mut handles = state.handles.lock().unwrap();
+            handles.update_devices(&json!({"devices":[{"serial":"fixture","state":"available","transportId":"one"}]})).unwrap();
+            let device = handles.single_available_device_handle().unwrap();
+            handles
+                .set_facts(&device, json!({"manufacturer":"Fixture","model":"A"}))
+                .unwrap();
+            device
+        };
+        (state, device)
+    }
+
+    #[test]
+    fn blocked_profile_selection_rejects_before_catalog_resolution() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        for (case, executions) in
+            crate::execution::tests::profile_change_blocking_stores(root.path())
+        {
+            let (mut state, device) = profile_race_fixture(root.path());
+            let before = {
+                let mut handles = state.handles.lock().unwrap();
+                let binding = profile_binding(&state, &handles, &device).unwrap();
+                let view = handles.profile_selection.observe(binding, json!({
+                    "resolutionStatus":"choice_required",
+                    "profiles":[{"profileId":"a","generic":false,"eligibility":"eligible","plans":[]}]
+                }), true);
+                handles
+                    .profile_selection
+                    .select(view["resolutionHandle"].as_str().unwrap(), "a", false)
+                    .unwrap();
+                handles.profile_selection.projection(false)
+            };
+            let fence_before = crate::execution::tests::profile_change_fence_snapshot(&executions);
+            *state.executions.lock().unwrap() = executions;
+            // A blocked explicit request must not enter catalog validation or matching.
+            state.catalog = Err("catalog intentionally unavailable".into());
+            let app = tauri::test::mock_app();
+            assert!(app.manage(state));
+            let error = select_device_profile(
+                device,
+                before["resolutionHandle"].as_str().unwrap().into(),
+                "a".into(),
+                false,
+                app.state(),
+            )
+            .unwrap_err();
+            assert!(error.contains("profile_change_blocked"), "{case}: {error}");
+            let state = app.state::<AppState>();
+            assert_eq!(
+                state
+                    .handles
+                    .lock()
+                    .unwrap()
+                    .profile_selection
+                    .projection(false),
+                before,
+                "{case}"
+            );
+            assert_eq!(
+                crate::execution::tests::profile_change_fence_snapshot(
+                    &state.executions.lock().unwrap()
+                ),
+                fence_before,
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn native_profile_selection_and_reset_preserve_each_execution_fence() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        for (case, executions) in
+            crate::execution::tests::profile_change_blocking_stores(root.path())
+        {
+            let (mut state, device) = profile_race_fixture(root.path());
+            let catalog = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../tests/fixtures/t03_app_target/authored");
+            state.catalog = CatalogDescriptor::for_test_root(catalog);
+            state.sidecar = SidecarState::with_test_backend(
+                root.path().join("sidecar-cache"),
+                emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                    runtime_root: root.path().join("runtime"),
+                    cache_root: root.path().join("sidecar-cache"),
+                    adb_path: "unused-test-adb".into(),
+                },
+            );
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .set_facts(
+                    &device,
+                    json!({
+                        "manufacturer":"EmuChef", "model":"Synthetic App Target",
+                        "android_version":14, "android_api_level":34
+                    }),
+                )
+                .unwrap();
+            match_device_observation(&device, &state).unwrap();
+            let before = state
+                .handles
+                .lock()
+                .unwrap()
+                .profile_selection
+                .projection(true);
+            assert!(
+                before["selectionHandle"].is_string(),
+                "{case}: fixture must select a profile"
+            );
+            *state.executions.lock().unwrap() = executions;
+            let fence_before = crate::execution::tests::profile_change_fence_snapshot(
+                &state.executions.lock().unwrap(),
+            );
+            let app = tauri::test::mock_app();
+            assert!(app.manage(state));
+            for reset in [false, true] {
+                let state = app.state::<AppState>();
+                let error = if reset {
+                    reset_device_profile_selection(app.state()).unwrap_err()
+                } else {
+                    select_device_profile(
+                        device.clone(),
+                        before["resolutionHandle"].as_str().unwrap().into(),
+                        before["selectedProfileId"].as_str().unwrap().into(),
+                        false,
+                        app.state(),
+                    )
+                    .unwrap_err()
+                };
+                assert!(
+                    error.contains("profile_change_blocked"),
+                    "{case}, reset={reset}: {error}"
+                );
+                assert_eq!(
+                    state
+                        .handles
+                        .lock()
+                        .unwrap()
+                        .profile_selection
+                        .projection(true),
+                    before,
+                    "{case}, reset={reset}"
+                );
+                let executions = state.executions.lock().unwrap();
+                assert!(!executions.profile_change_allowed(), "{case}");
+                assert_eq!(
+                    crate::execution::tests::profile_change_fence_snapshot(&executions),
+                    fence_before,
+                    "{case}, reset={reset}"
+                );
+            }
+            *app.state::<AppState>().executions.lock().unwrap() = ExecutionHandleStore::default();
+            let selected = select_device_profile(
+                device,
+                before["resolutionHandle"].as_str().unwrap().into(),
+                before["selectedProfileId"].as_str().unwrap().into(),
+                false,
+                app.state(),
+            )
+            .unwrap();
+            assert_eq!(selected["selectionHandle"], before["selectionHandle"]);
+            reset_device_profile_selection(app.state()).unwrap();
+            assert!(app
+                .state::<AppState>()
+                .handles
+                .lock()
+                .unwrap()
+                .profile_selection
+                .projection(true)["selectionHandle"]
+                .is_null());
+        }
+    }
+
+    #[test]
+    fn direct_ipc_catalog_change_then_revert_cannot_reactivate_selection_or_review() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, device) = profile_race_fixture(root.path());
+        let catalog_root = root.path().join("catalog");
+        for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+            std::fs::create_dir_all(catalog_root.join(directory)).unwrap();
+        }
+        let profile_path = catalog_root.join("device_profiles/a.yaml");
+        let original = b"id: a\nname: A\n";
+        std::fs::write(&profile_path, original).unwrap();
+        state.catalog = CatalogDescriptor::for_test_root(catalog_root);
+        let (selection, review) = {
+            let mut handles = state.handles.lock().unwrap();
+            let binding = profile_binding(&state, &handles, &device).unwrap();
+            let view = handles.profile_selection.observe(binding, json!({"resolutionStatus":"choice_required","profiles":[
+                {"profileId":"a","generic":false,"eligibility":"eligible","plans":[{"planId":"a.plan"}]},
+                {"profileId":"b","generic":false,"eligibility":"eligible","plans":[{"planId":"b.plan"}]}]}), true);
+            let selected = handles
+                .profile_selection
+                .select(view["resolutionHandle"].as_str().unwrap(), "a", false)
+                .unwrap();
+            let review = handles.insert_review(ReviewedPlanSnapshot {
+                response: json!({"profileSelectionHandle":selected.handle}),
+                target: json!({}),
+                catalog_identity: json!({}),
+                plan_digest: "fixture".into(),
+                device_handle: device.clone(),
+                qualification_context: None,
+                platform_tools_identity: None,
+                created: Instant::now(),
+                last_access: Instant::now(),
+            });
+            (selected.handle, review)
+        };
+        let app = tauri::test::mock_app();
+        assert!(app.manage(state));
+        std::fs::write(&profile_path, b"id: changed\nname: Changed\n").unwrap();
+        let error = describe_configuration(
+            device.clone(),
+            Some(selection.clone()),
+            "a.plan".into(),
+            None,
+            HashMap::new(),
+            1,
+            app.state(),
+        )
+        .unwrap_err();
+        assert!(error.contains("catalog_integrity_changed"));
+        std::fs::write(&profile_path, original).unwrap();
+        let state = app.state::<AppState>();
+        assert!(
+            require_profile_selection(&state, &device, Some(&selection), Some("a.plan"))
+                .unwrap_err()
+                .contains("profile_selection_stale")
+        );
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .review(&review)
+            .unwrap_err()
+            .contains("review_stale"));
+    }
+
+    #[test]
+    fn match_publication_rechecks_catalog_integrity_before_installing_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, device) = profile_race_fixture(root.path());
+        let catalog_root = root.path().join("catalog");
+        for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+            std::fs::create_dir_all(catalog_root.join(directory)).unwrap();
+        }
+        let profile_path = catalog_root.join("device_profiles/a.yaml");
+        let original = b"id: a\nname: A\n";
+        std::fs::write(&profile_path, original).unwrap();
+        state.catalog = CatalogDescriptor::for_test_root(catalog_root);
+        verified_profile_catalog(&state).unwrap();
+        let selection = {
+            let mut handles = state.handles.lock().unwrap();
+            let binding = profile_binding(&state, &handles, &device).unwrap();
+            let view = handles.profile_selection.observe(binding, json!({
+                "resolutionStatus":"choice_required",
+                "profiles":[{"profileId":"a","generic":false,"eligibility":"eligible","plans":[]}]
+            }), true);
+            handles
+                .profile_selection
+                .select(view["resolutionHandle"].as_str().unwrap(), "a", false)
+                .unwrap()
+                .handle
+        };
+        let result = match_device_result_with_commit_hook(
+            &device,
+            &state,
+            &mut |_, _| Ok(json!({"resolutionStatus":"choice_required", "profiles":[]})),
+            || std::fs::write(&profile_path, b"id: a\nname: Changed\n").unwrap(),
+        );
+        assert!(result.unwrap_err().contains("catalog_integrity_changed"));
+        std::fs::write(&profile_path, original).unwrap();
+        verified_profile_catalog(&state).unwrap();
+        let view = state
+            .handles
+            .lock()
+            .unwrap()
+            .profile_selection
+            .projection(true);
+        assert!(view["resolutionHandle"].is_null());
+        assert!(view["selectionHandle"].is_null());
+        assert!(
+            require_profile_selection(&state, &device, Some(&selection), None)
+                .unwrap_err()
+                .contains("profile_selection_stale")
+        );
+    }
+
+    #[test]
+    fn match_publication_retains_the_complete_captured_binding() {
+        for material_change in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut state, device) = profile_race_fixture(root.path());
+            state.catalog = CatalogDescriptor::for_test_root(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../tests/fixtures/t03_app_target/authored"),
+            );
+            verified_profile_catalog(&state).unwrap();
+            let initial = {
+                let mut handles = state.handles.lock().unwrap();
+                let context = crate::device_observation::QualificationContextKey::new(
+                    device.clone(),
+                    handles.device_session_epoch(&device).unwrap(),
+                    state.sidecar.try_generation().unwrap(),
+                    0,
+                    0,
+                    "original-capabilities",
+                );
+                handles.set_qualification_context(context.clone());
+                context
+            };
+            let result = match_device_result_with_commit_hook(
+                &device,
+                &state,
+                &mut |_, _| {
+                    Ok(json!({
+                        "resolutionStatus":"resolved",
+                        "profiles":[{"profileId":"a","generic":false,"eligibility":"eligible",
+                            "plans":[{"planId":"a.plan"}]}]
+                    }))
+                },
+                || {
+                    let before =
+                        profile_binding(&state, &state.handles.lock().unwrap(), &device).unwrap();
+                    assert!(state.qualification_transition_gate.lock.try_lock().is_err());
+                    // Qualification-attempt notification does not publish product context.
+                    commit_match_device_observation_in_transition(
+                        &state,
+                        &device,
+                        initial.session_epoch,
+                        Some("a.plan"),
+                        Some("a"),
+                        None,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        profile_binding(&state, &state.handles.lock().unwrap(), &device).unwrap(),
+                        before,
+                    );
+                    let mut replacement = initial.clone();
+                    replacement.qualification_revision += 1;
+                    if material_change {
+                        replacement.capability_fingerprint = "changed-capabilities".into();
+                    }
+                    // Inject at the exact publication boundary without scheduling sleeps.
+                    state
+                        .handles
+                        .lock()
+                        .unwrap()
+                        .set_qualification_context(replacement);
+                },
+            );
+            if material_change {
+                assert!(result.unwrap_err().contains("profile_selection_stale"));
+                let view = state
+                    .handles
+                    .lock()
+                    .unwrap()
+                    .profile_selection
+                    .projection(true);
+                assert!(view["selectionHandle"].is_null());
+                assert!(view["resolutionHandle"].is_null());
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "equivalent qualification revision must remain valid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_match_cannot_bind_old_facts_to_a_new_probe() {
+        use std::sync::mpsc;
+        let root = tempfile::tempdir().unwrap();
+        let (state, device) = profile_race_fixture(root.path());
+        let (captured_tx, captured_rx) = mpsc::sync_channel(1);
+        let (changed_tx, changed_rx) = mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let state_ref = &state;
+            let device_ref = &device;
+            let worker = scope.spawn(move || {
+                match_device_result_with_runtime(
+                    device_ref,
+                    state_ref,
+                    &mut |operation, payload| {
+                        assert_eq!(operation, "matchDevice");
+                        assert_eq!(payload["facts"]["model"], "A");
+                        captured_tx.send(()).unwrap();
+                        changed_rx
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        Ok(json!({}))
+                    },
+                )
+            });
+            captured_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the matcher must reach the injected runtime boundary");
+            state
+                .handles
+                .lock()
+                .unwrap()
+                .set_facts(&device, json!({"manufacturer":"Fixture","model":"B"}))
+                .unwrap();
+            changed_tx.send(()).unwrap();
+            assert!(worker
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .contains("device_changed"));
+        });
+        assert!(state
+            .handles
+            .lock()
+            .unwrap()
+            .profile_selection
+            .projection(true)["selectionHandle"]
+            .is_null());
+    }
+
+    #[test]
+    fn delayed_review_request_cannot_adopt_replacement_selection_after_a_b_a() {
+        use std::sync::Barrier;
+        let root = tempfile::tempdir().unwrap();
+        let (state, device) = profile_race_fixture(root.path());
+        let authority = {
+            let mut handles = state.handles.lock().unwrap();
+            let binding = profile_binding(&state, &handles, &device).unwrap();
+            let view = handles.profile_selection.observe(binding, json!({"resolutionStatus":"choice_required", "profiles":[
+                {"profileId":"a","generic":false,"eligibility":"eligible","plans":[{"planId":"a.plan"}]},
+                {"profileId":"b","generic":false,"eligibility":"eligible","plans":[{"planId":"b.plan"}]}]}), true);
+            handles
+                .profile_selection
+                .select(view["resolutionHandle"].as_str().unwrap(), "a", false)
+                .unwrap()
+        };
+        let validated = Barrier::new(2);
+        let replaced = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                validated.wait();
+                replaced.wait();
+                prepare_execution_review_with_runtime(
+                    device.clone(),
+                    "a.plan".into(),
+                    None,
+                    HashMap::new(),
+                    1,
+                    "dry_run",
+                    &state,
+                    &authority,
+                    &mut |_, _| panic!("stale selection must reject before planning"),
+                )
+            });
+            validated.wait();
+            let mut handles = state.handles.lock().unwrap();
+            for profile in ["b", "a"] {
+                let resolution = handles.profile_selection.projection(true)["resolutionHandle"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                handles
+                    .profile_selection
+                    .select(&resolution, profile, false)
+                    .unwrap();
+            }
+            drop(handles);
+            replaced.wait();
+            assert!(worker
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .contains("profile_selection_stale"));
+        });
+    }
+
+    #[test]
+    fn direct_description_ipc_cannot_replace_selection_with_a_plan_id_or_cached_token() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let mut state = reset_test_state(root.path());
+        state.catalog = CatalogDescriptor::for_test();
+        let device = {
+            let mut handles = state.handles.lock().unwrap();
+            handles.update_devices(&json!({"devices":[{"serial":"fixture","state":"available","transportId":"one"}]})).unwrap();
+            let device = handles.single_available_device_handle().unwrap();
+            handles
+                .set_facts(&device, json!({"manufacturer":"Fixture","model":"Fixture"}))
+                .unwrap();
+            device
+        };
+        select_plan_fixture(&state, &device, "fixture.plan");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(state));
+        for token in [None, Some("forged".to_string())] {
+            let error = describe_configuration(
+                device.clone(),
+                token,
+                "fixture.plan".into(),
+                None,
+                HashMap::new(),
+                1,
+                app.state(),
+            )
+            .unwrap_err();
+            assert!(error.contains("profile_selection_stale"));
+        }
+        let state = app.state::<AppState>();
+        let current = state
+            .handles
+            .lock()
+            .unwrap()
+            .profile_selection
+            .projection(true)["selectionHandle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(require_profile_selection(
+            &state,
+            &device,
+            Some(&current),
+            Some("other.profile.plan")
+        )
+        .is_err());
+        state.handles.lock().unwrap().profile_selection.invalidate();
+        assert!(
+            require_profile_selection(&state, &device, Some(&current), Some("fixture.plan"))
+                .is_err()
+        );
+    }
+
     #[test]
     fn production_review_bridge_fails_closed_without_root_preflight() {
         let temp = tempfile::tempdir().unwrap();
@@ -3794,9 +4760,13 @@ mod tests {
             .unwrap()
             .replace(1, &json!({ "inputs": [] })));
 
+        select_plan_fixture(&state, &device_handle, "t03.copy_fixture.base");
         let sidecar = &state.sidecar;
         let mut plan_request = None;
         let mut plan_response = None;
+        let authority =
+            require_profile_selection(&state, &device_handle, None, Some("t03.copy_fixture.base"))
+                .unwrap();
         let review_result = prepare_execution_review_with_runtime(
             device_handle,
             "t03.copy_fixture.base".to_string(),
@@ -3811,6 +4781,7 @@ mod tests {
             1,
             "real",
             &state,
+            &authority,
             &mut |operation, payload| {
                 if operation == "planConfiguration" {
                     plan_request = Some(payload.clone());
@@ -4043,8 +5014,17 @@ mod tests {
         let app = tauri::test::mock_app();
         assert!(app.manage(state));
         let state = app.state::<AppState>();
+        super::select_plan_fixture(&state, &device_handle, "t03.copy_fixture.base");
+        let selection = super::require_profile_selection(
+            &state,
+            &device_handle,
+            None,
+            Some("t03.copy_fixture.base"),
+        )
+        .unwrap();
         let public_review = super::prepare_execution_review(
             device_handle,
+            Some(selection.handle),
             "t03.copy_fixture.base".to_string(),
             Some(vec!["t03.copy_app_target".to_string()]),
             HashMap::from([
@@ -5974,6 +6954,7 @@ mod prepared_review_bridge_tests {
                 crate::device_qualification::RootQualificationState::Granted,
                 Some(crate::device_qualification::RootShellRoute::SuCommand),
             ));
+        super::select_plan_fixture(&state, &device_handle, "ayaneo.konkr_pocket_fit.base");
         let base_payload = configuration_payload(
             &state,
             &device_handle,
@@ -6050,6 +7031,13 @@ mod prepared_review_bridge_tests {
             selected_source.clone(),
         )]);
         let selected_recipes = Some(vec![CONFIGURATION_RECIPE_ID.to_string()]);
+        let authority = super::require_profile_selection(
+            &state,
+            &device_handle,
+            None,
+            Some("ayaneo.konkr_pocket_fit.base"),
+        )
+        .unwrap();
         let missing_evidence = prepare_execution_review_with_runtime(
             device_handle.clone(),
             "ayaneo.konkr_pocket_fit.base".to_string(),
@@ -6058,6 +7046,7 @@ mod prepared_review_bridge_tests {
             1,
             "dry_run",
             &state,
+            &authority,
             &mut request,
         )
         .expect_err("legacy root capability must not admit configuration creation");

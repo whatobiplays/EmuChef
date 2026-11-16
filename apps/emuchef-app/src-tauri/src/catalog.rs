@@ -171,6 +171,16 @@ impl CatalogDescriptor {
         self.identity.clone()
     }
 
+    pub(crate) fn verify_integrity(&self) -> Result<(), String> {
+        if verify_and_digest(&self.root)? != self.digest() {
+            return Err(crate::commands::safe_error(
+                "catalog_integrity_changed",
+                "The setup catalog changed. Restart EmuChef before choosing a profile.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn digest(&self) -> &str {
         &self.identity.content_digest.value
     }

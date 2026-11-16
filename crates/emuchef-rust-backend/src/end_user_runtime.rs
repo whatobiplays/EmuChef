@@ -4,17 +4,14 @@
 //! serials and catalog roots because the trusted Tauri backend consumes them;
 //! the React-facing bridge must project separate path- and serial-free DTOs.
 
-use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs;
-use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::catalog_source::CatalogSnapshot;
 use crate::device_probe::{
-    AdbDeviceProbe, AdbProbeConfig, CommandOutput, CommandRunner, DetectedDeviceFacts, DeviceProbe,
-    DeviceProbeError, ProcessCommandRunner,
+    AdbDeviceProbe, AdbProbeConfig, CommandOutput, CommandRunner, DeviceProbe, DeviceProbeError,
+    ProcessCommandRunner,
 };
 use crate::errors::ApiError;
 use crate::executor::adb::{probe_root_with_route, ProcessAdbCommandExecutor};
@@ -522,371 +519,7 @@ fn storage_output_is_valid(stdout: &str) -> bool {
     })
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-struct ProfileMatchYaml {
-    #[serde(default)]
-    manufacturer_contains: Vec<String>,
-    #[serde(default)]
-    brand_contains: Vec<String>,
-    #[serde(default)]
-    model_patterns: Vec<String>,
-    android_version: Option<AndroidRangeYaml>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct AndroidRangeYaml {
-    min: Option<i64>,
-    max: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ProfileYaml {
-    id: String,
-    name: String,
-    description: Option<String>,
-    #[serde(rename = "match", default)]
-    match_: ProfileMatchYaml,
-    #[serde(default)]
-    metadata: Value,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct PlanYaml {
-    id: String,
-    name: String,
-    description: Option<String>,
-    device_profile_ref: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct MatchEvidence {
-    matched: usize,
-    declared: usize,
-    missing: usize,
-    conflicts: usize,
-    family_matches: usize,
-    family_conflicts: usize,
-    android_conflict: bool,
-    reasons: Vec<String>,
-}
-
-pub(crate) fn match_device(
-    snapshot: &CatalogSnapshot,
-    facts: &DetectedDeviceFacts,
-) -> Result<Value, ApiError> {
-    let profiles: Vec<ProfileYaml> = load_yaml_directory(snapshot.root(), "device_profiles")?;
-    let plans: Vec<PlanYaml> = load_yaml_directory(snapshot.root(), "device_plans")?;
-    let mut plans_by_profile = BTreeMap::<String, Vec<&PlanYaml>>::new();
-    for plan in &plans {
-        plans_by_profile
-            .entry(plan.device_profile_ref.clone())
-            .or_default()
-            .push(plan);
-    }
-
-    let mut candidates = Vec::new();
-    let mut safe_generic_plans = Vec::new();
-    let explicit_only_profile_model_matches = facts.model.as_deref().is_some_and(|model| {
-        profiles.iter().any(|profile| {
-            profile_requires_explicit_selection(profile)
-                && profile.match_.model_patterns.iter().any(|pattern| {
-                    regex::Regex::new(pattern).is_ok_and(|expression| expression.is_match(model))
-                })
-        })
-    });
-    for profile in profiles {
-        let evidence = evaluate_profile(facts, &profile.match_);
-        let generic = profile_is_generic(&profile);
-        let safe_generic = generic
-            && evidence.family_matches > 0
-            && evidence.family_conflicts == 0
-            && !evidence.android_conflict;
-        let profile_plans = plans_by_profile
-            .get(&profile.id)
-            .cloned()
-            .unwrap_or_default();
-
-        if safe_generic {
-            safe_generic_plans.extend(profile_plans.iter().map(|plan| {
-                json!({
-                    "planId": plan.id,
-                    "name": plan.name,
-                    "description": plan.description,
-                    "profileId": profile.id,
-                    "profileName": profile.name,
-                    "reasons": evidence.reasons,
-                    "requiresExplicitChoice": true,
-                })
-            }));
-            continue;
-        }
-        if generic || evidence.conflicts > 0 || evidence.matched == 0 {
-            continue;
-        }
-        let confidence = if evidence.missing == 0 && evidence.matched == evidence.declared {
-            "exact"
-        } else if evidence.matched >= 2 {
-            "high"
-        } else {
-            "low"
-        };
-        candidates.extend(profile_plans.iter().map(|plan| {
-            json!({
-                "planId": plan.id,
-                "name": plan.name,
-                "description": plan.description,
-                "profileId": profile.id,
-                "profileName": profile.name,
-                "profileDescription": profile.description,
-                "confidence": confidence,
-                "reasons": evidence.reasons,
-                "requiresExplicitChoice": profile_requires_explicit_selection(&profile)
-                    || explicit_only_profile_model_matches,
-            })
-        }));
-    }
-
-    candidates.sort_by(|left, right| {
-        confidence_rank(right["confidence"].as_str().unwrap_or("none"))
-            .cmp(&confidence_rank(
-                left["confidence"].as_str().unwrap_or("none"),
-            ))
-            .then_with(|| left["planId"].as_str().cmp(&right["planId"].as_str()))
-    });
-    safe_generic_plans
-        .sort_by(|left, right| left["planId"].as_str().cmp(&right["planId"].as_str()));
-    let confidence = candidates
-        .first()
-        .and_then(|candidate| candidate["confidence"].as_str())
-        .unwrap_or("none");
-    let top_count = candidates
-        .iter()
-        .take_while(|candidate| candidate["confidence"] == confidence)
-        .count();
-    let recommended_plan_id = if matches!(confidence, "exact" | "high")
-        && top_count == 1
-        && candidates[0]["requiresExplicitChoice"] != true
-    {
-        candidates[0]["planId"].as_str()
-    } else {
-        None
-    };
-    let blank_setup_plans = candidates
-        .iter()
-        .chain(safe_generic_plans.iter())
-        .map(|plan| {
-            let plan_name = plan
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("approved setup");
-            json!({
-                "planId": plan.get("planId"),
-                "name": format!("Start from scratch with {plan_name}"),
-                "description": format!("Use the {plan_name} device profile and choose recipes manually."),
-                "profileId": plan.get("profileId"),
-                "profileName": plan.get("profileName"),
-                "confidence": plan.get("confidence"),
-                "reasons": plan.get("reasons"),
-                "requiresExplicitChoice": true,
-                "selectionMode": "blank",
-            })
-        })
-        .collect::<Vec<_>>();
-    let blocked = candidates.is_empty() && safe_generic_plans.is_empty();
-    Ok(json!({
-        "confidence": confidence,
-        "recommendedPlanId": recommended_plan_id,
-        "requiresExplicitChoice": recommended_plan_id.is_none() && !blocked,
-        "candidates": candidates,
-        "safeGenericPlans": safe_generic_plans,
-        "blankSetupPlans": blank_setup_plans,
-        "blocked": blocked,
-        "blockReason": blocked.then_some("No backend-approved device plan is safe for the detected device."),
-    }))
-}
-
-fn load_yaml_directory<T: for<'de> Deserialize<'de>>(
-    root: &Path,
-    directory: &str,
-) -> Result<Vec<T>, ApiError> {
-    let mut paths = fs::read_dir(root.join(directory))
-        .map_err(|_| catalog_match_load_error(directory))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| is_yaml(path))
-        .collect::<Vec<PathBuf>>();
-    paths.sort();
-    paths
-        .into_iter()
-        .map(|path| {
-            let bytes = fs::read(path).map_err(|_| catalog_match_load_error(directory))?;
-            serde_yaml::from_slice(&bytes).map_err(|_| catalog_match_load_error(directory))
-        })
-        .collect()
-}
-
-fn catalog_match_load_error(directory: &str) -> ApiError {
-    ApiError::load_failed(
-        "Catalog matching data is unavailable.",
-        json!({ "reason": "catalog_match_data_invalid", "directory": directory }),
-    )
-}
-
-fn is_yaml(path: &Path) -> bool {
-    path.is_file()
-        && matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("yaml" | "yml")
-        )
-}
-
-fn profile_is_generic(profile: &ProfileYaml) -> bool {
-    profile
-        .metadata
-        .get("safe_generic")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || profile.id.split('.').any(|part| part == "generic")
-}
-
-fn profile_requires_explicit_selection(profile: &ProfileYaml) -> bool {
-    profile
-        .metadata
-        .get("automatic_profile_matching")
-        .and_then(Value::as_bool)
-        == Some(false)
-        || profile
-            .metadata
-            .get("selection_policy")
-            .and_then(Value::as_str)
-            == Some("explicit_operator_selection")
-}
-
-fn evaluate_profile(facts: &DetectedDeviceFacts, criteria: &ProfileMatchYaml) -> MatchEvidence {
-    let mut result = MatchEvidence::default();
-    evaluate_contains(
-        "manufacturer",
-        facts.manufacturer.as_deref(),
-        &criteria.manufacturer_contains,
-        true,
-        &mut result,
-    );
-    evaluate_contains(
-        "brand",
-        facts.brand.as_deref(),
-        &criteria.brand_contains,
-        true,
-        &mut result,
-    );
-    evaluate_patterns(
-        facts.model.as_deref(),
-        &criteria.model_patterns,
-        &mut result,
-    );
-    if let Some(range) = &criteria.android_version {
-        result.declared += 1;
-        match facts.android_version {
-            None => {
-                result.missing += 1;
-                result
-                    .reasons
-                    .push("Android version was unavailable.".to_string());
-            }
-            Some(version)
-                if range.min.is_some_and(|minimum| version < minimum)
-                    || range.max.is_some_and(|maximum| version > maximum) =>
-            {
-                result.conflicts += 1;
-                result.android_conflict = true;
-                result
-                    .reasons
-                    .push("Android version is outside the supported range.".to_string());
-            }
-            Some(_) => {
-                result.matched += 1;
-                result
-                    .reasons
-                    .push("Android version is supported.".to_string());
-            }
-        }
-    }
-    result
-}
-
-fn evaluate_contains(
-    label: &str,
-    actual: Option<&str>,
-    expected: &[String],
-    family: bool,
-    result: &mut MatchEvidence,
-) {
-    if expected.is_empty() {
-        return;
-    }
-    result.declared += 1;
-    let Some(actual) = actual else {
-        result.missing += 1;
-        result
-            .reasons
-            .push(format!("Device {label} was unavailable."));
-        return;
-    };
-    let actual = actual.to_lowercase();
-    if expected
-        .iter()
-        .any(|value| actual.contains(&value.to_lowercase()))
-    {
-        result.matched += 1;
-        if family {
-            result.family_matches += 1;
-        }
-        result.reasons.push(format!("Device {label} matched."));
-    } else {
-        result.conflicts += 1;
-        if family {
-            result.family_conflicts += 1;
-        }
-        result
-            .reasons
-            .push(format!("Device {label} did not match."));
-    }
-}
-
-fn evaluate_patterns(actual: Option<&str>, patterns: &[String], result: &mut MatchEvidence) {
-    if patterns.is_empty() {
-        return;
-    }
-    result.declared += 1;
-    let Some(actual) = actual else {
-        result.missing += 1;
-        result
-            .reasons
-            .push("Device model was unavailable.".to_string());
-        return;
-    };
-    if patterns.iter().any(|pattern| {
-        regex::Regex::new(pattern)
-            .map(|regex| regex.is_match(actual))
-            .unwrap_or(false)
-    }) {
-        result.matched += 1;
-        result.reasons.push("Device model matched.".to_string());
-    } else {
-        result.conflicts += 1;
-        result
-            .reasons
-            .push("Device model did not match.".to_string());
-    }
-}
-
-fn confidence_rank(confidence: &str) -> u8 {
-    match confidence {
-        "exact" => 3,
-        "high" => 2,
-        "low" => 1,
-        _ => 0,
-    }
-}
+pub(crate) use crate::device_profile_resolution::match_device;
 
 #[cfg(test)]
 mod tests {
@@ -894,7 +527,9 @@ mod tests {
 
     use super::*;
     use crate::catalog_source::CatalogSnapshot;
+    use crate::device_probe::DetectedDeviceFacts;
     use crate::device_probe::{CommandOutput, DeviceProbeError};
+    use crate::device_profile_resolution::{evaluate_profile, AndroidRangeYaml, ProfileMatchYaml};
 
     struct FakeRunner {
         calls: RefCell<Vec<Vec<String>>>,
@@ -1647,9 +1282,9 @@ truncated
             false,
         );
         assert_eq!(high["confidence"], "high");
-        assert_eq!(high["recommendedPlanId"], "plan.test");
-        assert_eq!(high["blankSetupPlans"][0]["planId"], "plan.test");
-        assert_eq!(high["blankSetupPlans"][0]["selectionMode"], "blank");
+        assert!(high["recommendedPlanId"].is_null());
+        assert_eq!(high["resolutionStatus"], "incomplete");
+        assert!(high["blankSetupPlans"].as_array().unwrap().is_empty());
 
         let low = match_fixture(
             "manufacturer_contains: [Acme]\nbrand_contains: [Acme]\nmodel_patterns: ['^Model$']",
@@ -1661,7 +1296,7 @@ truncated
         );
         assert_eq!(low["confidence"], "low");
         assert!(low["recommendedPlanId"].is_null());
-        assert_eq!(low["requiresExplicitChoice"], true);
+        assert_eq!(low["resolutionStatus"], "incomplete");
 
         let none = match_fixture(
             "manufacturer_contains: [Acme]",
@@ -1778,6 +1413,59 @@ truncated
             true
         );
         assert!(fingerprint_release_conflict["recommendedPlanId"].is_null());
+    }
+
+    #[test]
+    fn empty_criteria_does_not_infer_compatibility() {
+        let result = match_fixture("{}", DetectedDeviceFacts::default(), false);
+        assert_eq!(result["profiles"][0]["eligibility"], "incompatible");
+        assert!(result["recommendedPlanId"].is_null());
+    }
+
+    #[test]
+    fn incomplete_profile_never_establishes_selection() {
+        let result = match_fixture(
+            "manufacturer_contains: [Acme]\nmodel_patterns: ['^Model$']",
+            DetectedDeviceFacts {
+                manufacturer: Some("Acme".into()),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(result["resolutionStatus"], "incomplete");
+        assert!(result["recommendedPlanId"].is_null());
+        assert_eq!(result["profiles"][0]["eligibility"], "incomplete");
+    }
+
+    #[test]
+    fn profile_without_plan_still_prevents_automatic_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+            fs::create_dir(root.path().join(directory)).unwrap();
+        }
+        for id in ["a", "b"] {
+            fs::write(
+                root.path().join(format!("device_profiles/{id}.yaml")),
+                format!("id: {id}\nname: {id}\nmatch:\n  manufacturer_contains: [ARBOR]\n"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            root.path().join("device_plans/a.yaml"),
+            "id: a.plan\nname: A\ndevice_profile_ref: a\n",
+        )
+        .unwrap();
+        let result = match_device(
+            &CatalogSnapshot::legacy_local(root.path()).unwrap(),
+            &DetectedDeviceFacts {
+                manufacturer: Some("ARBOR".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result["resolutionStatus"], "choice_required");
+        assert_eq!(result["profiles"].as_array().unwrap().len(), 2);
+        assert!(result["recommendedPlanId"].is_null());
     }
 
     fn match_fixture(match_yaml: &str, facts: DetectedDeviceFacts, safe_generic: bool) -> Value {

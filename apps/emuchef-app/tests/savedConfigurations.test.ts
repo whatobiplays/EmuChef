@@ -123,9 +123,10 @@ test("opening portable intent preserves stale references but resets all runtime 
   assert.equal(loaded.facts, null);
   assert.equal(loaded.review, null);
   assert.equal(loaded.execution.kind, "idle");
-  assert.equal(loaded.devicePlan, "plan.saved");
-  assert.deepEqual(loaded.selectedRecipes, ["recipe.saved", "recipe.removed"]);
-  assert.deepEqual(loaded.bindings, document.bindings);
+  assert.equal(loaded.devicePlan, null);
+  assert.equal(loaded.stagedIntent?.devicePlan, "plan.saved");
+  assert.deepEqual(loaded.stagedIntent?.selectedRecipes, ["recipe.saved", "recipe.removed"]);
+  assert.deepEqual(loaded.stagedIntent?.bindings, document.bindings);
 });
 
 test("Save and pure Save As preserve the current stage and review authority", () => {
@@ -170,8 +171,8 @@ test("Platform-Tools invalidation preserves dirty portable edits only", () => {
   assert.equal(invalidated.step, "connect");
   assert.equal(invalidated.deviceHandle, null);
   assert.equal(invalidated.portableIntentDirty, true);
-  assert.equal(invalidated.devicePlan, document.devicePlan);
-  assert.deepEqual(invalidated.bindings, document.bindings);
+  assert.equal(invalidated.stagedIntent?.devicePlan, document.devicePlan);
+  assert.deepEqual(invalidated.stagedIntent?.bindings, document.bindings);
 });
 
 test("last-opened display rejects invalid timestamps", () => {

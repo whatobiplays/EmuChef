@@ -34,6 +34,8 @@ const facts = {
 };
 
 const match = {
+  selectionHandle: "selection-one", selectedProfileId: "profile.one", resolutionHandle: "resolution-one", setupGeneration: 1, profileChangeAllowed: true,
+  profiles: [{ profileId: "profile.one", profileName:"One", profileDescription:null, generic:false, eligibility:"eligible" as const, requiresExplicitChoice:false, reasons:[], plans:["plan.one","plan.new","plan.old"].map((planId) => ({planId, name:planId, description:null, profileId:"profile.one", profileName:"One", reasons:[]})) }],
   confidence: "exact" as const,
   recommendedPlanId: "plan.one",
   requiresExplicitChoice: false,
@@ -215,8 +217,8 @@ test("runtime restart invalidates authority before restoring portable intent", (
   assert.equal(restored.facts, null);
   assert.equal(restored.review, null);
   assert.deepEqual(restored.execution, { kind: "idle" });
-  assert.deepEqual(restored.bindings, { "recipe.one/theme": "dark" });
-  assert.deepEqual(restored.requiredReentryBindings, ["recipe.one/token"]);
+  assert.deepEqual(restored.stagedIntent?.bindings, { "recipe.one/theme": "dark" });
+  assert.deepEqual(restored.stagedIntent?.requiredReentryBindings, ["recipe.one/token"]);
   assert.equal(restored.portableIntentDirty, true);
 });
 
@@ -262,7 +264,7 @@ test("device selection and probing advance without exposing a serial", () => {
   });
   const probed = workflowReducer(selected, { type: "device-probed", facts, match });
   assert.equal(probed.step, "setup");
-  assert.equal(probed.devicePlan, "plan.one");
+  assert.equal(probed.devicePlan, null);
   assert.equal("serial" in probed.facts!, false);
 });
 
@@ -314,9 +316,9 @@ test("back navigation preserves choices while leaving transient device loading",
   assert.equal(backToRecipes.step, "recipes");
   const backToSetup = workflowReducer(backToRecipes, { type: "back" });
   assert.equal(backToSetup.step, "setup");
-  assert.equal(backToSetup.devicePlan, "plan.one");
+  assert.equal(backToSetup.devicePlan, null);
   assert.deepEqual(backToSetup.selectedRecipes, ["recipe.one"]);
-  assert.equal(workflowReducer(backToSetup, { type: "back" }).step, "connect");
+  assert.equal(workflowReducer(backToSetup, { type: "back" }).step, "profile");
 });
 
 test("recipes cannot advance while empty or awaiting backend validation", () => {
@@ -473,6 +475,7 @@ test("clearing an input removes its binding and invalidates downstream authority
 test("plan selection distinguishes backend defaults from an explicit blank setup", () => {
   const state = {
     ...initialWorkflowState,
+    match, selectionHandle: "selection-one", selectedProfileId: "profile.one",
     devicePlan: "plan.old",
     selectedRecipes: ["recipe.old"],
   };
@@ -500,6 +503,7 @@ test("plan changes and unknown descriptions cannot persist Setup Location refere
     "recipe.one/portable": "/portable/value",
   };
   const description = {
+    match, selectionHandle: "selection-one", selectedProfileId: "profile.one",
     devicePlan: "plan.old",
     selectedRecipes: ["recipe.one"],
     expandedRecipes: ["recipe.one"],
@@ -521,6 +525,7 @@ test("plan changes and unknown descriptions cannot persist Setup Location refere
   };
   const state = {
     ...initialWorkflowState,
+    match, selectionHandle: "selection-one", selectedProfileId: "profile.one",
     devicePlan: "plan.old",
     selectedRecipes: ["recipe.one"],
     description,
@@ -736,6 +741,7 @@ test("safe generic plans are never auto-selected", () => {
   });
   const genericOnly = {
     ...match,
+    selectionHandle: null, selectedProfileId: null,
     confidence: "none" as const,
     recommendedPlanId: null,
     requiresExplicitChoice: true,
@@ -757,7 +763,7 @@ test("safe generic plans are never auto-selected", () => {
   });
   assert.equal(probed.devicePlan, null);
   assert.equal(probed.match?.blocked, false);
-  assert.equal(probed.step, "device");
+  assert.equal(probed.step, "profile");
   assert.equal(probed.unsupportedAcknowledged, false);
   assert.equal(workflowReducer(probed, { type: "continue-unsupported" }), probed);
 
@@ -765,10 +771,10 @@ test("safe generic plans are never auto-selected", () => {
     type: "set-unsupported-acknowledgment",
     acknowledged: true,
   });
-  assert.equal(acknowledged.step, "device");
+  assert.equal(acknowledged.step, "profile");
   assert.equal(acknowledged.devicePlan, null);
   const continued = workflowReducer(acknowledged, { type: "continue-unsupported" });
-  assert.equal(continued.step, "setup");
+  assert.equal(continued.step, "profile");
   assert.equal(continued.devicePlan, null);
   assert.deepEqual(continued.match?.safeGenericPlans, genericOnly.safeGenericPlans);
 });
@@ -941,7 +947,7 @@ test("portable transitions require a fresh setup-location selection", () => {
     dirty: true,
     requiredReentryBindings: portable.requiredReentryBindings,
   });
-  assert.deepEqual(restored.bindings, { "recipe.one/theme": "dark" });
+  assert.deepEqual(restored.stagedIntent?.bindings, { "recipe.one/theme": "dark" });
 
   const freshlySelected = workflowReducer(restored, {
     type: "set-binding",

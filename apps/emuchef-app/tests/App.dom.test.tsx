@@ -16,6 +16,7 @@ import type {
   ExecutionCapabilities,
   RuntimeStatus,
   SavedConfigurationDocument,
+  SavedConfigurationMutation,
   SupportSnapshot,
 } from "../src/types";
 
@@ -40,6 +41,9 @@ const mockApi = vi.hoisted(() => ({
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
+  selectDeviceProfile: vi.fn(),
+  deviceProfileSelection: vi.fn(),
+  resetDeviceProfileSelection: vi.fn(),
   prepareExecutionReview: vi.fn(),
   discardReview: vi.fn(),
   startSimulatedExecution: vi.fn(),
@@ -143,6 +147,8 @@ const safePlan = {
 };
 
 const supportedMatch = {
+  selectionHandle:"selection-supported", selectedProfileId:"profile.generic", resolutionHandle:"resolution-supported", setupGeneration:1, profileChangeAllowed:true,
+  profiles:[{profileId:"profile.generic",profileName:"Generic",profileDescription:null,generic:false,eligibility:"eligible",requiresExplicitChoice:false,reasons:[],plans:[{...safePlan,planId:"plan.supported",name:"Supported setup"}]}],
   confidence: "exact",
   recommendedPlanId: "plan.supported",
   requiresExplicitChoice: false,
@@ -433,7 +439,10 @@ function resetApi(): void {
   mockApi.listSetupLocations.mockResolvedValue([]);
   mockApi.saveSetupLocation.mockResolvedValue([]);
   mockApi.removeSetupLocation.mockResolvedValue([]);
+  mockApi.closeSavedConfiguration.mockResolvedValue(undefined);
+  mockApi.resetDeviceProfileSelection.mockResolvedValue(undefined);
   mockApi.matchDevice.mockResolvedValue(supportedMatch);
+  mockApi.deviceProfileSelection.mockResolvedValue({resolutionHandle:"resolution-supported",selectionHandle:"selection-supported",selectedProfileId:"profile.generic",setupGeneration:1,profileChangeAllowed:true,profileChangeReason:null});
   mockApi.pickInputPath.mockResolvedValue(null);
   mockApi.describeConfiguration.mockResolvedValue({
     devicePlan: "plan.supported",
@@ -482,6 +491,18 @@ async function renderReadyApp(): Promise<void> {
   await screen.findByRole("heading", { name: "Choose an Android device" });
 }
 
+async function continueCurrentStep(user: ReturnType<typeof userEvent.setup>) {
+  if (screen.queryByRole("heading", { name: "Choose Setup" })) await chooseSupportedSetup(user);
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+}
+
+async function chooseSupportedSetup(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByRole("heading", { name: "Choose Setup" });
+  if (screen.queryAllByRole("radio").some((radio) => radio.getAttribute("name") === "device-plan" && (radio as HTMLInputElement).checked)) return;
+  const recommended = screen.queryByRole("radio", { name: /Supported setup/ });
+  if (recommended && !(recommended as HTMLInputElement).checked) await user.click(recommended);
+}
+
 async function advanceToInputs(
   user: ReturnType<typeof userEvent.setup>,
 ): Promise<void> {
@@ -492,10 +513,11 @@ async function advanceToInputs(
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
-  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await chooseSupportedSetup(user);
+  await user.click(screen.getByRole("radio", { name: /Supported setup/ }));
+  await continueCurrentStep(user);
   await screen.findByRole("heading", { name: "Choose what to install" });
-  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await continueCurrentStep(user);
   await screen.findByRole("heading", {
     name: "Provide required files and options",
   });
@@ -601,7 +623,7 @@ test("a superseded committed inventory poll clears stale volume choices when the
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await screen.findByRole("radio", { name: "Internal storage" });
 
@@ -769,7 +791,7 @@ test("saves a Setup Location for the active plan without changing the T04 select
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -781,6 +803,7 @@ test("saves a Setup Location for the active plan without changing the T04 select
     expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
       availableDevice.deviceHandle,
       "plan.supported",
+      "selection-supported",
     ),
   );
   await waitFor(() =>
@@ -815,6 +838,7 @@ test("saves a Setup Location for the active plan without changing the T04 select
     undefined,
     "Games",
     "games",
+      "selection-supported",
   );
   expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
   expect(screen.getByText("Ready for recipe selection.")).toBeTruthy();
@@ -879,7 +903,7 @@ test.each([
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await screen.findByRole("heading", { name: "Example Handheld" });
+    await chooseSupportedSetup(user);
     await user.click(screen.getByRole("button", { name: "Refresh storage" }));
     await waitFor(() =>
       expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -911,6 +935,7 @@ test.each([
         availableDevice.deviceHandle,
         "plan.supported",
         "location-opaque",
+      "selection-supported",
       ),
     );
     await waitFor(() =>
@@ -1010,7 +1035,7 @@ test("a superseded poll queues the stale Setup Location refresh while removal is
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   const locationLoadsBeforeStorageRefresh =
     mockApi.listSetupLocations.mock.calls.length;
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
@@ -1035,6 +1060,7 @@ test("a superseded poll queues the stale Setup Location refresh while removal is
       availableDevice.deviceHandle,
       "plan.supported",
       "location-opaque",
+      "selection-supported",
     ),
   );
 
@@ -1130,7 +1156,7 @@ test("a same-handle session epoch change clears edited state and ignores a stale
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   const editLocation = await screen.findByRole("button", {
     name: "Edit Games",
@@ -1149,6 +1175,7 @@ test("a same-handle session epoch change clears edited state and ignores a stale
       availableDevice.deviceHandle,
       "plan.supported",
       "location-opaque",
+      "selection-supported",
     ),
   );
 
@@ -1248,7 +1275,7 @@ test("a generic Setup Location save failure refreshes readiness and preserves it
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() => expect(explicitRefreshCount).toBe(1));
   await user.click(await screen.findByRole("button", { name: "Edit Games" }));
@@ -1345,7 +1372,7 @@ test("a stale Setup Location save forces a fresh T04 observation before retry", 
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -1464,7 +1491,7 @@ test("a stale Setup Location save failure for an old plan does not affect the ne
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -1497,6 +1524,7 @@ test("a stale Setup Location save failure for an old plan does not affect the ne
     expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
       availableDevice.deviceHandle,
       "plan.alternate",
+      "selection-supported",
     ),
   );
 
@@ -1570,7 +1598,7 @@ test("a Setup Location save queues refresh for the selected plan after a plan ch
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -1627,6 +1655,7 @@ test("a Setup Location save queues refresh for the selected plan after a plan ch
   expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
     availableDevice.deviceHandle,
     "plan.alternate",
+      "selection-supported",
   );
 });
 
@@ -1689,12 +1718,13 @@ await screen.findByRole("button", {
 name: /Supported Handheld.*Connected/,
 }),
 );
-await screen.findByRole("heading", { name: "Example Handheld" });
+await chooseSupportedSetup(user);
 await user.click(screen.getByRole("button", { name: "Refresh storage" }));
 await waitFor(() =>
 expect(mockApi.listSetupLocations).toHaveBeenCalledWith(
 availableDevice.deviceHandle,
 "plan.supported",
+      "selection-supported",
 ),
 );
 await waitFor(() =>
@@ -1751,6 +1781,7 @@ locationLoadsBeforeSessionChange + 1,
 expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
 availableDevice.deviceHandle,
 "plan.supported",
+      "selection-supported",
 );
 expect(screen.queryByText("Games")).toBeNull();
 await act(async () => {
@@ -1797,7 +1828,7 @@ test("a same-handle inventory poll suppresses a stale Setup Location save error"
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(
@@ -1920,7 +1951,7 @@ test("an inventory poll preserves an in-flight Setup Location save", async () =>
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -1990,6 +2021,7 @@ test("an inventory poll preserves an in-flight Setup Location save", async () =>
   expect(mockApi.listSetupLocations).toHaveBeenLastCalledWith(
     availableDevice.deviceHandle,
     "plan.supported",
+      "selection-supported",
   );
   expect(mockApi.selectDeviceVolume).not.toHaveBeenCalled();
 });
@@ -2054,7 +2086,7 @@ test("a superseded inventory poll cannot invalidate an in-flight Setup Location 
       name: /Supported Handheld.*Connected/,
     }),
   );
-  await screen.findByRole("heading", { name: "Example Handheld" });
+  await chooseSupportedSetup(user);
   await user.click(screen.getByRole("button", { name: "Refresh storage" }));
   await waitFor(() =>
     expect(mockApi.deviceVolumes).toHaveBeenCalledWith(
@@ -2214,7 +2246,7 @@ test.each(["save", "remove"] as const)(
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await screen.findByRole("heading", { name: "Example Handheld" });
+    await chooseSupportedSetup(user);
     if (operation === "save") {
       await user.click(screen.getByRole("button", { name: "Refresh storage" }));
       await waitFor(() =>
@@ -2256,6 +2288,7 @@ test.each(["save", "remove"] as const)(
           availableDevice.deviceHandle,
           "plan.supported",
           "location-opaque",
+      "selection-supported",
         ),
       );
     }
@@ -3484,7 +3517,7 @@ describe("Phase 5B workflow surfaces", () => {
     ).toBeTruthy();
     const blank = screen.getByRole("radio", { name: /Start from scratch/ });
     await user.click(blank);
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     expect(mockApi.describeConfiguration).toHaveBeenCalledWith(
       expect.objectContaining({
         devicePlan: "plan.supported",
@@ -3568,7 +3601,7 @@ describe("Phase 5B workflow surfaces", () => {
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", { name: "Choose what to install" });
 
     expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
@@ -3644,7 +3677,7 @@ describe("Phase 5B workflow surfaces", () => {
       }),
     ).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(
       expect.objectContaining({
         devicePlan: "plan.supported",
@@ -3745,7 +3778,7 @@ describe("Phase 5B workflow surfaces", () => {
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", { name: "Choose what to install" });
 
     const recommended = screen.getByRole("button", {
@@ -3823,6 +3856,8 @@ describe("Phase 5B workflow surfaces", () => {
       availableDevice,
     ]);
     mockApi.matchDevice.mockResolvedValue({
+      resolutionHandle:"generic-resolution", selectionHandle:null, selectedProfileId:null, setupGeneration:1, profileChangeAllowed:true, resolutionStatus:"unsupported",
+      profiles:[{profileId:"profile.generic",profileName:"Generic",profileDescription:null,generic:true,eligibility:"eligible",requiresExplicitChoice:true,reasons:[],plans:[safePlan]}],
       confidence: "none",
       recommendedPlanId: null,
       requiresExplicitChoice: true,
@@ -3831,6 +3866,8 @@ describe("Phase 5B workflow surfaces", () => {
       blocked: false,
       blockReason: null,
     });
+    mockApi.deviceProfileSelection.mockResolvedValue({resolutionHandle:"generic-resolution",selectionHandle:null,selectedProfileId:null,setupGeneration:1,profileChangeAllowed:true,profileChangeReason:null});
+    mockApi.selectDeviceProfile.mockResolvedValue({resolutionHandle:"generic-next",selectionHandle:"generic-selected",selectedProfileId:"profile.generic",setupGeneration:2,profileChangeAllowed:true,profileChangeReason:null});
     await renderReadyApp();
 
     const unauthorized = await screen.findByRole("button", {
@@ -3848,26 +3885,15 @@ describe("Phase 5B workflow surfaces", () => {
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await screen.findByRole("heading", {
-      name: "This device is not officially supported",
-    });
-    expect(screen.queryByText(safePlan.name)).toBeNull();
-
-    const continueButton = screen.getByRole("button", {
-      name: "Show safe generic setups",
-    });
-    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
-    await user.click(
-      screen.getByRole("checkbox", {
-        name: /not officially supported.*not device-specific/i,
-      }),
-    );
-    expect(screen.queryByText(safePlan.name)).toBeNull();
-    await user.click(continueButton);
-
-    const planRadio = await screen.findByRole("radio", {
-      name: /Backend Safe Generic/,
-    });
+    await screen.findByRole("heading", { name: "Choose Device Profile" });
+    const generic=screen.getByRole("button",{name:"Generic"});
+    expect((generic as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("checkbox",{name:/generic profile provides only/}));
+    mockApi.deviceProfileSelection.mockResolvedValue({resolutionHandle:"generic-next",selectionHandle:"generic-selected",selectedProfileId:"profile.generic",setupGeneration:2,profileChangeAllowed:true,profileChangeReason:null});
+    await user.click(generic);
+    await screen.findByRole("heading",{name:"Choose Setup"});
+    expect(mockApi.selectDeviceProfile).toHaveBeenCalledWith("device-opaque","generic-resolution","profile.generic",true);
+    const planRadio=await screen.findByRole("radio",{name:/Backend Safe Generic/});
     expect((planRadio as HTMLInputElement).checked).toBe(false);
   });
 
@@ -4019,7 +4045,7 @@ describe("Phase 5B workflow surfaces", () => {
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await screen.findByRole("heading", { name: "Example Handheld" });
+    await chooseSupportedSetup(user);
 
     await user.click(
       await openSupportAction(
@@ -4605,6 +4631,7 @@ describe("device qualification controller integration", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Back" }));
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
     expect(
       (screen.getByRole("checkbox", { name: /Recipe One/ }) as HTMLInputElement)
@@ -4612,7 +4639,8 @@ describe("device qualification controller integration", () => {
     ).toBe(true);
 
     await user.click(screen.getByRole("button", { name: "Back" }));
-    await screen.findByRole("heading", { name: "Example Handheld" });
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
+    await chooseSupportedSetup(user);
     const statusCallsBeforeCheck =
       mockApi.deviceQualificationModeStatus.mock.calls.length;
     const pollsBeforeCheck = mockApi.pollDevices.mock.calls.length;
@@ -4632,6 +4660,7 @@ describe("device qualification controller integration", () => {
     // Rust closed the attempt, so the refreshed projection releases the
     // device-selection lock even though this workflow still holds the device.
     await user.click(screen.getByRole("button", { name: "Back" }));
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
     const connectedDevice = await screen.findByRole("button", {
       name: /Supported Handheld.*Connected/,
     });
@@ -4641,8 +4670,8 @@ describe("device qualification controller integration", () => {
 
     // Walking forward proves the recipe intent lock is released as well.
     await user.click(connectedDevice);
-    await screen.findByRole("heading", { name: "Example Handheld" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await chooseSupportedSetup(user);
+    await continueCurrentStep(user);
     await screen.findByRole("heading", { name: "Choose what to install" });
     await waitFor(() =>
       expect(
@@ -4842,14 +4871,18 @@ describe("device qualification controller integration", () => {
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Back" }));
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
     await screen.findByRole("heading", {
       name: "Provide required files and options",
     });
     await user.click(screen.getByRole("button", { name: "Back" }));
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
     await screen.findByRole("heading", { name: "Choose what to install" });
     await user.click(screen.getByRole("button", { name: "Back" }));
-    await screen.findByRole("heading", { name: /Example Handheld/ });
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
+    await screen.findByRole("heading", { name: /Choose Setup/ });
     await user.click(screen.getByRole("button", { name: "Back" }));
+    if (screen.queryByRole("button", { name: "Choose another device" })) await user.click(screen.getByRole("button", { name: "Choose another device" }));
 
     const connectedDevice = await screen.findByRole("button", {
       name: /Supported Handheld.*Connected/,
@@ -4918,10 +4951,10 @@ describe("device qualification controller integration", () => {
         name: /Supported Handheld.*Connected/,
       }),
     );
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", { name: "Choose what to install" });
     await user.click(screen.getByRole("checkbox", { name: /Example emulator/ }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", {
       name: "Provide required files and options",
     });
@@ -5074,7 +5107,7 @@ describe("Phase 5D input collection and repair", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", {
       name: "Provide required files and options",
     });
@@ -5099,478 +5132,31 @@ describe("Phase 5D input collection and repair", () => {
     expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
   });
 
-  test("repair persists only current portable bindings through the saved mutation queue", async () => {
-    const user = userEvent.setup();
-    const recipeIds = ["recipe.one", "recipe.removed"];
-    const themeKey = "recipe.one/theme";
-    const accountKey = "recipe.one/account";
-    const destinationKey = "recipe.one/destination";
-    const removedKey = "recipe.removed/obsolete";
-    const defaultRecipes = ["recipe.one", "recipe.removed"];
-    const makeDescription = (
-      devicePlan: string,
-      selectedRecipes: string[],
-      bindings: Record<string, unknown>,
-    ): ConfigurationDescription => {
-      const portableInputs = [
-        descriptionWithTextInput({
-          key: themeKey,
-          inputId: "theme",
-          label: "Theme",
-          required: false,
-          sensitive: false,
-        }).inputs[0],
-        descriptionWithTextInput({
-          key: accountKey,
-          inputId: "account",
-          label: "Account name",
-          required: false,
-          sensitive: false,
-        }).inputs[0],
-      ];
-      const destination = descriptionWithSetupLocationRef().inputs[0];
-      const obsolete = descriptionWithTextInput({
-        key: removedKey,
-        inputId: "obsolete",
-        label: "Removed recipe option",
-        required: false,
-        sensitive: false,
-      }).inputs[0];
-      const availableInputs = [
-        ...(selectedRecipes.includes("recipe.one")
-          ? [...portableInputs, destination]
-          : []),
-        ...(selectedRecipes.includes("recipe.removed") ? [obsolete] : []),
-      ];
-      return {
-        devicePlan,
-        selectedRecipes,
-        expandedRecipes: selectedRecipes,
-        recipeOptions: recipeIds.map((id) => ({
-          id,
-          name: id === "recipe.one" ? "Recipe One" : "Removed Recipe",
-          description: null,
-          selected: selectedRecipes.includes(id),
-          recommended: true,
-          dependencyRequired: false,
-          available: true,
-          unavailableCapabilities: [],
-        })),
-        inputs: availableInputs.map((input) => ({
-          ...input,
-          value: bindings[input.key] ?? null,
-        })),
-        diagnostics: [],
-      };
-    };
-    let resolveFreshRepairDescription:
-      | ((description: ConfigurationDescription) => void)
-      | undefined;
-    const freshRepairDescription = new Promise<ConfigurationDescription>(
-      (resolve) => {
-        resolveFreshRepairDescription = resolve;
-      },
-    );
-    mockApi.catalog.mockResolvedValue({
-      catalog: {
-        sourceKind: "bundled",
-        sourceId: "test",
-        version: "test",
-        contentDigest: { algorithm: "sha256", value: "digest" },
-      },
-      recipes: recipeIds.map((id) => ({
-        id,
-        name: id === "recipe.one" ? "Recipe One" : "Removed Recipe",
-        description: null,
-      })),
-    });
-    mockApi.listSetupLocations.mockResolvedValue([
-      {
-        id: "location-one",
-        name: "Games",
-        relativePath: "games",
-        volumeKind: "internalShared",
-        volumeLabel: "Internal storage",
-        ready: true,
-        detail: "Available.",
-      },
-    ]);
-    mockApi.describeConfiguration.mockImplementation(async (request) => {
-      const selectedRecipes = request.selectedRecipes ?? defaultRecipes;
-      const description = makeDescription(
-        request.devicePlan,
-        selectedRecipes,
-        request.bindings,
-      );
-      if (
-        request.devicePlan === "generic.safe" &&
-        Object.hasOwn(request.bindings, themeKey)
-      )
-        return freshRepairDescription;
-      return description;
-    });
-
-    let returnChangedHandleOnNextUpdate = false;
-    let holdNextSavedMutation = false;
-    let releaseHeldSavedMutation: (() => void) | undefined;
-    let signalHeldSavedMutationStarted: (() => void) | undefined;
-    const heldSavedMutationStarted = new Promise<void>((resolve) => {
-      signalHeldSavedMutationStarted = resolve;
-    });
-    let persisted: SavedConfigurationDocument = {
-      outcome: "saved" as const,
-      configurationHandle: "configuration-repair",
-      name: "My EmuChef setup",
-      schemaVersion: 2,
-      dirty: false,
-      revision: 7,
-      devicePlan: "plan.supported",
-      selectedRecipes: defaultRecipes,
-      bindings: {
-        [themeKey]: "saved-old-theme",
-        [removedKey]: "saved-obsolete-value",
-      },
-      pendingSanitationCount: 0,
-      compatibility: { baselineState: "unchanged" },
-      validation: { state: "valid", diagnostics: [] },
-    };
-    mockApi.createSavedConfiguration.mockResolvedValue(persisted);
-    mockApi.updateSavedConfiguration.mockImplementation(
-      async (
-        configurationHandle: string,
-        revision: number,
-        mutation: { kind: string; key?: string; value?: unknown },
-      ) => {
-        expect(configurationHandle).toBe("configuration-repair");
-        expect(revision).toBe(persisted.revision);
-        if (
-          holdNextSavedMutation &&
-          mutation.kind === "device_plan" &&
-          mutation.value === "generic.safe"
-        ) {
-          holdNextSavedMutation = false;
-          signalHeldSavedMutationStarted?.();
-          await new Promise<void>((resolve) => {
-            releaseHeldSavedMutation = resolve;
-          });
-        }
-        if (returnChangedHandleOnNextUpdate) {
-          returnChangedHandleOnNextUpdate = false;
-          return {
-            ...persisted,
-            configurationHandle: "configuration-replaced",
-            revision: revision + 1,
-            dirty: true,
-            devicePlan: mutation.value as string,
-          };
-        }
-        let bindings = { ...persisted.bindings };
-        let devicePlan = persisted.devicePlan;
-        let selectedRecipes = persisted.selectedRecipes;
-        if (mutation.kind === "device_plan")
-          devicePlan = mutation.value as string;
-        else if (mutation.kind === "selected_recipes")
-          selectedRecipes = mutation.value as string[];
-        else if (mutation.kind === "remove_binding" && mutation.key)
-          delete bindings[mutation.key];
-        else if (mutation.kind === "binding" && mutation.key)
-          bindings[mutation.key] = mutation.value;
-        persisted = {
-          ...persisted,
-          revision: revision + 1,
-          dirty: true,
-          devicePlan,
-          selectedRecipes,
-          bindings,
-        };
-        return persisted;
-      },
-    );
-    mockApi.saveSavedConfiguration.mockImplementation(async () => ({
-      ...persisted,
-      dirty: false,
-    }));
-    mockApi.prepareExecutionReview.mockResolvedValue({
-      reviewHandle: "review-opaque",
-      setup: { name: "Reviewed setup" },
-      target: { label: "Connected Android device" },
-      features: [],
-      inputs: [],
-      notices: [],
-      work: { actionCount: 1 },
-      canExecute: true,
-    });
+  test("repair requires explicit setup choice when the saved plan is no longer available", async () => {
+    const user=userEvent.setup(); const inputKey="recipe.one/theme";
+    const description=descriptionWithTextInput({key:inputKey,inputId:"theme",label:"Theme",required:false,sensitive:false});
+    mockApi.describeConfiguration.mockImplementation(async (request)=>({...description,devicePlan:request.devicePlan,selectedRecipes:["recipe.one"],inputs:description.inputs.map((input)=>({...input,value:request.bindings[input.key]??null}))}));
+    const saved={outcome:"saved",configurationHandle:"original-saved",name:"My EmuChef setup",schemaVersion:2,dirty:false,revision:7,devicePlan:"plan.supported",selectedRecipes:["recipe.one"],bindings:{[inputKey]:"current-theme"},pendingSanitationCount:0,compatibility:{baselineState:"unchanged"},validation:{state:"valid",diagnostics:[]}};
+    mockApi.createSavedConfiguration.mockResolvedValue(saved);
+    mockApi.prepareExecutionReview.mockResolvedValue({reviewHandle:"review-opaque",executionMode:"simulated",setup:{name:"Reviewed setup"},target:{label:"Connected Android device"},features:[],inputs:[],notices:[],work:{actionCount:1},canExecute:true});
     mockApi.discardReview.mockResolvedValue(undefined);
-    mockApi.startSimulatedExecution.mockResolvedValue(
-      failedSimulationSnapshot(),
-    );
-
-    await advanceToInputs(user);
-    await waitFor(() => expect(screen.getByLabelText("Theme")).toBeTruthy());
-    fireEvent.change(screen.getByLabelText("Theme"), {
-      target: { value: "current-theme" },
-    });
-    fireEvent.change(screen.getByLabelText("Account name"), {
-      target: { value: "current-account" },
-    });
-    await user.selectOptions(
-      screen.getByLabelText("Install destination"),
-      "location-one",
-    );
-    await waitFor(() =>
-      expect(
-        mockApi.describeConfiguration.mock.calls.some(
-          ([request]) =>
-            request.bindings[themeKey] === "current-theme" &&
-            request.bindings[accountKey] === "current-account" &&
-            request.bindings[destinationKey] === "location-one",
-        ),
-      ).toBe(true),
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: "Manage saved setups…" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", {
-      name: "Provide required files and options",
-    });
-    expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(
-      expect.objectContaining({
-        bindings: {
-          [themeKey]: "current-theme",
-          [accountKey]: "current-account",
-        },
-      }),
-    );
-    expect(
-      JSON.stringify(mockApi.createSavedConfiguration.mock.calls),
-    ).not.toContain(destinationKey);
-
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await waitFor(() =>
-      expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(1),
-    );
-    await screen.findByRole("button", { name: "Start simulation" });
-    await user.click(screen.getByRole("button", { name: "Start simulation" }));
-    await waitFor(() =>
-      expect(mockApi.startSimulatedExecution).toHaveBeenCalledWith(
-        "review-opaque",
-      ),
-    );
-    await screen.findByRole("button", { name: "Repair setup" });
-
-    mockApi.catalog.mockResolvedValue({
-      catalog: {
-        sourceKind: "bundled",
-        sourceId: "test",
-        version: "test",
-        contentDigest: { algorithm: "sha256", value: "digest" },
-      },
-      recipes: [
-        { id: "recipe.one", name: "Recipe One", description: null },
-      ],
-    });
-    mockApi.matchDevice.mockResolvedValue({
-      ...supportedMatch,
-      recommendedPlanId: "generic.safe",
-      candidates: [safePlan],
-    });
-    const catalogCallsBeforeRepair = mockApi.catalog.mock.calls.length;
-    const repairButton = screen.getByRole("button", { name: "Repair setup" });
-    expect((repairButton as HTMLButtonElement).disabled).toBe(false);
-    await user.click(repairButton);
-    await waitFor(() =>
-      expect(mockApi.discardReview).toHaveBeenCalledWith("review-opaque"),
-    );
-    await waitFor(() =>
-      expect(mockApi.catalog.mock.calls.length).toBeGreaterThan(
-        catalogCallsBeforeRepair,
-      ),
-    );
-    await waitFor(() =>
-      expect(
-        mockApi.describeConfiguration.mock.calls.some(
-          ([request]) => request.devicePlan === "generic.safe",
-        ),
-      ).toBe(true),
-    );
-    expect(
-      mockApi.describeConfiguration.mock.calls
-        .filter(([request]) => request.devicePlan === "generic.safe")
-        .map(([request]) => ({
-          selectedRecipes: request.selectedRecipes,
-          bindings: request.bindings,
-        })),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          bindings: expect.objectContaining({
-            [themeKey]: "current-theme",
-            [accountKey]: "current-account",
-          }),
-        }),
-      ]),
-    );
-    await waitFor(() =>
-      expect(
-        mockApi.describeConfiguration.mock.calls.some(
-          ([request]) =>
-            request.devicePlan === "generic.safe" &&
-            request.bindings[themeKey] === "current-theme" &&
-            request.bindings[accountKey] === "current-account",
-        ),
-      ).toBe(true),
-    );
-    holdNextSavedMutation = true;
-    await act(async () => {
-      resolveFreshRepairDescription?.(
-        makeDescription("generic.safe", ["recipe.one"], {
-          [themeKey]: "current-theme",
-          [accountKey]: "current-account",
-          [destinationKey]: "location-one",
-        }),
-      );
-      await freshRepairDescription;
-    });
-    await heldSavedMutationStarted;
-    const themeInput = screen.getByLabelText("Theme") as HTMLInputElement;
-    const descriptionsBeforeBlockedEdit =
-      mockApi.describeConfiguration.mock.calls.length;
-    await user.clear(themeInput);
-    await user.type(themeInput, "edited-during-repair");
-    await screen.findByText("Wait for setup repair to finish before continuing.");
-    await waitFor(() => expect(themeInput.value).toBe("current-theme"));
-    expect(mockApi.describeConfiguration).toHaveBeenCalledTimes(
-      descriptionsBeforeBlockedEdit,
-    );
-    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      releaseHeldSavedMutation?.();
-      await Promise.resolve();
-    });
-
-    await waitFor(() =>
-      expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(5),
-    );
-    expect(
-      mockApi.updateSavedConfiguration.mock.calls.map(([, revision, mutation]) => [
-        revision,
-        mutation.kind,
-        mutation.key ?? null,
-        mutation.value ?? null,
-      ]),
-    ).toEqual([
-      [7, "device_plan", null, "generic.safe"],
-      [8, "selected_recipes", null, ["recipe.one"]],
-      [9, "remove_binding", removedKey, null],
-      [10, "binding", themeKey, "current-theme"],
-      [11, "binding", accountKey, "current-account"],
-    ]);
-    expect(persisted).toMatchObject({
-      revision: 12,
-      devicePlan: "generic.safe",
-      selectedRecipes: ["recipe.one"],
-      bindings: {
-        [themeKey]: "current-theme",
-        [accountKey]: "current-account",
-      },
-    });
-    expect(Object.hasOwn(persisted.bindings, destinationKey)).toBe(false);
-    expect(Object.hasOwn(persisted.bindings, removedKey)).toBe(false);
-    expect(screen.getByLabelText("Theme")).toHaveProperty(
-      "value",
-      "current-theme",
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: "Manage saved setups…" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(mockApi.saveSavedConfiguration).toHaveBeenCalledWith(
-        "configuration-repair",
-      ),
-    );
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await waitFor(() =>
-      expect(mockApi.prepareExecutionReview).toHaveBeenCalledTimes(2),
-    );
-    expect(mockApi.prepareExecutionReview).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        devicePlan: "generic.safe",
-        selectedRecipes: ["recipe.one"],
-        bindings: expect.objectContaining({
-          [themeKey]: "current-theme",
-          [accountKey]: "current-account",
-          [destinationKey]: "location-one",
-        }),
-      }),
-    );
-
-    await screen.findByRole("button", { name: "Start simulation" });
-    await user.click(screen.getByRole("button", { name: "Start simulation" }));
-    await waitFor(() =>
-      expect(mockApi.startSimulatedExecution).toHaveBeenCalledTimes(2),
-    );
-    await screen.findByRole("button", { name: "Repair setup" });
-    const updatesBeforeUnchangedRepair =
-      mockApi.updateSavedConfiguration.mock.calls.length;
-    const descriptionsBeforeUnchangedRepair =
-      mockApi.describeConfiguration.mock.calls.length;
-    await user.click(screen.getByRole("button", { name: "Repair setup" }));
-    await waitFor(() =>
-      expect(
-        mockApi.describeConfiguration.mock.calls
-          .slice(descriptionsBeforeUnchangedRepair)
-          .some(
-            ([request]) =>
-              request.devicePlan === "generic.safe" &&
-              request.bindings[themeKey] === "current-theme",
-          ),
-      ).toBe(true),
-    );
-    await screen.findByText(
-      "Setup refreshed. Resolve any remaining issues, then create and review a new plan.",
-    );
-    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(
-      updatesBeforeUnchangedRepair,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Review plan" }));
-    await screen.findByRole("button", { name: "Start simulation" });
-    await user.click(screen.getByRole("button", { name: "Start simulation" }));
-    await waitFor(() =>
-      expect(mockApi.startSimulatedExecution).toHaveBeenCalledTimes(3),
-    );
-    await screen.findByRole("button", { name: "Repair setup" });
-    const nextPlan = {
-      ...safePlan,
-      planId: "generic.next",
-      name: "Next safe setup",
-    };
-    mockApi.matchDevice.mockResolvedValue({
-      ...supportedMatch,
-      recommendedPlanId: nextPlan.planId,
-      candidates: [nextPlan],
-    });
-    const updatesBeforeChangedHandle =
-      mockApi.updateSavedConfiguration.mock.calls.length;
-    returnChangedHandleOnNextUpdate = true;
-    await user.click(screen.getByRole("button", { name: "Repair setup" }));
-    await screen.findByText(
-      "The active saved setup changed during its update.",
-    );
-    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(
-      updatesBeforeChangedHandle + 1,
-    );
-    expect(mockApi.updateSavedConfiguration).toHaveBeenLastCalledWith(
-      "configuration-repair",
-      persisted.revision,
-      { kind: "device_plan", value: "generic.next" },
-    );
+    mockApi.startSimulatedExecution.mockResolvedValue(failedSimulationSnapshot());
+    await advanceToInputs(user); fireEvent.change(screen.getByLabelText("Theme"),{target:{value:"current-theme"}});
+    await waitFor(()=>expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({bindings:{[inputKey]:"current-theme"}})));
+    await user.click(screen.getByRole("button",{name:"Manage saved setups…"})); await user.click(screen.getByRole("button",{name:"Save"}));
+    await screen.findByRole("heading",{name:"Name this setup"}); await continueCurrentStep(user);
+    await screen.findByRole("heading",{name:"Provide required files and options"});
+    await user.click(screen.getByRole("button",{name:"Review plan"})); await user.click(await screen.findByRole("button",{name:"Start simulation"}));
+    await screen.findByRole("button",{name:"Repair setup"});
+    const originalBytes=JSON.stringify(saved); const updates=mockApi.updateSavedConfiguration.mock.calls.length; const descriptions=mockApi.describeConfiguration.mock.calls.length;
+    mockApi.matchDevice.mockResolvedValue({...supportedMatch,recommendedPlanId:safePlan.planId,candidates:[safePlan],profiles:[{...supportedMatch.profiles[0],plans:[safePlan]}]});
+    await user.click(screen.getByRole("button",{name:"Repair setup"}));
+    await screen.findByText("Choose a Device Profile and setup before creating a fresh review.");
+    expect(screen.getByRole("heading",{name:"Choose Setup"})).toBeTruthy();
+    expect((screen.getByRole("radio",{name:/Backend Safe Generic/}) as HTMLInputElement).checked).toBe(false);
+    expect(mockApi.describeConfiguration).toHaveBeenCalledTimes(descriptions);
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(updates);
+    expect(JSON.stringify(saved)).toBe(originalBytes);
   });
 
   test("repair write failure stays visible and explicit save retries the portable mutation", async () => {
@@ -5674,7 +5260,7 @@ describe("Phase 5D input collection and repair", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", {
       name: "Provide required files and options",
     });
@@ -5815,7 +5401,7 @@ describe("Phase 5D input collection and repair", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", {
       name: "Provide required files and options",
     });
@@ -5932,7 +5518,7 @@ describe("Phase 5D input collection and repair", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
 
     await waitFor(() =>
       expect(mockApi.createSavedConfiguration).toHaveBeenCalled(),
@@ -6002,7 +5588,7 @@ describe("Phase 5D input collection and repair", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await waitFor(() => expect(resolveRecovery).not.toBeNull());
 
     fireEvent.change(input, { target: { value: "latest" } });
@@ -6052,7 +5638,7 @@ describe("Phase 5D input collection and repair", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await waitFor(() => expect(mockApi.createSavedConfiguration).toHaveBeenCalled());
 
     fireEvent.change(input, { target: { value: "latest" } });
@@ -6486,9 +6072,7 @@ describe("Phase 5D input collection and repair", () => {
     await screen.findByRole("heading", { name: "Choose what to install" });
     await act(async () => picker.resolve("/selected/stale.cfg"));
     expect(screen.queryByText("/selected/stale.cfg")).toBeNull();
-    expect(
-      await screen.findAllByText("An outdated file selection was ignored."),
-    ).not.toHaveLength(0);
+    expect(screen.queryByText("An outdated file selection was ignored.")).toBeNull();
   });
 
   test("device destinations stay textual and sensitive values use concealed controls", async () => {
@@ -6820,7 +6404,7 @@ describe("Phase 5F saved setup management", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("heading", { name: "Name this setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await screen.findByRole("heading", {
       name: "Provide required files and options",
     });
@@ -6838,7 +6422,7 @@ describe("Phase 5F saved setup management", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save As…" }));
     await screen.findByRole("heading", { name: "Name the new setup" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await waitFor(() =>
       expect(mockApi.saveSavedConfigurationAs).toHaveBeenCalledWith(
         "configuration-original",
@@ -6981,7 +6565,7 @@ describe("Phase 5F saved setup management", () => {
         /does not save the connected device, generated plan, execution progress, or results/,
       ),
     ).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
 
     expect(
       await screen.findByRole("heading", {
@@ -7006,7 +6590,7 @@ describe("Phase 5F saved setup management", () => {
     expect(
       await screen.findByRole("heading", { name: "Name the duplicate setup" }),
     ).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await waitFor(() =>
       expect(mockApi.duplicateSavedConfiguration).toHaveBeenCalled(),
     );
@@ -7025,7 +6609,7 @@ describe("Phase 5F saved setup management", () => {
     expect(
       await screen.findByRole("heading", { name: "Name the exported setup" }),
     ).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await continueCurrentStep(user);
     await waitFor(() =>
       expect(mockApi.exportSavedConfiguration).toHaveBeenCalled(),
     );
@@ -7364,3 +6948,184 @@ test("an authoritative inventory poll reloads qualification status without a man
     screen.queryByRole("heading", { name: "Normal workflow intent is locked" }),
   ).toBeNull();
 });
+
+test("ambiguous profile buttons wait for native acceptance and focus Choose Setup", async () => {
+  const user=userEvent.setup(); const accepted=deferred<{resolutionHandle:string;selectionHandle:string;selectedProfileId:string;setupGeneration:number;profileChangeAllowed:boolean;profileChangeReason:null}>();
+  const profiles=["KONKR Pocket Advance","AYANEO Pocket Air Mini"].map((profileName,index) => ({profileId:String(index),profileName,profileDescription:null,generic:false,eligibility:"eligible",requiresExplicitChoice:true,reasons:["Model matched"],plans:[{...safePlan,profileId:String(index),planId:String(index)+".plan"}]}));
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.matchDevice.mockResolvedValue({...supportedMatch,resolutionHandle:"choice",selectionHandle:null,selectedProfileId:null,recommendedPlanId:null,resolutionStatus:"choice_required",profiles,candidates:profiles.flatMap((p)=>p.plans)});
+  mockApi.deviceProfileSelection.mockResolvedValue({resolutionHandle:"choice",selectionHandle:null,selectedProfileId:null,setupGeneration:1,profileChangeAllowed:true,profileChangeReason:null});
+  mockApi.selectDeviceProfile.mockReturnValue(accepted.promise);
+  await renderReadyApp(); await user.click(await screen.findByRole("button",{name:/Supported Handheld.*Connected/}));
+  await screen.findByRole("heading",{name:"Choose Device Profile"});
+  await user.click(screen.getByRole("button",{name:"KONKR Pocket Advance"}));
+  expect(screen.queryByRole("heading",{name:"Choose Setup"})).toBeNull();
+  mockApi.deviceProfileSelection.mockResolvedValue({resolutionHandle:"next",selectionHandle:"selected",selectedProfileId:"0",setupGeneration:2,profileChangeAllowed:true,profileChangeReason:null});
+  await act(async()=>{accepted.resolve({resolutionHandle:"next",selectionHandle:"selected",selectedProfileId:"0",setupGeneration:2,profileChangeAllowed:true,profileChangeReason:null});await accepted.promise;});
+  const heading=await screen.findByRole("heading",{name:"Choose Setup"}); await waitFor(()=>expect(document.activeElement).toBe(heading));
+  expect(mockApi.selectDeviceProfile).toHaveBeenCalledExactlyOnceWith("device-opaque","choice","0",false);
+});
+
+for (const changeProfile of [false,true]) {
+  test(changeProfile ? "a profile switch detaches the old document before queued writes can continue" : "same-profile saved writes remain ordered by the accepted document revision", async () => {
+    const user=userEvent.setup(); const first=deferred<SavedConfigurationDocument>();
+    const theme="recipe.one/theme"; const account="recipe.one/account";
+    const one=descriptionWithTextInput({key:theme,inputId:"theme",label:"Theme",required:false,sensitive:false});
+    const two=descriptionWithTextInput({key:account,inputId:"account",label:"Account",required:false,sensitive:false});
+    mockApi.describeConfiguration.mockImplementation(async(request)=>({...one,inputs:[...one.inputs,...two.inputs].map((input)=>({...input,value:request.bindings[input.key]??"base"}))}));
+    const saved: SavedConfigurationDocument={outcome:"saved",configurationHandle:"ordered-original",name:"Original saved setup",schemaVersion:2,dirty:false,revision:7,devicePlan:"plan.supported",selectedRecipes:["recipe.one"],bindings:{[theme]:"base",[account]:"base"},pendingSanitationCount:0,compatibility:{baselineState:"unchanged"},validation:{state:"valid",diagnostics:[]}};
+    const originalBytes=JSON.stringify(saved);
+    mockApi.createSavedConfiguration.mockResolvedValue(saved);
+    mockApi.updateSavedConfiguration.mockImplementation(async(_handle,revision,mutation)=>{
+      if (revision===7) return first.promise;
+      return {...saved,dirty:true,revision:revision+1,bindings:{[theme]:"first",[account]:mutation.value}};
+    });
+    const alternative={profileId:"other",profileName:"Other profile",profileDescription:null,generic:false,eligibility:"eligible",requiresExplicitChoice:true,reasons:[],plans:[{...safePlan,planId:"other.plan",profileId:"other"}]};
+    mockApi.matchDevice.mockResolvedValue({...supportedMatch,profiles:[...supportedMatch.profiles,alternative],candidates:[...supportedMatch.candidates,...alternative.plans]});
+    await advanceToInputs(user);
+    await user.click(screen.getByRole("button",{name:"Manage saved setups…"})); await user.click(screen.getByRole("button",{name:"Save"}));
+    await screen.findByRole("heading",{name:"Name this setup"}); await continueCurrentStep(user);
+    await screen.findByRole("heading",{name:"Provide required files and options"});
+    fireEvent.change(screen.getByLabelText("Theme"),{target:{value:"first"}});
+    await waitFor(()=>expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("Account"),{target:{value:"second"}});
+    expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1);
+    if (changeProfile) {
+      await user.click(screen.getByRole("button",{name:"Back"})); await user.click(screen.getByRole("button",{name:"Back"}));
+      await user.click(screen.getByRole("button",{name:"Change Device Profile"}));
+      const accepted={resolutionHandle:"other-resolution",selectionHandle:"other-selection",selectedProfileId:"other",setupGeneration:2,profileChangeAllowed:true,profileChangeReason:null};
+      mockApi.selectDeviceProfile.mockResolvedValue(accepted); mockApi.deviceProfileSelection.mockResolvedValue(accepted);
+      await user.click(screen.getByRole("button",{name:"Other profile"}));
+      await screen.findByRole("heading",{name:"Choose Setup"});
+    }
+    await act(async()=>{first.resolve({...saved,revision:8,dirty:true,bindings:{[theme]:"first",[account]:"base"}});await first.promise;await flushPendingPromises();});
+    if (changeProfile) {
+      expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("Original saved setup")).toBeNull();
+    } else {
+      await waitFor(()=>expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(2));
+      expect(mockApi.updateSavedConfiguration.mock.calls.map(([,revision,mutation])=>[revision,mutation.kind,mutation.key,mutation.value])).toEqual([[7,"binding",theme,"first"],[8,"binding",account,"second"]]);
+    }
+    expect(JSON.stringify(saved)).toBe(originalBytes);
+  });
+}
+
+test("a delayed native authority rejection cannot erase a replacement profile in App", async () => {
+  const user = userEvent.setup();
+  const oldRead = deferred<{ resolutionHandle: string; selectionHandle: string; selectedProfileId: string; setupGeneration: number; profileChangeAllowed: boolean; profileChangeReason: null }>();
+  const replacement = { resolutionHandle: "resolution-b", selectionHandle: "selection-b", selectedProfileId: "profile-b", setupGeneration: 2, profileChangeAllowed: true, profileChangeReason: null };
+  const profileB = { ...supportedMatch.profiles[0], profileId: "profile-b", profileName: "Replacement profile", plans: [{ ...safePlan, profileId: "profile-b", planId: "plan-b", name: "Replacement setup" }] };
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  mockApi.matchDevice.mockResolvedValue({ ...supportedMatch, profiles: [...supportedMatch.profiles, profileB], candidates: [...supportedMatch.candidates, ...profileB.plans] });
+  mockApi.deviceProfileSelection.mockReturnValueOnce(oldRead.promise).mockResolvedValue(replacement);
+  mockApi.selectDeviceProfile.mockResolvedValue(replacement);
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await screen.findByRole("heading", { name: "Choose Setup" });
+  await waitFor(() => expect(mockApi.deviceProfileSelection).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByRole("button", { name: "Change Device Profile" }));
+  await user.click(screen.getByRole("button", { name: "Replacement profile" }));
+  await screen.findByRole("heading", { name: "Choose Setup" });
+  await screen.findByRole("radio", { name: /Replacement setup/ });
+  await waitFor(() => expect(mockApi.selectDeviceProfile).toHaveBeenCalledWith("device-opaque", "resolution-supported", "profile-b", false));
+  // Keep any later observation pending so this assertion isolates the old rejection.
+  mockApi.deviceProfileSelection.mockReturnValue(new Promise(() => { /* Keep later observations pending for this rejection check. */ }));
+  await act(async () => { oldRead.reject(new Error("older authority read failed")); await flushPendingPromises(); });
+  expect(screen.getByRole("heading", { name: "Choose Setup" })).toBeTruthy();
+  expect(screen.getByRole("radio", { name: /Replacement setup/ })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Choose Device Profile" })).toBeNull();
+  expect(screen.queryByText("Profile authority is unavailable. Read device information again.")).toBeNull();
+});
+
+for (const changed of [true, false]) {
+  test(changed ? "same-profile repair filters and orders mutations while blocking edits during persistence" : "unchanged same-profile repair completes without saved writes", async () => {
+    const user = userEvent.setup();
+    const theme = "recipe.one/theme";
+    const account = "recipe.one/account";
+    const obsolete = "recipe.one/obsolete";
+    const themeDescription = descriptionWithTextInput({ key: theme, inputId: "theme", label: "Theme", required: false, sensitive: false });
+    const accountDescription = descriptionWithTextInput({ key: account, inputId: "account", label: "Account", required: false, sensitive: false });
+    const obsoleteDescription = descriptionWithTextInput({ key: obsolete, inputId: "obsolete", label: "Obsolete option", required: false, sensitive: false });
+    const currentValues = { [theme]: "current-theme", [account]: "current-account" };
+    let repairing = false;
+    mockApi.describeConfiguration.mockImplementation(async (request) => ({
+      ...themeDescription,
+      devicePlan: request.devicePlan,
+      selectedRecipes: request.selectedRecipes ?? ["recipe.one"],
+      inputs: [...themeDescription.inputs, ...accountDescription.inputs, ...(!repairing && changed ? obsoleteDescription.inputs : [])].map((input) => ({ ...input, value: request.bindings[input.key] ?? null })),
+    }));
+    mockApi.catalog.mockResolvedValue({ catalog: { sourceKind: "bundled", sourceId: "test", version: "test", contentDigest: { algorithm: "sha256", value: "digest" } }, recipes: [{ id: "recipe.one", name: "Recipe One", description: null }] });
+    const original: SavedConfigurationDocument = {
+      outcome: "saved", configurationHandle: "same-profile-repair", name: "Same-profile saved setup", schemaVersion: 2,
+      dirty: false, revision: 7, devicePlan: "plan.supported", selectedRecipes: changed ? ["recipe.one", "recipe.optional"] : ["recipe.one"],
+      bindings: changed ? { [theme]: "saved-theme", [account]: "saved-account", [obsolete]: "saved-obsolete" } : currentValues,
+      pendingSanitationCount: 0, compatibility: { baselineState: "unchanged" }, validation: { state: "valid", diagnostics: [] },
+    };
+    const originalBytes = JSON.stringify(original);
+    let persisted = original;
+    const persistGate = deferred<void>();
+    let calls = 0;
+    mockApi.createSavedConfiguration.mockResolvedValue(original);
+    mockApi.updateSavedConfiguration.mockImplementation(async (handle: string, revision: number, mutation: SavedConfigurationMutation) => {
+      expect(handle).toBe(original.configurationHandle);
+      expect(revision).toBe(persisted.revision);
+      calls += 1;
+      if (calls === 1) await persistGate.promise;
+      const next = { ...persisted, bindings: { ...persisted.bindings }, revision: revision + 1, dirty: true };
+      if (mutation.kind === "device_plan") next.devicePlan = mutation.value;
+      else if (mutation.kind === "selected_recipes") next.selectedRecipes = mutation.value;
+      else if (mutation.kind === "remove_binding") delete next.bindings[mutation.key];
+      else next.bindings[mutation.key] = mutation.value;
+      persisted = next;
+      return next;
+    });
+    mockApi.discardReview.mockResolvedValue(undefined);
+    mockApi.prepareExecutionReview.mockResolvedValue({ reviewHandle: "review-opaque", executionMode: "simulated", setup: { name: "Reviewed setup" }, target: { label: "Connected Android device" }, features: [], inputs: [], notices: [], work: { actionCount: 1 }, canExecute: true });
+    mockApi.startSimulatedExecution.mockResolvedValue(failedSimulationSnapshot());
+    await advanceToInputs(user);
+    fireEvent.change(screen.getByLabelText("Theme"), { target: { value: currentValues[theme] } });
+    fireEvent.change(screen.getByLabelText("Account"), { target: { value: currentValues[account] } });
+    if (changed) fireEvent.change(screen.getByLabelText("Obsolete option"), { target: { value: "current-obsolete" } });
+    await waitFor(() => expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({ bindings: changed ? { ...currentValues, [obsolete]: "current-obsolete" } : currentValues })));
+    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Name this setup" });
+    await continueCurrentStep(user);
+    await screen.findByRole("heading", { name: "Provide required files and options" });
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await user.click(await screen.findByRole("button", { name: "Start simulation" }));
+    await screen.findByRole("button", { name: "Repair setup" });
+    expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
+    repairing = true;
+    await user.click(screen.getByRole("button", { name: "Repair setup" }));
+    if (changed) {
+      await waitFor(() => expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1));
+      await screen.findByRole("heading", { name: "Provide required files and options" });
+      expect(screen.queryByLabelText("Obsolete option")).toBeNull();
+      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({ devicePlan: "plan.supported", selectionHandle: "selection-supported", selectedRecipes: ["recipe.one"], bindings: currentValues }));
+      const descriptions = mockApi.describeConfiguration.mock.calls.length;
+      fireEvent.change(screen.getByLabelText("Theme"), { target: { value: "blocked-during-repair" } });
+      await screen.findByText("Wait for setup repair to finish before continuing.");
+      expect((screen.getByLabelText("Theme") as HTMLInputElement).value).toBe(currentValues[theme]);
+      expect(mockApi.describeConfiguration).toHaveBeenCalledTimes(descriptions);
+      expect(mockApi.updateSavedConfiguration).toHaveBeenCalledTimes(1);
+      await act(async () => { persistGate.resolve(); await persistGate.promise; await flushPendingPromises(); });
+    }
+    await screen.findByText("Setup refreshed. Resolve any remaining issues, then create and review a new plan.");
+    if (changed) {
+      expect(mockApi.updateSavedConfiguration.mock.calls.map(([, revision, mutation]) => [revision, mutation])).toEqual([
+        [7, { kind: "selected_recipes", value: ["recipe.one"] }],
+        [8, { kind: "remove_binding", key: obsolete }],
+        [9, { kind: "binding", key: theme, value: currentValues[theme] }],
+        [10, { kind: "binding", key: account, value: currentValues[account] }],
+      ]);
+      expect(persisted).toMatchObject({ revision: 11, devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], bindings: currentValues });
+      expect(Object.hasOwn(persisted.bindings, obsolete)).toBe(false);
+    } else {
+      expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
+      expect(persisted).toBe(original);
+    }
+    expect(mockApi.saveSavedConfiguration).not.toHaveBeenCalled();
+    expect(JSON.stringify(original)).toBe(originalBytes);
+  });
+}

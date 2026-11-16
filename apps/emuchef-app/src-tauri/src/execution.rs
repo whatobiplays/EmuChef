@@ -195,6 +195,10 @@ impl ExecutionHandleStore {
         self.durable_operation_fence_active
     }
 
+    pub(crate) fn profile_change_allowed(&self) -> bool {
+        !self.has_in_flight() && self.pending_setup_location_lease.is_none()
+    }
+
     pub fn has_in_flight(&self) -> bool {
         self.start_reserved.is_some()
             || self.active.is_some()
@@ -943,6 +947,42 @@ where
     })
 }
 
+/// Refresh the eligibility decision without adopting changed catalog or match
+/// evidence. Start reservations exclude both explicit and automatic selection.
+fn revalidate_profile_for_start<R: RuntimeRequester>(
+    state: &AppState,
+    runtime: &R,
+    review: &ReviewedPlanSnapshot,
+    facts: &Value,
+) -> Result<(), String> {
+    let handle = review
+        .response
+        .get("profileSelectionHandle")
+        .and_then(Value::as_str)
+        .ok_or_else(|| stale_review("Choose a Device Profile and create a fresh review."))?;
+    crate::commands::verified_profile_catalog(state)?;
+    let result = runtime_request(
+        runtime,
+        "matchDevice",
+        json!({"catalog": crate::commands::catalog(state)?.internal_payload(), "facts": facts}),
+    )?;
+    let transition = crate::commands::qualification_transition_lock(state);
+    {
+        let mut handles = state.handles.lock().map_err(|_| session_error())?;
+        let epoch = handles.device(&review.device_handle)?.session_epoch;
+        handles.set_facts_for_epoch(&review.device_handle, epoch, facts.clone())?;
+    }
+    crate::commands::require_profile_selection(state, &review.device_handle, Some(handle), None)?;
+    state
+        .handles
+        .lock()
+        .map_err(|_| session_error())?
+        .profile_selection
+        .require_match_set(&result)?;
+    transition.release_and_retry_best_effort();
+    Ok(())
+}
+
 #[tauri::command]
 pub fn start_simulated_execution(
     review_handle: String,
@@ -1064,7 +1104,35 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
         refreshed_review.qualification_context.as_ref(),
     )?;
 
-    let start_result = request_dry_run_start(runtime, &refreshed_review).map_err(|error| {
+    {
+        let epoch = state
+            .handles
+            .lock()
+            .map_err(|_| session_error())?
+            .device(&refreshed_review.device_handle)?
+            .session_epoch;
+        state
+            .handles
+            .lock()
+            .map_err(|_| session_error())?
+            .set_facts_for_epoch(&refreshed_review.device_handle, epoch, facts.clone())?;
+    }
+    revalidate_profile_for_start(state, runtime, &refreshed_review, &facts).map_err(|error| {
+        resolve_simulated_start_failure(state, executions, &error, || error.clone())
+    })?;
+    let transition = crate::commands::qualification_transition_lock(state);
+    let selected = refreshed_review.response["profileSelectionHandle"]
+        .as_str()
+        .ok_or_else(|| stale_review("Choose a Device Profile and review again."))?;
+    crate::commands::require_profile_selection(
+        state,
+        &refreshed_review.device_handle,
+        Some(selected),
+        None,
+    )?;
+    let start_response = request_dry_run_start(runtime, &refreshed_review);
+    transition.release_and_retry_best_effort();
+    let start_result = start_response.map_err(|error| {
         resolve_simulated_start_failure(state, executions, &error, || execution_start_error(&error))
     })?;
     bind_start_result(executions, review_handle, refreshed_review, &start_result)
@@ -2091,6 +2159,13 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         qualification_result?;
     }
 
+    if let Some(state) = qualification_state {
+        revalidate_profile_for_start(state, runtime, &refreshed_review, &facts).map_err(
+            |error| {
+                resolve_runtime_request_failure(Some(state), executions, &error, || error.clone())
+            },
+        )?;
+    }
     let setup_location_attempt_sequence = executions.issue_setup_location_attempt_sequence()?;
     let setup_location_lease = setup_location_lease_for_review(
         &refreshed_review,
@@ -2117,7 +2192,20 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
                     && device.session_epoch == session_epoch
                     && device.facts_session_epoch == Some(session_epoch)
             });
-        if !current {
+        let profile_current = qualification_state.is_none_or(|state| {
+            refreshed_review.response["profileSelectionHandle"]
+                .as_str()
+                .is_some_and(|selected| {
+                    crate::commands::require_profile_selection(
+                        state,
+                        &refreshed_review.device_handle,
+                        Some(selected),
+                        None,
+                    )
+                    .is_ok()
+                })
+        });
+        if !current || !profile_current {
             let release_result = executions.release_unrequested_real_start(&unresolved_real_start);
             if let Some(transition) = transition {
                 transition.release_and_retry_best_effort();
@@ -2151,7 +2239,30 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         }
         response
     } else {
-        request_real_start(runtime, &refreshed_review, None)
+        let transition = qualification_state.map(crate::commands::qualification_transition_lock);
+        let admission = qualification_state
+            .map(|state| {
+                let selected = refreshed_review.response["profileSelectionHandle"]
+                    .as_str()
+                    .ok_or_else(|| stale_review("Choose a Device Profile and review again."))?;
+                crate::commands::require_profile_selection(
+                    state,
+                    &refreshed_review.device_handle,
+                    Some(selected),
+                    None,
+                )
+                .map(|_| ())
+            })
+            .transpose();
+        if let Err(error) = admission {
+            executions.release_unrequested_real_start(&unresolved_real_start)?;
+            return Err(error);
+        }
+        let response = request_real_start(runtime, &refreshed_review, None);
+        if let Some(transition) = transition {
+            transition.release_and_retry_best_effort();
+        }
+        response
     };
     let start_result = match start_response {
         Ok(public) => public,
@@ -3358,6 +3469,7 @@ where
         .map_err(|_| launch_stale_target())?;
     validate_plan_digest(&refreshed_review).map_err(|_| launch_stale_target())?;
 
+    revalidate_profile_for_start(state, runtime, &refreshed_review, &facts)?;
     let report_response = match runtime_request(
         runtime,
         "getExecution",
@@ -3378,11 +3490,23 @@ where
         .ok_or_else(launch_unavailable)?;
     eligible_launch_label(mapping, report).ok_or_else(launch_unavailable)?;
 
-    match runtime_request(
+    let transition = crate::commands::qualification_transition_lock(state);
+    let handle = refreshed_review.response["profileSelectionHandle"]
+        .as_str()
+        .ok_or_else(launch_stale_target)?;
+    crate::commands::require_profile_selection(
+        state,
+        &refreshed_review.device_handle,
+        Some(handle),
+        None,
+    )?;
+    let launch_response = runtime_request(
         runtime,
         "launchExecutionApp",
         json!({ "executionId": mapping.sidecar_id }),
-    ) {
+    );
+    transition.release_and_retry_best_effort();
+    match launch_response {
         Ok(_) => {}
         Err(error) => {
             if let Some(lost) =
@@ -5553,6 +5677,69 @@ pub(crate) mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    pub(crate) fn profile_change_blocking_stores(
+        root: &Path,
+    ) -> Vec<(&'static str, ExecutionHandleStore)> {
+        let mut reserved = ExecutionHandleStore::default();
+        reserved.reserve_start(ExecutionKind::Real).unwrap();
+        let mut active = ExecutionHandleStore::default();
+        active.reserve_start(ExecutionKind::Real).unwrap();
+        active.bind_started(
+            ExecutionKind::Real,
+            "guard-sidecar".into(),
+            "guard-review".into(),
+            review(),
+        );
+        let uncertain = ExecutionHandleStore {
+            unresolved_real_start: Some(UnresolvedRealStart {
+                runtime_generation: 1,
+                attempt_sequence: 1,
+                device_handle: "guard-device".into(),
+                plan_digest: "guard-plan".into(),
+            }),
+            ..ExecutionHandleStore::default()
+        };
+        let path = root.join("profile-change-operation.fence");
+        fs::write(&path, b"unresolved operation").unwrap();
+        let durable = ExecutionHandleStore::with_durable_operation_fence(path);
+        let pending_lease = ExecutionHandleStore {
+            pending_setup_location_lease: Some(SetupLocationExecutionLease {
+                attempt_sequence: 1,
+                device_handle: "guard-device".into(),
+                session_epoch: 1,
+                runtime_generation: 1,
+                plan_id: "guard-plan".into(),
+                plan_digest: "a".repeat(64),
+            }),
+            ..ExecutionHandleStore::default()
+        };
+        vec![
+            ("reserved", reserved),
+            ("active", active),
+            ("uncertain", uncertain),
+            ("durable", durable),
+            ("pending lease", pending_lease),
+        ]
+    }
+
+    pub(crate) fn profile_change_fence_snapshot(store: &ExecutionHandleStore) -> Value {
+        json!({
+            "reserved": store.start_reserved.map(|kind| format!("{kind:?}")),
+            "active": store.active.as_ref().map(|mapping| json!({
+                "handle": mapping.public_handle, "sidecar": mapping.sidecar_id,
+                "review": mapping.review_handle, "kind": format!("{:?}", mapping.kind)
+            })),
+            "uncertain": store.unresolved_real_start.as_ref().map(|start| json!({
+                "generation": start.runtime_generation, "attempt": start.attempt_sequence,
+                "device": start.device_handle, "digest": start.plan_digest
+            })),
+            "durable": store.durable_operation_fence_active,
+            "path": store.durable_operation_fence_path,
+            "marker": store.durable_operation_fence_path.as_ref().map(|path| fs::read(path).unwrap()),
+            "pendingLease": store.setup_location_lease(),
+        })
+    }
 
     #[cfg(not(feature = "real-execution"))]
     #[test]
@@ -8092,6 +8279,21 @@ pub(crate) mod tests {
         (temp, app)
     }
 
+    fn select_test_profile(state: &AppState) {
+        let mut handles = state.handles.lock().unwrap();
+        let Some(device) = handles.single_available_device_handle() else {
+            return;
+        };
+        let Ok(binding) = crate::commands::profile_binding(state, &handles, &device) else {
+            return;
+        };
+        let view = handles
+            .profile_selection
+            .observe(binding, match_result("profile.test"), true);
+        let selection = view["selectionHandle"].as_str().unwrap();
+        handles.bind_test_reviews_to_profile_selection(&device, selection);
+    }
+
     fn align_test_adb_revision(state: &AppState, expected_revision: u64) {
         let mut adb = state.adb.lock().unwrap();
         while adb.revision() < expected_revision {
@@ -8099,6 +8301,8 @@ pub(crate) mod tests {
                 .expect("the test ADB manager should advance its revision");
         }
         assert_eq!(adb.revision(), expected_revision);
+        drop(adb);
+        select_test_profile(state);
     }
 
     fn supported_inventory(transport_id: &str) -> Value {
@@ -8126,6 +8330,8 @@ pub(crate) mod tests {
 
     fn match_result(profile_id: &str) -> Value {
         json!({
+            "profiles": [{"profileId": profile_id, "profileName":"Test profile", "generic":false,"eligibility":"eligible","plans":[{"planId":"test-plan"}]}],
+            "resolutionStatus":"resolved", "selectedProfileId":profile_id,
             "confidence": "high",
             "recommendedPlanId": "test-plan",
             "requiresExplicitChoice": false,
@@ -8221,6 +8427,11 @@ pub(crate) mod tests {
             }]);
             retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
         }
+        handles
+            .lock()
+            .unwrap()
+            .set_facts(&retained.device_handle, target_facts())
+            .unwrap();
         let review_handle = handles.lock().unwrap().insert_review(retained);
         (handles, root, review_handle)
     }
@@ -10741,7 +10952,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn final_probe_drift_invalidates_qualification_without_changing_product_admission() {
+    fn final_probe_drift_invalidates_selection_and_blocks_product_admission() {
         let repository_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
         std::fs::write(
@@ -10836,6 +11047,7 @@ pub(crate) mod tests {
         .unwrap();
         let mut executions = ExecutionHandleStore::default();
         executions.reserve_start(ExecutionKind::Real).unwrap();
+        select_test_profile(&state);
         let runtime = ScriptedRuntime {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(vec![
@@ -10869,8 +11081,8 @@ pub(crate) mod tests {
         );
 
         assert!(
-            result.is_ok(),
-            "qualification invalidation must not change product admission: {result:?}; requests: {:?}",
+            result.is_err(),
+            "material identity drift must block product admission: {result:?}; requests: {:?}",
             runtime
                 .requests
                 .lock()
@@ -10901,7 +11113,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|(request_type, _)| request_type == "startExecution")
                 .count(),
-            1
+            0
         );
         drop(requests);
         let stored = state
@@ -11022,12 +11234,14 @@ pub(crate) mod tests {
         .unwrap();
         let mut executions = ExecutionHandleStore::default();
         executions.reserve_start(ExecutionKind::Real).unwrap();
+        select_test_profile(&state);
         let runtime = ScriptedRuntime {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(vec![
                 Ok(supported_inventory("transport-1")),
                 Ok(target_facts()),
                 Ok(supported_qualification()),
+                Ok(match_result("profile.test")),
                 Ok(match_result("profile.test")),
                 Err(safe_error(
                     "runtime_session_lost",
@@ -11128,6 +11342,8 @@ pub(crate) mod tests {
                 .cleanup_retired_install();
         }
         assert_eq!(adb.revision(), 2);
+        drop(adb);
+        select_test_profile(state);
     }
 
     /// Start seam under test for scripted runtime-request coverage.
@@ -11337,6 +11553,15 @@ pub(crate) mod tests {
                 StartSeam::Real => ExecutionKind::Real,
             })
             .unwrap();
+        select_test_profile(&state);
+        let mut responses = responses;
+        let profile_check_index = match seam {
+            StartSeam::Simulated => 2,
+            StartSeam::Real => 4,
+        };
+        if responses.len() > profile_check_index {
+            responses.insert(profile_check_index, Ok(match_result("profile.test")));
+        }
         let runtime = StartSeamRuntime {
             handles: &state.handles,
             sidecar: &state.sidecar,
@@ -11627,6 +11852,11 @@ pub(crate) mod tests {
             ),
         );
 
+        let mut responses = responses;
+        if responses.len() > 2 {
+            responses.insert(2, Ok(match_result("profile.test")));
+        }
+        select_test_profile(&state);
         let runtime = StartSeamRuntime {
             handles: &state.handles,
             sidecar: &state.sidecar,
@@ -11728,7 +11958,12 @@ pub(crate) mod tests {
         assert!(error.contains("runtime_session_lost"), "{error}");
         assert_eq!(
             outcome.requests,
-            vec!["listAdbDevices", "probeDevice", "getExecution"]
+            vec![
+                "listAdbDevices",
+                "probeDevice",
+                "matchDevice",
+                "getExecution"
+            ]
         );
         assert!(!outcome.mapping_retained);
         assert!(outcome.attempt_invalidated);
@@ -11752,6 +11987,7 @@ pub(crate) mod tests {
             vec![
                 "listAdbDevices",
                 "probeDevice",
+                "matchDevice",
                 "getExecution",
                 "launchExecutionApp"
             ]
@@ -11882,7 +12118,12 @@ pub(crate) mod tests {
 
         assert_eq!(
             requests,
-            vec!["listAdbDevices", "probeDevice", "startExecution"]
+            vec![
+                "listAdbDevices",
+                "probeDevice",
+                "matchDevice",
+                "startExecution"
+            ]
         );
     }
 
@@ -12257,7 +12498,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn final_catalog_profile_drift_invalidates_qualification_without_blocking_execution() {
+    fn final_catalog_profile_drift_invalidates_selection_and_blocks_product_admission() {
         let repository_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repository_root.path().join("authored/recipes")).unwrap();
         std::fs::write(
@@ -12332,6 +12573,7 @@ pub(crate) mod tests {
         .unwrap();
         let mut executions = ExecutionHandleStore::default();
         executions.reserve_start(ExecutionKind::Real).unwrap();
+        select_test_profile(&state);
         let runtime = ScriptedRuntime {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(vec![
@@ -12365,8 +12607,8 @@ pub(crate) mod tests {
         );
 
         assert!(
-            result.is_ok(),
-            "profile drift must remain qualification-only: {result:?}; requests: {:?}",
+            result.is_err(),
+            "profile drift must block product admission: {result:?}; requests: {:?}",
             runtime
                 .requests
                 .lock()
@@ -12393,7 +12635,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|(request_type, _)| request_type == "startExecution")
                 .count(),
-            1
+            0
         );
         drop(requests);
         let stored = state
@@ -12903,11 +13145,13 @@ pub(crate) mod tests {
                 "warnings": [],
                 "errors": [],
             });
+            select_test_profile(&state);
             let runtime = ScriptedRuntime {
                 requests: Mutex::new(Vec::new()),
                 responses: Mutex::new(vec![
                     Ok(supported_inventory("transport-1")),
                     Ok(target_facts()),
+                    Ok(match_result("profile.test")),
                     Ok(json!({
                         "execution": {
                             "executionId": format!("sidecar-{source_kind}"),

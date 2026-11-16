@@ -8,6 +8,7 @@ mod execution;
 mod handles;
 mod menu;
 mod phase6d6_ui_smoke;
+mod profile_selection;
 mod qualification;
 pub(crate) mod qualification_build;
 mod qualification_mode;
@@ -129,6 +130,9 @@ pub fn run() {
             device_storage::save_setup_location,
             device_storage::remove_setup_location,
             commands::match_device,
+            commands::select_device_profile,
+            commands::get_device_profile_selection,
+            commands::reset_device_profile_selection,
             qualification_mode::get_device_qualification_mode_status,
             qualification_mode::create_qualification_target_candidate,
             qualification_mode::register_qualification_target,

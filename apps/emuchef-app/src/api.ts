@@ -7,6 +7,7 @@ import type {
   ConfigurationDescription,
   DeviceFacts,
   DeviceMatch,
+  ProfileSelection,
   DeviceSummary,
   DeviceVolumesProjection,
   SetupLocationProjection,
@@ -107,8 +108,8 @@ export const api = {
       volumeHandle,
       observationToken,
     }),
-  listSetupLocations: (deviceHandle: string, devicePlan: string) =>
-    invoke<SetupLocationProjection[]>("list_setup_locations", { deviceHandle, devicePlan }),
+  listSetupLocations: (deviceHandle: string, devicePlan: string, selectionHandle?: string | null) =>
+    invoke<SetupLocationProjection[]>("list_setup_locations", { deviceHandle, devicePlan, selectionHandle }),
   saveSetupLocation: (
     deviceHandle: string,
     devicePlan: string,
@@ -117,6 +118,7 @@ export const api = {
     existingId: string | undefined,
     name: string,
     relativePath: string,
+    selectionHandle?: string | null,
   ) => invoke<SetupLocationProjection[]>("save_setup_location", {
     deviceHandle,
     devicePlan,
@@ -125,13 +127,19 @@ export const api = {
     existingId: existingId ?? null,
     name,
     relativePath,
+    selectionHandle,
   }),
-  removeSetupLocation: (deviceHandle: string, devicePlan: string, id: string) =>
-    invoke<SetupLocationProjection[]>("remove_setup_location", { deviceHandle, devicePlan, id }),
+  removeSetupLocation: (deviceHandle: string, devicePlan: string, id: string, selectionHandle?: string | null) =>
+    invoke<SetupLocationProjection[]>("remove_setup_location", { deviceHandle, devicePlan, id, selectionHandle }),
+  resetDeviceProfileSelection: () => invoke<void>("reset_device_profile_selection"),
+  deviceProfileSelection: (deviceHandle: string) => invoke<ProfileSelection>("get_device_profile_selection", { deviceHandle }),
+  selectDeviceProfile: (deviceHandle: string, resolutionHandle: string, profileId: string, genericAcknowledged: boolean) =>
+    invoke<ProfileSelection>("select_device_profile", { deviceHandle, resolutionHandle, profileId, genericAcknowledged }),
   matchDevice: (deviceHandle: string) =>
     invoke<DeviceMatch>("match_device", { deviceHandle }),
   describeConfiguration: (request: {
     deviceHandle: string;
+    selectionHandle?: string | null;
     devicePlan: string;
     selectedRecipes: string[] | null;
     bindings: Record<string, unknown>;
@@ -139,6 +147,7 @@ export const api = {
   }) => invoke<ConfigurationDescription>("describe_configuration", request),
   prepareExecutionReview: (request: {
     deviceHandle: string;
+    selectionHandle?: string | null;
     devicePlan: string;
     selectedRecipes: string[] | null;
     bindings: Record<string, unknown>;
@@ -176,6 +185,7 @@ export const api = {
     invoke<QualificationModeStatus>("get_device_qualification_mode_status"),
   createQualificationTargetCandidate: (request: {
     deviceHandle: string;
+    selectionHandle?: string | null;
     devicePlan: string;
     connectionType: QualificationConnectionType;
   }) => invoke<QualificationTargetCandidatePreview>("create_qualification_target_candidate", {
@@ -225,6 +235,8 @@ export const api = {
   launchConfiguredApp: (launchActionHandle: string) =>
     invoke<LaunchResult>("launch_configured_app", { launchActionHandle }),
   pickInputPath: (request: {
+    deviceHandle?: string;
+    selectionHandle?: string | null;
     inputKey: string;
     requestGeneration: number;
     mode: "replace_all" | "append" | "replace_entry";

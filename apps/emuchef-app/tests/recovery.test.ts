@@ -54,6 +54,8 @@ test("restored intent is dirty, has no transient authority, and blocks review fo
   assert.equal(restored.review, null);
   assert.deepEqual(restored.execution, { kind: "idle" });
   assert.equal(reviewReady(restored), false);
+  assert.equal(restored.selectionHandle, null);
+  assert.deepEqual(restored.stagedIntent?.requiredReentryBindings, ["recipe.one/neutral"]);
 
   const supplied = workflowReducer(restored, {
     type: "set-binding",
