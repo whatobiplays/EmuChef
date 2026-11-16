@@ -6,6 +6,7 @@ import {
   resolveUnsavedDecision,
   saveConfigurationDisabledReason,
   savedConfigurationBlocksProgress,
+  savedConfigurationCanRestoreAutomatically,
   savedConfigurationDiagnosticSummary,
   savedConfigurationValidationLabel,
   savedDevicePlanAvailable,
@@ -123,9 +124,10 @@ test("opening portable intent preserves stale references but resets all runtime 
   assert.equal(loaded.facts, null);
   assert.equal(loaded.review, null);
   assert.equal(loaded.execution.kind, "idle");
-  assert.equal(loaded.devicePlan, "plan.saved");
-  assert.deepEqual(loaded.selectedRecipes, ["recipe.saved", "recipe.removed"]);
-  assert.deepEqual(loaded.bindings, document.bindings);
+  assert.equal(loaded.devicePlan, null);
+  assert.equal(loaded.stagedIntent?.devicePlan, "plan.saved");
+  assert.deepEqual(loaded.stagedIntent?.selectedRecipes, ["recipe.saved", "recipe.removed"]);
+  assert.deepEqual(loaded.stagedIntent?.bindings, document.bindings);
 });
 
 test("Save and pure Save As preserve the current stage and review authority", () => {
@@ -170,11 +172,19 @@ test("Platform-Tools invalidation preserves dirty portable edits only", () => {
   assert.equal(invalidated.step, "connect");
   assert.equal(invalidated.deviceHandle, null);
   assert.equal(invalidated.portableIntentDirty, true);
-  assert.equal(invalidated.devicePlan, document.devicePlan);
-  assert.deepEqual(invalidated.bindings, document.bindings);
+  assert.equal(invalidated.stagedIntent?.devicePlan, document.devicePlan);
+  assert.deepEqual(invalidated.stagedIntent?.bindings, document.bindings);
 });
 
 test("last-opened display rejects invalid timestamps", () => {
   assert.equal(formatLastOpened(0), "Last opened time unavailable");
   assert.match(formatLastOpened(1_700_000_000_000), /^Last opened /);
+});
+
+test("automatic restoration needs an unchanged baseline independently of input validation", () => {
+  for (const baselineState of [undefined, "pending_first_v2_save", "materially_changed", "repair_required", "unavailable", "unchanged"] as const) {
+    const valid: SavedConfigurationDocument = { ...document, compatibility: baselineState ? { baselineState } : undefined, validation: { state: "valid", diagnostics: [] } };
+    assert.equal(savedConfigurationCanRestoreAutomatically(valid), baselineState === "unchanged");
+  }
+  assert.equal(savedConfigurationCanRestoreAutomatically({ ...document, compatibility: { baselineState: "unchanged" } }), false);
 });

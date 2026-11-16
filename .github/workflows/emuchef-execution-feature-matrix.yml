@@ -55,6 +55,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  product-behavior:
+    name: Backend and frontend behavior
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/emuchef-app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/emuchef-rust-backend
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/emuchef-app
+      - name: Test backend behavior and protocol contracts
+        run: cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml
+      - name: Check frontend types
+        run: npm --prefix apps/emuchef-app run typecheck
+      - name: Lint frontend source and tests
+        run: npm --prefix apps/emuchef-app run lint
+      - name: Test frontend logic and DOM behavior
+        run: npm --prefix apps/emuchef-app run test
+
   android-qualification-fixture:
     name: Phase 6C.1 Android fixture contract
     runs-on: ubuntu-latest

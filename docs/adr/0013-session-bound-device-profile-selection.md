@@ -1,6 +1,6 @@
 # ADR 0013: Session-bound Device Profile selection for overlapping matches
 
-**Status:** Accepted product direction (2026-11-15); implementation and target-specific evidence pending.
+**Status:** Accepted (2026-11-15). Session-bound Device Profile selection is implemented and locally validated; target-specific physical qualification evidence remains pending.
 
 ## Context
 
@@ -12,7 +12,7 @@ Device Profiles express *compatibility criteria*, not uniquely attested retail i
 - With ambiguity, present an accessible **Choose Device Profile** step before **Choose Setup**. Show names dynamically from the catalog, with relevant observed facts and a clear explanation when ADB cannot distinguish the products. No option is preselected. Selecting a profile is the affirmative confirmation; there is no additional confirmation control or hardcoded model-specific action title.
 - Treat the selected profile as a **user assertion**, not proof from ADB. Rust/Tauri retains the profile selection bound to the currently selected device, native session continuity and catalog identity. Planning, review and execution cannot gain authority from frontend state, cached recommendations or saved intent without the currently valid selection.
 - Material device/firmware/profile-catalog changes that affect eligibility invalidate the confirmation and current review with an explanation. Equivalent refreshes do not. Reconnection with ambiguous candidates requires a fresh explicit choice; an earlier choice may be suggested, not automatically reactivated.
-- Unknown facts needed for eligibility cannot establish a match. Offer retry or an independently eligible safe generic plan with the established limitations acknowledgment; do not force an unrelated model-specific profile.
+- Every declared eligibility criterion needs current evidence. A known conflict excludes the profile even if other facts are missing. Any plausible incomplete non-generic competitor leaves model identification incomplete, including when one other profile is fully eligible. Offer retry or an independently eligible generic profile with its limitations acknowledgment; do not infer compatibility from missing facts or an empty match declaration.
 - **Changing profiles starts a new setup.** Discard previous profile-specific settings, Setup Locations, descriptions and review, without cross-profile migration or compatibility adjudication. Block profile changes during active or uncertain execution until terminal verification/reconciliation; a later fresh setup does not roll back earlier mutations.
 - Saved complete setups remain stored under their originating Device Profile and Device Plan. They can be reopened for that profile only after fresh session/eligibility checks and a new review; they do not migrate to a different selected profile. App-owned reusable templates remain separately selectable inputs for a new reviewed setup and are not automatic setup migration.
 - Recommendation precedence (valid explicit choice, then model, brand, generic) applies **within an already selected profile**. Equal-specificity recommendation collisions remain governed by the existing recommendation contract.

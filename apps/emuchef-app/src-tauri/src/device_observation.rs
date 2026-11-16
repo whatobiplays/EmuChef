@@ -476,12 +476,21 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
             return Err(unverified_device_error());
         };
         let matched = crate::commands::match_device_projection(device_handle, state)?;
+        let selection = crate::commands::require_profile_selection(
+            state,
+            device_handle,
+            None,
+            Some(device_plan),
+        )?;
         let profile_id = matched_profile_id(&matched, device_plan).ok_or_else(|| {
             safe_error(
                 "device_plan_unmatched",
                 "The selected device plan is not a trusted match for this device.",
             )
         })?;
+        if profile_id != selection.profile_id {
+            return Err(unverified_device_error());
+        }
         let current = refresh_current_qualification(state, Some(device_handle))?;
         let snapshot = &current.snapshot;
         if snapshot.state != DeviceQualificationState::Supported
@@ -515,6 +524,12 @@ impl SelectedDeviceObservationSource for AppStateObservationSource<'_> {
         }
         let capabilities = capabilities_from_snapshot(snapshot);
         commit_selected_observation(state, observation.clone())?;
+        crate::commands::require_profile_selection(
+            state,
+            device_handle,
+            Some(&selection.handle),
+            Some(device_plan),
+        )?;
         Ok(SelectedDeviceCapture {
             observation,
             capabilities,

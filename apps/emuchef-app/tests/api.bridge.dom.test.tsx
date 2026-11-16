@@ -13,6 +13,7 @@ beforeEach(() => {
 test("prepares the execution review through the native bridge", async () => {
   const request = {
     deviceHandle: "device-opaque",
+    selectionHandle: "selection-opaque",
     devicePlan: "t03.copy_fixture.base",
     selectedRecipes: ["t03.copy_app_target"],
     bindings: {
@@ -43,12 +44,13 @@ test("lists Setup Locations for the requested device plan", async () => {
   }];
   mockInvoke.mockResolvedValue(locations);
 
-  await expect(api.listSetupLocations("device-opaque", "plan.one")).resolves.toBe(locations);
+  await expect(api.listSetupLocations("device-opaque", "plan.one", "selection-opaque")).resolves.toBe(locations);
 
   expect(mockInvoke).toHaveBeenCalledOnce();
   expect(mockInvoke).toHaveBeenCalledWith("list_setup_locations", {
     deviceHandle: "device-opaque",
     devicePlan: "plan.one",
+    selectionHandle: "selection-opaque",
   });
 });
 
@@ -64,6 +66,7 @@ test("saves a Setup Location with the current observation and opaque volume hand
     "location-existing",
     "Games",
     "games/primary",
+    "selection-opaque",
   )).resolves.toBe(locations);
 
   expect(mockInvoke).toHaveBeenCalledOnce();
@@ -75,6 +78,7 @@ test("saves a Setup Location with the current observation and opaque volume hand
     existingId: "location-existing",
     name: "Games",
     relativePath: "games/primary",
+    selectionHandle: "selection-opaque",
   });
 });
 
@@ -89,6 +93,7 @@ test("creates a Setup Location without an existing ID", async () => {
     undefined,
     "Internal games",
     "games",
+    "selection-created",
   );
 
   expect(mockInvoke).toHaveBeenCalledWith("save_setup_location", {
@@ -99,6 +104,7 @@ test("creates a Setup Location without an existing ID", async () => {
     existingId: null,
     name: "Internal games",
     relativePath: "games",
+    selectionHandle: "selection-created",
   });
 });
 
@@ -106,7 +112,7 @@ test("removes a Setup Location only within the requested device plan", async () 
   const locations: Awaited<ReturnType<typeof api.listSetupLocations>> = [];
   mockInvoke.mockResolvedValue(locations);
 
-  await expect(api.removeSetupLocation("device-opaque", "plan.one", "location-opaque"))
+  await expect(api.removeSetupLocation("device-opaque", "plan.one", "location-opaque", "selection-opaque"))
     .resolves.toBe(locations);
 
   expect(mockInvoke).toHaveBeenCalledOnce();
@@ -114,5 +120,23 @@ test("removes a Setup Location only within the requested device plan", async () 
     deviceHandle: "device-opaque",
     devicePlan: "plan.one",
     id: "location-opaque",
+    selectionHandle: "selection-opaque",
   });
 });
+
+test("describes configuration with the selected profile authority", async () => {
+  const request = { deviceHandle: "device-opaque", selectionHandle: "selection-opaque", devicePlan: "plan.one", selectedRecipes: ["recipe.one"], bindings: { "recipe.one/theme": "dark" }, requestGeneration: 7 };
+  const description = { devicePlan: "plan.one" };
+  mockInvoke.mockResolvedValue(description);
+  await expect(api.describeConfiguration(request)).resolves.toBe(description);
+  expect(mockInvoke).toHaveBeenCalledExactlyOnceWith("describe_configuration", request);
+});
+
+for (const genericAcknowledged of [false, true]) {
+  test(`selects a profile with its resolution token and acknowledgment ${genericAcknowledged}`, async () => {
+    const selected = { selectionHandle: "selected-opaque" };
+    mockInvoke.mockResolvedValue(selected);
+    await expect(api.selectDeviceProfile("device-opaque", "resolution-opaque", "profile.one", genericAcknowledged)).resolves.toBe(selected);
+    expect(mockInvoke).toHaveBeenCalledExactlyOnceWith("select_device_profile", { deviceHandle: "device-opaque", resolutionHandle: "resolution-opaque", profileId: "profile.one", genericAcknowledged });
+  });
+}

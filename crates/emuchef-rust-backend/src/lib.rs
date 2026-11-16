@@ -126,3 +126,5 @@ pub fn run_with_args_and_input(args: &[String], input: &str) -> ProcessOutput {
 
     one_shot::run(args)
 }
+
+mod device_profile_resolution;

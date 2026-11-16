@@ -2,6 +2,7 @@ import type {
   ConfigurationDescription,
   DeviceFacts,
   DeviceMatch,
+  ProfileSelection,
   ExecutionEvent,
   ExecutionEventBatch,
   AnyExecutionSnapshot,
@@ -11,7 +12,7 @@ import type {
   ValidationDiagnostic,
 } from "./types";
 
-export type WorkflowStep = "connect" | "device" | "setup" | "recipes" | "inputs" | "review" | "execution";
+export type WorkflowStep = "connect" | "device" | "profile" | "setup" | "recipes" | "inputs" | "review" | "execution";
 export type ExecutionMode = "simulated" | "real";
 
 /**
@@ -58,6 +59,9 @@ export interface WorkflowState {
   deviceHandle: string | null;
   facts: DeviceFacts | null;
   match: DeviceMatch | null;
+  stagedIntent: { devicePlan: string; selectedRecipes: string[]; bindings: Record<string, unknown>; requiredReentryBindings: string[]; dirty: boolean; activationAllowed: boolean; profileId?: string } | null;
+  selectionHandle: string | null;
+  selectedProfileId: string | null;
   devicePlan: string | null;
   selectedRecipes: string[] | null;
   bindings: Record<string, unknown>;
@@ -81,6 +85,9 @@ export const initialWorkflowState: WorkflowState = {
   deviceHandle: null,
   facts: null,
   match: null,
+  stagedIntent: null,
+  selectionHandle: null,
+  selectedProfileId: null,
   devicePlan: null,
   selectedRecipes: null,
   bindings: {},
@@ -101,6 +108,9 @@ export const initialWorkflowState: WorkflowState = {
 
 export type WorkflowAction =
   | { type: "select-device"; deviceHandle: string; preserveIntent?: boolean }
+  | { type: "profile-observed"; selection: ProfileSelection }
+  | { type: "profile-selected"; selection: ProfileSelection }
+  | { type: "choose-profile" }
   | { type: "device-probed"; facts: DeviceFacts; match: DeviceMatch }
   | { type: "select-plan"; devicePlan: string; recipeSelection?: "preserve" | "defaults" | "blank" }
   | { type: "description"; description: ConfigurationDescription; generation: number }
@@ -123,11 +133,13 @@ export type WorkflowAction =
       selectedRecipes: string[];
       bindings: Record<string, unknown>;
       dirty: boolean;
+      activationAllowed?: boolean;
       requiredReentryBindings?: string[];
     }
   | { type: "portable-intent-saved" }
   | {
       type: "repair-ready";
+      generation?: number;
       facts: DeviceFacts;
       match: DeviceMatch;
       devicePlan: string;
@@ -147,10 +159,27 @@ export type WorkflowAction =
   | { type: "infrastructure-invalidated" }
   | { type: "runtime-invalidated" };
 
+/**
+ * Loaded intent needs a verified unchanged baseline before activation is allowed.
+ * In-session intent instead retains its known profile, which must still match.
+ * Both paths also require plan membership in the newly accepted native profile.
+ */
+export function stagedIntentMatchesProfile(
+  intent: WorkflowState["stagedIntent"],
+  match: DeviceMatch | null,
+  profileId: string | null | undefined,
+): intent is NonNullable<WorkflowState["stagedIntent"]> {
+  return !!intent?.activationAllowed && !!profileId
+    && (intent.profileId === undefined || intent.profileId === profileId)
+    && !!match?.profiles?.some((profile) => profile.profileId === profileId
+      && profile.plans.some((plan) => plan.planId === intent.devicePlan));
+}
+
 const previousStep: Record<WorkflowStep, WorkflowStep> = {
   connect: "connect",
   device: "connect",
-  setup: "connect",
+  profile: "connect",
+  setup: "profile",
   recipes: "setup",
   inputs: "recipes",
   review: "inputs",
@@ -223,35 +252,56 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         ...initialWorkflowState,
         step: "device",
         deviceHandle: action.deviceHandle,
+        stagedIntent: state.stagedIntent,
         requestGeneration: state.requestGeneration + 1,
       };
-    case "device-probed":
+    case "device-probed": {
       if (state.deviceHandle !== action.facts.deviceHandle) return state;
-      return {
-        ...state,
-        step: deviceIsUnsupported(action.match) ? "device" : "setup",
-        facts: action.facts,
-        match: action.match,
-        devicePlan: deviceIsUnsupported(action.match)
-          ? null
-          : state.savedIntentLoaded
-          ? state.devicePlan
-          : state.repairIntent && planStillAvailable(state.devicePlan, action.match)
-            ? state.devicePlan
-            : action.match.recommendedPlanId,
-        reconnectDeviceHandle: null,
-        unsupportedAcknowledged: false,
-      };
+      const equivalent = !!state.selectionHandle && state.selectionHandle === action.match.selectionHandle;
+      if (equivalent) return { ...state, facts: action.facts, match: action.match };
+      const base = { ...initialWorkflowState, deviceHandle: state.deviceHandle,
+        stagedIntent: state.stagedIntent, facts: action.facts, match: action.match,
+        selectionHandle: action.match.selectionHandle ?? null, selectedProfileId: action.match.selectedProfileId ?? null,
+        requestGeneration: state.requestGeneration + 1 };
+      if (action.match.selectionHandle && action.match.selectedProfileId) {
+        const staged = state.stagedIntent;
+        const sameProfile = stagedIntentMatchesProfile(staged, action.match, action.match.selectedProfileId);
+        return { ...base, step: "setup", stagedIntent: null,
+          ...(sameProfile ? { devicePlan: staged.devicePlan, selectedRecipes: staged.selectedRecipes, bindings: staged.bindings, requiredReentryBindings: staged.requiredReentryBindings, portableIntentDirty: staged.dirty, savedIntentLoaded: true, descriptionDirty: true } : {}) };
+      }
+      return { ...base, step: "profile" };
+    }
+
+    case "profile-observed": {
+      if (!state.match) return state;
+      const match = { ...state.match, ...action.selection };
+      if (state.selectionHandle === action.selection.selectionHandle) return { ...state, match };
+      if (state.step === "execution") return { ...state, match, selectionHandle: null, selectedProfileId: null, review: null, reviewStale: true };
+      return { ...initialWorkflowState, step: state.facts ? "profile" : "connect", facts: state.facts, deviceHandle: state.deviceHandle,
+        match: { ...match, resolutionStatus: "incomplete" }, requestGeneration: state.requestGeneration + 1,
+        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, state.bindings), requiredReentryBindings: state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: !!state.selectedProfileId, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent };
+    }
+    case "choose-profile":
+      if (state.match?.profileChangeAllowed !== true || executionBlocksProfileChange(state)) return state;
+      return { ...state, step: "profile" };
+    case "profile-selected": {
+      if (!action.selection.selectionHandle || !state.match || executionBlocksProfileChange(state)) return state;
+      if (state.selectionHandle === action.selection.selectionHandle) return { ...state, step: "setup" };
+      const staged = state.stagedIntent;
+      const sameProfile = stagedIntentMatchesProfile(staged, state.match, action.selection.selectedProfileId);
+      return { ...initialWorkflowState, step: "setup", deviceHandle: state.deviceHandle,
+        ...(sameProfile ? { devicePlan: staged.devicePlan, selectedRecipes: staged.selectedRecipes, bindings: staged.bindings, requiredReentryBindings: staged.requiredReentryBindings, portableIntentDirty: staged.dirty, savedIntentLoaded: true, descriptionDirty: true } : {}),
+        facts: state.facts, match: { ...state.match, ...action.selection },
+        selectionHandle: action.selection.selectionHandle, selectedProfileId: action.selection.selectedProfileId,
+        requestGeneration: state.requestGeneration + 1 };
+    }
     case "set-unsupported-acknowledgment":
       if (!state.match || !deviceIsUnsupported(state.match)) return state;
       return { ...state, unsupportedAcknowledged: action.acknowledged };
     case "continue-unsupported":
-      if (!state.match || !deviceIsUnsupported(state.match) || state.match.safeGenericPlans.length === 0) {
-        return state;
-      }
-      if (!state.unsupportedAcknowledged) return state;
-      return { ...state, step: "setup", devicePlan: null };
+      return state;
     case "select-plan":
+      if (!state.selectionHandle || !state.match || ![...state.match.candidates, ...state.match.safeGenericPlans, ...(state.match.blankSetupPlans ?? []), ...(state.match.profiles?.flatMap((p) => p.plans) ?? [])].some((plan) => plan.profileId === state.selectedProfileId && plan.planId === action.devicePlan)) return state;
       return {
         ...state,
         devicePlan: action.devicePlan,
@@ -433,8 +483,11 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       };
     }
     case "prepare-repair":
+      if (executionBlocksProfileChange(state)) return state;
       return {
         ...state,
+        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, state.bindings), requiredReentryBindings: state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: !!state.selectedProfileId, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent,
+        selectionHandle: null, selectedProfileId: null,
         step: state.deviceHandle ? "device" : "connect",
         facts: null,
         match: null,
@@ -451,22 +504,13 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         repairIntent: true,
       };
     case "load-portable-intent":
-      return {
-        ...initialWorkflowState,
-        step: "connect",
-        devicePlan: action.devicePlan,
-        selectedRecipes: action.selectedRecipes,
-        bindings: action.bindings,
-        descriptionDirty: true,
-        portableIntentDirty: action.dirty,
-        savedIntentLoaded: true,
-        requiredReentryBindings: action.requiredReentryBindings ?? [],
-        requestGeneration: state.requestGeneration + 1,
-        executionGeneration: state.executionGeneration + 1,
-      };
+      return { ...initialWorkflowState, portableIntentDirty: action.dirty, savedIntentLoaded: true, stagedIntent: { devicePlan: action.devicePlan, selectedRecipes: action.selectedRecipes, bindings: action.bindings, requiredReentryBindings: action.requiredReentryBindings ?? [], dirty: action.dirty, activationAllowed: action.activationAllowed === true },
+        requestGeneration: state.requestGeneration + 1, executionGeneration: state.executionGeneration + 1 };
     case "portable-intent-saved":
       return { ...state, portableIntentDirty: false };
     case "repair-ready":
+      if (action.generation !== undefined && action.generation !== state.requestGeneration) return state;
+      if (!state.selectionHandle || state.selectionHandle !== action.match.selectionHandle) return state;
       return {
         ...state,
         step: "inputs",
@@ -479,7 +523,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         description: action.description,
         descriptionDirty: false,
         review: null,
-        requestGeneration: state.requestGeneration + 1,
+        requestGeneration: state.requestGeneration,
         execution: { kind: "idle" },
         repairIntent: false,
         portableIntentDirty: true,
@@ -510,9 +554,11 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (state.step === "execution" || state.execution.kind === "starting") return state;
       return {
         ...state,
+        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, action.bindings ?? state.bindings), requiredReentryBindings: action.requiredReentryBindings ?? state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: !!state.selectedProfileId, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent,
         step: "connect",
         reconnectDeviceHandle: state.deviceHandle,
         deviceHandle: null,
+        selectionHandle: null, selectedProfileId: null,
         facts: null,
         match: null,
         description: null,
@@ -534,6 +580,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         ...state,
         step: "connect",
         deviceHandle: null,
+        selectionHandle: null, selectedProfileId: null,
         facts: null,
         match: null,
         description: null,
@@ -553,11 +600,6 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
     case "runtime-invalidated":
       return { ...initialWorkflowState, requestGeneration: state.requestGeneration + 1 };
   }
-}
-
-function planStillAvailable(planId: string | null, match: DeviceMatch): boolean {
-  if (!planId) return false;
-  return [...match.candidates, ...match.safeGenericPlans].some((plan) => plan.planId === planId);
 }
 
 /** Preserve only bindings whose current input contract still matches the reviewed workflow. */
@@ -822,4 +864,18 @@ export async function runBusyAction<T>({
 
 function missingRequiredValue(value: unknown): boolean {
   return value === null || value === undefined || value === "" || (Array.isArray(value) && value.length === 0);
+}
+
+export function executionBlocksProfileChange(state: WorkflowState): boolean {
+  return state.execution.kind === "starting" || (state.execution.kind === "active" && !state.execution.snapshot.terminal) || state.execution.kind === "unavailable";
+}
+
+/** Accept a read only while its runtime, setup request and selected profile still match. */
+export function profileAuthorityReadIsCurrent(
+  current: { runtimeGeneration: number; requestGeneration: number; selectionHandle: string | null },
+  captured: { runtimeGeneration: number; requestGeneration: number; selectionHandle: string | null },
+): boolean {
+  return current.runtimeGeneration === captured.runtimeGeneration
+    && current.requestGeneration === captured.requestGeneration
+    && current.selectionHandle === captured.selectionHandle;
 }

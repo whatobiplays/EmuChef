@@ -118,9 +118,39 @@ pub struct SessionHandles {
     qualification_context_by_handle: HashMap<String, QualificationContextKey>,
     last_inventory_count: Option<usize>,
     device_storage: DeviceStorageState,
+    pub(crate) profile_selection: crate::profile_selection::ProfileSelectionState,
 }
 
 impl SessionHandles {
+    #[cfg(test)]
+    pub(crate) fn bind_test_reviews_to_profile_selection(&mut self, device: &str, selection: &str) {
+        for review in self
+            .reviews
+            .values_mut()
+            .filter(|r| r.device_handle == device)
+        {
+            review.response["profileSelectionHandle"] = json!(selection);
+        }
+    }
+
+    pub(crate) fn retire_profile_authority(&mut self, reason: &'static str) {
+        self.profile_selection.invalidate_with_reason(reason);
+        self.device_storage.clear_all_after_authority_loss();
+        let reviews = self.reviews.keys().cloned().collect::<Vec<_>>();
+        for review in reviews {
+            self.invalidate_review(&review, "review_stale");
+        }
+    }
+
+    pub(crate) fn reset_profile_setup(&mut self) {
+        self.profile_selection.invalidate();
+        self.device_storage.clear_all_after_authority_loss();
+        let reviews = self.reviews.keys().cloned().collect::<Vec<_>>();
+        for review in reviews {
+            self.invalidate_review(&review, "review_stale");
+        }
+    }
+
     /// Mutable access to trusted storage observation and selection state.
     ///
     /// Callers must never hold this lock while an ADB command runs.
@@ -133,7 +163,12 @@ impl SessionHandles {
         // "no inventory was committed", so retained authority must be
         // untouched whenever any entry is rejected.
         let parsed = parse_inventory_devices(inventory, "ADB inventory response was invalid.")?;
-        let inventory_count = parsed.len();
+        let inventory_count = inventory
+            .get("inventoryCount")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(parsed.len())
+            .max(parsed.len());
         let cardinality_transition = self
             .last_inventory_count
             .is_some_and(|previous| previous > 1 || inventory_count > 1);
@@ -246,9 +281,14 @@ impl SessionHandles {
         inventory: &Value,
     ) -> Result<Vec<(String, u64)>, String> {
         let parsed = parse_inventory_devices(inventory, "ADB inventory response is invalid.")?;
-        let cardinality_transition = self
-            .last_inventory_count
-            .is_some_and(|previous| previous > 1 || parsed.len() > 1);
+        let cardinality_transition = self.last_inventory_count.is_some_and(|previous| {
+            previous > 1
+                || inventory
+                    .get("inventoryCount")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count > 1)
+                || parsed.len() > 1
+        });
         let mut invalidated = HashSet::new();
         if cardinality_transition {
             invalidated.extend(self.session_epoch_by_handle.keys().cloned());
@@ -355,7 +395,9 @@ impl SessionHandles {
     }
 
     pub fn single_available_device_handle(&self) -> Option<String> {
-        if self.devices_by_handle.len() != 1 {
+        if self.devices_by_handle.len() != 1
+            || self.last_inventory_count.is_some_and(|count| count != 1)
+        {
             return None;
         }
         self.devices_by_handle
@@ -405,7 +447,10 @@ impl SessionHandles {
             })?
             .facts
             .as_ref()
-            .is_some_and(|current| current != &facts);
+            .is_some_and(|current| {
+                crate::profile_selection::normalized_facts(current)
+                    != crate::profile_selection::normalized_facts(&facts)
+            });
         if changed {
             self.invalidate_reviews_for_device(handle, "review_stale");
         }
@@ -428,7 +473,13 @@ impl SessionHandles {
         let changed = self
             .qualification_context_by_handle
             .get(&context.device_handle)
-            .is_some_and(|previous| previous != &context);
+            .is_some_and(|previous| {
+                previous.device_handle != context.device_handle
+                    || previous.session_epoch != context.session_epoch
+                    || previous.runtime_generation != context.runtime_generation
+                    || previous.platform_tools_revision != context.platform_tools_revision
+                    || previous.capability_fingerprint != context.capability_fingerprint
+            });
         if changed {
             self.invalidate_reviews_for_device(
                 &context.device_handle,
@@ -546,6 +597,7 @@ impl SessionHandles {
     /// Clears live device, storage, and review authority while retaining only
     /// bounded, process-local identity continuity for controlled redetection.
     pub fn invalidate_runtime_authority_preserving_identities(&mut self) {
+        self.profile_selection.invalidate_with_reason("The runtime or Platform-Tools changed. Read device information and choose a Device Profile again.");
         self.device_storage.clear_all_after_authority_loss();
         let handles = self.reviews.keys().cloned().collect::<Vec<_>>();
         for handle in handles {
@@ -562,6 +614,7 @@ impl SessionHandles {
     }
 
     pub fn invalidate_reviews_for_device(&mut self, device_handle: &str, code: &'static str) {
+        self.profile_selection.invalidate_device(device_handle, if code == "device_qualification_changed" { "The device session or capabilities changed. Read device information and choose a Device Profile again." } else { "The device disconnected or its firmware changed. Reconnect it and choose a Device Profile again." });
         self.invalidate_reviews_for_device_if(device_handle, code, |_| true);
     }
 
@@ -677,6 +730,26 @@ mod tests {
             created: Instant::now(),
             last_access: Instant::now(),
         }
+    }
+
+    #[test]
+    fn unprojected_inventory_rows_still_break_profile_session_continuity() {
+        let mut handles = SessionHandles::default();
+        let inventory = json!({"inventoryCount":1,"devices":[{"serial":"fixture","state":"available","transportId":"one"}]});
+        handles.update_devices(&inventory).unwrap();
+        let handle = handles.single_available_device_handle().unwrap();
+        let epoch = handles.device(&handle).unwrap().session_epoch;
+        let mut multiple = inventory;
+        multiple["inventoryCount"] = json!(2);
+        assert_eq!(
+            handles
+                .session_epochs_invalidated_by_inventory(&multiple)
+                .unwrap(),
+            vec![(handle.clone(), epoch)]
+        );
+        handles.update_devices(&multiple).unwrap();
+        assert!(handles.single_available_device_handle().is_none());
+        assert!(handles.device(&handle).unwrap().session_epoch > epoch);
     }
 
     #[test]

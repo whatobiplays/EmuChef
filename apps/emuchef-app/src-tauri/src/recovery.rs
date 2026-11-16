@@ -171,6 +171,11 @@ impl RecoveryStore {
         }))
     }
 
+    pub(crate) fn clear_profile_intent(&mut self) {
+        self.sensitivity.clear();
+        self.required_reentry.clear();
+    }
+
     pub fn record_schema(&mut self, description: &Value) {
         self.sensitivity.clear();
         for input in description
