@@ -137,6 +137,74 @@ fn config_create_plan_request(
 }
 
 #[test]
+fn konkre_product_plan_supports_managed_configuration_only_override() {
+    let authored_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "app.retroarch.configure/retroarch_cfg_source".to_string(),
+        serde_json::json!("managed"),
+    );
+    let mut request =
+        config_create_plan_request(&authored_root, "app.retroarch.configure", bindings, true);
+    request.device_plan = Some("konkr.pocket_advance.base".to_string());
+    // Runtime availability and write evidence are test fixtures, not profile defaults.
+    request.runtime_capability_availability = Some(super::RuntimeCapabilityAvailability {
+        root_shell: true,
+        app_data_write: true,
+        root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
+        config_create_write_evidence: Some(super::test_config_create_write_evidence()),
+    });
+
+    let response = plan_configuration(request).unwrap();
+    assert!(
+        response.plan.is_some(),
+        "test-only scoped evidence should admit the explicit config-create recipe: {:?}",
+        response.diagnostics
+    );
+    let plan = response.plan.unwrap();
+    let plan_value = serde_json::to_value(&plan).unwrap();
+
+    assert_eq!(
+        plan_value["source"]["device_plan_ref"],
+        "konkr.pocket_advance.base"
+    );
+    assert_eq!(
+        plan_value["source"]["device_profile_ref"],
+        "konkr.pocket_advance"
+    );
+    assert_eq!(
+        plan_value["source"]["selected_recipe_refs"],
+        serde_json::json!(["app.retroarch.configure"])
+    );
+    assert!(!plan.runtime_capabilities.app_data_write);
+    assert_eq!(plan.steps.len(), 1);
+    let step = &plan.steps[0];
+    assert_eq!(step.id, "app.retroarch.configure/seed_retroarch_cfg");
+    let Some(crate::planner::ExecutionParamValue::Literal { value }) =
+        step.params.get("copy_policy")
+    else {
+        panic!("configuration creation should retain its authored copy policy");
+    };
+    assert_eq!(value, "create_only");
+    let Some(crate::planner::ExecutionParamValue::Literal { value }) = step.params.get("source")
+    else {
+        panic!("configuration creation should freeze its target identity");
+    };
+    assert_eq!(
+        value
+            .pointer("/targetIdentity/targetId")
+            .and_then(Value::as_str),
+        Some("config")
+    );
+    assert_eq!(
+        value
+            .pointer("/targetIdentity/target/path")
+            .and_then(Value::as_str),
+        Some("files/retroarch.cfg")
+    );
+}
+
+#[test]
 fn caller_supplied_config_create_evidence_is_not_a_runtime_capability_field() {
     let parsed =
         serde_json::from_value::<super::RuntimeCapabilityAvailabilityRequest>(serde_json::json!({

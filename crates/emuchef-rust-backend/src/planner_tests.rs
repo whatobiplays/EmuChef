@@ -3508,11 +3508,7 @@ fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
                 "konkr.pocket_advance".to_string(),
                 true,
                 false,
-                vec![
-                    "handheld_android".to_string(),
-                    "brand_konkr".to_string(),
-                    "retroarch_config_create_qualification".to_string(),
-                ],
+                vec!["handheld_android".to_string(), "brand_konkr".to_string(),],
             ),
         ]
     );
@@ -3576,7 +3572,41 @@ fn repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order(
                 "ayaneo.pocket_s_mini".to_string(),
                 vec!["app.retroarch.provision".to_string()],
             ),
+            (
+                "authored/device_plans/konkr.pocket_advance.base.yaml".to_string(),
+                "konkr.pocket_advance.base".to_string(),
+                "konkr.pocket_advance".to_string(),
+                vec![
+                    "app.retroarch.provision".to_string(),
+                    "feature.copy_bios".to_string(),
+                ],
+            ),
         ]
+    );
+}
+
+#[test]
+fn konkre_product_plan_keeps_unavailable_defaults_selected_and_blocks_completion() {
+    let input = repo_device_plan_planner_input_with_bindings("konkr.pocket_advance.base", &[]);
+
+    assert_eq!(input.device_plan_ref, "konkr.pocket_advance.base");
+    assert_eq!(input.device_profile_ref, "konkr.pocket_advance");
+    assert_eq!(
+        input.selected_recipe_refs,
+        vec![
+            "app.retroarch.provision".to_string(),
+            "feature.copy_bios".to_string(),
+        ]
+    );
+    assert_eq!(input.device_context.manufacturer, "ARBOR");
+    assert_eq!(input.device_context.model, "KONKR Pocket Advance");
+    assert_eq!(input.device_context.android_version, 12);
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(
+        result["execution_plan"].is_null(),
+        "unavailable selected defaults must not yield a completed plan: {result:#}"
     );
 }
 
@@ -4459,7 +4489,7 @@ fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_metadat
 }
 
 #[test]
-fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() {
+fn repo_device_plan_defaults_and_optional_config_variants_remain_metadata_only() {
     let mut actual = Vec::new();
     for plan in discover_device_plan_inventory(repo_authored_root())
         .expect("repo device plan inventory should parse")
@@ -4468,20 +4498,28 @@ fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() 
             fs::read_to_string(&plan.path).expect("checked-in device plan should be readable");
         let parsed: serde_yaml::Value =
             serde_yaml::from_str(&yaml).expect("checked-in device plan should be valid YAML");
+        let config_variants = &parsed["overrides"]["config_variants"];
+        let variants = if config_variants.is_null() {
+            None
+        } else {
+            Some((
+                config_variants["vendor_family"]
+                    .as_str()
+                    .expect("checked-in vendor family should be string")
+                    .to_string(),
+                config_variants["screen_class"]
+                    .as_str()
+                    .expect("checked-in screen class should be string")
+                    .to_string(),
+            ))
+        };
 
         actual.push((
             plan.id.clone(),
             parsed["defaults"]["show_advanced_steps"]
                 .as_bool()
-                .expect("checked-in default should be a bool"),
-            parsed["overrides"]["config_variants"]["vendor_family"]
-                .as_str()
-                .expect("checked-in vendor family should be a string")
-                .to_string(),
-            parsed["overrides"]["config_variants"]["screen_class"]
-                .as_str()
-                .expect("checked-in screen class should be a string")
-                .to_string(),
+                .expect("checked-in default should be bool"),
+            variants,
         ));
 
         let input = repo_device_plan_planner_input_with_bindings(&plan.id, &[]);
@@ -4489,14 +4527,14 @@ fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() 
             !input
                 .device_plan_input_bindings
                 .contains_key("show_advanced_steps"),
-            "{} defaults.show_advanced_steps must not become a planner binding",
+            "{} defaults.show_advanced_steps must not become planner binding",
             plan.id
         );
         assert!(
             !input
                 .device_plan_input_bindings
                 .contains_key("config_variants"),
-            "{} overrides.config_variants must not become a planner binding",
+            "{} overrides.config_variants must not become planner binding",
             plan.id
         );
     }
@@ -4507,33 +4545,29 @@ fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() 
             (
                 "ayaneo.generic.base".to_string(),
                 false,
-                "ayaneo".to_string(),
-                "handheld_16_9".to_string(),
+                Some(("ayaneo".to_string(), "handheld_16_9".to_string())),
             ),
             (
                 "ayaneo.konkr_pocket_fit.base".to_string(),
                 false,
-                "ayaneo".to_string(),
-                "handheld_16_9".to_string(),
+                Some(("ayaneo".to_string(), "handheld_16_9".to_string())),
             ),
             (
                 "ayaneo.pocket_air_mini.base".to_string(),
                 false,
-                "ayaneo".to_string(),
-                "handheld_4_3".to_string(),
+                Some(("ayaneo".to_string(), "handheld_4_3".to_string())),
             ),
             (
                 "ayaneo.pocket_s2.base".to_string(),
                 false,
-                "ayaneo".to_string(),
-                "handheld_16_9".to_string(),
+                Some(("ayaneo".to_string(), "handheld_16_9".to_string())),
             ),
             (
                 "ayaneo.pocket_s_mini.base".to_string(),
                 false,
-                "ayaneo".to_string(),
-                "handheld_16_9".to_string(),
+                Some(("ayaneo".to_string(), "handheld_16_9".to_string())),
             ),
+            ("konkr.pocket_advance.base".to_string(), false, None),
         ]
     );
 }

@@ -429,6 +429,39 @@ mod tests {
             assert!(result["recommendedPlanId"].is_null());
         }
     }
+
+    #[test]
+    fn checked_in_konkr_and_ayaneo_profiles_require_a_choice_when_both_match() {
+        let authored_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let snapshot = CatalogSnapshot::legacy_local(&authored_root).unwrap();
+        let facts = DetectedDeviceFacts {
+            manufacturer: Some("ARBOR".into()),
+            // Both checked-in matchers accept ARBOR, so the shared model stays ambiguous.
+            brand: Some("ARBOR".into()),
+            model: Some("GT78-VN".into()),
+            android_version: Some(12),
+            android_api_level: Some(31),
+            ..Default::default()
+        };
+
+        let result = match_device(&snapshot, &facts).unwrap();
+
+        assert_eq!(result["resolutionStatus"], "choice_required");
+        assert!(result["selectedProfileId"].is_null());
+        assert_eq!(result["requiresExplicitChoice"], true);
+        let mut plan_ids = result["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|plan| plan["planId"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        plan_ids.sort();
+        assert_eq!(
+            plan_ids,
+            vec!["ayaneo.pocket_air_mini.base", "konkr.pocket_advance.base"]
+        );
+    }
+
     #[test]
     fn plausible_incomplete_competitor_blocks_a_complete_eligible_profile() {
         let result = resolve(

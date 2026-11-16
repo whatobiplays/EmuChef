@@ -23,3 +23,7 @@ A universal write probe would change admission for established rooted workflows.
 ## Consequences
 
 Root access and legacy `appDataWrite` do not authorize RetroArch configuration creation. The production probe, trusted evidence bridge, and KONKR device-session binding remain unimplemented, so physical configuration creation stays fail-closed until those boundaries are implemented and reviewed.
+
+## Implementation status — 2026-11-16
+
+The KONKR Pocket Advance now has a product Device Profile and linked base Device Plan. The profile keeps conservative capability defaults. The plan selects RetroArch provisioning and BIOS copy by default and leaves configuration creation optional. Ambiguous eligible KONKR and AYANEO matches require a choice bound to the current device session. Host regressions cover a configuration-only plan using test-scoped evidence and retain the create-only `config` App Target boundary. Production target-scoped write evidence and physical qualification remain outstanding.
