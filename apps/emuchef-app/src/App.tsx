@@ -70,6 +70,7 @@ import type {
 import {
   resolveUnsavedDecision,
   savedConfigurationBlocksProgress,
+  savedConfigurationCanRestoreAutomatically,
   saveConfigurationDisabledReason,
   savedConfigurationDiagnosticSummary,
   savedConfigurationValidationLabel,
@@ -81,6 +82,7 @@ import {
 } from "./realExecution";
 import {
   profileAuthorityReadIsCurrent,
+  stagedIntentMatchesProfile,
   filterRepairBindings,
   initialWorkflowState,
   executionBlocksProfileChange,
@@ -941,7 +943,10 @@ export function App({
     setRecoveredName(null);
   };
 
-  const applySavedDocument = async (document: SavedConfigurationDocument) => {
+  const applySavedDocument = async (
+    document: SavedConfigurationDocument,
+    sourceBaselineUnchanged: boolean,
+  ) => {
     if (qualificationLocksIntent) {
       setNotice(
         "The qualification session must finish before changing setup intent.",
@@ -968,7 +973,7 @@ export function App({
     setSavedConfiguration(document);
     dispatch({
       type: "load-portable-intent",
-      activationAllowed: !savedConfigurationBlocksProgress(document),
+      activationAllowed: sourceBaselineUnchanged && savedConfigurationCanRestoreAutomatically(document),
       devicePlan: document.devicePlan,
       selectedRecipes: document.selectedRecipes,
       bindings: document.bindings,
@@ -1017,7 +1022,8 @@ export function App({
     );
     dispatch({
       type: "load-portable-intent",
-      activationAllowed: result.document ? !savedConfigurationBlocksProgress(result.document) : result.sourceStatus !== "missing",
+      activationAllowed: savedConfigurationCanRestoreAutomatically(result.document)
+        && result.document?.devicePlan === result.intent.devicePlan,
       devicePlan: result.intent.devicePlan,
       selectedRecipes: result.intent.selectedRecipes,
       bindings: result.intent.bindings,
@@ -1604,6 +1610,8 @@ export function App({
   const confirmConfigurationPreview = async () => {
     const preview = configurationPreview;
     if (!preview || preview.compatibility.requiresRepair) return;
+    // Import writes a current baseline; retain the source proof from before that write.
+    const sourceBaselineUnchanged = preview.compatibility.baselineState === "unchanged";
     setConfigurationManagerOpen(false);
     let importName: string | null = null;
     if (configurationPreviewMode === "import") {
@@ -1622,10 +1630,11 @@ export function App({
         const result = await withNativeDialogFocus(() =>
           api.importSavedConfiguration(preview.previewHandle, importName!),
         );
-        if (result.outcome !== "cancelled") await applySavedDocument(result);
+        if (result.outcome !== "cancelled") await applySavedDocument(result, sourceBaselineUnchanged);
       } else {
         await applySavedDocument(
           await api.confirmSavedConfigurationPreview(preview.previewHandle),
+          sourceBaselineUnchanged,
         );
       }
     }).catch((error) => {
@@ -3481,7 +3490,7 @@ if (rejectSetupActionDuringRepair()) return;
         runtimeGenerationRef.current !== runtimeGeneration
       )
         return;
-      if (match.selectionHandle && before.stagedIntent && !match.profiles?.some((p) => p.profileId === match.selectedProfileId && p.plans.some((plan) => plan.planId === before.stagedIntent?.devicePlan))) {
+      if (match.selectionHandle && before.stagedIntent && !stagedIntentMatchesProfile(before.stagedIntent, match, match.selectedProfileId)) {
         savedConfigurationRef.current = null; setSavedConfiguration(null); setRecoveredName(null);
       }
       dispatch({ type: "device-probed", facts, match });
@@ -3590,8 +3599,7 @@ if (rejectSetupActionDuringRepair()) return;
       const selection = await api.selectDeviceProfile(prior.deviceHandle, prior.match.resolutionHandle, profileId, genericAcknowledged);
       if (!current()) return;
       if (selection.selectionHandle !== prior.selectionHandle) {
-        const pendingPlan = prior.stagedIntent?.devicePlan;
-        const sameSavedProfile = prior.stagedIntent?.activationAllowed && prior.match.profiles?.some((p) => p.profileId === profileId && p.plans.some((plan) => plan.planId === pendingPlan));
+        const sameSavedProfile = stagedIntentMatchesProfile(prior.stagedIntent, prior.match, selection.selectedProfileId);
         if (!sameSavedProfile) {
           const oldDocument = savedConfigurationRef.current;
           savedConfigurationRef.current = null; setSavedConfiguration(null); setRecoveredName(null);

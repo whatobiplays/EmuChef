@@ -34,6 +34,18 @@ export function savedConfigurationBlocksProgress(
     || document?.validation.state === "cannot_use";
 }
 
+/**
+ * Only an unchanged authored baseline establishes the saved plan's profile.
+ * Its fingerprint includes the profile reference; valid inputs alone do not
+ * establish that the saved setup still belongs to the current profile.
+ */
+export function savedConfigurationCanRestoreAutomatically(
+  document: SavedConfigurationDocument | null,
+): boolean {
+  return document?.compatibility?.baselineState === "unchanged"
+    && !savedConfigurationBlocksProgress(document);
+}
+
 export function savedConfigurationValidationLabel(
   document: SavedConfigurationDocument,
 ): string {

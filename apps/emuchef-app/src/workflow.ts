@@ -159,6 +159,22 @@ export type WorkflowAction =
   | { type: "infrastructure-invalidated" }
   | { type: "runtime-invalidated" };
 
+/**
+ * Loaded intent needs a verified unchanged baseline before activation is allowed.
+ * In-session intent instead retains its known profile, which must still match.
+ * Both paths also require plan membership in the newly accepted native profile.
+ */
+export function stagedIntentMatchesProfile(
+  intent: WorkflowState["stagedIntent"],
+  match: DeviceMatch | null,
+  profileId: string | null | undefined,
+): intent is NonNullable<WorkflowState["stagedIntent"]> {
+  return !!intent?.activationAllowed && !!profileId
+    && (intent.profileId === undefined || intent.profileId === profileId)
+    && !!match?.profiles?.some((profile) => profile.profileId === profileId
+      && profile.plans.some((plan) => plan.planId === intent.devicePlan));
+}
+
 const previousStep: Record<WorkflowStep, WorkflowStep> = {
   connect: "connect",
   device: "connect",
@@ -249,7 +265,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         requestGeneration: state.requestGeneration + 1 };
       if (action.match.selectionHandle && action.match.selectedProfileId) {
         const staged = state.stagedIntent;
-        const sameProfile = staged?.activationAllowed && (!staged.profileId || staged.profileId === action.match.selectedProfileId) && action.match.profiles?.some((p) => p.profileId === action.match.selectedProfileId && p.plans.some((plan) => plan.planId === staged.devicePlan));
+        const sameProfile = stagedIntentMatchesProfile(staged, action.match, action.match.selectedProfileId);
         return { ...base, step: "setup", stagedIntent: null,
           ...(sameProfile ? { devicePlan: staged.devicePlan, selectedRecipes: staged.selectedRecipes, bindings: staged.bindings, requiredReentryBindings: staged.requiredReentryBindings, portableIntentDirty: staged.dirty, savedIntentLoaded: true, descriptionDirty: true } : {}) };
       }
@@ -263,7 +279,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (state.step === "execution") return { ...state, match, selectionHandle: null, selectedProfileId: null, review: null, reviewStale: true };
       return { ...initialWorkflowState, step: state.facts ? "profile" : "connect", facts: state.facts, deviceHandle: state.deviceHandle,
         match: { ...match, resolutionStatus: "incomplete" }, requestGeneration: state.requestGeneration + 1,
-        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, state.bindings), requiredReentryBindings: state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: true, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent };
+        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, state.bindings), requiredReentryBindings: state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: !!state.selectedProfileId, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent };
     }
     case "choose-profile":
       if (state.match?.profileChangeAllowed !== true || executionBlocksProfileChange(state)) return state;
@@ -272,7 +288,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (!action.selection.selectionHandle || !state.match || executionBlocksProfileChange(state)) return state;
       if (state.selectionHandle === action.selection.selectionHandle) return { ...state, step: "setup" };
       const staged = state.stagedIntent;
-      const sameProfile = !!staged?.activationAllowed && (!staged.profileId || staged.profileId === action.selection.selectedProfileId) && !!state.match.profiles?.some((p) => p.profileId === action.selection.selectedProfileId && p.plans.some((plan) => plan.planId === staged.devicePlan));
+      const sameProfile = stagedIntentMatchesProfile(staged, state.match, action.selection.selectedProfileId);
       return { ...initialWorkflowState, step: "setup", deviceHandle: state.deviceHandle,
         ...(sameProfile ? { devicePlan: staged.devicePlan, selectedRecipes: staged.selectedRecipes, bindings: staged.bindings, requiredReentryBindings: staged.requiredReentryBindings, portableIntentDirty: staged.dirty, savedIntentLoaded: true, descriptionDirty: true } : {}),
         facts: state.facts, match: { ...state.match, ...action.selection },
@@ -470,7 +486,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (executionBlocksProfileChange(state)) return state;
       return {
         ...state,
-        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, state.bindings), requiredReentryBindings: state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: true, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent,
+        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, state.bindings), requiredReentryBindings: state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: !!state.selectedProfileId, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent,
         selectionHandle: null, selectedProfileId: null,
         step: state.deviceHandle ? "device" : "connect",
         facts: null,
@@ -488,7 +504,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         repairIntent: true,
       };
     case "load-portable-intent":
-      return { ...initialWorkflowState, portableIntentDirty: action.dirty, savedIntentLoaded: true, stagedIntent: { devicePlan: action.devicePlan, selectedRecipes: action.selectedRecipes, bindings: action.bindings, requiredReentryBindings: action.requiredReentryBindings ?? [], dirty: action.dirty, activationAllowed: action.activationAllowed !== false },
+      return { ...initialWorkflowState, portableIntentDirty: action.dirty, savedIntentLoaded: true, stagedIntent: { devicePlan: action.devicePlan, selectedRecipes: action.selectedRecipes, bindings: action.bindings, requiredReentryBindings: action.requiredReentryBindings ?? [], dirty: action.dirty, activationAllowed: action.activationAllowed === true },
         requestGeneration: state.requestGeneration + 1, executionGeneration: state.executionGeneration + 1 };
     case "portable-intent-saved":
       return { ...state, portableIntentDirty: false };
@@ -538,7 +554,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (state.step === "execution" || state.execution.kind === "starting") return state;
       return {
         ...state,
-        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, action.bindings ?? state.bindings), requiredReentryBindings: action.requiredReentryBindings ?? state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: true, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent,
+        stagedIntent: state.devicePlan ? { devicePlan: state.devicePlan, selectedRecipes: state.selectedRecipes ?? [], bindings: bindingsWithoutSetupLocationReferences(state.description, action.bindings ?? state.bindings), requiredReentryBindings: action.requiredReentryBindings ?? state.requiredReentryBindings, dirty: state.portableIntentDirty, activationAllowed: !!state.selectedProfileId, profileId: state.selectedProfileId ?? undefined } : state.stagedIntent,
         step: "connect",
         reconnectDeviceHandle: state.deviceHandle,
         deviceHandle: null,

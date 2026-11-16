@@ -55,3 +55,11 @@ test("a delayed authority error cannot clear a replacement selection at the same
   assert.equal(state.selectionHandle, "selection-b");
   assert.deepEqual(state.bindings, { theme: "current" });
 });
+
+test("portable intent without explicit compatibility evidence never restores by matching plan ID", () => {
+  let state = workflowReducer(initialWorkflowState, { type: "load-portable-intent", devicePlan: "a.plan", selectedRecipes: ["recipe"], bindings: { theme: "old-profile" }, dirty: false });
+  state = { ...state, deviceHandle: "device", match: profileMatch };
+  const selected = workflowReducer(state, { type: "profile-selected", selection: selection("a", "current") });
+  assert.equal(selected.devicePlan, null);
+  assert.deepEqual(selected.bindings, {});
+});

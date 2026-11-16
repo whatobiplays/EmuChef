@@ -2344,6 +2344,162 @@ fn now_epoch_ms() -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn retargeted_saved_plan_changes_baseline_without_invalidating_inputs_or_recent_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/fixtures/t03_app_target/authored");
+        let authored = root.join("authored");
+        for relative in [
+            "apps/t03.copy_fixture.yaml",
+            "device_profiles/t03.copy_fixture.yaml",
+            "device_plans/t03.copy_fixture.base.yaml",
+            "recipes/t03.copy_app_target.yaml",
+        ] {
+            let destination = authored.join(relative);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(fixture.join(relative), destination).unwrap();
+        }
+        let profile_a =
+            fs::read_to_string(authored.join("device_profiles/t03.copy_fixture.yaml")).unwrap();
+        fs::write(
+            authored.join("device_profiles/other.profile.yaml"),
+            profile_a.replace("id: t03.copy_fixture\n", "id: other.profile\n"),
+        )
+        .unwrap();
+        let source = root.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("asset.txt"), b"portable source\n").unwrap();
+        let cache_root = root.join("sidecar-cache");
+        let mut state = AppState {
+            sidecar: crate::sidecar::SidecarState::with_test_backend(
+                cache_root.clone(),
+                emuchef_rust_backend::execution_session::SidecarRuntimeConfig {
+                    runtime_root: root.join("sidecar-runtime"),
+                    cache_root,
+                    adb_path: "unused-test-adb".into(),
+                },
+            ),
+            catalog: crate::catalog::CatalogDescriptor::for_test_root(authored.clone()),
+            qualification_repository: Default::default(),
+            qualification_transition_gate: crate::commands::QualificationTransitionGate::new(),
+            adb: Mutex::new(crate::adb::AdbManager::new(root.join("platform-tools"))),
+            platform_tools_selections: Default::default(),
+            input_contracts: Default::default(),
+            handles: Default::default(),
+            qualification_sessions: Default::default(),
+            root_qualification: Default::default(),
+            executions: Default::default(),
+            saved_configurations: Mutex::new(SavedConfigurationStore::load(
+                root.join("recents.json"),
+            )),
+            recovery: Mutex::new(crate::recovery::RecoveryStore::load(
+                root.join("recovery.json"),
+                root.join("session.marker"),
+            )),
+            support: Mutex::new(crate::support::SupportStore::new(root.join("support"))),
+            updates: crate::updates::UpdateService::from_production_document().unwrap(),
+            update_activity: Default::default(),
+        };
+        let path = root.join("saved.yaml");
+        let created = state
+            .sidecar
+            .request(
+                "createUserConfiguration",
+                json!({
+                    "path": path,
+                    "configurationId": "saved.retarget",
+                    "name": "Saved setup",
+                    "devicePlan": "t03.copy_fixture.base",
+                    "selectedRecipes": ["t03.copy_app_target"],
+                    "bindings": {"t03.copy_app_target/source": source},
+                    "authoredRoot": authored,
+                }),
+            )
+            .unwrap();
+        let initial = open_result(&state, path.clone(), &created).unwrap();
+        assert_eq!(initial["compatibility"]["baselineState"], "unchanged");
+        assert_eq!(
+            initial["validation"],
+            json!({"state":"valid", "diagnostics":[]})
+        );
+        let saved_bytes = fs::read(&path).unwrap();
+        let recent_identity = {
+            let store = state.saved_configurations.lock().unwrap();
+            assert_eq!(store.recents.len(), 1);
+            let entry = &store.recents[0];
+            (
+                entry.name.clone(),
+                entry.configuration_id.clone(),
+                entry.path.clone(),
+            )
+        };
+        let handle = initial["configurationHandle"].as_str().unwrap();
+        let removed = state
+            .saved_configurations
+            .lock()
+            .unwrap()
+            .remove_document(handle)
+            .unwrap();
+        state
+            .sidecar
+            .request(
+                "closeUserConfiguration",
+                json!({
+                    "documentId": removed.sidecar_document_id,
+                }),
+            )
+            .unwrap();
+
+        let plan_path = authored.join("device_plans/t03.copy_fixture.base.yaml");
+        let plan_a = fs::read_to_string(&plan_path).unwrap();
+        let plan_b = plan_a.replace(
+            "device_profile_ref: t03.copy_fixture\n",
+            "device_profile_ref: other.profile\n",
+        );
+        assert_ne!(plan_a, plan_b);
+        fs::write(plan_path, plan_b).unwrap();
+        state.catalog = crate::catalog::CatalogDescriptor::for_test_root(authored);
+
+        let restored = restore_recovery_source(
+            &state,
+            "saved.retarget",
+            &RecoveryPortableIntent {
+                dirty: false,
+                device_plan: "t03.copy_fixture.base".into(),
+                selected_recipes: vec!["t03.copy_app_target".into()],
+                bindings: Map::new(),
+                omitted_bindings: vec![],
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored["devicePlan"], initial["devicePlan"]);
+        assert_eq!(restored["bindings"], initial["bindings"]);
+        assert_eq!(
+            restored["compatibility"]["baselineState"],
+            "materially_changed"
+        );
+        assert_eq!(
+            restored["validation"],
+            json!({"state":"valid", "diagnostics":[]})
+        );
+        assert_eq!(restored["dirty"], false);
+        assert_eq!(fs::read(&path).unwrap(), saved_bytes);
+        let persisted = SavedConfigurationStore::load(root.join("recents.json"));
+        assert_eq!(persisted.recents.len(), 1);
+        let entry = &persisted.recents[0];
+        assert_eq!(
+            (
+                entry.name.clone(),
+                entry.configuration_id.clone(),
+                entry.path.clone()
+            ),
+            recent_identity,
+        );
+    }
+
     fn recent(handle: &str, id: &str, name: &str) -> RecentEntry {
         RecentEntry {
             recent_handle: handle.to_string(),

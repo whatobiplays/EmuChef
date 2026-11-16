@@ -7129,3 +7129,121 @@ for (const changed of [true, false]) {
     expect(JSON.stringify(original)).toBe(originalBytes);
   });
 }
+
+for (const operation of ["open", "import"] as const) {
+for (const confirmation of ["automatic", "explicit"] as const) {
+  for (const scenario of [
+    { name: "retargeted plan", profile: "profile.b", baseline: "materially_changed", restore: false },
+    { name: "changed contracts with valid diagnostics", profile: "profile.a", baseline: "materially_changed", restore: false },
+    { name: "unknown originating profile", profile: "profile.a", baseline: undefined, restore: false },
+    { name: "unchanged same-profile contracts", profile: "profile.a", baseline: "unchanged", restore: true },
+  ] as const) {
+    test(`saved restoration requires compatibility proof: ${scenario.name}, ${confirmation} confirmation, ${operation}`, async () => {
+      const user = userEvent.setup();
+      const inputKey = "recipe.one/theme";
+      const saved: SavedConfigurationDocument = {
+        outcome: "saved", configurationHandle: "origin-document", name: "Original saved setup",
+        schemaVersion: scenario.baseline ? 2 : 1, dirty: false, revision: 7,
+        devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], bindings: { [inputKey]: "origin-theme" },
+        compatibility: scenario.baseline ? { baselineState: scenario.baseline } : undefined,
+        validation: { state: "valid", diagnostics: [] },
+      };
+      const sourceBytes = JSON.stringify(saved);
+      const recents = [{ recentHandle: "origin-recent", name: saved.name, fileLabel: "original.yaml", lastOpenedEpochMs: 1, availability: "available", identityConflict: false }];
+      const recentBytes = JSON.stringify(recents);
+      const plan = { ...supportedMatch.candidates[0], profileId: scenario.profile, name: "Restoration setup" };
+      const profile = { ...supportedMatch.profiles[0], profileId: scenario.profile, profileName: "Current profile", plans: [plan], requiresExplicitChoice: true };
+      const selection = { resolutionHandle: "current-resolution", selectionHandle: "current-selection", selectedProfileId: scenario.profile, setupGeneration: 1, profileChangeAllowed: true, profileChangeReason: null };
+      const unselected = { ...selection, selectionHandle: null, selectedProfileId: null };
+      const accepted = deferred<typeof selection>();
+      mockApi.pollDevices.mockResolvedValue([availableDevice]);
+      mockApi.listRecentConfigurations.mockResolvedValue(recents);
+      mockApi.matchDevice.mockResolvedValue({ ...supportedMatch, ...(confirmation === "automatic" ? selection : unselected), profiles: [profile], candidates: [plan], resolutionStatus: confirmation === "automatic" ? "resolved" : "choice_required" });
+      mockApi.deviceProfileSelection.mockResolvedValue(confirmation === "automatic" ? selection : unselected);
+      mockApi.selectDeviceProfile.mockReturnValue(accepted.promise);
+      mockApi.previewSavedConfiguration.mockResolvedValue({
+        outcome: "previewed", previewHandle: "origin-preview", name: saved.name, fileLabel: "original.yaml", schemaVersion: saved.schemaVersion,
+        lastModifiedEpochMs: null, setupLabel: "Restoration setup", featureLabels: ["Recipe One"], savedInputCount: 1, omittedInputCount: 0,
+        compatibility: { state: scenario.baseline === "materially_changed" ? "materially_changed" : "compatible", baselineState: scenario.baseline ?? "pending_first_v2_save", requiresRepair: false, message: "Inspect the saved setup." }, repairActions: [],
+      });
+      mockApi.confirmSavedConfigurationPreview.mockResolvedValue(saved);
+      mockApi.importSavedConfiguration.mockResolvedValue({ ...saved, configurationHandle: "imported-document", schemaVersion: 2, compatibility: { baselineState: "unchanged" } });
+      mockApi.describeConfiguration.mockImplementation(async (request) => {
+        const description = descriptionWithTextInput({ key: inputKey, inputId: "theme", label: "Restored theme", required: false, sensitive: false });
+        return { ...description, devicePlan: request.devicePlan, inputs: description.inputs.map((input) => ({ ...input, value: request.bindings[input.key] ?? null })) };
+      });
+      await renderReadyApp();
+      await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+      await user.click(screen.getByRole("button", { name: operation === "open" ? "Open…" : "Import…" }));
+      await user.click(await screen.findByRole("button", { name: operation === "open" ? "Open setup" : "Import a copy…" }));
+      if (operation === "import") {
+        await screen.findByRole("heading", { name: "Name the imported setup" });
+        await continueCurrentStep(user);
+      }
+      await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+      expect(mockApi.describeConfiguration).not.toHaveBeenCalled();
+      if (confirmation === "explicit") {
+        await user.click(await screen.findByRole("button", { name: "Current profile" }));
+        expect(screen.queryByRole("heading", { name: "Choose Setup" })).toBeNull();
+        expect(mockApi.describeConfiguration).not.toHaveBeenCalled();
+        mockApi.deviceProfileSelection.mockResolvedValue(selection);
+        await act(async () => { accepted.resolve(selection); await accepted.promise; });
+      }
+      await screen.findByRole("heading", { name: "Choose Setup" });
+      expect((screen.getByRole("radio", { name: /Restoration setup/ }) as HTMLInputElement).checked).toBe(scenario.restore);
+      if (!scenario.restore) await user.click(screen.getByRole("radio", { name: /Restoration setup/ }));
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      await screen.findByRole("heading", { name: "Choose what to install" });
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      await screen.findByRole("heading", { name: "Provide required files and options" });
+      expect((screen.getByLabelText("Restored theme") as HTMLInputElement).value).toBe(scenario.restore ? "origin-theme" : "");
+      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({ selectionHandle: selection.selectionHandle, bindings: scenario.restore ? saved.bindings : {} }));
+      expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
+      expect(mockApi.saveSavedConfiguration).not.toHaveBeenCalled();
+      expect(mockApi.removeRecentConfiguration).not.toHaveBeenCalled();
+      expect(JSON.stringify(saved)).toBe(sourceBytes);
+      expect(JSON.stringify(recents)).toBe(recentBytes);
+    });
+  }
+}
+
+}
+
+for (const baseline of [null, "materially_changed", "unchanged"] as const) {
+  const linkedDocument = baseline !== null;
+  const restore = baseline === "unchanged";
+  test(`recovery restoration requires compatibility proof: baseline=${baseline}`, async () => {
+    const user = userEvent.setup();
+    const saved: SavedConfigurationDocument = { configurationHandle: "recovery-source", name: "Original setup", dirty: false, revision: 7, devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], bindings: { "recipe.one/theme": "profile-a-theme" }, compatibility: { baselineState: baseline ?? "materially_changed" }, validation: { state: "valid", diagnostics: [] } };
+    const sourceBytes = JSON.stringify(saved);
+    const profileId = restore ? "profile.a" : "profile.b";
+    const selection = { resolutionHandle: "recovery-resolution", selectionHandle: "recovery-selection", selectedProfileId: profileId, setupGeneration: 1, profileChangeAllowed: true, profileChangeReason: null };
+    const plan = { ...supportedMatch.candidates[0], profileId, name: "Recovery setup" };
+    mockApi.beginAppSession.mockResolvedValue({ sessionGeneration: 1, interruptedSession: true, recovery: { state: "available", draftGeneration: 4, displayName: "Original setup", savedAtEpochMs: 1, sourceSavedConfiguration: linkedDocument, reason: "Setup was interrupted.", restores: "Portable choices", doesNotRestore: "Device authority", restoreConsequence: "Review choices again.", discardConsequence: "Remove this draft." } });
+    mockApi.restoreRecoveryDraft.mockImplementation(async (_session, draftGeneration, requestGeneration) => ({ requestGeneration, draftGeneration, displayName: null, sourceStatus: linkedDocument ? "available" : "unsaved", document: linkedDocument ? saved : null, intent: { dirty: false, devicePlan: saved.devicePlan, selectedRecipes: saved.selectedRecipes, bindings: saved.bindings, requiredReentryBindings: [] } }));
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.matchDevice.mockResolvedValue({ ...supportedMatch, ...selection, candidates: [plan], profiles: [{ ...supportedMatch.profiles[0], profileId, plans: [plan] }] });
+    mockApi.deviceProfileSelection.mockResolvedValue(selection);
+    mockApi.describeConfiguration.mockImplementation(async (request) => {
+      const description = descriptionWithTextInput({ key: "recipe.one/theme", inputId: "theme", label: "Recovered theme", required: false, sensitive: false });
+      return { ...description, devicePlan: request.devicePlan, inputs: description.inputs.map((input) => ({ ...input, value: request.bindings[input.key] ?? null })) };
+    });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Restore" }));
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await screen.findByRole("heading", { name: "Choose Setup" });
+    expect((screen.getByRole("radio", { name: /Recovery setup/ }) as HTMLInputElement).checked).toBe(restore);
+    expect(mockApi.describeConfiguration).not.toHaveBeenCalled();
+    if (restore) {
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      await screen.findByRole("heading", { name: "Choose what to install" });
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      expect((await screen.findByLabelText("Recovered theme") as HTMLInputElement).value).toBe("profile-a-theme");
+    }
+    expect(mockApi.selectDeviceProfile).not.toHaveBeenCalled();
+    expect(mockApi.updateSavedConfiguration).not.toHaveBeenCalled();
+    expect(mockApi.saveSavedConfiguration).not.toHaveBeenCalled();
+    expect(mockApi.removeRecentConfiguration).not.toHaveBeenCalled();
+    expect(JSON.stringify(saved)).toBe(sourceBytes);
+  });
+}

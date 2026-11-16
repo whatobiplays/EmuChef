@@ -6,6 +6,7 @@ import {
   resolveUnsavedDecision,
   saveConfigurationDisabledReason,
   savedConfigurationBlocksProgress,
+  savedConfigurationCanRestoreAutomatically,
   savedConfigurationDiagnosticSummary,
   savedConfigurationValidationLabel,
   savedDevicePlanAvailable,
@@ -178,4 +179,12 @@ test("Platform-Tools invalidation preserves dirty portable edits only", () => {
 test("last-opened display rejects invalid timestamps", () => {
   assert.equal(formatLastOpened(0), "Last opened time unavailable");
   assert.match(formatLastOpened(1_700_000_000_000), /^Last opened /);
+});
+
+test("automatic restoration needs an unchanged baseline independently of input validation", () => {
+  for (const baselineState of [undefined, "pending_first_v2_save", "materially_changed", "repair_required", "unavailable", "unchanged"] as const) {
+    const valid: SavedConfigurationDocument = { ...document, compatibility: baselineState ? { baselineState } : undefined, validation: { state: "valid", diagnostics: [] } };
+    assert.equal(savedConfigurationCanRestoreAutomatically(valid), baselineState === "unchanged");
+  }
+  assert.equal(savedConfigurationCanRestoreAutomatically({ ...document, compatibility: { baselineState: "unchanged" } }), false);
 });
