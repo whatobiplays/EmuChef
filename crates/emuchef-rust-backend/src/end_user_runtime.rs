@@ -1347,7 +1347,7 @@ truncated
     }
 
     #[test]
-    fn air_mini_and_konkr_profiles_never_auto_resolve_the_shared_model_identity() {
+    fn ambiguous_shared_identity_requires_choice_but_one_eligible_profile_can_resolve() {
         let root = tempfile::tempdir().unwrap();
         for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
             fs::create_dir(root.path().join(directory)).unwrap();
@@ -1410,9 +1410,17 @@ truncated
         );
         assert_eq!(
             fingerprint_release_conflict["candidates"][0]["requiresExplicitChoice"],
-            true
+            false
         );
-        assert!(fingerprint_release_conflict["recommendedPlanId"].is_null());
+        assert_eq!(fingerprint_release_conflict["resolutionStatus"], "resolved");
+        assert_eq!(
+            fingerprint_release_conflict["selectedProfileId"],
+            "ayaneo.pocket_air_mini"
+        );
+        assert_eq!(
+            fingerprint_release_conflict["recommendedPlanId"],
+            "plan.ayaneo.pocket_air_mini"
+        );
     }
 
     #[test]

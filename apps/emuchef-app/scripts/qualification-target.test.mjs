@@ -18,7 +18,7 @@ test("configuration-create target preserves the owner identity and conflicting A
   assert.equal(target.automaticProfileMatching, false);
   assert.equal(
     target.deviceSessionBinding,
-    "blocked_by_existing_canonical_selection_contract",
+    "requires_current_session_profile_selection",
   );
   assert.equal(target.status, "pending_physical_qualification");
   assert.equal(target.profileId, "konkr.pocket_advance");
@@ -34,8 +34,11 @@ test("configuration-create target preserves the owner identity and conflicting A
   assert.equal(Object.hasOwn(target, "serial"), false);
 
   const profile = readFileSync(PROFILE_PATH, "utf8");
-  assert.match(profile, /selection_policy: explicit_operator_selection/);
-  assert.match(profile, /automatic_profile_matching: false/);
+  assert.match(profile, /^id: konkr\.pocket_advance$/m);
+  assert.doesNotMatch(
+    profile,
+    /qualification_scope:|selection_policy:|automatic_profile_matching:|retroarch_config_create_qualification/,
+  );
   assert.match(profile, /android_version:\n\s+min: 12/);
   assert.match(profile, /root_shell: false/);
   assert.match(profile, /app_data_write: false/);

@@ -1,0 +1,15 @@
+schema_version: 1
+kind: device_plan
+id: konkr.pocket_advance.base
+name: KONKR Pocket Advance Base Setup
+description: Base setup for the KONKR Pocket Advance.
+device_profile_ref: konkr.pocket_advance
+recipes:
+  - recipe_ref: app.retroarch.provision
+    selected_by_default: true
+  - recipe_ref: feature.copy_bios
+    selected_by_default: true
+  - recipe_ref: app.retroarch.configure
+    selected_by_default: false
+defaults:
+  show_advanced_steps: false

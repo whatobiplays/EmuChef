@@ -4,7 +4,7 @@
   "qualificationScope": "RetroArch configuration-create qualification",
   "selectionPolicy": "explicit_operator_selection",
   "automaticProfileMatching": false,
-  "deviceSessionBinding": "blocked_by_existing_canonical_selection_contract",
+  "deviceSessionBinding": "requires_current_session_profile_selection",
   "status": "pending_physical_qualification",
   "profileId": "konkr.pocket_advance",
   "retailIdentity": {

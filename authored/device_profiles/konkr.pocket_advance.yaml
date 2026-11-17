@@ -2,7 +2,7 @@ schema_version: 1
 kind: device_profile
 id: konkr.pocket_advance
 name: KONKR Pocket Advance
-description: Explicit qualification profile for the owner-identified KONKR Pocket Advance.
+description: Product profile for the KONKR Pocket Advance.
 match:
   manufacturer_contains:
     - ARBOR
@@ -22,8 +22,3 @@ capability_defaults:
 device_tags:
   - handheld_android
   - brand_konkr
-  - retroarch_config_create_qualification
-metadata:
-  qualification_scope: retroarch_config_create
-  selection_policy: explicit_operator_selection
-  automatic_profile_matching: false
