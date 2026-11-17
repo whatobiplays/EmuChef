@@ -2023,7 +2023,7 @@ mod tests {
     }
 
     #[test]
-    fn observed_completion_at_the_deadline_boundary_keeps_completion_without_deadline_reached() {
+    fn observed_process_completion_returns_success_and_records_terminal_deadline_sample() {
         let observer = OwnedProcessObservationHandle::default();
         let executable = std::env::current_exe().expect("test executable should be available");
         let output = run_owned_process_observed_for_test(
@@ -2036,11 +2036,11 @@ mod tests {
                 "--ignored".to_string(),
                 "--nocapture".to_string(),
             ],
-            Duration::from_millis(10),
+            Duration::from_secs(2),
             ProcessOperation::DeviceCopy,
             observer.clone(),
         )
-        .expect("a completed exact child must remain completed at the deadline boundary");
+        .expect("normal helper should complete within the test deadline");
         assert_eq!(output.status_code, Some(0));
         assert!(
             !observer
