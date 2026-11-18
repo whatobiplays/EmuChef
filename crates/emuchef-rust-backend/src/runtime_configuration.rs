@@ -1396,7 +1396,7 @@ fn recipe_availability(
             diagnostics,
         );
     }
-    if !planning_result_is_empty_only(&actual) {
+    if !planning_result_is_empty_only(&actual) && !planning_result_is_capability_blocked(&actual) {
         if diagnostics.is_empty() {
             diagnostics.push(recipe_availability_diagnostic(
                 &recipe.id,
@@ -1555,7 +1555,9 @@ fn recipe_availability(
             crate::planner::plan_execution_for_recipe_availability(probe_input, app_definitions);
         if planning_result_has_steps(&probe) {
             minimal_solutions.push(subset);
-        } else if !planning_result_is_empty_only(&probe) {
+        } else if !planning_result_is_empty_only(&probe)
+            && !planning_result_is_capability_blocked(&probe)
+        {
             diagnostics.extend(recipe_planner_diagnostics(
                 &probe, &recipe.id, severity, false,
             ));
@@ -1623,6 +1625,25 @@ fn planning_result_is_empty_only(result: &crate::planner::PlanningResult) -> boo
             .errors
             .iter()
             .all(|error| error.code == "empty_execution_plan")
+}
+
+fn planning_result_is_capability_blocked(result: &crate::planner::PlanningResult) -> bool {
+    let has_capability_blocker = result.errors.iter().any(|error| {
+        matches!(
+            error.code.as_str(),
+            "required_step_capability_unavailable" | "required_step_dependency_unavailable"
+        )
+    });
+    result.execution_plan.is_none()
+        && has_capability_blocker
+        && result.errors.iter().all(|error| {
+            matches!(
+                error.code.as_str(),
+                "empty_execution_plan"
+                    | "required_step_capability_unavailable"
+                    | "required_step_dependency_unavailable"
+            )
+        })
 }
 
 fn recipe_planner_diagnostics(

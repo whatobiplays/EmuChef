@@ -244,6 +244,38 @@ fn catalog_semantics_are_diagnostics_and_sensitive_values_are_redacted() {
 }
 
 #[test]
+fn saved_configuration_may_omit_session_bound_setup_location() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let authored_root = write_authored_root(&temp, false);
+    let recipe_path = authored_root.join("recipes/feature.test.yaml");
+    let recipe = fs::read_to_string(&recipe_path).expect("test recipe should be readable");
+    let recipe = recipe.replace(
+        "  destination:\n    type: device_path\n    required: true\n    validation:\n      allowed_prefixes: [/sdcard]\n",
+        "  destination:\n    type: setup_location_ref\n    role: destination\n    label: Destination\n    required: true\n",
+    );
+    assert!(recipe.contains("type: setup_location_ref"));
+    fs::write(&recipe_path, recipe)
+        .expect("test recipe should declare a session-bound Setup Location input");
+    let path = write_configuration(&temp, valid_yaml());
+    let configuration = load_user_configuration(&path)
+        .expect("saved configuration should load without a session location");
+
+    let diagnostics =
+        validate_user_configuration_with_catalog(&configuration, &path, &authored_root);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+    let emitted = emit_user_configuration_yaml(&configuration)
+        .expect("saved configuration should emit canonically");
+    assert!(emitted.contains("feature.test/value"));
+    assert!(emitted.contains("value: saved"));
+    assert!(!emitted.contains("feature.test/destination"));
+    assert_eq!(
+        parse_user_configuration(&emitted).expect("emitted configuration should parse"),
+        configuration
+    );
+}
+
+#[test]
 fn sidecar_user_configuration_document_remains_editable_with_semantic_errors() {
     let temp = TempDir::new().expect("temp root should be created");
     let authored_root = write_authored_root(&temp, false);

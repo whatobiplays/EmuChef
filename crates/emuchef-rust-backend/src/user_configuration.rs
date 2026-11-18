@@ -1208,7 +1208,10 @@ fn validate_with_recipes(
         };
         for (input_id, input) in &recipe.inputs {
             let key = format!("{recipe_id}/{input_id}");
+            // Setup Location choices belong to the active session; runtime
+            // planning still requires a current choice for every selected operation.
             if input.required
+                && input.type_name != "setup_location_ref"
                 && !configuration.bindings.contains_key(&key)
                 && !device_overrides.contains_key(&key)
                 && input.default.is_null()

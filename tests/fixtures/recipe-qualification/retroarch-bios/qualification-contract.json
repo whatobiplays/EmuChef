@@ -95,7 +95,7 @@
   ],
   "fakeStorageAliasesQualified": false,
   "liveNetworkRequiredForAutomatedQualification": false,
-  "automatedStatus": "qualified",
+  "automatedStatus": "planner_membership_and_bios_only_host",
   "physicalStatus": "deferred",
   "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
 }

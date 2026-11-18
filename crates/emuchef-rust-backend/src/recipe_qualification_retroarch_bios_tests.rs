@@ -30,25 +30,6 @@ const BIOS_DESTINATION: &str = "/storage/emulated/0/RetroArch/system";
 const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
 const RETROARCH_LAUNCHER: &str = "com.retroarch.browser.mainmenu.MainMenuActivity";
 
-macro_rules! assert_shared_system_target_overlap {
-    ($result:expr) => {{
-        let result = $result;
-        assert!(
-            result.plan.is_none(),
-            "overlapping selections must not produce a plan"
-        );
-        let diagnostic = result
-            .diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.code == "app_target_destination_overlap")
-            .expect("the shared system target collision must be explicit");
-        assert_eq!(diagnostic.details["first_recipe_ref"], RETROARCH_RECIPE);
-        assert_eq!(diagnostic.details["first_target_id"], "system");
-        assert_eq!(diagnostic.details["second_recipe_ref"], BIOS_RECIPE);
-        assert_eq!(diagnostic.details["second_target_id"], "system");
-    }};
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CombinedQualificationContract {
@@ -135,7 +116,10 @@ fn load_contract() -> CombinedQualificationContract {
     );
     assert!(!contract.fake_storage_aliases_qualified);
     assert!(!contract.live_network_required_for_automated_qualification);
-    assert_eq!(contract.automated_status, "qualified");
+    assert_eq!(
+        contract.automated_status,
+        "planner_membership_and_bios_only_host"
+    );
     assert_eq!(contract.physical_status, "deferred");
     assert_eq!(
         contract.physical_cleanup_authority,
@@ -254,21 +238,13 @@ fn combined_contract_binds_all_authored_sources_and_defers_physical_aliases() {
 }
 
 #[test]
-fn combined_default_plan_and_review_match_the_strict_contract() {
+fn combined_default_plan_has_complete_membership_and_preserves_runtime_staging() {
     let contract = load_contract();
     let workspace = CombinedQualificationWorkspace::new();
     let result = plan_combined(
         Some(&workspace.bios_source_dir),
         Some(&workspace.retroarch_config),
     );
-    if result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "app_target_destination_overlap")
-    {
-        assert_shared_system_target_overlap!(&result);
-        return;
-    }
     assert!(result
         .diagnostics
         .iter()
@@ -276,21 +252,15 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
     assert!(result.copy_commit_preparation_required);
     assert!(result.plan_digest.is_none());
     assert!(result.review.is_none());
-    let mut reviewed_plan = result
+    let plan = result
         .plan
         .as_ref()
         .expect("combined plan should be generated")
         .clone();
-    let mut reviewer = ExecutorRunner::new(combined_sandbox_adapters(&workspace));
-    reviewer
-        .prepare_copy_commit_snapshots(&mut reviewed_plan)
-        .expect("combined review should prepare trusted copy snapshots");
-    assert!(!reviewed_plan.copy_commit_snapshots.is_empty());
-    let plan_digest = crate::plan_digest::execution_plan_digest(&reviewed_plan)
-        .expect("prepared combined plan should have a canonical digest");
-    assert!(!plan_digest.is_empty());
-    let review = crate::review_projection::project_review(&reviewed_plan, &[]);
-    let plan = &reviewed_plan;
+    assert!(plan.copy_commit_snapshots.is_empty());
+    assert_eq!(plan.source.selected_recipe_refs, contract.selected_recipes);
+    assert_eq!(plan.source.expanded_recipe_refs, contract.expanded_recipes);
+    let plan = &plan;
     let lifecycle = &contract.app_lifecycle;
     assert_eq!(lifecycle.app_id, "retroarch");
     assert_eq!(lifecycle.package_id, RETROARCH_PACKAGE);
@@ -482,38 +452,18 @@ fn combined_default_plan_and_review_match_the_strict_contract() {
         .expect("RetroArch authored video setting should be resolved");
     assert_eq!(threaded_binding.value, Some(Value::Bool(false)));
 
-    assert!(review.can_execute);
-    assert_eq!(review.features.len(), 2);
-    assert!(review
-        .features
-        .iter()
-        .all(|feature| !feature.automatically_added));
-    assert!(review
-        .features
-        .iter()
-        .any(|feature| feature.name == "Provision RetroArch (AArch64)"));
-    assert!(review
-        .features
-        .iter()
-        .any(|feature| feature.name == "Copy BIOS Files"));
-    assert!(review
-        .features
-        .iter()
-        .flat_map(|feature| feature.sections.iter())
-        .any(|section| section.kind == "copies"));
-    assert_eq!(review.work.action_count, plan.steps.len());
-    assert!(review
-        .notices
-        .iter()
-        .all(|notice| notice.severity != "blocker"));
-
-    let serialized = serde_json::to_string(&review).expect("review should serialize");
-    assert!(serialized.contains(RETROARCH_PACKAGE));
-    assert!(serialized.contains(RETROARCH_LAUNCHER));
-    assert!(serialized.contains("retroarch.cfg"));
-    assert!(serialized.contains("bios-source"));
-    assert!(!serialized.contains(&workspace._temp.path().to_string_lossy().to_string()));
-    assert!(!serialized.contains("serial"));
+    let mut plan_needing_runtime_outputs = plan.clone();
+    let mut reviewer = ExecutorRunner::new(combined_sandbox_adapters(&workspace));
+    let error = reviewer
+        .prepare_copy_commit_snapshots(&mut plan_needing_runtime_outputs)
+        .expect_err("runtime-generated App Target sources require a fresh staging review");
+    assert!(
+        error.contains("App Target sources from runtime step outputs cannot be reviewed"),
+        "{error}"
+    );
+    assert!(plan_needing_runtime_outputs
+        .copy_commit_snapshots
+        .is_empty());
 }
 
 #[test]
@@ -715,13 +665,15 @@ fn combined_sandbox_adapters(workspace: &CombinedQualificationWorkspace) -> Exec
     )
 }
 
-fn prepared_combined_plan<D: ExecutorDevice>(
+fn prepared_bios_only_plan<D: ExecutorDevice>(
     workspace: &CombinedQualificationWorkspace,
     runner: &mut ExecutorRunner<D>,
 ) -> ExecutionPlan {
-    let result = plan_combined(
+    let result = plan_configuration_for(
+        KONKR_DEVICE_PLAN,
+        Some(vec![BIOS_RECIPE.to_string()]),
         Some(&workspace.bios_source_dir),
-        Some(&workspace.retroarch_config),
+        None,
     );
     assert!(result
         .diagnostics
@@ -733,31 +685,19 @@ fn prepared_combined_plan<D: ExecutorDevice>(
     let mut plan = combined_plan(result);
     runner
         .prepare_copy_commit_snapshots(&mut plan)
-        .expect("combined execution should use trusted copy snapshots");
+        .expect("BIOS-only execution should use trusted copy snapshots");
     plan
 }
 
 #[test]
-fn combined_generated_plan_executes_with_exact_nested_bios_bytes() {
+fn bios_only_plan_executes_with_exact_nested_bios_bytes() {
     let workspace = CombinedQualificationWorkspace::new();
-    let result = plan_combined(
-        Some(&workspace.bios_source_dir),
-        Some(&workspace.retroarch_config),
-    );
-    if result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "app_target_destination_overlap")
-    {
-        assert_shared_system_target_overlap!(&result);
-        return;
-    }
     let mut runner = ExecutorRunner::new(combined_sandbox_adapters(&workspace));
-    let plan = prepared_combined_plan(&workspace, &mut runner);
+    let plan = prepared_bios_only_plan(&workspace, &mut runner);
     seed_artifact_cache(&workspace.cache_root, &plan);
     let result = runner.run(&plan);
 
-    assert!(result.success, "combined plan should execute successfully");
+    assert!(result.success, "BIOS-only plan should execute successfully");
     assert_eq!(result.total_steps, plan.steps.len());
     assert_eq!(result.steps.len(), result.total_steps);
     let lifecycle_commands = runner
@@ -773,18 +713,9 @@ fn combined_generated_plan_executes_with_exact_nested_bios_bytes() {
         })
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(
-        lifecycle_commands,
-        vec![
-            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
-            vec!["force_stop_app", RETROARCH_PACKAGE],
-            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
-            vec!["force_stop_app", RETROARCH_PACKAGE],
-            vec!["launch_app", RETROARCH_PACKAGE, RETROARCH_LAUNCHER],
-        ]
-        .into_iter()
-        .map(|command| command.into_iter().map(str::to_string).collect::<Vec<_>>())
-        .collect::<Vec<_>>()
+    assert!(
+        lifecycle_commands.is_empty(),
+        "BIOS-only selection must not run RetroArch lifecycle operations"
     );
     assert!(result.steps.iter().all(|record| {
         !matches!(
@@ -792,11 +723,7 @@ fn combined_generated_plan_executes_with_exact_nested_bios_bytes() {
             StepRunStatus::Failed | StepRunStatus::Blocked | StepRunStatus::Cancelled
         )
     }));
-    for suffix in [
-        "/install_retroarch",
-        "/copy_core_system_files",
-        "/copy_bios_dir",
-    ] {
+    for suffix in ["/copy_bios_dir"] {
         let record = result
             .steps
             .iter()
@@ -829,26 +756,14 @@ fn combined_generated_plan_executes_with_exact_nested_bios_bytes() {
 }
 
 #[test]
-fn combined_repeated_run_skips_only_retroarch_install_and_reexecutes_bios_sync() {
+fn bios_only_repeated_run_reexecutes_the_reviewed_sync_copy() {
     let workspace = CombinedQualificationWorkspace::new();
-    let result = plan_combined(
-        Some(&workspace.bios_source_dir),
-        Some(&workspace.retroarch_config),
-    );
-    if result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "app_target_destination_overlap")
-    {
-        assert_shared_system_target_overlap!(&result);
-        return;
-    }
     let mut runner = ExecutorRunner::new(combined_sandbox_adapters(&workspace));
-    let mut plan = prepared_combined_plan(&workspace, &mut runner);
+    let mut plan = prepared_bios_only_plan(&workspace, &mut runner);
     seed_artifact_cache(&workspace.cache_root, &plan);
 
     let first = runner.run(&plan);
-    assert!(first.success, "first combined run should succeed");
+    assert!(first.success, "first BIOS-only run should succeed");
     let status = |result: &crate::executor::ExecutionRunResult, suffix: &str| {
         result
             .steps
@@ -858,10 +773,6 @@ fn combined_repeated_run_skips_only_retroarch_install_and_reexecutes_bios_sync()
             .status
             .clone()
     };
-    assert_eq!(
-        status(&first, "/install_retroarch"),
-        StepRunStatus::Executed
-    );
     assert_eq!(status(&first, "/copy_bios_dir"), StepRunStatus::Executed);
 
     runner
@@ -870,12 +781,7 @@ fn combined_repeated_run_skips_only_retroarch_install_and_reexecutes_bios_sync()
     let second = runner.run(&plan);
     assert!(
         second.success,
-        "repeated combined run should remain successful"
-    );
-    assert_eq!(
-        status(&second, "/install_retroarch"),
-        StepRunStatus::Skipped,
-        "the authored package_installed predicate must skip only repeated RetroArch install"
+        "repeated BIOS-only run should remain successful"
     );
     assert_eq!(
         status(&second, "/copy_bios_dir"),
@@ -999,7 +905,7 @@ impl ExecutorDevice for CombinedVerificationFailDevice {
 }
 
 #[test]
-fn combined_bios_verification_failure_keeps_prior_results_truthful_without_plan_mutation() {
+fn bios_only_verification_failure_keeps_prior_results_truthful_without_plan_mutation() {
     let workspace = CombinedQualificationWorkspace::new();
     let device = CombinedVerificationFailDevice::for_bios_destination();
     assert!(!device.uses_fake_device_filesystem());
@@ -1012,20 +918,8 @@ fn combined_bios_verification_failure_keeps_prior_results_truthful_without_plan_
         vec![workspace.host_input_root.clone()],
         false,
     );
-    let planning = plan_combined(
-        Some(&workspace.bios_source_dir),
-        Some(&workspace.retroarch_config),
-    );
-    if planning
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "app_target_destination_overlap")
-    {
-        assert_shared_system_target_overlap!(&planning);
-        return;
-    }
     let mut runner = ExecutorRunner::new(adapters);
-    let plan = prepared_combined_plan(&workspace, &mut runner);
+    let plan = prepared_bios_only_plan(&workspace, &mut runner);
     seed_artifact_cache(&workspace.cache_root, &plan);
     let plan_before = plan.clone();
     let result = runner.run(&plan);
@@ -1089,26 +983,6 @@ fn combined_bios_verification_failure_keeps_prior_results_truthful_without_plan_
         }),
         "authored BIOS destination verification should still observe the missing path"
     );
-
-    assert!(commands
-        .iter()
-        .any(|command| command.first().map(String::as_str) == Some("install_apk")));
-    let install = result
-        .steps
-        .iter()
-        .find(|record| record.step_id.ends_with("/install_retroarch"))
-        .expect("RetroArch install record should exist");
-    assert_eq!(install.status, StepRunStatus::Executed);
-
-    assert!(commands
-        .iter()
-        .any(|command| command.first().map(String::as_str) == Some("launch_app")));
-    let launch = result
-        .steps
-        .iter()
-        .find(|record| record.step_id.ends_with("/launch_retroarch"))
-        .expect("RetroArch launch record should exist");
-    assert_eq!(launch.status, StepRunStatus::Executed);
 }
 
 #[test]
@@ -1118,14 +992,6 @@ fn konkr_default_selects_retroarch_and_bios() {
     fs::create_dir_all(&bios_source_dir).expect("BIOS source directory should be created");
 
     let result = plan_combined(Some(&bios_source_dir), None);
-    if result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "app_target_destination_overlap")
-    {
-        assert_shared_system_target_overlap!(&result);
-        return;
-    }
     let plan = combined_plan(result);
 
     assert_eq!(

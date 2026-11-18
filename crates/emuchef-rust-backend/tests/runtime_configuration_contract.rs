@@ -1079,16 +1079,23 @@ fn target_backed_recipe_options_report_missing_write_capabilities() {
             "feature.copy_roms",
         ] {
             let option = target_recipe_option(&response, recipe_id);
-            let blocked_by_shared_storage =
-                !shared_write && matches!(recipe_id, "feature.copy_bios" | "feature.copy_roms");
+            let blocked_by_shared_storage = !shared_write
+                && matches!(
+                    recipe_id,
+                    "app.retroarch.provision" | "feature.copy_bios" | "feature.copy_roms"
+                );
+            let blocked_by_app_data = !app_data_write && recipe_id == "app.retroarch.provision";
             assert_eq!(
-                option["available"], !blocked_by_shared_storage,
+                option["available"],
+                !blocked_by_shared_storage && !blocked_by_app_data,
                 "{recipe_id}: {option:#}"
             );
             assert_eq!(
                 option["unavailableCapabilities"],
                 if blocked_by_shared_storage {
                     json!(["shared_storage_write"])
+                } else if blocked_by_app_data {
+                    json!(["app_data_write"])
                 } else {
                     json!([])
                 },
@@ -1189,7 +1196,10 @@ fn target_errors_block_only_selected_or_dependency_expanded_recipes() {
             "authoredRoot": root,
             "devicePlan": "target.plan",
             "selectedRecipes": selection,
-            "bindings": { "feature.copy_roms/source": source },
+            "bindings": {
+                "feature.copy_roms/source": source,
+                "feature.copy_roms/destination": "internal-roms",
+            },
         });
         let response = describe(payload.clone());
         let plan = runtime_request("planConfiguration", payload);

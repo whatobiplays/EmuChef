@@ -6,8 +6,7 @@ device_plan: ayaneo.pocket_s_mini.base
 selected_recipes:
   - feature.copy_roms
 bindings:
-  feature.copy_roms/destination:
-    value: /sdcard/Emulation/ROMs
+  # Select the ROM destination from the current session's Setup Locations.
   feature.copy_roms/policy:
     value: sync
   feature.copy_roms/source:

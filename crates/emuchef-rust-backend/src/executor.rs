@@ -1140,7 +1140,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             snapshots.push(snapshot);
         }
 
-        validate_active_copy_writer_collisions(&snapshots)?;
+        copy_commit::prepare_ordered_copy_projections(&plan.steps, &mut snapshots)?;
+        copy_commit::validate_ordered_writer_preconditions(&snapshots)?;
         validate_unreviewed_legacy_shared_copy_writers(
             &mut self.adapters.device,
             &sandbox.fake_device_root,
@@ -2036,7 +2037,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             "resolve_artifacts" => self.execute_resolve_artifacts(plan, state, &resolved_params),
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
-            "copy_files" => self.execute_copy_files(plan, step, &resolved_params),
+            "copy_files" => self.execute_copy_files(plan, state, step, &resolved_params),
             "install_apk" => self.execute_install_apk(plan, state, step, &resolved_params),
             "launch_app" => self.execute_launch_app(plan, step),
             "force_stop_app" => self.execute_force_stop_app(plan, step),
@@ -2644,8 +2645,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     }
 
     fn reviewed_copy_commit_request(
-        &self,
+        &mut self,
         plan: &ExecutionPlan,
+        state: &ExecutionState,
         step: &ExecutionStep,
         source_path: &Path,
         sandbox: &SandboxRoots,
@@ -2668,10 +2670,26 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 "reviewed copy snapshot is duplicated".to_string(),
             ));
         }
-        let request = if self.adapters.device.uses_fake_copy_commit_adapter()
+        let current_destination_manifest = copy_commit::current_copy_destination_manifest(
+            &mut self.adapters.device,
+            snapshot,
+            source_path,
+            sandbox,
+        )
+        .map_err(StepFailure::new)?;
+        let simulation = self.adapters.device.uses_fake_copy_commit_adapter()
             && (snapshot.destination_binding.is_some()
-                || destination_kind == CopyCommitDestinationKind::SetupLocation)
-        {
+                || destination_kind == CopyCommitDestinationKind::SetupLocation);
+        let current_destination_manifest =
+            copy_commit::reviewed_destination_manifest_for_execution(
+                plan,
+                state,
+                snapshot,
+                current_destination_manifest,
+                simulation,
+            )
+            .map_err(StepFailure::new)?;
+        let request = if simulation {
             snapshot.simulation_request_for_execution(
                 &step.id,
                 source_path,
@@ -2679,15 +2697,17 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 destination_identity,
                 destination_kind,
                 operation,
+                current_destination_manifest,
             )
         } else {
-            snapshot.request_for_execution(
+            snapshot.request_for_execution_with_destination(
                 &step.id,
                 source_path,
                 &sandbox.fake_device_root,
                 destination_identity,
                 destination_kind,
                 operation,
+                current_destination_manifest,
             )
         };
         let mut request = request.map_err(|error| StepFailure::new(error.to_string()))?;
@@ -2700,6 +2720,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     fn execute_copy_files(
         &mut self,
         plan: &ExecutionPlan,
+        state: &ExecutionState,
         step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
@@ -2845,6 +2866,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 .map_err(|error| StepFailure::new(error.to_string()))?;
             let request = self.reviewed_copy_commit_request(
                 plan,
+                state,
                 step,
                 &source_path,
                 &sandbox,
@@ -2859,6 +2881,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             if !report.succeeded {
                 return Err(copy_commit_report_failure(report));
             }
+            let report =
+                copy_commit::validate_ordered_copy_commit_result(plan, &step.id, &request, report)?;
             let copied: Vec<String> = request
                 .source_manifest
                 .iter()
@@ -2877,6 +2901,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 .map_err(|error| StepFailure::new(error.to_string()))?;
             let request = self.reviewed_copy_commit_request(
                 plan,
+                state,
                 step,
                 &source_path,
                 &sandbox,
@@ -2891,6 +2916,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             if !report.succeeded {
                 return Err(copy_commit_report_failure(report));
             }
+            let report =
+                copy_commit::validate_ordered_copy_commit_result(plan, &step.id, &request, report)?;
             let copied: Vec<String> = request
                 .source_manifest
                 .iter()
@@ -4770,70 +4797,6 @@ fn inspect_android_setup_destination<D: ExecutorDevice>(
     Ok((precondition, destination_manifest))
 }
 
-fn validate_active_copy_writer_collisions(
-    snapshots: &[ExecutionCopyCommitSnapshot],
-) -> Result<(), String> {
-    if !snapshots
-        .iter()
-        .any(|snapshot| snapshot.destination_kind == CopyCommitDestinationKind::SetupLocation)
-    {
-        return Ok(());
-    }
-    let removable_volume_roots = active_removable_volume_roots(snapshots)?;
-    let active = snapshots
-        .iter()
-        .filter(|snapshot| {
-            matches!(
-                snapshot.destination_kind,
-                CopyCommitDestinationKind::SharedDevicePath
-                    | CopyCommitDestinationKind::SetupLocation
-            )
-        })
-        .map(|snapshot| {
-            let scope = active_copy_writer_scope(snapshot)?;
-            let scope = canonical_active_writer_scope(scope, &removable_volume_roots)?;
-            let (effects, creation_paths) = copy_writer_effects(snapshot, &scope)?;
-            let missing_precondition_paths =
-                setup_destination_precondition_missing_paths(snapshot, &scope)?;
-            Ok((
-                snapshot,
-                scope,
-                effects,
-                creation_paths,
-                missing_precondition_paths,
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    for (index, (left, _, left_effects, left_creations, left_missing)) in active.iter().enumerate()
-    {
-        for (right, right_scope, right_effects, right_creations, right_missing) in
-            active.iter().skip(index + 1)
-        {
-            let creates_reviewed_missing_path = left_creations
-                .iter()
-                .any(|path| right_missing.contains(path))
-                || right_creations
-                    .iter()
-                    .any(|path| left_missing.contains(path));
-            if creates_reviewed_missing_path || writer_effects_conflict(left_effects, right_effects)
-            {
-                return Err(format!(
-                    "active copy steps {} and {} have conflicting destination effects",
-                    left.step_id, right.step_id
-                ));
-            }
-            if writer_effects_change_reviewed_scope(left_effects, left_creations, right_scope) {
-                return Err(format!(
-                    "active copy step {} changes the destination tree captured by later step {}'s reviewed snapshot",
-                    left.step_id, right.step_id
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn writer_effects_change_reviewed_scope(
     effects: &[WriterEffect],
     creation_paths: &[PathBuf],
@@ -5425,9 +5388,10 @@ fn canonical_fake_device_path(
 
 fn active_copy_writer_scope(snapshot: &ExecutionCopyCommitSnapshot) -> Result<PathBuf, String> {
     match snapshot.destination_kind {
-        CopyCommitDestinationKind::AppTarget => {
-            Err("App Target is not a shared-storage writer".to_string())
-        }
+        CopyCommitDestinationKind::AppTarget => match &snapshot.destination_binding {
+            Some(binding) => canonical_path_from_binding(binding),
+            None => canonical_shared_destination(&snapshot.destination_identity),
+        },
         CopyCommitDestinationKind::SharedDevicePath => match &snapshot.destination_binding {
             Some(binding) => canonical_path_from_binding(binding),
             None => canonical_shared_destination(&snapshot.destination_identity),
@@ -5448,12 +5412,12 @@ fn active_copy_writer_scope(snapshot: &ExecutionCopyCommitSnapshot) -> Result<Pa
     }
 }
 
-/// Map the trusted removable-volume alias to the visible root for collision checks.
+/// Map a trusted removable-volume alias to its visible storage root.
 ///
 /// Tauri validates Setup Location roots as `/storage/<fsUuid>`, and the device
 /// storage classifier recognizes `/mnt/media_rw/<fsUuid>` as the same public
-/// volume. This normalized scope is used only to compare active writer effects;
-/// reviewed bindings continue to supply the actual mutation paths.
+/// volume. The normalized scope groups reviewed operations; their trusted
+/// bindings still supply the paths used for mutation.
 fn canonical_active_writer_scope(
     scope: PathBuf,
     removable_volume_roots: &[String],
@@ -6062,6 +6026,7 @@ pub(crate) fn validate_supported_copy_plan(plan: &ExecutionPlan) -> Result<(), S
 /// source and destination manifests reviewed before execution.
 pub(crate) fn validate_copy_commit_snapshot_coverage(plan: &ExecutionPlan) -> Result<(), String> {
     let state = ExecutionState::from_plan(plan);
+    copy_commit::validate_ordered_copy_snapshot_links(plan)?;
     for step in plan
         .steps
         .iter()
@@ -6110,6 +6075,9 @@ pub(crate) fn validate_copy_commit_snapshot_coverage(plan: &ExecutionPlan) -> Re
         return Err("execution plan contains an orphaned copy snapshot".to_string());
     }
     for snapshot in &plan.copy_commit_snapshots {
+        snapshot
+            .validate_ordered_projection()
+            .map_err(|error| error.to_string())?;
         validate_setup_location_snapshot_writer(plan, snapshot)?;
         snapshot
             .validate_source_unchanged()
@@ -8881,17 +8849,22 @@ mod runtime_ref_projection_tests {
 
 #[cfg(test)]
 mod setup_location_writer_tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use serde_json::json;
 
+    use super::copy_commit::{
+        ordered_runtime_destination_state, prepare_ordered_copy_projections,
+        validate_ordered_copy_snapshot_links, validate_ordered_writer_preconditions,
+    };
     use super::{
-        check_unreviewed_writer_effects, validate_active_copy_writer_collisions,
-        validate_copy_commit_snapshot_coverage, validate_supported_copy_plan,
+        check_unreviewed_writer_effects, validate_copy_commit_snapshot_coverage,
+        validate_supported_copy_plan, ExecutionState, ProgressPhase, ProgressStatus,
+        StepRuntimeState, StepRuntimeStatus,
     };
     use crate::executor::copy_commit::{
-        CopyCommitDestinationKind, CopyCommitOperation, CopyEntryKind, CopyManifestEntry,
-        ExecutionCopyCommitSnapshot,
+        CopyCommitDestinationKind, CopyCommitOperation, CopyCommitOutcome, CopyCommitReport,
+        CopyEntryKind, CopyManifestEntry, ExecutionCopyCommitSnapshot,
     };
     use crate::storage_targets::{
         SetupDestinationPrecondition, StorageTargetBinding, StorageTargetVolumeKind, WriterEffect,
@@ -9041,13 +9014,46 @@ mod setup_location_writer_tests {
                 existing_anchor_binding: "anchor".to_string(),
                 missing_components: Vec::new(),
             }),
-            destination_before_manifest,
+            destination_before_manifest: destination_before_manifest.clone(),
             destination_before_digest_sha256: String::new(),
+            destination_initial_manifest: destination_before_manifest.clone(),
+            destination_initial_digest_sha256: None,
+            ordered_predecessor_step_ids: Vec::new(),
+            projected_destination_after_manifest: Vec::new(),
+            projected_destination_after_digest_sha256: None,
             reviewed_deletion_set: reviewed_deletion_set
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
         }
+    }
+
+    fn recipe_steps_for_snapshots(
+        snapshots: &[ExecutionCopyCommitSnapshot],
+        recipe_refs: &[&str],
+    ) -> Vec<ExecutionStep> {
+        assert_eq!(snapshots.len(), recipe_refs.len());
+        snapshots
+            .iter()
+            .zip(recipe_refs)
+            .map(|(snapshot, recipe_ref)| ExecutionStep {
+                id: snapshot.step_id.clone(),
+                recipe_ref: (*recipe_ref).to_string(),
+                app_id: None,
+                type_name: "copy_files".to_string(),
+                name: "Copy".to_string(),
+                note: "Copy".to_string(),
+                dependencies: Vec::new(),
+                constraints: ExecutionStepConstraints {
+                    capabilities: Vec::new(),
+                    conflicts_with: Vec::new(),
+                },
+                permission_plan: None,
+                params: OrderedMap::new(),
+                skip_if: Vec::new(),
+                verify: Vec::new(),
+            })
+            .collect()
     }
 
     #[test]
@@ -9105,7 +9111,7 @@ mod setup_location_writer_tests {
     }
 
     #[test]
-    fn rejects_writers_when_reviewed_file_effects_overlap_across_nested_scopes() {
+    fn allows_ordered_writers_across_nested_destination_scopes() {
         let parent = snapshot(
             "copy-parent",
             "parent-location",
@@ -9125,10 +9131,57 @@ mod setup_location_writer_tests {
             Vec::new(),
         );
 
-        let error = validate_active_copy_writer_collisions(&[parent, nested])
-            .expect_err("writing a file over a nested destination scope must conflict");
-        assert!(error.contains("copy-parent"));
-        assert!(error.contains("copy-nested"));
+        validate_ordered_writer_preconditions(&[parent, nested])
+            .expect("reviewed overlapping scopes are ordered operations");
+    }
+
+    #[test]
+    fn same_recipe_setup_location_writers_keep_the_overlap_rejection() {
+        let first = snapshot(
+            "copy-first",
+            "roms",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            vec![file("same.rom")],
+            vec![file("existing.rom")],
+            Vec::new(),
+        );
+        let second = snapshot(
+            "copy-second",
+            "roms",
+            "Games",
+            "/storage/ABCD-1234/Games",
+            vec![file("other.rom")],
+            vec![file("existing.rom")],
+            Vec::new(),
+        );
+        let mut snapshots = [first, second];
+        let steps =
+            recipe_steps_for_snapshots(&snapshots, &["feature.copy_roms", "feature.copy_roms"]);
+
+        let error = prepare_ordered_copy_projections(&steps, &mut snapshots)
+            .expect_err("only distinct Recipes may use ordered overlapping writes");
+
+        assert!(error.contains("same Recipe"), "{error}");
+    }
+
+    #[test]
+    fn reviewed_plan_cannot_relabel_cross_recipe_projection_as_same_recipe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_source = temporary.path().join("first-source");
+        let second_source = temporary.path().join("second-source");
+        std::fs::create_dir_all(&first_source).unwrap();
+        std::fs::create_dir_all(&second_source).unwrap();
+        std::fs::write(first_source.join("first.rom"), b"first").unwrap();
+        std::fs::write(second_source.join("second.rom"), b"second").unwrap();
+        let (mut plan, _, _) =
+            prepared_two_step_setup_plan(&temporary, &first_source, &second_source, None);
+        plan.steps[1].recipe_ref = plan.steps[0].recipe_ref.clone();
+
+        let error = validate_ordered_copy_snapshot_links(&plan)
+            .expect_err("plan admission must preserve the same-Recipe overlap guard");
+
+        assert!(error.contains("same Recipe"), "{error}");
     }
 
     #[test]
@@ -9187,7 +9240,7 @@ mod setup_location_writer_tests {
     }
 
     #[test]
-    fn rejects_distinct_location_ids_that_resolve_to_the_same_canonical_scope() {
+    fn allows_distinct_location_ids_that_resolve_to_the_same_canonical_scope() {
         let first = snapshot(
             "copy-first",
             "first-location",
@@ -9207,11 +9260,12 @@ mod setup_location_writer_tests {
             Vec::new(),
         );
 
-        assert!(validate_active_copy_writer_collisions(&[first, second]).is_err());
+        validate_ordered_writer_preconditions(&[first, second])
+            .expect("distinct Recipes may share a trusted destination scope");
     }
 
     #[test]
-    fn rejects_sequential_writes_that_invalidate_a_later_reviewed_tree_snapshot() {
+    fn allows_sequential_writes_with_a_later_reviewed_tree_projection() {
         let destination_before = vec![file("existing.cfg")];
         let first = snapshot(
             "copy-first",
@@ -9232,16 +9286,12 @@ mod setup_location_writer_tests {
             Vec::new(),
         );
 
-        let error = validate_active_copy_writer_collisions(&[first, second])
-            .expect_err("the first write would invalidate the second step's reviewed tree");
-
-        assert!(error.contains("copy-first"), "{error}");
-        assert!(error.contains("copy-second"), "{error}");
-        assert!(error.contains("snapshot"), "{error}");
+        validate_ordered_writer_preconditions(&[first, second])
+            .expect("a reviewed predecessor projection keeps later writes valid");
     }
 
     #[test]
-    fn rejects_two_step_setup_copy_review_before_mutation_when_first_changes_later_snapshot() {
+    fn prepares_and_executes_ordered_setup_copies_to_the_same_directory() {
         let temporary = tempfile::tempdir().unwrap();
         let first_source = temporary.path().join("first-source");
         let second_source = temporary.path().join("second-source");
@@ -9295,6 +9345,7 @@ mod setup_location_writer_tests {
             description: None,
         });
         plan.steps[0].id = "copy-first".to_string();
+        plan.steps[0].recipe_ref = "recipe.first".to_string();
         plan.steps[0].params.insert(
             "source".to_string(),
             ExecutionParamValue::Ref {
@@ -9303,6 +9354,7 @@ mod setup_location_writer_tests {
         );
         let mut second_step = plan.steps[0].clone();
         second_step.id = "copy-second".to_string();
+        second_step.recipe_ref = "recipe.second".to_string();
         second_step.params.insert(
             "source".to_string(),
             ExecutionParamValue::Ref {
@@ -9318,29 +9370,579 @@ mod setup_location_writer_tests {
             vec![temporary.path().to_path_buf()],
         );
         let mut runner = super::ExecutorRunner::new(adapters);
-        let error = runner
+        let result = runner.prepare_copy_commit_snapshots_with_storage_targets(
+            &mut plan,
+            &[binding("location-one", "Games")],
+        );
+
+        assert!(result.is_ok(), "ordered review should succeed: {result:?}");
+        assert_eq!(plan.copy_commit_snapshots.len(), 2);
+        assert_eq!(
+            plan.copy_commit_snapshots[1]
+                .destination_before_manifest
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["existing.cfg", "first.cfg"],
+            "the later review must include the earlier authorized write"
+        );
+
+        let run = runner.run(&plan);
+
+        assert!(run.success, "ordered setup copies should succeed: {run:?}");
+        assert_eq!(
+            std::fs::read(existing_destination.join("first.cfg")).unwrap(),
+            b"first reviewed file"
+        );
+        assert_eq!(
+            std::fs::read(existing_destination.join("second.cfg")).unwrap(),
+            b"second reviewed file"
+        );
+    }
+
+    fn prepared_two_step_setup_plan(
+        temporary: &tempfile::TempDir,
+        first_source: &Path,
+        second_source: &Path,
+        second_policy: Option<&str>,
+    ) -> (
+        ExecutionPlan,
+        super::ExecutorRunner<super::FakeDryRunDevice>,
+        PathBuf,
+    ) {
+        let runtime_root = temporary.path().join("runtime");
+        let cache_root = temporary.path().join("cache");
+        let fake_device_root = temporary.path().join("fake-device");
+        let existing_destination = fake_device_root.join("storage/ABCD-1234/Games");
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&existing_destination).unwrap();
+
+        let mut plan = plan_with_runtime_source(
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.setup-location".to_string(),
+            },
+            vec![
+                ExecutionInputValue {
+                    id: "setup-location".to_string(),
+                    value: RuntimeValue {
+                        type_name: "setup_location_ref".to_string(),
+                        value: json!("location-one"),
+                        location: None,
+                    },
+                },
+                ExecutionInputValue {
+                    id: "first-source".to_string(),
+                    value: RuntimeValue {
+                        type_name: "directory_path".to_string(),
+                        value: json!(first_source.to_string_lossy()),
+                        location: Some("host".to_string()),
+                    },
+                },
+                ExecutionInputValue {
+                    id: "second-source".to_string(),
+                    value: RuntimeValue {
+                        type_name: "directory_path".to_string(),
+                        value: json!(second_source.to_string_lossy()),
+                        location: Some("host".to_string()),
+                    },
+                },
+            ],
+        );
+        plan.device_plan = Some(ExecutionDevicePlanSnapshot {
+            id: "plan.test".to_string(),
+            name: None,
+            description: None,
+        });
+        plan.steps[0].id = "copy-first".to_string();
+        plan.steps[0].recipe_ref = "recipe.first".to_string();
+        plan.steps[0].params.insert(
+            "source".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.first-source".to_string(),
+            },
+        );
+        let mut second_step = plan.steps[0].clone();
+        second_step.id = "copy-second".to_string();
+        second_step.recipe_ref = "recipe.second".to_string();
+        second_step.params.insert(
+            "source".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.second-source".to_string(),
+            },
+        );
+        if let Some(policy) = second_policy {
+            second_step.params.insert(
+                "copy_policy".to_string(),
+                ExecutionParamValue::Literal {
+                    value: json!(policy),
+                },
+            );
+        }
+        plan.steps.push(second_step);
+
+        let adapters = super::ExecutorAdapters::with_sandbox_roots(
+            runtime_root,
+            cache_root,
+            fake_device_root,
+            vec![temporary.path().to_path_buf()],
+        );
+        let mut runner = super::ExecutorRunner::new(adapters);
+        runner
             .prepare_copy_commit_snapshots_with_storage_targets(
                 &mut plan,
                 &[binding("location-one", "Games")],
             )
-            .expect_err(
-                "a prior reviewed write must not stale a later step after execution starts",
-            );
+            .expect("ordered setup copy snapshots should be prepared");
+        (plan, runner, existing_destination)
+    }
 
-        assert!(error.contains("copy-first"), "{error}");
-        assert!(error.contains("copy-second"), "{error}");
-        assert!(error.contains("snapshot"), "{error}");
-        assert!(plan.copy_commit_snapshots.is_empty());
-        assert!(runner.adapters().device().commands().iter().all(|command| {
-            command.first().is_none_or(|name| {
-                !["push", "push_sync", "mkdir_p", "remove_file", "remove_tree"]
-                    .contains(&name.as_str())
-            })
-        }));
+    fn prepared_disjoint_setup_plan(
+        temporary: &tempfile::TempDir,
+        first_source: &Path,
+        second_source: &Path,
+    ) -> (
+        ExecutionPlan,
+        super::ExecutorRunner<super::FakeDryRunDevice>,
+        PathBuf,
+        PathBuf,
+    ) {
+        let runtime_root = temporary.path().join("runtime");
+        let cache_root = temporary.path().join("cache");
+        let fake_device_root = temporary.path().join("fake-device");
+        let existing_parent = fake_device_root.join("storage/ABCD-1234/Games");
+        let first_destination = existing_parent.join("First");
+        let second_destination = existing_parent.join("Second");
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::create_dir_all(&existing_parent).unwrap();
+
+        let mut plan = plan_with_runtime_source(
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.first-location".to_string(),
+            },
+            vec![
+                ExecutionInputValue {
+                    id: "first-location".to_string(),
+                    value: RuntimeValue {
+                        type_name: "setup_location_ref".to_string(),
+                        value: json!("location-first"),
+                        location: None,
+                    },
+                },
+                ExecutionInputValue {
+                    id: "second-location".to_string(),
+                    value: RuntimeValue {
+                        type_name: "setup_location_ref".to_string(),
+                        value: json!("location-second"),
+                        location: None,
+                    },
+                },
+                ExecutionInputValue {
+                    id: "first-source".to_string(),
+                    value: RuntimeValue {
+                        type_name: "directory_path".to_string(),
+                        value: json!(first_source.to_string_lossy()),
+                        location: Some("host".to_string()),
+                    },
+                },
+                ExecutionInputValue {
+                    id: "second-source".to_string(),
+                    value: RuntimeValue {
+                        type_name: "directory_path".to_string(),
+                        value: json!(second_source.to_string_lossy()),
+                        location: Some("host".to_string()),
+                    },
+                },
+            ],
+        );
+        plan.device_plan = Some(ExecutionDevicePlanSnapshot {
+            id: "plan.test".to_string(),
+            name: None,
+            description: None,
+        });
+        plan.steps[0].id = "copy-first".to_string();
+        plan.steps[0].recipe_ref = "recipe.first".to_string();
+        plan.steps[0].params.insert(
+            "source".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.first-source".to_string(),
+            },
+        );
+        let mut second_step = plan.steps[0].clone();
+        second_step.id = "copy-second".to_string();
+        second_step.recipe_ref = "recipe.second".to_string();
+        second_step.params.insert(
+            "source".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.second-source".to_string(),
+            },
+        );
+        second_step.params.insert(
+            "dest".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "inputs.second-location".to_string(),
+            },
+        );
+        plan.steps.push(second_step);
+        plan.runtime_capabilities.apk_install = false;
+        plan.steps[0].constraints.capabilities = vec!["apk_install".to_string()];
+        plan.steps[1].constraints.capabilities.clear();
+
+        let mut runner = super::ExecutorRunner::new(super::ExecutorAdapters::with_sandbox_roots(
+            runtime_root,
+            cache_root,
+            fake_device_root,
+            vec![temporary.path().to_path_buf()],
+        ));
+        runner
+            .prepare_copy_commit_snapshots_with_storage_targets(
+                &mut plan,
+                &[
+                    binding("location-first", "Games/First"),
+                    binding("location-second", "Games/Second"),
+                ],
+            )
+            .expect("disjoint Setup Location snapshots should be prepared");
+        (plan, runner, first_destination, second_destination)
+    }
+
+    fn predecessor_state(
+        status: StepRuntimeStatus,
+        report: Option<serde_json::Value>,
+    ) -> ExecutionState {
+        let mut outputs = OrderedMap::new();
+        if let Some(value) = report {
+            outputs.insert(
+                "copy_commit_report".to_string(),
+                RuntimeValue {
+                    type_name: "copy_commit_report".to_string(),
+                    value,
+                    location: Some("device".to_string()),
+                },
+            );
+        }
+        let mut state = ExecutionState::default();
+        state.steps.insert(
+            "copy-first".to_string(),
+            StepRuntimeState { status, outputs },
+        );
+        state
+    }
+
+    fn serialized_copy_commit_report(
+        snapshot: &ExecutionCopyCommitSnapshot,
+        succeeded: bool,
+        outcome: CopyCommitOutcome,
+        after_manifest: Option<Vec<CopyManifestEntry>>,
+    ) -> serde_json::Value {
+        let paths = |manifest: &[CopyManifestEntry]| {
+            manifest
+                .iter()
+                .map(|entry| entry.relative_path.clone())
+                .collect()
+        };
+        let after_paths = after_manifest.as_deref().map(paths).unwrap_or_default();
+        serde_json::to_value(CopyCommitReport {
+            operation: snapshot.operation,
+            destination_identity: snapshot.destination_identity.clone(),
+            succeeded,
+            outcome,
+            before_paths: paths(&snapshot.destination_before_manifest),
+            before_manifest: snapshot.destination_before_manifest.clone(),
+            after_paths,
+            after_manifest,
+            reviewed_deletion_set: snapshot.reviewed_deletion_set.clone(),
+            deleted_paths: Vec::new(),
+            copied_paths: Vec::new(),
+            staged_paths: Vec::new(),
+            staging_verified: succeeded,
+            destination_binding_verified: true,
+            destination_mutation_attempted: Some(true),
+            created_directories: Vec::new(),
+            source_digest_sha256: snapshot.source_digest_sha256.clone(),
+            staging_cleanup_error: None,
+            error: (!succeeded).then(|| "copy result was incomplete".to_string()),
+            internal_error: None,
+            internal_device_error: None,
+        })
+        .expect("copy commit report should serialize")
     }
 
     #[test]
-    fn rejects_mixed_setup_and_legacy_writers_that_resolve_to_the_same_scope() {
+    fn later_merge_replaces_the_same_file_written_by_an_earlier_recipe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_source = temporary.path().join("first-source");
+        let second_source = temporary.path().join("second-source");
+        std::fs::create_dir_all(&first_source).unwrap();
+        std::fs::create_dir_all(&second_source).unwrap();
+        std::fs::write(first_source.join("same.cfg"), b"first bytes").unwrap();
+        std::fs::write(second_source.join("same.cfg"), b"second bytes").unwrap();
+
+        let (plan, mut runner, destination) =
+            prepared_two_step_setup_plan(&temporary, &first_source, &second_source, None);
+        assert_eq!(
+            plan.copy_commit_snapshots[1].reviewed_deletion_set,
+            Vec::<String>::new(),
+            "merge replaces the reviewed same-kind file without deleting other paths"
+        );
+
+        let result = runner.run(&plan);
+
+        assert!(result.success, "ordered merge should succeed: {result:?}");
+        assert_eq!(
+            std::fs::read(destination.join("same.cfg")).unwrap(),
+            b"second bytes"
+        );
+    }
+
+    #[test]
+    fn later_replace_and_sync_keep_their_exact_deletion_semantics() {
+        for policy in ["replace", "sync"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let first_source = temporary.path().join("first-source");
+            let second_source = temporary.path().join("second-source");
+            std::fs::create_dir_all(&first_source).unwrap();
+            std::fs::create_dir_all(&second_source).unwrap();
+            std::fs::write(first_source.join("first.cfg"), b"first bytes").unwrap();
+            std::fs::write(second_source.join("second.cfg"), b"second bytes").unwrap();
+            let initial_destination = temporary.path().join("fake-device/storage/ABCD-1234/Games");
+            std::fs::create_dir_all(&initial_destination).unwrap();
+            std::fs::write(initial_destination.join("stale.cfg"), b"initial file").unwrap();
+
+            let (plan, mut runner, destination) = prepared_two_step_setup_plan(
+                &temporary,
+                &first_source,
+                &second_source,
+                Some(policy),
+            );
+            let second_snapshot = &plan.copy_commit_snapshots[1];
+            assert_eq!(
+                second_snapshot.reviewed_deletion_set,
+                ["first.cfg".to_string(), "stale.cfg".to_string()],
+                "{policy} must disclose deletion of the earlier output and initial file"
+            );
+
+            let result = runner.run(&plan);
+
+            assert!(
+                result.success,
+                "ordered {policy} should succeed: {result:?}"
+            );
+            assert!(!destination.join("first.cfg").exists());
+            assert!(!destination.join("stale.cfg").exists());
+            assert_eq!(
+                std::fs::read(destination.join("second.cfg")).unwrap(),
+                b"second bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn later_ordered_copy_requires_a_complete_successful_predecessor() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_source = temporary.path().join("first-source");
+        let second_source = temporary.path().join("second-source");
+        std::fs::create_dir_all(&first_source).unwrap();
+        std::fs::create_dir_all(&second_source).unwrap();
+        std::fs::write(first_source.join("first.cfg"), b"first bytes").unwrap();
+        std::fs::write(second_source.join("second.cfg"), b"second bytes").unwrap();
+        let (plan, _runner, _) =
+            prepared_two_step_setup_plan(&temporary, &first_source, &second_source, None);
+        let later = &plan.copy_commit_snapshots[1];
+
+        for status in [
+            StepRuntimeStatus::Skipped,
+            StepRuntimeStatus::Blocked,
+            StepRuntimeStatus::Failed,
+        ] {
+            let state = predecessor_state(status, None);
+            let error = ordered_runtime_destination_state(&plan, &state, later).expect_err(
+                "non-successful predecessors cannot authorize later overlapping writes",
+            );
+            assert!(error.contains("predecessor copy-first"), "{error}");
+        }
+
+        for outcome in [CopyCommitOutcome::Partial, CopyCommitOutcome::Uncertain] {
+            let state = predecessor_state(
+                StepRuntimeStatus::Succeeded,
+                Some(serialized_copy_commit_report(
+                    &plan.copy_commit_snapshots[0],
+                    false,
+                    outcome,
+                    None,
+                )),
+            );
+            let error = ordered_runtime_destination_state(&plan, &state, later)
+                .expect_err("partial or uncertain mutation cannot authorize a later write");
+            assert!(error.contains("complete result"), "{error}");
+        }
+
+        let mut changed_after = plan.copy_commit_snapshots[0]
+            .projected_destination_after_manifest
+            .clone();
+        changed_after[0].sha256 = Some("f".repeat(64));
+        let state = predecessor_state(
+            StepRuntimeStatus::Succeeded,
+            Some(serialized_copy_commit_report(
+                &plan.copy_commit_snapshots[0],
+                true,
+                CopyCommitOutcome::Succeeded,
+                Some(changed_after),
+            )),
+        );
+        let error = ordered_runtime_destination_state(&plan, &state, later)
+            .expect_err("the predecessor report must match its reviewed result projection");
+        assert!(
+            error.contains("differs from its reviewed projection"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unexpected_destination_drift_before_the_first_copy_is_preserved_and_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_source = temporary.path().join("first-source");
+        let second_source = temporary.path().join("second-source");
+        std::fs::create_dir_all(&first_source).unwrap();
+        std::fs::create_dir_all(&second_source).unwrap();
+        std::fs::write(first_source.join("first.cfg"), b"first bytes").unwrap();
+        std::fs::write(second_source.join("second.cfg"), b"second bytes").unwrap();
+        let (plan, mut runner, destination) =
+            prepared_two_step_setup_plan(&temporary, &first_source, &second_source, None);
+        std::fs::write(destination.join("external.cfg"), b"external change").unwrap();
+
+        let result = runner.run(&plan);
+
+        assert!(
+            !result.success,
+            "unexpected destination drift must fail the run"
+        );
+        assert_eq!(
+            result
+                .steps
+                .iter()
+                .find(|step| step.step_id == "copy-first")
+                .unwrap()
+                .status,
+            super::StepRunStatus::Failed
+        );
+        assert!(!destination.join("first.cfg").exists());
+        assert!(!destination.join("second.cfg").exists());
+        assert_eq!(
+            std::fs::read(destination.join("external.cfg")).unwrap(),
+            b"external change"
+        );
+    }
+
+    #[test]
+    fn unexpected_drift_after_an_authorized_copy_fails_the_later_copy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_source = temporary.path().join("first-source");
+        let second_source = temporary.path().join("second-source");
+        std::fs::create_dir_all(&first_source).unwrap();
+        std::fs::create_dir_all(&second_source).unwrap();
+        std::fs::write(first_source.join("first.cfg"), b"reviewed first bytes").unwrap();
+        std::fs::write(second_source.join("second.cfg"), b"second bytes").unwrap();
+        let (plan, mut runner, destination) =
+            prepared_two_step_setup_plan(&temporary, &first_source, &second_source, None);
+        let mut injected_drift = false;
+
+        let result = runner.run_with_progress(&plan, |event| {
+            if !injected_drift
+                && event.step_id == "copy-first"
+                && event.phase == ProgressPhase::Finished
+                && event.status == Some(ProgressStatus::Succeeded)
+            {
+                std::fs::write(destination.join("first.cfg"), b"external replacement").unwrap();
+                injected_drift = true;
+            }
+        });
+
+        assert!(
+            injected_drift,
+            "the test must alter state after the authorized commit"
+        );
+        assert!(
+            !result.success,
+            "later copy must reject unexplained destination drift"
+        );
+        assert_eq!(
+            result
+                .steps
+                .iter()
+                .find(|step| step.step_id == "copy-first")
+                .unwrap()
+                .status,
+            super::StepRunStatus::Executed
+        );
+        assert_eq!(
+            result
+                .steps
+                .iter()
+                .find(|step| step.step_id == "copy-second")
+                .unwrap()
+                .status,
+            super::StepRunStatus::Failed
+        );
+        assert!(!destination.join("second.cfg").exists());
+        assert_eq!(
+            std::fs::read(destination.join("first.cfg")).unwrap(),
+            b"external replacement"
+        );
+    }
+
+    #[test]
+    fn failure_in_one_destination_does_not_block_a_disjoint_recipe_copy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_source = temporary.path().join("first-source");
+        let second_source = temporary.path().join("second-source");
+        std::fs::create_dir_all(&first_source).unwrap();
+        std::fs::create_dir_all(&second_source).unwrap();
+        std::fs::write(first_source.join("first.cfg"), b"first bytes").unwrap();
+        std::fs::write(second_source.join("second.cfg"), b"second bytes").unwrap();
+        let (plan, mut runner, first_destination, second_destination) =
+            prepared_disjoint_setup_plan(&temporary, &first_source, &second_source);
+        assert!(plan.copy_commit_snapshots[1]
+            .ordered_predecessor_step_ids
+            .is_empty());
+        assert!(plan.steps[0].dependencies.is_empty());
+        assert!(plan.steps[1].dependencies.is_empty());
+
+        let result = runner.run(&plan);
+
+        assert!(
+            !result.success,
+            "the first Recipe requires an unavailable capability"
+        );
+        assert_eq!(
+            result
+                .steps
+                .iter()
+                .find(|step| step.step_id == "copy-first")
+                .unwrap()
+                .status,
+            super::StepRunStatus::Failed
+        );
+        assert_eq!(
+            result
+                .steps
+                .iter()
+                .find(|step| step.step_id == "copy-second")
+                .unwrap()
+                .status,
+            super::StepRunStatus::Executed,
+            "an unrelated destination must remain runnable: {result:#?}"
+        );
+        assert!(!first_destination.join("first.cfg").exists());
+        assert_eq!(
+            std::fs::read(second_destination.join("second.cfg")).unwrap(),
+            b"second bytes"
+        );
+    }
+
+    #[test]
+    fn allows_ordered_setup_and_legacy_writers_at_the_same_scope() {
         let mut setup = snapshot(
             "copy-setup",
             "internal-location",
@@ -9373,15 +9975,25 @@ mod setup_location_writer_tests {
         legacy.setup_location_binding = None;
         legacy.setup_destination_precondition = None;
 
-        let error = validate_active_copy_writer_collisions(&[setup, legacy])
-            .expect_err("a legacy alias and Setup Location cannot write the same reviewed file");
-
-        assert!(error.contains("copy-setup"));
-        assert!(error.contains("copy-legacy"));
+        let mut snapshots = [setup, legacy];
+        validate_ordered_writer_preconditions(&snapshots)
+            .expect("reviewed Setup Location and legacy paths may share a destination");
+        let steps = recipe_steps_for_snapshots(&snapshots, &["recipe.setup", "recipe.legacy"]);
+        prepare_ordered_copy_projections(&steps, &mut snapshots)
+            .expect("internal-storage aliases should share the reviewed projection");
+        assert_eq!(snapshots[1].ordered_predecessor_step_ids, ["copy-setup"]);
+        assert_eq!(
+            snapshots[1]
+                .destination_before_manifest
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["same.rom"]
+        );
     }
 
     #[test]
-    fn rejects_setup_and_legacy_writers_across_removable_mount_aliases() {
+    fn allows_ordered_setup_and_legacy_writers_across_trusted_volume_aliases() {
         let setup = snapshot(
             "copy-setup",
             "removable-location",
@@ -9406,11 +10018,21 @@ mod setup_location_writer_tests {
         legacy.setup_location_binding = None;
         legacy.setup_destination_precondition = None;
 
-        let error = validate_active_copy_writer_collisions(&[setup, legacy])
-            .expect_err("removable mount aliases must share one active writer scope");
-
-        assert!(error.contains("copy-setup"));
-        assert!(error.contains("copy-legacy"));
+        let mut snapshots = [setup, legacy];
+        validate_ordered_writer_preconditions(&snapshots)
+            .expect("trusted removable mount aliases share one ordered destination scope");
+        let steps = recipe_steps_for_snapshots(&snapshots, &["recipe.setup", "recipe.legacy"]);
+        prepare_ordered_copy_projections(&steps, &mut snapshots)
+            .expect("trusted removable aliases should share the reviewed projection");
+        assert_eq!(snapshots[1].ordered_predecessor_step_ids, ["copy-setup"]);
+        assert_eq!(
+            snapshots[1]
+                .destination_before_manifest
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["same.rom"]
+        );
     }
 
     #[test]
@@ -9554,7 +10176,7 @@ mod setup_location_writer_tests {
             .expect("second precondition")
             .missing_components = vec!["Games".to_string(), "B".to_string()];
 
-        let error = validate_active_copy_writer_collisions(&[first, second])
+        let error = validate_ordered_writer_preconditions(&[first, second])
             .expect_err("shared parent creation would invalidate the other reviewed precondition");
 
         assert!(error.contains("copy-first"), "{error}");
@@ -9582,7 +10204,7 @@ mod setup_location_writer_tests {
             Vec::new(),
         );
 
-        validate_active_copy_writer_collisions(&[parent, nested])
+        validate_ordered_writer_preconditions(&[parent, nested])
             .expect("overlapping scopes alone do not create a writer collision");
     }
 
@@ -9618,12 +10240,12 @@ mod setup_location_writer_tests {
             .expect("nested precondition")
             .missing_components = vec!["Settings".to_string()];
 
-        validate_active_copy_writer_collisions(&[parent, nested])
+        validate_ordered_writer_preconditions(&[parent, nested])
             .expect("an existing parent directory does not conflict with nested creation");
     }
 
     #[test]
-    fn rejects_reviewed_directory_deletion_that_contains_another_writer() {
+    fn requires_fresh_review_when_an_earlier_replace_removes_a_later_scope() {
         let parent = snapshot(
             "replace-parent",
             "parent-location",
@@ -9648,12 +10270,16 @@ mod setup_location_writer_tests {
             Vec::new(),
         );
 
-        assert!(validate_active_copy_writer_collisions(&[parent, nested]).is_err());
+        let mut snapshots = [parent, nested];
+        let steps = recipe_steps_for_snapshots(&snapshots, &["recipe.first", "recipe.second"]);
+        let error = prepare_ordered_copy_projections(&steps, &mut snapshots)
+            .expect_err("a later target removed by an earlier replace cannot be rebound");
+        assert!(error.contains("prepare a fresh review"), "{error}");
     }
 
     #[test]
     fn named_locations_without_active_copy_snapshots_do_not_collide() {
-        validate_active_copy_writer_collisions(&[])
+        validate_ordered_writer_preconditions(&[])
             .expect("unreferenced named locations are not destination writers");
     }
 

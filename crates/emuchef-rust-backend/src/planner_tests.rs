@@ -1417,31 +1417,6 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
     );
 }
 
-fn assert_shared_system_target_overlap_rejected(result: &Value, context: &str) {
-    assert_eq!(result["status"], "error", "{context}: {result:#}");
-    assert!(result["execution_plan"].is_null(), "{context}: {result:#}");
-    let diagnostic = result["errors"]
-        .as_array()
-        .and_then(|errors| {
-            errors
-                .iter()
-                .find(|error| error["code"] == "app_target_destination_overlap")
-        })
-        .unwrap_or_else(|| {
-            panic!("{context} should report the shared system-target overlap: {result:#}")
-        });
-    assert_eq!(
-        diagnostic["details"]["first_recipe_ref"],
-        "app.retroarch.provision"
-    );
-    assert_eq!(diagnostic["details"]["first_target_id"], "system");
-    assert_eq!(
-        diagnostic["details"]["second_recipe_ref"],
-        "feature.copy_bios"
-    );
-    assert_eq!(diagnostic["details"]["second_target_id"], "system");
-}
-
 #[test]
 fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for_current_corpus() {
     for plan in discover_device_plan_inventory(repo_authored_root())
@@ -1463,11 +1438,6 @@ fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for
             &selected_recipe_refs,
             &selected_bindings,
         ));
-
-        if actual["status"] == "error" {
-            assert_shared_system_target_overlap_rejected(&actual, plan.id.as_str());
-            continue;
-        }
 
         assert_eq!(actual["status"], "success", "{}: {actual:#}", plan.id);
         assert_eq!(
@@ -2108,13 +2078,15 @@ fn step_ref_validation_reports_invalid_targets_outputs_and_formats() {
 
 #[test]
 fn step_ref_validation_uses_emitted_selected_step_universe() {
+    let mut unavailable_extract = ref_validation_step(
+        "unavailable_extract",
+        "extract_artifacts",
+        vec![],
+        OrderedMap::new(),
+    );
+    unavailable_extract.user_toggleable = true;
     let actual = planning_result_value(ref_validation_input(vec![
-        ref_validation_step(
-            "unavailable_extract",
-            "extract_artifacts",
-            vec![],
-            OrderedMap::new(),
-        ),
+        unavailable_extract,
         ref_validation_step(
             "copy",
             "copy_files",
@@ -2194,9 +2166,13 @@ fn dependency_validation_reports_unknown_self_and_non_emitted_dependencies() {
 
 #[test]
 fn selection_time_pruning_removes_dependents_of_capability_unavailable_steps() {
+    let mut unavailable = unavailable_dependency_step("unavailable");
+    unavailable.user_toggleable = true;
+    let mut optional_consumer = dependency_step("consumer", vec!["unavailable"]);
+    optional_consumer.user_toggleable = true;
     let actual = planning_result_value(dependency_validation_input(vec![
-        unavailable_dependency_step("unavailable"),
-        dependency_step("consumer", vec!["unavailable"]),
+        unavailable,
+        optional_consumer,
         dependency_step("independent", vec![]),
     ]));
 
@@ -2736,8 +2712,10 @@ fn param_contract_wait_duration_rejects_negative_and_non_integer_values() {
 
 #[test]
 fn dependency_validation_ignores_invalid_dependencies_on_unavailable_steps() {
+    let mut unavailable = unavailable_dependency_step("unavailable");
+    unavailable.user_toggleable = true;
     let actual = planning_result_value(dependency_validation_input(vec![
-        unavailable_dependency_step("unavailable"),
+        unavailable,
         dependency_step("available", vec![]),
     ]));
 
@@ -3080,7 +3058,7 @@ fn binding_resolution_applies_precedence_and_preserves_provenance() {
             "key": "feature.copy_roms/destination",
             "recipeId": "feature.copy_roms",
             "inputId": "destination",
-            "type": "device_path",
+            "type": "setup_location_ref",
             "value": "/sdcard/User",
             "source": "user_configuration",
         })
@@ -3108,8 +3086,13 @@ fn binding_resolution_applies_precedence_and_preserves_provenance() {
         .iter()
         .find(|input| input.key == "feature.copy_roms/destination")
         .unwrap();
-    assert_eq!(destination.value, Some(json!("/sdcard/ROMs")));
-    assert_eq!(destination.source, Some(BindingSource::RecipeDefault));
+    assert_eq!(destination.value, None);
+    assert_eq!(destination.source, None);
+    assert!(default_only
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "binding_missing"
+            && diagnostic.key == "feature.copy_roms/destination"));
 }
 
 #[test]
@@ -3169,12 +3152,23 @@ fn binding_resolution_validates_only_the_winner_and_redacts_sensitive_values() {
         &binding_map(&[("feature.copy_roms/policy", json!("merge"))]),
     );
 
-    assert_eq!(resolution.diagnostics.len(), 2, "{resolution:#?}");
+    assert_eq!(resolution.diagnostics.len(), 3, "{resolution:#?}");
     let serialized = serde_json::to_string(&resolution.diagnostics).unwrap();
     assert!(!serialized.contains("DO_NOT_LEAK"));
-    assert!(resolution.diagnostics.iter().all(|diagnostic| {
+    let explicit_diagnostics = resolution
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.provenance == Some(BindingSource::Explicit))
+        .collect::<Vec<_>>();
+    assert_eq!(explicit_diagnostics.len(), 2);
+    assert!(explicit_diagnostics.iter().all(|diagnostic| {
         diagnostic.provenance == Some(BindingSource::Explicit)
             && diagnostic.details["provenance"] == "explicit"
+    }));
+    assert!(resolution.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "binding_missing"
+            && diagnostic.key == "feature.copy_roms/destination"
+            && diagnostic.provenance.is_none()
     }));
 
     let invalid_user = resolve_runtime_bindings(
@@ -3250,7 +3244,7 @@ fn binding_resolution_reports_missing_unknown_unselected_and_optional_unbound_in
 }
 
 #[test]
-fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
+fn runtime_input_metadata_validates_enum_and_setup_location_bindings() {
     let valid = planning_result_value(authored_corpus_planner_input_with_bindings(
         &["feature.copy_roms"],
         &[
@@ -3265,8 +3259,9 @@ fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
         .expect("execution inputs should be present");
     assert!(inputs.iter().any(|input| {
         input["id"] == "feature.copy_roms/destination"
-            && input["value"]["type"] == "device_path"
-            && input["value"]["location"] == "device"
+            && input["value"]["type"] == "setup_location_ref"
+            && input["value"]["value"] == "/sdcard/Games"
+            && input["value"]["location"].is_null()
     }));
     assert!(inputs.iter().any(|input| {
         input["id"] == "feature.copy_roms/policy"
@@ -3289,26 +3284,6 @@ fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
         .any(|error| {
             error["code"] == "binding_validation_failed"
                 && error["details"]["input_id"] == "feature.copy_roms/policy"
-        }));
-
-    let invalid_prefix = planning_result_value(authored_corpus_planner_input_with_bindings(
-        &["feature.copy_roms"],
-        &[
-            ("feature.copy_roms/source", json!("/tmp/ROMs")),
-            ("feature.copy_roms/destination", json!("/data/local/ROMs")),
-        ],
-    ));
-    assert_eq!(invalid_prefix["status"], "error");
-    assert!(invalid_prefix["errors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|error| {
-            error["code"] == "binding_validation_failed"
-                && error["details"]["input_id"] == "feature.copy_roms/destination"
-                && error["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("allowed path prefixes"))
         }));
 
     let temp = TempDir::new().expect("missing-path test root should be created");
@@ -3654,6 +3629,379 @@ fn konkr_provisioning_reports_unavailable_required_capabilities() {
             });
         assert_eq!(error["details"]["capability"], capability);
     }
+}
+
+fn unrooted_ayaneo_provisioning_input(device_plan_ref: &str) -> PlannerInput {
+    let mut input = repo_device_plan_planner_input_with_bindings(device_plan_ref, &[]);
+    input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
+    input.device_context.android_api_level = Some(35);
+    input.runtime_capabilities.adb_available = true;
+    input.runtime_capabilities.apk_install = true;
+    input.runtime_capabilities.shared_storage_write = true;
+    input.runtime_capabilities.app_launch = true;
+    input.runtime_capabilities.shell_command = true;
+    input.runtime_capabilities.root_shell = false;
+    input.runtime_capabilities.app_data_write = true;
+    input
+}
+
+#[test]
+fn konkre_base_plan_selects_provisioning_and_bios_but_not_roms_or_configuration() {
+    let input = repo_device_plan_planner_input_with_bindings("konkr.pocket_advance.base", &[]);
+
+    assert_eq!(
+        input.selected_recipe_refs,
+        vec![
+            "app.retroarch.provision".to_string(),
+            "feature.copy_bios".to_string(),
+        ]
+    );
+    assert!(!input
+        .selected_recipe_refs
+        .iter()
+        .any(|recipe| recipe == "feature.copy_roms"));
+    assert!(!input
+        .selected_recipe_refs
+        .iter()
+        .any(|recipe| recipe == "app.retroarch.configure"));
+
+    let plan_path = repo_authored_root().join("device_plans/konkr.pocket_advance.base.yaml");
+    let plan_yaml = fs::read_to_string(plan_path).expect("KONKR Device Plan should be readable");
+    let plan: serde_yaml::Value =
+        serde_yaml::from_str(&plan_yaml).expect("KONKR Device Plan should parse");
+    let rom_selection = plan["recipes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|recipe| recipe["recipe_ref"] == "feature.copy_roms")
+        .expect("ROM Recipe should be available in the KONKR Device Plan");
+    assert_eq!(rom_selection["selected_by_default"], false);
+}
+
+#[test]
+fn konkr_full_selection_produces_typed_plan_with_overlapping_app_targets() {
+    let temp = TempDir::new().expect("host-only manifest input root should be created");
+    let bios_source = temp.path().join("bios");
+    let rom_source = temp.path().join("roms");
+    let config_source = temp.path().join("retroarch.cfg");
+    fs::create_dir_all(&bios_source).expect("BIOS source directory should exist");
+    fs::create_dir_all(&rom_source).expect("ROM source directory should exist");
+    fs::write(&config_source, b"video_threaded = false\n")
+        .expect("configuration source file should exist");
+    let mut input = repo_device_plan_planner_input_with_bindings(
+        "konkr.pocket_advance.base",
+        &[
+            (
+                "feature.copy_bios/bios_source_dir",
+                json!(bios_source.to_string_lossy().to_string()),
+            ),
+            (
+                "feature.copy_roms/source",
+                json!(rom_source.to_string_lossy().to_string()),
+            ),
+            ("feature.copy_roms/destination", json!("internal-roms")),
+            (
+                "app.retroarch.configure/retroarch_cfg",
+                json!(config_source.to_string_lossy().to_string()),
+            ),
+            (
+                "app.retroarch.configure/retroarch_cfg_source",
+                json!("uploaded"),
+            ),
+        ],
+    );
+    let selected_recipes = [
+        "app.retroarch.provision",
+        "feature.copy_bios",
+        "feature.copy_roms",
+        "app.retroarch.configure",
+    ];
+    input.selected_recipe_refs = selected_recipes
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect();
+
+    // These host-fixture capabilities exercise membership only. The KONKR
+    // profile continues to withhold device-write capabilities until evidence
+    // qualifies them; root remains unavailable on this ordinary path.
+    input.runtime_capabilities.adb_available = true;
+    input.runtime_capabilities.apk_install = true;
+    input.runtime_capabilities.shared_storage_write = true;
+    input.runtime_capabilities.app_launch = true;
+    input.runtime_capabilities.shell_command = true;
+    input.runtime_capabilities.package_remove_for_user = false;
+    input.runtime_capabilities.root_shell = false;
+    input.runtime_capabilities.app_data_write = true;
+    input.runtime_capabilities.root_shell_route = None;
+    input.device_context.android_api_level = Some(35);
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "success", "{result:#}");
+    assert!(result["execution_plan"].is_object(), "{result:#}");
+    assert_eq!(
+        result["execution_plan"]["source"]["selected_recipe_refs"],
+        json!(selected_recipes)
+    );
+    let steps = result["execution_plan"]["steps"]
+        .as_array()
+        .expect("complete selection should emit typed execution steps");
+    let step_for = |step_id: &str| {
+        steps
+            .iter()
+            .find(|step| step["id"] == step_id)
+            .unwrap_or_else(|| panic!("typed plan is missing operation {step_id}: {steps:#?}"))
+    };
+    for (step_id, operation_type) in [
+        (
+            "app.retroarch.provision/resolve_artifacts",
+            "resolve_artifacts",
+        ),
+        ("app.retroarch.provision/install_retroarch", "install_apk"),
+        (
+            "app.retroarch.provision/launch_retroarch_bootstrap",
+            "launch_app",
+        ),
+        (
+            "app.retroarch.provision/wait_for_retroarch_bootstrap",
+            "wait",
+        ),
+        (
+            "app.retroarch.provision/stop_retroarch_after_bootstrap",
+            "force_stop_app",
+        ),
+        (
+            "app.retroarch.provision/grant_retroarch_baseline",
+            "grant_permissions",
+        ),
+        (
+            "app.retroarch.provision/launch_retroarch_permissions",
+            "launch_app",
+        ),
+        (
+            "app.retroarch.provision/wait_for_retroarch_permissions",
+            "wait",
+        ),
+        (
+            "app.retroarch.provision/stop_retroarch_after_permissions",
+            "force_stop_app",
+        ),
+        ("app.retroarch.provision/extract_assets", "extract_archive"),
+        ("app.retroarch.provision/copy_assets", "copy_files"),
+        (
+            "app.retroarch.provision/extract_autoconfig",
+            "extract_archive",
+        ),
+        ("app.retroarch.provision/copy_autoconfig", "copy_files"),
+        ("app.retroarch.provision/extract_cheats", "extract_archive"),
+        ("app.retroarch.provision/copy_cheats", "copy_files"),
+        (
+            "app.retroarch.provision/extract_database_rdb",
+            "extract_archive",
+        ),
+        ("app.retroarch.provision/copy_database_rdb", "copy_files"),
+        ("app.retroarch.provision/extract_info", "extract_archive"),
+        ("app.retroarch.provision/copy_info", "copy_files"),
+        (
+            "app.retroarch.provision/extract_overlays",
+            "extract_archive",
+        ),
+        ("app.retroarch.provision/copy_overlays", "copy_files"),
+        (
+            "app.retroarch.provision/extract_shaders_glsl",
+            "extract_archive",
+        ),
+        ("app.retroarch.provision/copy_shaders_glsl", "copy_files"),
+        ("app.retroarch.provision/extract_cores", "extract_artifacts"),
+        ("app.retroarch.provision/copy_cores", "copy_files"),
+        (
+            "app.retroarch.provision/extract_core_system_files",
+            "extract_artifacts",
+        ),
+        (
+            "app.retroarch.provision/copy_core_system_files",
+            "copy_files",
+        ),
+        ("feature.copy_bios/copy_bios_dir", "copy_files"),
+        ("feature.copy_roms/copy_rom_library", "copy_files"),
+        ("app.retroarch.configure/seed_retroarch_cfg", "copy_files"),
+        ("app.retroarch.provision/launch_retroarch", "launch_app"),
+    ] {
+        assert_eq!(
+            step_for(step_id)["type"],
+            operation_type,
+            "wrong typed operation for {step_id}"
+        );
+    }
+    assert!(
+        steps
+            .iter()
+            .all(|step| step["id"] != "app.retroarch.provision/grant_retroarch_elevated"),
+        "unprivileged typed membership must omit the inapplicable elevated permission step"
+    );
+    assert_eq!(
+        step_for("feature.copy_roms/copy_rom_library")["params"]["dest"]["ref"],
+        "inputs.feature.copy_roms/destination"
+    );
+    assert_eq!(
+        step_for("feature.copy_roms/copy_rom_library")["params"]["copy_policy"]["ref"],
+        "inputs.feature.copy_roms/policy"
+    );
+    assert_eq!(
+        step_for("feature.copy_bios/copy_bios_dir")["params"]["copy_policy"]["value"],
+        "sync"
+    );
+    assert_eq!(
+        step_for("app.retroarch.configure/seed_retroarch_cfg")["params"]["copy_policy"]["value"],
+        "create_only"
+    );
+    assert!(result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|error| { error["code"] != "app_target_destination_overlap" }));
+}
+
+#[test]
+fn required_rom_copy_fails_when_shared_storage_is_unavailable() {
+    let temp = TempDir::new().expect("host-only ROM source should be created");
+    let source = temp.path().join("roms");
+    let mut input = repo_device_plan_planner_input_with_bindings(
+        "konkr.pocket_advance.base",
+        &[
+            (
+                "feature.copy_roms/source",
+                json!(source.to_string_lossy().to_string()),
+            ),
+            ("feature.copy_roms/destination", json!("internal-roms")),
+        ],
+    );
+    input.selected_recipe_refs = vec!["feature.copy_roms".to_string()];
+    assert!(!input.runtime_capabilities.shared_storage_write);
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+    assert!(result["errors"].as_array().unwrap().iter().any(|error| {
+        error["code"] == "required_step_capability_unavailable"
+            && error["details"]["recipe_ref"] == "feature.copy_roms"
+            && error["details"]["step_id"] == "copy_rom_library"
+            && error["details"]["capability"] == "shared_storage_write"
+    }));
+}
+
+#[test]
+fn capability_gated_non_mutating_step_is_pruned_while_other_work_remains() {
+    let optional_step = dependency_step_with_capabilities("root_only", vec![], vec!["root_shell"]);
+    let mut input = dependency_validation_input(vec![
+        optional_step,
+        dependency_step("unconditional", vec![]),
+    ]);
+    input.runtime_capabilities.root_shell = false;
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "success", "{result:#}");
+    assert_eq!(
+        dependency_step_ids(&result),
+        vec!["planner.dependency_validation/unconditional"]
+    );
+}
+
+#[test]
+fn required_app_target_step_fails_when_protected_write_capability_is_unavailable() {
+    let mut input = unrooted_ayaneo_provisioning_input("ayaneo.generic.base");
+    input.runtime_capabilities.app_data_write = false;
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+    assert!(result["errors"].as_array().unwrap().iter().any(|error| {
+        error["code"] == "required_step_capability_unavailable"
+            && error["details"]["recipe_ref"] == "app.retroarch.provision"
+            && error["details"]["step_id"] == "copy_assets"
+            && error["details"]["capability"] == "app_data_write"
+    }));
+}
+
+#[test]
+fn required_step_fails_when_an_optional_dependency_is_unavailable() {
+    let mut unavailable_dependency = dependency_step_with_capabilities(
+        "optional_dependency",
+        vec![],
+        vec!["shared_storage_write"],
+    );
+    unavailable_dependency.user_toggleable = true;
+    let mut input = dependency_validation_input(vec![
+        unavailable_dependency,
+        dependency_step("required_consumer", vec!["optional_dependency"]),
+        dependency_step("independent", vec![]),
+    ]);
+    input.runtime_capabilities.shared_storage_write = false;
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+    assert!(result["errors"].as_array().unwrap().iter().any(|error| {
+        error["code"] == "required_step_dependency_unavailable"
+            && error["details"]["step_id"] == "required_consumer"
+            && error["details"]["dependency"] == "optional_dependency"
+    }));
+}
+
+#[test]
+fn elevated_permission_is_omitted_without_root_on_existing_ayaneo_plans() {
+    for device_plan_ref in ["ayaneo.generic.base", "ayaneo.pocket_s2.base"] {
+        let result = planning_result_value(unrooted_ayaneo_provisioning_input(device_plan_ref));
+        assert_eq!(result["status"], "success", "{device_plan_ref}: {result:#}");
+
+        let steps = result["execution_plan"]["steps"]
+            .as_array()
+            .expect("successful plan should contain steps");
+        let step_ids = steps
+            .iter()
+            .map(|step| step["id"].as_str().expect("step id should be a string"))
+            .collect::<BTreeSet<_>>();
+        assert!(step_ids.contains("app.retroarch.provision/install_retroarch"));
+        assert!(step_ids.contains("app.retroarch.provision/grant_retroarch_baseline"));
+        assert!(step_ids.contains("app.retroarch.provision/launch_retroarch"));
+        assert!(!step_ids.contains("app.retroarch.provision/grant_retroarch_elevated"));
+        assert_eq!(
+            result["execution_plan"]["source"]["device_plan_ref"],
+            device_plan_ref
+        );
+    }
+}
+
+#[test]
+fn missing_shell_capability_is_not_hidden_by_elevated_root_omission() {
+    let mut input = unrooted_ayaneo_provisioning_input("ayaneo.generic.base");
+    input.runtime_capabilities.shell_command = false;
+
+    let result = planning_result_value(input);
+
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+    assert!(result["errors"].as_array().unwrap().iter().any(|error| {
+        error["code"] == "required_step_capability_unavailable"
+            && error["details"]["recipe_ref"] == "app.retroarch.provision"
+            && error["details"]["step_id"] == "grant_retroarch_elevated"
+            && error["details"]["capability"] == "shell_command"
+    }));
+}
+
+#[test]
+fn warning_permission_policy_does_not_omit_required_baseline_permission_step() {
+    let mut input = unrooted_ayaneo_provisioning_input("ayaneo.generic.base");
+    input.runtime_capabilities.shell_command = false;
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+    assert!(result["errors"].as_array().unwrap().iter().any(|error| {
+        error["code"] == "required_step_capability_unavailable"
+            && error["details"]["recipe_ref"] == "app.retroarch.provision"
+            && error["details"]["step_id"] == "grant_retroarch_baseline"
+            && error["details"]["capability"] == "shell_command"
+    }));
 }
 
 #[test]
@@ -4871,11 +5219,6 @@ fn repo_plan_e2e_from_checked_in_device_plan_succeeds() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
 
-        if actual["status"] == "error" {
-            assert_shared_system_target_overlap_rejected(&actual, case.device_plan_ref);
-            continue;
-        }
-
         assert_eq!(
             actual["status"], "success",
             "{}: {actual:#}",
@@ -4915,10 +5258,11 @@ fn repo_plan_e2e_selected_and_expanded_refs_are_deterministic() {
             "{} should emit the same private planner result for repeated runs with the same bindings",
             case.device_plan_ref
         );
-        if first["status"] == "error" {
-            assert_shared_system_target_overlap_rejected(&first, case.device_plan_ref);
-            continue;
-        }
+        assert_eq!(
+            first["status"], "success",
+            "{}: {first:#}",
+            case.device_plan_ref
+        );
         assert_eq!(
             first["execution_plan"]["source"]["selected_recipe_refs"],
             json!(case.selected_recipe_refs)
@@ -5074,11 +5418,6 @@ fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
 
-        if actual["status"] == "error" {
-            assert_shared_system_target_overlap_rejected(&actual, case.device_plan_ref);
-            continue;
-        }
-
         assert_eq!(
             actual["status"], "success",
             "{}: {actual:#}",
@@ -5101,32 +5440,63 @@ fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
 }
 
 #[test]
-fn repo_plan_e2e_no_app_data_write_contexts_prune_app_data_dependents() {
+fn repo_plan_e2e_without_app_data_write_preserves_defaults_and_rejects_required_writes() {
     for case in repo_plan_e2e_no_app_data_write_cases() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
-        let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
+        let input = repo_plan_e2e_input(&case, &temp);
+        let provision_selected = input
+            .selected_recipe_refs
+            .iter()
+            .any(|recipe| recipe == "app.retroarch.provision");
+        let actual = planning_result_value(input);
 
-        if actual["status"] == "error" {
-            assert_shared_system_target_overlap_rejected(&actual, case.device_plan_ref);
-            continue;
+        if provision_selected {
+            assert_eq!(
+                actual["status"], "error",
+                "{} should reject required protected writes: {actual:#}",
+                case.device_plan_ref
+            );
+            assert!(
+                actual["execution_plan"].is_null(),
+                "{}: {actual:#}",
+                case.device_plan_ref
+            );
+            assert!(
+                actual["errors"]
+                    .as_array()
+                    .is_some_and(|errors| errors.iter().any(|error| {
+                        error["code"] == "required_step_capability_unavailable"
+                            && error["details"]["recipe_ref"] == "app.retroarch.provision"
+                            && error["details"]["step_id"] == "copy_assets"
+                            && error["details"]["capability"] == "app_data_write"
+                    })),
+                "{} should report the unavailable mandatory content copy: {actual:#}",
+                case.device_plan_ref,
+            );
+        } else {
+            assert_eq!(
+                actual["status"], "success",
+                "{}: {actual:#}",
+                case.device_plan_ref
+            );
+            assert!(
+                execution_step_ids(&actual).contains(&"feature.copy_bios/copy_bios_dir"),
+                "{} should retain its default BIOS operation: {actual:#}",
+                case.device_plan_ref
+            );
+            assert!(
+                !execution_step_ids(&actual).contains(&"app.retroarch.provision/launch_retroarch"),
+                "{} should not add unselected RetroArch provisioning: {actual:#}",
+                case.device_plan_ref
+            );
         }
-
-        assert_eq!(
-            actual["status"], "success",
-            "{}: {actual:#}",
-            case.device_plan_ref
-        );
         assert!(
-            actual["errors"].as_array().is_some_and(Vec::is_empty),
-            "{} should not report stale unknown dependency errors after app-data pruning: {actual:#}",
-            case.device_plan_ref
-        );
-        assert_planning_result_shape(case.device_plan_ref, &actual);
-        assert!(
-            !execution_step_ids(&actual)
-                .contains(&"app.retroarch.provision/launch_retroarch"),
-            "{} should prune launch_retroarch when app-data copy dependencies are unavailable: {actual:#}",
-            case.device_plan_ref
+            actual["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|error| { error["code"] != "app_target_destination_overlap" }),
+            "cross-Recipe destination overlap must not be reported as a planner error"
         );
     }
 }
@@ -5183,6 +5553,16 @@ fn config_create_write_grant_does_not_admit_other_steps_to_the_same_target() {
         "app.retroarch.provision/retroarch_cfg_source".to_string(),
         json!("uploaded"),
     );
+    let recipe = input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.retroarch.provision")
+        .expect("selected RetroArch provisioning recipe should be loaded");
+    for step in &mut recipe.steps {
+        if step.type_name == "copy_files" {
+            step.user_toggleable = true;
+        }
+    }
 
     let authorized_result = planning_result_value(input.clone());
     assert_eq!(
@@ -7521,7 +7901,7 @@ fn issue19_mixed_permission_actions_keep_existing_shell_and_root_gates() {
     assert!(result
         .errors
         .iter()
-        .any(|error| error.code == "empty_execution_plan"));
+        .any(|error| error.code == "required_step_capability_unavailable"));
 
     input.runtime_capabilities.root_shell = true;
     input.runtime_capabilities.shell_command = true;
@@ -7564,7 +7944,7 @@ fn issue19_all_inapplicable_actions_preserve_authored_root_requirement() {
     assert!(result
         .errors
         .iter()
-        .any(|error| error.code == "empty_execution_plan"));
+        .any(|error| error.code == "required_step_capability_unavailable"));
 }
 
 #[test]
