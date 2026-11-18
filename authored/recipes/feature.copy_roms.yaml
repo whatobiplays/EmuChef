@@ -19,19 +19,12 @@ inputs:
       path_kind: directory
     default: null
   destination:
-    type: device_path
+    type: setup_location_ref
     role: rom_destination
     label: Device ROM folder
     required: true
     multiple: false
-    validation:
-      must_exist: false
-      allowed_extensions: []
-      path_kind: directory
-      allowed_prefixes:
-        - /sdcard
-        - /storage/emulated/0
-    default: /sdcard/ROMs
+    default: null
   policy:
     type: enum
     role: copy_policy

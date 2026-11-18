@@ -40,19 +40,12 @@ inputs:
       path_kind: directory
     default: null
   destination:
-    type: device_path
+    type: setup_location_ref
     role: rom_destination
     label: Device ROM folder
     required: true
     multiple: false
-    validation:
-      must_exist: false
-      allowed_extensions: []
-      path_kind: directory
-      allowed_prefixes:
-        - /sdcard
-        - /storage/emulated/0
-    default: /sdcard/ROMs
+    default: null
   policy:
     type: enum
     role: copy_policy
@@ -402,6 +395,13 @@ accepts either an ID/path string or an inline document object. An inline object
 uses the canonical persisted document schema and therefore keeps snake_case
 document fields:
 
+Setup Location references are bound to the current device session and are not
+portable saved paths. A saved configuration may omit this required input;
+runtime planning still needs a current Setup Location selection. Existing
+literal path bindings remain unchanged and require reselection when they no
+longer resolve. They are not silently converted or discarded with unrelated
+saved content.
+
 ```json
 {
   "type": "describeConfiguration",
@@ -414,11 +414,7 @@ document fields:
       "name": "Example",
       "device_plan": "ayaneo.pocket_s_mini.base",
       "selected_recipes": ["feature.copy_roms"],
-      "bindings": {
-        "feature.copy_roms/destination": {
-          "value": "/sdcard/ROMs"
-        }
-      }
+      "bindings": {}
     }
   }
 }

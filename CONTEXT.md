@@ -535,13 +535,16 @@ precedence over profile context and is retained in the plan's device context
 for review.
 
 `baseline` requires `shell_command` and executes through ordinary ADB shell.
-`elevated` requires both `shell_command` and `root_shell` and is omitted when
-either capability is unavailable. Reviewed root authorization is required only
-when an elevated plan has at least one applicable action; an all-inapplicable
-plan skips without root qualification or execution preflight. The real adapter
-separately checks authorization and revalidates root immediately before each
-privileged command. The fixed command surface grants runtime permissions or
-sets app-ops to `allow`; it does not accept authored shell commands.
+When `root_shell` is unavailable, the planner may omit an `elevated` permission
+operation whose typed permission set has applicable actions. It exempts only
+the derived `root_shell` requirement; other missing capabilities on the step
+still block planning. `policy.on_failure` controls outcomes after selection and
+does not change operation eligibility. Reviewed root authorization is required
+only when an elevated plan has at least one applicable action. The real
+adapter separately checks authorization and revalidates root immediately
+before each privileged command. The fixed command surface grants runtime
+permissions or sets app-ops to `allow`; it does not accept authored shell
+commands.
 Ordinary action failures continue across independent applicable actions. Under
 `warn`, each failed action is reported as a warning and the step succeeds with
 warnings; under `fail`, the step fails with an execution error. Root-authority,
@@ -584,6 +587,14 @@ diagnostics remain warnings. An API-inapplicable permission action remains in
 the plan as a skipped no-op and contributes neither `shell_command` nor
 `root_shell`; applicable permission actions retain their existing capability
 gates.
+
+Missing capabilities block a selected non-toggleable state-changing operation
+(`copy_files`, `extract_archive`, `force_stop_app`, `grant_permissions`,
+`install_apk`, or `launch_app`) instead of silently removing it. Other
+known capability-ineligible work may be pruned. An unclassified
+non-toggleable step is treated as required until its capability behavior is
+defined. If an applicable required step depends on an unavailable step,
+planning fails rather than pruning the dependent action.
 
 A Recipe step that names an unsupported runtime capability is pruned with a
 Recipe-keyed diagnostic. The Recipe remains available when other planner-retained
@@ -1804,20 +1815,36 @@ planning and review. The immutable plan digest covers each active trusted
 binding, including volume evidence, root, and relative path. The retained review
 binds canonical destination scopes, manifests, preconditions, and reviewed
 effects, including any required directory creation. Active Setup Location and
-legacy shared-path writers are compared by canonical scope and reviewed effect.
-Device `extract_archive` steps also join this comparison by canonical
-destination scope and reviewed effects. The planner rejects overlapping
-writers and fails closed when it cannot resolve the destination. Host extraction
-does not write to device storage.
-Conflicting writes, destructive overlaps, and shared directory creations that
-would invalidate another writer's reviewed missing-path precondition are
-rejected before execution. Idempotent directory effects may coexist when those
-directories already exist at review time and no other effect conflicts. Unused
-named locations do not participate and may have overlapping paths.
-Collision checks follow execution order. If an earlier active writer would
-change any part of a later writer's reviewed whole-tree destination snapshot,
-planning rejects the plan before execution. Disjoint effects outside that later
-scope may coexist when the remaining reviewed preconditions hold.
+legacy shared-path writers use canonical paths and trusted volume identity.
+Distinct Recipes may write to overlapping App Targets, shared paths, and Setup
+Locations. Overlap alone does not make a plan invalid. Device `extract_archive`
+effects remain outside the reviewed CopyCommit projection; when an active copy
+overlaps an extraction whose resulting state cannot be reviewed, planning
+continues to fail closed. Host extraction does not write to device storage.
+
+Each reviewed copy snapshot binds its initial destination state, ordered
+predecessor steps, projected incoming and resulting manifests, exact deletion
+set, and projection digests. The serial `ExecutionPlan.steps` order determines
+which operation is reviewed first. Every later overlapping operation is
+reviewed against the projected effects of earlier CopyCommit operations, and
+its own `merge`, `replace`, or `sync` policy determines whether it updates or
+deletes files written earlier in the run. The planner adds no cross-Recipe
+dependency edges or concurrent execution.
+
+Before a later overlapping copy mutates, the executor requires each relevant
+predecessor to have a complete successful report matching its projection. It
+replays those reports and requires the current destination manifest to match
+that state, then checks the later operation's own source, destination, volume,
+confinement, and write preconditions. Known earlier EmuChef mutations are part
+of that expected state. Unexpected drift fails the affected operation. A
+skipped, failed, partial, uncertain, or mismatched predecessor leaves later
+overlapping work without a valid review state; disjoint destinations remain
+independently eligible.
+
+Shared directory creation still fails if it invalidates a later writer's
+reviewed missing-path precondition. An already-existing directory effect may
+be shared when the remaining preconditions hold. Unused named locations do not
+participate and may have overlapping paths.
 
 Public review output for a legacy shared-storage copy replaces its physical
 destination with a logical storage label and relative path, and omits
@@ -3003,18 +3030,18 @@ validated and tested. Physical qualification is not claimed.
 Physical qualification for all three standalone workflows is deferred by owner
 with cleanup authority `not_authorized_for_recipe_qualification`.
 The default `ayaneo.konkr_pocket_fit.base` selection includes both
-`app.retroarch.provision` and `feature.copy_bios`, but current planning rejects
-that composition with `app_target_destination_overlap`. Both recipes copy to
-the same `system` App Target: RetroArch uses additive `merge`, while BIOS uses
-directory `sync`, which removes destination-only files. CopyCommit reviews
-capture each destination manifest before mutation and do not compose sequential
-operations on one boundary, so the combined workflow is unsupported. The
-authored recipes and production destinations remain unchanged. The earlier
-sandbox characterization does not establish this combined flow as supported.
-The fake filesystem does not treat `/sdcard` and `/storage/emulated/0` as
-aliases. Phase 6E remains in progress for other workflow qualification and
-physical/full end-to-end work; Phase 6D retains its missing physical and
-UI-smoke evidence. This work does not waive those requirements.
+`app.retroarch.provision` and `feature.copy_bios`. Both recipes copy to the same
+`system` App Target. Distinct Recipes may write
+to overlapping destinations, and ordered CopyCommit review binds the BIOS
+operation to the projected result of RetroArch provisioning. BIOS `sync` keeps
+its declared mirror behavior and removes destination-only files, including
+files written by the earlier operation; the exact deletion set is reviewed
+before mutation. The fake filesystem does not model `/sdcard` and
+`/storage/emulated/0` as one backing tree. This host-side planning and review
+support does not establish device behavior or physical qualification. Phase 6E
+remains in progress for other workflow qualification and physical/full
+end-to-end work; Phase 6D retains its missing physical and UI-smoke evidence.
+This work does not waive those requirements.
 
 ### Protected App Target qualification
 
@@ -3057,14 +3084,18 @@ temporary file before rename. Copy-commit source access requires Unix
 descriptor-relative no-follow filesystem operations; hosts without those
 operations reject the copy instead of using path-based opens. Non-Unix host
 support for this copy path is not qualified.
-The planner rejects selected CopyCommit operations whose destination paths are
-equal or ancestor/descendant, including overlaps across recipes. Disjoint
-sibling boundaries remain eligible. The review protocol has no sequential
-same-boundary composition: each snapshot is captured before mutation, so one
-operation cannot safely consume another operation's output. For Android shared
-storage, overlap checks also recognize `/sdcard` and `/storage/self/primary`
-as aliases of `/storage/emulated/0`; unresolved destination identity fails
-closed.
+Selected CopyCommit operations from distinct Recipes may target the same or
+nested destination scopes. Review snapshots follow deterministic plan order and
+bind the earlier projected result into each later snapshot, including the exact
+deletion set implied by its policy. Execution checks the successful predecessor
+reports and compares the live tree with their replay before applying the later
+operation's own write preconditions. A failed or uncertain predecessor does
+not invalidate disjoint operations; it leaves only later overlapping snapshots
+without usable state. Unexpected drift still fails closed. Overlapping copy
+destinations within one Recipe remain blocked, and no implicit Recipe dependency
+or concurrent execution is added. For Android shared storage, canonical scope
+comparison also recognizes `/sdcard` and `/storage/self/primary` as aliases of
+`/storage/emulated/0`; unresolved destination identity fails closed.
 
 Shared-storage CopyCommit runs as Android shell UID 2000 and never falls back
 to root. For `/sdcard` destinations, it preserves the reviewed spelling and
@@ -3135,7 +3166,13 @@ or Setup Location lease.
 
 ## KONKR Pocket Advance RetroArch configuration qualification
 
-The KONKR Pocket Advance uses the product Device Profile `konkr.pocket_advance` and linked Device Plan `konkr.pocket_advance.base`. The profile matches manufacturer ARBOR, model GT78-VN, and Android 12 or later. Its capability defaults keep APK installation, shared-storage writes, app launch, root shell, and protected app-data writes unavailable. The base plan selects RetroArch provisioning and BIOS copy. Planning returns an error when required APK-install or app-launch steps need unavailable capabilities, rather than reporting a partial setup as complete. RetroArch configuration creation is optional and is off by default. A configuration-only request can select `app.retroarch.configure`; its explicit recipe list replaces the plan defaults. This catalog foundation does not qualify physical workflows or establish complete device support.
+The KONKR Pocket Advance uses the product Device Profile `konkr.pocket_advance` and linked Device Plan `konkr.pocket_advance.base`. The profile matches manufacturer ARBOR, model GT78-VN, and Android 12 or later. Its conservative capability defaults keep APK installation, shared-storage writes, app launch, root shell, and protected app-data writes unavailable until exact-device evidence supports them. The base plan selects RetroArch provisioning and BIOS copy. ROM copy through `feature.copy_roms` is optional and unselected by default; its source is a user-selected directory, its destination is a typed `setup_location_ref`, and its policy defaults to `merge`. RetroArch configuration remains optional and off by default. Planning returns an error when required APK-install, app-launch, content-copy, or protected-destination operations need unavailable capabilities; it does not report a partial setup as complete. A configuration-only request can select `app.retroarch.configure`; its explicit recipe list replaces the plan defaults.
+
+Portable saved setups may omit the session-bound ROM destination; runtime planning still requires a current Setup Location selection.
+
+Ambiguous ARBOR/GT78-VN profile matches require a current session-bound selection. A stale literal destination binding requires reselection; EmuChef does not migrate it silently or discard unrelated saved content. The [operation-evidence matrix](tests/fixtures/recipe-qualification/konkr-pocket-advance/operation-evidence-matrix.json) requires each qualification record to bind the exact selected device and build, APK SHA-256 and source, frozen execution strategy, and operation-specific postconditions. Automated host evidence is recorded separately from physical runs. The matrix currently records no physical measurements or execution results, and this catalog foundation does not establish complete device support.
+
+The plan records typed operation membership only. It is not ready for execution as a combined setup: RetroArch provisioning produces copy sources at runtime, so those copies need a separate fresh review before mutation. No cross-Recipe order is guaranteed, and there is no automatic in-run review.
 
 The observed Android 12/API 31 values conflict with the Android 11 release encoded in the firmware fingerprint. Keep both observations until new measurements resolve the discrepancy. The qualification target `konkr-pocket-advance-retroarch-config-create` remains `pending_physical_qualification` and records that ambiguous KONKR and AYANEO profile matches require a choice bound to the current device session. A single eligible profile may resolve under the normal matching policy.
 

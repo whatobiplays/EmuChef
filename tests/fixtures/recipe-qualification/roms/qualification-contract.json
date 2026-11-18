@@ -4,7 +4,7 @@
   "planningDevicePlan": "ayaneo.generic.base",
   "authoredSource": {
     "path": "authored/recipes/feature.copy_roms.yaml",
-    "sha256": "956838151ed9048421e4c88d0895abe5b7f1a1998731c7dd2fbbee9cc13c2041"
+    "sha256": "61b63304c02a7b88c42e827176cdec3e63b1672b4cee862d9d820115a7701b30"
   },
   "selectedRecipes": ["feature.copy_roms"],
   "expandedRecipes": ["feature.copy_roms"],
@@ -21,9 +21,8 @@
     "destination": {
       "key": "feature.copy_roms/destination",
       "required": true,
-      "type": "device_path",
-      "role": "rom_destination",
-      "default": "/sdcard/ROMs"
+      "type": "setup_location_ref",
+      "role": "rom_destination"
     },
     "policy": {
       "key": "feature.copy_roms/policy",

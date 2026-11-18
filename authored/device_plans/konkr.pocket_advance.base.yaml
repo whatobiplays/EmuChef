@@ -9,6 +9,8 @@ recipes:
     selected_by_default: true
   - recipe_ref: feature.copy_bios
     selected_by_default: true
+  - recipe_ref: feature.copy_roms
+    selected_by_default: false
   - recipe_ref: app.retroarch.configure
     selected_by_default: false
 defaults:

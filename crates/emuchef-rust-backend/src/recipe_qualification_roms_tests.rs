@@ -22,13 +22,16 @@ use crate::executor::{
 use crate::planner::BindingSource;
 use crate::planner::{ExecutionParamValue, ExecutionPlan, ExecutionStep};
 use crate::runtime_configuration::PlanConfigurationResult;
+use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
 
 const TARGET_RECIPE: &str = "feature.copy_roms";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.generic.base";
 const SOURCE_INPUT_KEY: &str = "feature.copy_roms/source";
 const DESTINATION_INPUT_KEY: &str = "feature.copy_roms/destination";
 const POLICY_INPUT_KEY: &str = "feature.copy_roms/policy";
-const DEFAULT_DESTINATION: &str = "/sdcard/ROMs";
+const DEFAULT_LOCATION_ID: &str = "internal-roms";
+const REMOVABLE_LOCATION_ID: &str = "removable-sd-roms";
+const DEFAULT_DESTINATION: &str = "/storage/emulated/0/ROMs";
 const DEFAULT_POLICY: &str = "merge";
 const COPY_STEP_ID_SUFFIX: &str = "copy_rom_library";
 const COPY_STEP_PATH_SUFFIX: &str = "/copy_rom_library";
@@ -130,12 +133,9 @@ fn load_contract() -> RomQualificationContract {
     assert!(contract.inputs.source.options.is_empty());
     assert_eq!(contract.inputs.destination.key, DESTINATION_INPUT_KEY);
     assert!(contract.inputs.destination.required);
-    assert_eq!(contract.inputs.destination.type_name, "device_path");
+    assert_eq!(contract.inputs.destination.type_name, "setup_location_ref");
     assert_eq!(contract.inputs.destination.role, "rom_destination");
-    assert_eq!(
-        contract.inputs.destination.default.as_deref(),
-        Some(DEFAULT_DESTINATION)
-    );
+    assert_eq!(contract.inputs.destination.default, None);
     assert!(contract.inputs.destination.options.is_empty());
     assert_eq!(contract.inputs.policy.key, POLICY_INPUT_KEY);
     assert!(!contract.inputs.policy.required);
@@ -288,10 +288,57 @@ fn normal_rom_adapters(workspace: &RomQualificationWorkspace) -> ExecutorAdapter
     )
 }
 
+fn rom_setup_location_binding(
+    plan: &ExecutionPlan,
+    id: &str,
+    volume_kind: StorageTargetVolumeKind,
+    mount_root: &str,
+    relative_path: &str,
+    name: &str,
+) -> StorageTargetBinding {
+    StorageTargetBinding {
+        id: id.to_string(),
+        device_plan: plan
+            .device_plan
+            .as_ref()
+            .expect("ROM plan should retain its Device Plan identity")
+            .id
+            .clone(),
+        session_epoch: 1,
+        name: name.to_string(),
+        relative_path: relative_path.to_string(),
+        volume_handle: "1".repeat(32),
+        volume_kind,
+        mount_root: mount_root.to_string(),
+        volume_identity: "2".repeat(32),
+        volume_continuity: "3".repeat(32),
+        observation_token: "4".repeat(32),
+    }
+}
+
+fn internal_rom_setup_location(plan: &ExecutionPlan) -> StorageTargetBinding {
+    rom_setup_location_binding(
+        plan,
+        DEFAULT_LOCATION_ID,
+        StorageTargetVolumeKind::InternalShared,
+        "/storage/emulated/0",
+        "ROMs",
+        "Internal ROMs",
+    )
+}
+
+fn prepare_internal_rom_copy_snapshots<D: ExecutorDevice>(
+    runner: &mut ExecutorRunner<D>,
+    plan: &mut ExecutionPlan,
+) -> Result<(), String> {
+    let binding = internal_rom_setup_location(plan);
+    runner.prepare_copy_commit_snapshots_with_storage_targets(plan, &[binding])
+}
+
 #[test]
 fn rom_sync_generated_plan_mirrors_source_directory() {
     let workspace = RomQualificationWorkspace::new();
-    let stale_file = workspace.fake_device_file("sdcard/ROMs/destination-only.txt");
+    let stale_file = workspace.fake_device_file("storage/emulated/0/ROMs/destination-only.txt");
     fs::create_dir_all(
         stale_file
             .parent()
@@ -302,7 +349,7 @@ fn rom_sync_generated_plan_mirrors_source_directory() {
 
     let prepared = plan_roms(
         Some(&workspace.rom_source_dir),
-        Some(DEFAULT_DESTINATION),
+        Some(DEFAULT_LOCATION_ID),
         Some("sync"),
     );
     let mut plan = prepared
@@ -318,8 +365,7 @@ fn rom_sync_generated_plan_mirrors_source_directory() {
     );
 
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
-    runner
-        .prepare_copy_commit_snapshots(&mut plan)
+    prepare_internal_rom_copy_snapshots(&mut runner, &mut plan)
         .expect("ROM sync review should prepare trusted copy snapshots");
     assert_eq!(plan.copy_commit_snapshots.len(), 1);
     assert!(plan.copy_commit_snapshots[0]
@@ -342,14 +388,18 @@ fn rom_sync_generated_plan_mirrors_source_directory() {
         "directory-style sync must remove destination-only files"
     );
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/ROMs/Nintendo/GBA/Metroid Fusion.gba"))
-            .expect("GBA ROM should be copied"),
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/ROMs/Nintendo/GBA/Metroid Fusion.gba")
+        )
+        .expect("GBA ROM should be copied"),
         fs::read(workspace.source_file("Nintendo/GBA/Metroid Fusion.gba"))
             .expect("source GBA ROM should be readable")
     );
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/ROMs/Sony/PSX/Crash Bandicoot.chd"))
-            .expect("PSX ROM should be copied"),
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/ROMs/Sony/PSX/Crash Bandicoot.chd")
+        )
+        .expect("PSX ROM should be copied"),
         fs::read(workspace.source_file("Sony/PSX/Crash Bandicoot.chd"))
             .expect("source PSX ROM should be readable")
     );
@@ -380,7 +430,11 @@ fn rom_contract_binds_current_source_and_deferred_physical_status() {
 fn rom_real_authored_plan_and_review_match_qualification_contract() {
     let contract = load_contract();
     let workspace = RomQualificationWorkspace::new();
-    let result = plan_roms(Some(&workspace.rom_source_dir), None, None);
+    let result = plan_roms(
+        Some(&workspace.rom_source_dir),
+        Some(DEFAULT_LOCATION_ID),
+        None,
+    );
     assert!(result
         .diagnostics
         .iter()
@@ -431,14 +485,11 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
         ))
     );
     let destination_binding = resolved_input(&result, DESTINATION_INPUT_KEY);
-    assert_eq!(destination_binding.type_name, "device_path");
-    assert_eq!(
-        destination_binding.source,
-        Some(BindingSource::RecipeDefault)
-    );
+    assert_eq!(destination_binding.type_name, "setup_location_ref");
+    assert_eq!(destination_binding.source, Some(BindingSource::Explicit));
     assert_eq!(
         destination_binding.value,
-        Some(Value::String(DEFAULT_DESTINATION.to_string()))
+        Some(Value::String(DEFAULT_LOCATION_ID.to_string()))
     );
     let policy_binding = resolved_input(&result, POLICY_INPUT_KEY);
     assert_eq!(policy_binding.type_name, "enum");
@@ -465,8 +516,7 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
         .expect("fake device root should exist before snapshot preparation");
     let mut reviewed_plan = plan.clone();
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
-    runner
-        .prepare_copy_commit_snapshots(&mut reviewed_plan)
+    prepare_internal_rom_copy_snapshots(&mut runner, &mut reviewed_plan)
         .expect("reviewed ROM destination snapshot should be prepared");
     let plan_digest = crate::plan_digest::execution_plan_digest(&reviewed_plan)
         .expect("prepared ROM plan digest should be available");
@@ -490,7 +540,10 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
         .all(|notice| notice.severity != "blocker"));
     let serialized = serde_json::to_string(&review).expect("ROM review should serialize");
     assert!(serialized.contains("rom-source"));
-    assert!(serialized.contains(DEFAULT_DESTINATION));
+    assert!(
+        serialized.contains(DEFAULT_DESTINATION),
+        "review should identify the currently resolved Setup Location destination"
+    );
     assert!(!serialized.contains(&workspace._temp.path().to_string_lossy().to_string()));
     assert!(!serialized.contains("serial"));
     assert!(!serialized.contains("runtimeAuthority"));
@@ -498,7 +551,7 @@ fn rom_real_authored_plan_and_review_match_qualification_contract() {
 
 #[test]
 fn rom_missing_required_source_prevents_executable_plan_and_review() {
-    let result = plan_roms(None, None, None);
+    let result = plan_roms(None, Some(DEFAULT_LOCATION_ID), None);
     assert!(result.plan.is_none());
     assert!(result.plan_digest.is_none());
     assert!(result.review.is_none());
@@ -514,10 +567,28 @@ fn rom_missing_required_source_prevents_executable_plan_and_review() {
 }
 
 #[test]
+fn rom_missing_current_setup_location_prevents_executable_plan_and_review() {
+    let workspace = RomQualificationWorkspace::new();
+    let result = plan_roms(Some(&workspace.rom_source_dir), None, None);
+    assert!(result.plan.is_none());
+    assert!(result.plan_digest.is_none());
+    assert!(result.review.is_none());
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "binding_missing")
+        .expect("missing current Setup Location should produce binding_missing");
+    assert_eq!(diagnostic.key.as_deref(), Some(DESTINATION_INPUT_KEY));
+    let binding = resolved_input(&result, DESTINATION_INPUT_KEY);
+    assert!(binding.value.is_none());
+    assert!(binding.source.is_none());
+}
+
+#[test]
 fn rom_nonexistent_required_source_prevents_executable_plan_and_review() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let missing = temp.path().join("missing-rom-source");
-    let result = plan_roms(Some(&missing), None, None);
+    let result = plan_roms(Some(&missing), Some(DEFAULT_LOCATION_ID), None);
     assert!(result.plan.is_none());
     assert!(result.plan_digest.is_none());
     assert!(result.review.is_none());
@@ -531,45 +602,150 @@ fn rom_nonexistent_required_source_prevents_executable_plan_and_review() {
 }
 
 #[test]
-fn rom_destination_validation_is_fail_closed_and_accepts_storage_prefix() {
+fn stale_literal_destination_requires_a_current_setup_location_binding() {
     let workspace = RomQualificationWorkspace::new();
-    let invalid = plan_roms(
-        Some(&workspace.rom_source_dir),
-        Some("/data/local/tmp/roms"),
-        None,
-    );
-    assert!(invalid.plan.is_none());
-    assert!(invalid.plan_digest.is_none());
-    assert!(invalid.review.is_none());
-    let diagnostic = invalid
-        .diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.code == "binding_validation_failed")
-        .expect("disallowed ROM destination should fail validation");
-    assert_eq!(diagnostic.key.as_deref(), Some(DESTINATION_INPUT_KEY));
-    assert_eq!(diagnostic.provenance, Some(BindingSource::Explicit));
+    let legacy = plan_roms(Some(&workspace.rom_source_dir), Some("/sdcard/ROMs"), None);
+    let mut plan = legacy
+        .plan
+        .expect("legacy path remains a string until a session binding is checked");
+    let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    let binding = internal_rom_setup_location(&plan);
+    let error = runner
+        .prepare_copy_commit_snapshots_with_storage_targets(&mut plan, &[binding])
+        .expect_err("a literal path must not resolve as a Setup Location ID");
 
-    let accepted = plan_roms(
+    assert!(
+        error.contains("active Setup Location binding is missing"),
+        "{error}"
+    );
+    assert!(!workspace.fake_device_file("sdcard/ROMs").exists());
+}
+
+#[test]
+fn rom_copy_resolves_internal_and_removable_setup_locations() {
+    let cases = [
+        (
+            DEFAULT_LOCATION_ID,
+            StorageTargetVolumeKind::InternalShared,
+            "/storage/emulated/0",
+            "storage/emulated/0/ROMs",
+            "Internal ROMs",
+        ),
+        (
+            REMOVABLE_LOCATION_ID,
+            StorageTargetVolumeKind::RemovableSd,
+            "/storage/ABCD-1234",
+            "storage/ABCD-1234/ROMs",
+            "Removable SD ROMs",
+        ),
+    ];
+
+    for (location_id, volume_kind, mount_root, fake_destination, name) in cases {
+        let workspace = RomQualificationWorkspace::new();
+        let stale_file =
+            workspace.fake_device_file(&format!("{fake_destination}/destination-only.txt"));
+        fs::create_dir_all(
+            stale_file
+                .parent()
+                .expect("destination parent should exist"),
+        )
+        .expect("destination parent should be created");
+        fs::write(&stale_file, b"stale\n").expect("stale entry should be written");
+
+        let result = plan_roms(
+            Some(&workspace.rom_source_dir),
+            Some(location_id),
+            Some("sync"),
+        );
+        let mut plan = result.plan.expect("ROM Setup Location plan should exist");
+        let binding =
+            rom_setup_location_binding(&plan, location_id, volume_kind, mount_root, "ROMs", name);
+        let expected_identity = binding
+            .destination_path()
+            .expect("synthetic Setup Location binding should validate")
+            .to_string_lossy()
+            .into_owned();
+        let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+        runner
+            .prepare_copy_commit_snapshots_with_storage_targets(&mut plan, &[binding])
+            .expect("active logical destination should bind to trusted storage evidence");
+
+        let snapshot = plan
+            .copy_commit_snapshots
+            .first()
+            .expect("selected ROM writer should have a reviewed snapshot");
+        assert_eq!(snapshot.destination_identity, expected_identity);
+        assert_eq!(
+            snapshot.destination_kind,
+            crate::executor::copy_commit::CopyCommitDestinationKind::SetupLocation
+        );
+        assert_eq!(
+            snapshot
+                .setup_location_binding
+                .as_ref()
+                .expect("Setup Location snapshot should retain its trusted binding")
+                .volume_kind,
+            volume_kind
+        );
+        assert_eq!(snapshot.reviewed_deletion_set, ["destination-only.txt"]);
+
+        let result = runner.run(&plan);
+        assert!(result.success, "{location_id}: {result:?}");
+        assert!(!stale_file.exists(), "sync removes reviewed stale content");
+        assert!(
+            workspace
+                .fake_device_file(&format!(
+                    "{fake_destination}/Nintendo/GBA/Metroid Fusion.gba"
+                ))
+                .exists(),
+            "ROM source should be copied below the selected logical location"
+        );
+    }
+}
+
+#[test]
+fn changed_setup_location_volume_changes_review_digest() {
+    let workspace = RomQualificationWorkspace::new();
+    let prepared = plan_roms(
         Some(&workspace.rom_source_dir),
-        Some("/storage/emulated/0/Emulation/ROMs"),
+        Some(DEFAULT_LOCATION_ID),
         None,
     );
-    assert!(accepted.plan.is_some());
-    let destination = resolved_input(&accepted, DESTINATION_INPUT_KEY);
-    assert_eq!(destination.source, Some(BindingSource::Explicit));
-    assert_eq!(
-        destination.value,
-        Some(Value::String(
-            "/storage/emulated/0/Emulation/ROMs".to_string()
-        ))
-    );
+    let plan = prepared.plan.expect("ROM Setup Location plan should exist");
+
+    let mut original_plan = plan.clone();
+    let original_binding = internal_rom_setup_location(&original_plan);
+    let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    fs::create_dir_all(&workspace.fake_device_root)
+        .expect("fake device root should exist for changed-volume review");
+    runner
+        .prepare_copy_commit_snapshots_with_storage_targets(&mut original_plan, &[original_binding])
+        .expect("original storage evidence should prepare a reviewed snapshot");
+    let original_digest = crate::plan_digest::execution_plan_digest(&original_plan)
+        .expect("original Setup Location plan should have a digest");
+
+    let mut changed_plan = plan;
+    let mut changed_binding = internal_rom_setup_location(&changed_plan);
+    changed_binding.volume_identity = "5".repeat(32);
+    let mut changed_runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
+    changed_runner
+        .prepare_copy_commit_snapshots_with_storage_targets(&mut changed_plan, &[changed_binding])
+        .expect("changed volume evidence should prepare a distinct review");
+    let changed_digest = crate::plan_digest::execution_plan_digest(&changed_plan)
+        .expect("changed Setup Location plan should have a digest");
+
+    assert_ne!(original_digest, changed_digest);
 }
 
 #[test]
 fn rom_copy_policy_accepts_authored_options() {
     let workspace = RomQualificationWorkspace::new();
     for policy in ["merge", "replace", "sync"] {
-        let result = plan_roms(Some(&workspace.rom_source_dir), None, Some(policy));
+        let result = plan_roms(
+            Some(&workspace.rom_source_dir),
+            Some(DEFAULT_LOCATION_ID),
+            Some(policy),
+        );
         assert!(result.plan.is_some(), "policy {policy} should plan");
         let binding = resolved_input(&result, POLICY_INPUT_KEY);
         assert_eq!(binding.source, Some(BindingSource::Explicit));
@@ -580,7 +756,11 @@ fn rom_copy_policy_accepts_authored_options() {
 #[test]
 fn rom_copy_policy_rejects_unsupported_values() {
     let workspace = RomQualificationWorkspace::new();
-    let result = plan_roms(Some(&workspace.rom_source_dir), None, Some("overwrite"));
+    let result = plan_roms(
+        Some(&workspace.rom_source_dir),
+        Some(DEFAULT_LOCATION_ID),
+        Some("overwrite"),
+    );
     assert!(result.plan.is_none());
     assert!(result.plan_digest.is_none());
     assert!(result.review.is_none());
@@ -594,10 +774,11 @@ fn rom_copy_policy_rejects_unsupported_values() {
 }
 
 #[test]
-fn rom_default_merge_preserves_unrelated_content_and_plan_identity() {
+fn rom_default_merge_reviews_existing_setup_location_content_and_plan_identity() {
     let workspace = RomQualificationWorkspace::new();
-    let keep = workspace.fake_device_file("sdcard/ROMs/Existing/keep.txt");
-    let collision = workspace.fake_device_file("sdcard/ROMs/Nintendo/GBA/Metroid Fusion.gba");
+    let keep = workspace.fake_device_file("storage/emulated/0/ROMs/Existing/keep.txt");
+    let collision =
+        workspace.fake_device_file("storage/emulated/0/ROMs/Nintendo/GBA/Metroid Fusion.gba");
     fs::create_dir_all(keep.parent().expect("keep parent should exist"))
         .expect("keep parent should be created");
     fs::create_dir_all(collision.parent().expect("collision parent should exist"))
@@ -605,12 +786,22 @@ fn rom_default_merge_preserves_unrelated_content_and_plan_identity() {
     fs::write(&keep, b"keep-me\n").expect("unrelated destination file should be written");
     fs::write(&collision, b"old-gba\n").expect("collision destination file should be written");
 
-    let prepared = plan_roms(Some(&workspace.rom_source_dir), None, None);
+    let prepared = plan_roms(
+        Some(&workspace.rom_source_dir),
+        Some(DEFAULT_LOCATION_ID),
+        None,
+    );
     let mut plan = prepared.plan.expect("default ROM merge plan should exist");
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
-    runner
-        .prepare_copy_commit_snapshots(&mut plan)
+    prepare_internal_rom_copy_snapshots(&mut runner, &mut plan)
         .expect("reviewed ROM destination snapshot should be prepared");
+    let existing_paths = plan.copy_commit_snapshots[0]
+        .destination_before_manifest
+        .iter()
+        .map(|entry| entry.relative_path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(existing_paths.contains("Existing/keep.txt"));
+    assert!(existing_paths.contains("Nintendo/GBA/Metroid Fusion.gba"));
     let plan_before = plan.clone();
     let result = runner.run(&plan);
 
@@ -619,10 +810,16 @@ fn rom_default_merge_preserves_unrelated_content_and_plan_identity() {
         plan, plan_before,
         "executor must not mutate the generated plan"
     );
-    assert_eq!(fs::read(&keep).unwrap(), b"keep-me\n");
+    assert!(
+        keep.exists(),
+        "merge should retain unrelated destination paths"
+    );
     assert_eq!(fs::read(&collision).unwrap(), b"source-gba\n");
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/ROMs/Sony/PSX/Crash Bandicoot.chd")).unwrap(),
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/ROMs/Sony/PSX/Crash Bandicoot.chd")
+        )
+        .unwrap(),
         b"source-psx\n"
     );
     assert_eq!(
@@ -636,72 +833,21 @@ fn rom_default_merge_preserves_unrelated_content_and_plan_identity() {
 }
 
 #[test]
-fn rom_shared_directory_snapshots_preserve_selected_spelling() {
-    for destination in ["/sdcard/ROMs", "/storage/emulated/0/RetroArch/system"] {
-        let workspace = RomQualificationWorkspace::new();
-        let stale_file = workspace
-            .fake_device_file(
-                destination
-                    .strip_prefix('/')
-                    .expect("shared destination should be absolute"),
-            )
-            .join("destination-only.txt");
-        fs::create_dir_all(
-            stale_file
-                .parent()
-                .expect("destination parent should exist"),
-        )
-        .expect("destination parent should be created");
-        fs::write(&stale_file, b"stale\n").expect("stale entry should be written");
-
-        let prepared = plan_roms(
-            Some(&workspace.rom_source_dir),
-            Some(destination),
-            Some("sync"),
-        );
-        let mut plan = prepared.plan.expect("ROM sync plan should exist");
-        let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
-        runner
-            .prepare_copy_commit_snapshots(&mut plan)
-            .expect("shared destination should receive a trusted snapshot");
-
-        let snapshot = plan
-            .copy_commit_snapshots
-            .first()
-            .expect("shared destination snapshot should be present");
-        assert_eq!(snapshot.destination_identity, destination);
-        assert_eq!(
-            snapshot.destination_kind,
-            crate::executor::copy_commit::CopyCommitDestinationKind::SharedDevicePath
-        );
-        assert_eq!(snapshot.reviewed_deletion_set, ["destination-only.txt"]);
-
-        let result = runner.run(&plan);
-        assert!(result.success, "reviewed shared-path sync should execute");
-        assert!(
-            !stale_file.exists(),
-            "sync should remove only reviewed stale content"
-        );
-    }
-}
-
-#[test]
 fn rom_replace_generated_plan_removes_stale_destination_content() {
     let workspace = RomQualificationWorkspace::new();
-    let stale = workspace.fake_device_file("sdcard/ROMs/stale-only.txt");
+    let stale = workspace.fake_device_file("storage/emulated/0/ROMs/stale-only.txt");
     fs::create_dir_all(stale.parent().expect("stale parent should exist"))
         .expect("stale parent should be created");
     fs::write(&stale, b"stale\n").expect("stale ROM should be written");
 
     let prepared = plan_roms(
         Some(&workspace.rom_source_dir),
-        Some(DEFAULT_DESTINATION),
+        Some(DEFAULT_LOCATION_ID),
         Some("replace"),
     );
     let mut plan = prepared.plan.expect("ROM replace plan should exist");
     let mut runner = ExecutorRunner::new(normal_rom_adapters(&workspace));
-    runner
-        .prepare_copy_commit_snapshots(&mut plan)
+    prepare_internal_rom_copy_snapshots(&mut runner, &mut plan)
         .expect("ROM replace review should prepare trusted copy snapshots");
     assert_eq!(plan.copy_commit_snapshots.len(), 1);
     assert!(plan.copy_commit_snapshots[0]
@@ -713,12 +859,17 @@ fn rom_replace_generated_plan_removes_stale_destination_content() {
     assert!(result.success, "ROM replace plan should execute");
     assert!(!stale.exists());
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/ROMs/Nintendo/GBA/Metroid Fusion.gba"))
-            .unwrap(),
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/ROMs/Nintendo/GBA/Metroid Fusion.gba")
+        )
+        .unwrap(),
         b"source-gba\n"
     );
     assert_eq!(
-        fs::read(workspace.fake_device_file("sdcard/ROMs/Sony/PSX/Crash Bandicoot.chd")).unwrap(),
+        fs::read(
+            workspace.fake_device_file("storage/emulated/0/ROMs/Sony/PSX/Crash Bandicoot.chd")
+        )
+        .unwrap(),
         b"source-psx\n"
     );
 }
@@ -769,7 +920,33 @@ impl ExecutorDevice for CopyFailureDevice {
     }
 
     fn copy_commit_path_binding(&mut self, path: &str) -> Result<String, DeviceOperationError> {
-        Ok(format!("rom-copy-failure:{path}"))
+        Ok(serde_json::json!({
+            "canonicalPath": path,
+            "parentIdentity": "synthetic-parent",
+            "selectedIdentity": "synthetic-selected",
+        })
+        .to_string())
+    }
+
+    fn copy_commit_path_is_symlink(&mut self, _path: &str) -> Result<bool, DeviceOperationError> {
+        Ok(false)
+    }
+
+    fn copy_commit_verify_setup_location(
+        &mut self,
+        binding: &StorageTargetBinding,
+    ) -> Result<(), DeviceOperationError> {
+        binding.validate().map_err(DeviceOperationError::other)?;
+        if binding.id == DEFAULT_LOCATION_ID
+            && binding.mount_root == "/storage/emulated/0"
+            && binding.relative_path == "ROMs"
+        {
+            Ok(())
+        } else {
+            Err(DeviceOperationError::other(
+                "unexpected synthetic ROM Setup Location binding",
+            ))
+        }
     }
 
     fn copy_commit_create_directory(&mut self, path: &str) -> Result<(), DeviceOperationError> {
@@ -816,10 +993,16 @@ impl ExecutorDevice for CopyFailureDevice {
     }
 
     fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        if path == "/storage/emulated/0" {
+            return Ok(true);
+        }
         <FakeDryRunDevice as ExecutorDevice>::path_exists(&mut self.inner, path)
     }
 
     fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        if path == "/storage/emulated/0" {
+            return Ok(true);
+        }
         <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
     }
 
@@ -846,7 +1029,11 @@ impl ExecutorDevice for CopyFailureDevice {
 #[test]
 fn rom_copy_failure_fails_the_unchanged_generated_plan_truthfully() {
     let workspace = RomQualificationWorkspace::new();
-    let prepared = plan_roms(Some(&workspace.rom_source_dir), None, None);
+    let prepared = plan_roms(
+        Some(&workspace.rom_source_dir),
+        Some(DEFAULT_LOCATION_ID),
+        None,
+    );
     let mut plan = prepared.plan.expect("ROM merge plan should be generated");
     assert!(generated_copy_step(&plan).verify.is_empty());
 
@@ -862,13 +1049,37 @@ fn rom_copy_failure_fails_the_unchanged_generated_plan_truthfully() {
         vec![workspace.host_input_root.clone()],
         false,
     );
-    let mut runner = ExecutorRunner::new(adapters);
+    let mut prepare_runner = ExecutorRunner::new(adapters);
     fs::create_dir_all(&workspace.fake_device_root)
         .expect("fake device root should exist before snapshot preparation");
-    runner
-        .prepare_copy_commit_snapshots(&mut plan)
+    prepare_internal_rom_copy_snapshots(&mut prepare_runner, &mut plan)
         .expect("reviewed ROM destination snapshot should be prepared");
     let plan_before = plan.clone();
+
+    let plan_digest = crate::plan_digest::execution_plan_digest(&plan)
+        .expect("reviewed ROM plan digest should be available");
+    let lease = Arc::new(crate::storage_targets::SetupLocationMutationLease::new(
+        crate::storage_targets::SetupLocationExecutionLease {
+            attempt_sequence: 1,
+            device_handle: "rom-copy-failure-fixture".to_string(),
+            session_epoch: 1,
+            runtime_generation: 1,
+            plan_id: "rom-copy-failure-fixture".to_string(),
+            plan_digest,
+        },
+    ));
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        CopyFailureDevice {
+            inner: FakeDryRunDevice::default(),
+            push_attempts: Arc::clone(&push_attempts),
+        },
+        workspace.runtime_root.clone(),
+        workspace.cache_root.clone(),
+        workspace.fake_device_root.clone(),
+        vec![workspace.host_input_root.clone()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new_with_setup_location_lease(adapters, Some(lease));
     let result = runner.run(&plan);
 
     assert_eq!(
@@ -1028,13 +1239,13 @@ fn assert_shared_avd_path_absent(serial: &str, path: &str) {
 
 /// Qualify reviewed ROM Mirror behavior on the authorized non-root AVD.
 ///
-/// The test creates only a unique child directory and sibling sentinel below
-/// `/sdcard/ROMs`; it requires the reviewed shared-storage alias chain and
+/// The test creates only a unique Setup Location child directory and sibling
+/// sentinel below `/storage/emulated/0/ROMs`; it requires the reviewed alias chain and
 /// shell UID 2000, then verifies the exact stale entry is removed while the
 /// sibling sentinel remains unchanged.
 #[test]
 #[ignore = "requires the authorized EmuChef-Android16-Root AVD on emulator-5554"]
-fn avd_shared_copy_commit_mirrors_sdcard_roms_as_shell_uid() {
+fn avd_setup_location_copy_commit_mirrors_roms_as_shell_uid() {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const SERIAL: &str = "emulator-5554";
@@ -1124,12 +1335,20 @@ fn avd_shared_copy_commit_mirrors_sdcard_roms_as_shell_uid() {
 
     let prepared = plan_roms(
         Some(&workspace.rom_source_dir),
-        Some(&selected_root),
+        Some(DEFAULT_LOCATION_ID),
         Some("sync"),
     );
     let mut plan = prepared
         .plan
         .expect("production-generated ROM Mirror plan should exist");
+    let binding = rom_setup_location_binding(
+        &plan,
+        DEFAULT_LOCATION_ID,
+        StorageTargetVolumeKind::InternalShared,
+        "/storage/emulated/0",
+        &format!("ROMs/.emuchef-copycommit-{unique}"),
+        "AVD ROMs",
+    );
     let commands = Arc::new(Mutex::new(Vec::new()));
     let errors = Arc::new(Mutex::new(Vec::new()));
     let device = crate::executor::adb::RealAdbDevice::with_executor(
@@ -1152,7 +1371,7 @@ fn avd_shared_copy_commit_mirrors_sdcard_roms_as_shell_uid() {
     let mut runner = ExecutorRunner::new(adapters);
     assert_shared_avd_shell_uid(SERIAL, "before snapshot preparation");
     runner
-        .prepare_copy_commit_snapshots(&mut plan)
+        .prepare_copy_commit_snapshots_with_storage_targets(&mut plan, &[binding])
         .expect("shared ROM destination snapshot should bind under shell UID 2000");
     let snapshot = plan
         .copy_commit_snapshots

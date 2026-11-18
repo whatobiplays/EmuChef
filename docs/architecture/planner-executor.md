@@ -40,10 +40,11 @@ because review cannot bind an immutable source snapshot before earlier steps
 run. Planning and snapshot-coverage validation reject that combination before
 execution.
 
-Device `extract_archive` steps remain legacy writers. When a plan has an active
-Setup Location writer, planning compares each device extraction's canonical
-destination scope with the active writer effects. Overlapping writers and
-unresolved destinations fail closed. Host extraction does not enter this check.
+Device `extract_archive` steps remain legacy writers. Their device-side effects
+are not part of the reviewed CopyCommit projection. If an active copy overlaps
+an extraction whose resulting destination state cannot be reviewed, planning
+continues to fail closed and requires a separately prepared review. Host
+extraction does not write to device storage.
 
 Config Editor input definitions do not include `setup_location_ref`; that
 Recipe type is accepted only for `copy_files.dest`.
@@ -51,22 +52,62 @@ Recipe type is accepted only for `copy_files.dest`.
 Tauri resolves each named Setup Location from its own current T04 volume
 evidence and retains the binding independently of T04's single presentation
 selection. Planning includes only bindings used by selected Recipe writers.
+Portable saved configurations may omit these session-bound values; planning a
+selected Recipe with a required location still needs a current session binding.
+A saved literal path is not converted into a location reference and must be
+reselected if it no longer resolves.
 The immutable plan digest covers each active trusted binding, including the
-volume evidence, root, and relative path. The retained review binds its
-canonical destination scope, tree snapshot, and any directory-creation effects.
-Overlapping named locations are permitted when unused. Active Setup Location
-and legacy shared-path writers are compared by canonical resolved scope and
-reviewed effects. Conflicting file writes, destructive same-path/ancestor
-effects, and overlapping directory creations that would invalidate another
-writer's reviewed missing-path precondition fail before execution. An
-idempotent directory effect may coexist when the directory already exists at
-review time and no other effect conflicts. Implicit parent-directory creation
-by a legacy `file_path` copy targeting a directory is included in its reviewed
-effects and participates in these active-writer checks.
-These checks also follow execution order. If an earlier active writer would
-change any part of a later writer's reviewed whole-tree destination snapshot,
-preparation rejects the plan before execution. Disjoint effects outside that
-later scope may coexist when the remaining reviewed preconditions hold.
+volume evidence, root, and relative path. Each reviewed copy snapshot also binds
+its initial destination manifest, ordered predecessor step IDs, projected
+before and after states, exact deletion set, and projection digests.
+
+## Capability and operation eligibility
+
+Capability constraints can make an operation ineligible for the current
+device. A missing capability blocks a selected non-toggleable state-changing
+step (`copy_files`, `extract_archive`, `force_stop_app`, `grant_permissions`,
+`install_apk`, or `launch_app`) instead of silently removing it. Other
+known capability-ineligible work may be pruned. An unclassified non-toggleable
+step is treated as required until its capability behavior is defined. A
+required step whose dependency is unavailable blocks planning. The planner
+reports missing capabilities through the same typed plan path used for
+execution.
+
+An elevated permission operation is omitted on an unprivileged path when its
+typed permission set has actions that are inapplicable without `root_shell`.
+The planner omits the missing `root_shell` requirement for that operation and
+still checks its other required capabilities. `policy.on_failure` controls how
+applicable permission-action failures are reported; it does not determine
+operation selection.
+
+Distinct Recipes may write to overlapping App Targets, shared paths, and Setup
+Locations. Overlap alone does not make the plan invalid or trigger a semantic
+compatibility check. Overlapping writers from the same Recipe remain blocked;
+ordered predecessor links are valid only between distinct Recipes. The existing
+serial plan order determines which copy is reviewed first. Each later CopyCommit snapshot is prepared against the projected
+result of earlier overlapping reviewed copies. Its own `merge`, `replace`, or
+`sync` policy determines its writes and exact deletion set, including whether
+it replaces or removes files written earlier in the run. The planner adds no
+cross-Recipe dependency edge or concurrency.
+
+Before a later overlapping copy mutates its destination, the executor requires
+every reviewed predecessor to have a complete successful report matching its
+projected result. It replays those reports and requires the current destination
+manifest to equal that state, then rechecks the operation's normal source,
+destination, device, volume, confinement, and safe-write preconditions. A
+skipped, failed, partial, uncertain, or mismatched predecessor leaves that
+later overlapping snapshot unusable until a fresh review. Unexpected drift
+also fails the affected operation. Disjoint destinations remain independently
+eligible when another Recipe fails.
+
+Setup Location bindings for unused named locations do not enter the plan and
+may overlap. Shared directory creation still fails when it would invalidate a
+later writer's reviewed missing-path precondition; an already-existing
+directory effect may be shared when the remaining preconditions hold. Implicit
+parent-directory creation by a legacy `file_path` copy targeting a directory
+remains part of its reviewed effects. Unreviewable device-side extraction
+effects do not join the ordered projection and keep their existing fail-closed
+review boundary.
 
 T04's ten-second observation lifetime governs whether volume evidence is fresh
 enough to resolve or refresh a Setup Location. It does not expire an immutable
@@ -148,9 +189,10 @@ contract. The complete product protocol is documented in
 Portable schema-v1 configurations store the authored device-plan reference,
 recipe selection, and reusable user bindings. They exclude `setup_location_ref`
 values because each named location belongs to one device session and plan.
-Opening a saved configuration requires a current Setup Location only when the
-selected workflow declares a required `setup_location_ref` input. The required
-input uses ordinary description validation before review and execution.
+Saved-configuration validation permits a required location value to be absent;
+runtime planning blocks until the selected workflow has a current binding.
+Previously saved literal paths remain unchanged and are not migrated into
+location IDs.
 Configurations never store a generated execution plan or
 its digest; reopening one always re-probes the selected device and runs current
 validation, description, planning, and review before execution starts.

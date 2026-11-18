@@ -62,12 +62,29 @@ impl TempRecipe {
             .as_nanos();
         let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "emuchef-rust-backend-phase6i-{}-{unique}-{sequence}",
+            "emuchef-rust-backend-recipe-command-fixture-{}-{unique}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).expect("temp directory should be created");
         let path = dir.join(name);
         fs::copy(fixture_path(name), &path).expect("fixture should copy to temp path");
+        Self { dir, path }
+    }
+
+    fn from_contents(name: &str, contents: &str) -> Self {
+        static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "emuchef-rust-backend-recipe-command-fixture-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp directory should be created");
+        let path = dir.join(name);
+        fs::write(&path, contents).expect("recipe contents should be written");
         Self { dir, path }
     }
 }
@@ -83,6 +100,14 @@ fn open_request(path: impl AsRef<Path>) -> Value {
         "id": "open",
         "type": "openRecipe",
         "payload": {"path": path.as_ref(), "authoredRoot": fixture_root()}
+    })
+}
+
+fn open_standalone_request(path: impl AsRef<Path>) -> Value {
+    json!({
+        "id": "open",
+        "type": "openRecipe",
+        "payload": {"path": path.as_ref(), "authoredRoot": null}
     })
 }
 
@@ -297,6 +322,71 @@ fn input_commands_update_dto_yaml_ref_index_and_history() {
     let redone = assert_changed(&responses[17]);
     assert!(redone["recipe"]["inputs"].get("saves_dir").is_none());
     assert_eq!(responses[18]["result"]["document"], *redone);
+}
+
+#[test]
+fn setup_location_input_survives_unrelated_editor_edit_validation_and_save() {
+    let temp_recipe = TempRecipe::from_contents(
+        "feature.copy_roms.yaml",
+        include_str!("../../../authored/recipes/feature.copy_roms.yaml"),
+    );
+    let input = jsonl_input(vec![
+        open_standalone_request(&temp_recipe.path),
+        command_request(
+            "update-label",
+            json!({
+                "type": "UpdateInputField",
+                "inputId": "destination",
+                "field": "label",
+                "value": "Selected ROM destination"
+            }),
+        ),
+        request("save", "saveRecipe"),
+        request("get", "getDocument"),
+    ]);
+
+    let responses = sidecar_responses(&input);
+    assert_eq!(responses.len(), 4);
+    let opened = &responses[0]["result"]["document"];
+    assert_eq!(
+        opened["recipe"]["inputs"]["destination"]["type"],
+        "setup_location_ref"
+    );
+
+    let edited = assert_changed(&responses[1]);
+    assert_eq!(
+        edited["recipe"]["inputs"]["destination"]["type"],
+        "setup_location_ref"
+    );
+    assert_eq!(
+        edited["recipe"]["inputs"]["destination"]["label"],
+        "Selected ROM destination"
+    );
+    assert!(edited["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("type: setup_location_ref"));
+    assert!(edited["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|diagnostic| diagnostic["severity"] != "error"));
+
+    assert_eq!(
+        responses[2]["ok"], true,
+        "save request failed: {:#?}",
+        responses[2]
+    );
+    let saved = &responses[2]["result"]["document"];
+    assert_eq!(
+        saved["recipe"]["inputs"]["destination"]["type"],
+        "setup_location_ref"
+    );
+    assert_eq!(saved["dirty"], false);
+    assert!(fs::read_to_string(&temp_recipe.path)
+        .unwrap()
+        .contains("type: setup_location_ref"));
+    assert_eq!(responses[3]["result"]["document"], *saved);
 }
 
 #[test]

@@ -1,0 +1,305 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "deviceProfile": "konkr.pocket_advance",
+    "devicePlan": "konkr.pocket_advance.base",
+    "manufacturer": "ARBOR",
+    "model": "GT78-VN",
+    "ambiguousMatchRule": "unique_or_session_bound_explicit_choice"
+  },
+  "qualification": {
+    "automatedEvidence": "host_only",
+    "physicalStatus": "deferred",
+    "physicalTestsRun": false,
+    "cleanupAuthority": "not_authorized_for_recipe_qualification",
+    "productionCapabilityPromotion": false,
+    "releaseClaims": false,
+    "operationMembershipOnly": true,
+    "executionReadyFullSetup": false,
+    "crossRecipeOrderingGuaranteed": false,
+    "actualAppUsabilityQualified": false,
+    "fullJourneyQualified": false
+  },
+  "deviceEvidence": {
+    "requiredFields": [
+      "exact_device_identity",
+      "device_session_id",
+      "selected_profile_id",
+      "profile_match_resolution"
+    ],
+    "captureStatus": "not_captured"
+  },
+  "buildEvidence": {
+    "requiredFields": [
+      "android_version",
+      "android_api_level",
+      "build_fingerprint"
+    ],
+    "captureStatus": "not_captured"
+  },
+  "apkEvidence": {
+    "appRef": "retroarch",
+    "packageName": "com.retroarch.aarch64",
+    "requiredFields": [
+      "apk_sha256",
+      "artifact_source",
+      "artifact_version_or_build_id"
+    ],
+    "captureStatus": "not_captured"
+  },
+  "executionStrategy": {
+    "requiredStrategy": "unprivileged",
+    "requiredFields": [
+      "strategy_id",
+      "strategy_digest",
+      "root_authority_used",
+      "oem_compiler_or_stage_used"
+    ],
+    "forbiddenAuthorities": [
+      "root_shell",
+      "oem_compiler",
+      "oem_stage"
+    ],
+    "captureStatus": "not_captured"
+  },
+  "defaultRecipeSelection": [
+    {
+      "recipeRef": "app.retroarch.provision",
+      "selectedByDefault": true
+    },
+    {
+      "recipeRef": "feature.copy_bios",
+      "selectedByDefault": true
+    },
+    {
+      "recipeRef": "feature.copy_roms",
+      "selectedByDefault": false
+    },
+    {
+      "recipeRef": "app.retroarch.configure",
+      "selectedByDefault": false
+    }
+  ],
+  "operations": [
+    {
+      "id": "artifact_resolution",
+      "recipeRefs": ["app.retroarch.provision"],
+      "stepIds": ["resolve_artifacts"],
+      "mandatoryStepIds": ["resolve_artifacts"],
+      "optionalStepIds": [],
+      "conditionalStepIds": [],
+      "copyPolicy": null,
+      "copyPolicyOptions": [],
+      "destinationKind": null,
+      "destinationRef": null,
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": ["artifact_provenance_and_sha256_recorded"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "apk_install",
+      "recipeRefs": ["app.retroarch.provision"],
+      "stepIds": ["install_retroarch"],
+      "mandatoryStepIds": ["install_retroarch"],
+      "optionalStepIds": [],
+      "conditionalStepIds": [],
+      "copyPolicy": null,
+      "copyPolicyOptions": [],
+      "destinationKind": null,
+      "destinationRef": null,
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": [
+        "artifact_provenance_and_sha256_recorded",
+        "installed_package_matches_apk_evidence"
+      ],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "initialization",
+      "recipeRefs": ["app.retroarch.provision"],
+      "stepIds": [
+        "launch_retroarch_bootstrap",
+        "wait_for_retroarch_bootstrap",
+        "stop_retroarch_after_bootstrap",
+        "grant_retroarch_baseline",
+        "launch_retroarch_permissions",
+        "wait_for_retroarch_permissions",
+        "stop_retroarch_after_permissions"
+      ],
+      "mandatoryStepIds": [
+        "launch_retroarch_bootstrap",
+        "wait_for_retroarch_bootstrap",
+        "stop_retroarch_after_bootstrap",
+        "grant_retroarch_baseline",
+        "launch_retroarch_permissions",
+        "wait_for_retroarch_permissions",
+        "stop_retroarch_after_permissions"
+      ],
+      "optionalStepIds": [],
+      "conditionalStepIds": [],
+      "copyPolicy": null,
+      "copyPolicyOptions": [],
+      "destinationKind": null,
+      "destinationRef": null,
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": ["bootstrap_and_permission_launches_complete"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "elevated_permission",
+      "recipeRefs": ["app.retroarch.provision"],
+      "stepIds": ["grant_retroarch_elevated"],
+      "mandatoryStepIds": [],
+      "optionalStepIds": [],
+      "conditionalStepIds": ["grant_retroarch_elevated"],
+      "copyPolicy": null,
+      "copyPolicyOptions": [],
+      "destinationKind": null,
+      "destinationRef": null,
+      "permissionSet": "elevated",
+      "failurePolicy": "warn",
+      "requiredPostconditions": ["elevated_permission_omitted_when_inapplicable"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "resource_provisioning",
+      "recipeRefs": ["app.retroarch.provision"],
+      "stepIds": [
+        "extract_assets",
+        "copy_assets",
+        "extract_autoconfig",
+        "copy_autoconfig",
+        "extract_cheats",
+        "copy_cheats",
+        "extract_database_rdb",
+        "copy_database_rdb",
+        "extract_info",
+        "copy_info",
+        "extract_overlays",
+        "copy_overlays",
+        "extract_shaders_glsl",
+        "copy_shaders_glsl",
+        "extract_cores",
+        "copy_cores",
+        "extract_core_system_files",
+        "copy_core_system_files"
+      ],
+      "mandatoryStepIds": [
+        "extract_assets",
+        "copy_assets",
+        "extract_autoconfig",
+        "copy_autoconfig",
+        "extract_cheats",
+        "copy_cheats",
+        "extract_database_rdb",
+        "copy_database_rdb",
+        "extract_info",
+        "copy_info",
+        "extract_overlays",
+        "copy_overlays",
+        "extract_shaders_glsl",
+        "copy_shaders_glsl"
+      ],
+      "optionalStepIds": [
+        "extract_cores",
+        "copy_cores",
+        "extract_core_system_files",
+        "copy_core_system_files"
+      ],
+      "conditionalStepIds": [],
+      "copyPolicy": "merge",
+      "copyPolicyOptions": ["merge"],
+      "destinationKind": "app_target",
+      "destinationRef": "RetroArch resource App Targets",
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": ["selected_resource_copies_match_reviewed_results"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "bios_copy",
+      "recipeRefs": ["feature.copy_bios"],
+      "stepIds": ["copy_bios_dir"],
+      "mandatoryStepIds": [],
+      "optionalStepIds": ["copy_bios_dir"],
+      "conditionalStepIds": [],
+      "copyPolicy": "sync",
+      "copyPolicyOptions": ["sync"],
+      "destinationKind": "app_target",
+      "destinationRef": "system",
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": ["bios_sync_matches_reviewed_result_and_deletion_set"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "rom_copy",
+      "recipeRefs": ["feature.copy_roms"],
+      "stepIds": ["copy_rom_library"],
+      "mandatoryStepIds": ["copy_rom_library"],
+      "optionalStepIds": [],
+      "conditionalStepIds": [],
+      "copyPolicy": "merge",
+      "copyPolicyOptions": ["merge", "replace", "sync"],
+      "destinationKind": "setup_location_ref",
+      "destinationRef": "feature.copy_roms/destination",
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": [
+        "setup_location_and_volume_identity_match_review",
+        "rom_copy_matches_selected_policy_and_reviewed_result"
+      ],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "configuration",
+      "recipeRefs": ["app.retroarch.provision", "app.retroarch.configure"],
+      "stepIds": [
+        "app.retroarch.provision/seed_retroarch_cfg",
+        "app.retroarch.configure/seed_retroarch_cfg"
+      ],
+      "mandatoryStepIds": [],
+      "optionalStepIds": [
+        "app.retroarch.provision/seed_retroarch_cfg",
+        "app.retroarch.configure/seed_retroarch_cfg"
+      ],
+      "conditionalStepIds": [],
+      "copyPolicy": "create_only",
+      "copyPolicyOptions": ["create_only"],
+      "destinationKind": "app_target",
+      "destinationRef": "config",
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": ["configuration_publication_meets_existing_protected_contract"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    },
+    {
+      "id": "final_launch",
+      "recipeRefs": ["app.retroarch.provision"],
+      "stepIds": ["app.retroarch.provision/launch_retroarch"],
+      "mandatoryStepIds": [],
+      "optionalStepIds": ["app.retroarch.provision/launch_retroarch"],
+      "conditionalStepIds": [],
+      "copyPolicy": null,
+      "copyPolicyOptions": [],
+      "destinationKind": null,
+      "destinationRef": null,
+      "permissionSet": null,
+      "failurePolicy": null,
+      "requiredPostconditions": ["final_launch_reports_success"],
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    }
+  ]
+}

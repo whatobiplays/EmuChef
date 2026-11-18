@@ -2401,6 +2401,11 @@ mod tests {
                 ),
                 destination_before_manifest: Vec::new(),
                 destination_before_digest_sha256: "b".repeat(64),
+                destination_initial_manifest: Vec::new(),
+                destination_initial_digest_sha256: None,
+                ordered_predecessor_step_ids: Vec::new(),
+                projected_destination_after_manifest: Vec::new(),
+                projected_destination_after_digest_sha256: None,
                 reviewed_deletion_set: Vec::new(),
             },
         );

@@ -4810,10 +4810,14 @@ mod tests {
             .expect("the planner response should be captured")
             .expect("the sidecar should return the fail-closed planner result");
         assert!(plan_response["plan"].is_null());
-        assert_eq!(
-            plan_response["diagnostics"][0]["code"],
-            "empty_execution_plan"
-        );
+        assert!(plan_response["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic["code"] == "required_step_capability_unavailable"
+                    && diagnostic["details"]["capability"] == "app_data_write"
+            }));
     }
 
     #[cfg(feature = "real-execution")]

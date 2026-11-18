@@ -1824,7 +1824,12 @@ fn app_target_simulation_uses_the_reviewed_destination_baseline() {
             destination,
             crate::executor::copy_commit::CopyCommitOperation::Mirror,
             fake_review_request.destination_manifest,
-            "reviewed destination binding".to_string(),
+            serde_json::json!({
+                "canonicalPath": destination,
+                "parentIdentity": "reviewed-parent",
+                "selectedIdentity": "reviewed-destination",
+            })
+            .to_string(),
         )
         .expect("real destination manifest should be bound to review");
     assert_eq!(reviewed_request.reviewed_deletion_set, ["B.rom", "C.rom"]);
@@ -1853,13 +1858,15 @@ fn app_target_simulation_uses_the_reviewed_destination_baseline() {
         category: None,
         package_id: "com.example.app".to_string(),
     });
-    execution_plan.copy_commit_snapshots.push(
-        crate::executor::copy_commit::ExecutionCopyCommitSnapshot::from_request(
-            "app-target-copy",
-            &source_dir,
-            &reviewed_request,
-        ),
+    let mut snapshot = crate::executor::copy_commit::ExecutionCopyCommitSnapshot::from_request(
+        "app-target-copy",
+        &source_dir,
+        &reviewed_request,
     );
+    snapshot
+        .set_ordered_projection(snapshot.destination_initial_manifest.clone(), Vec::new())
+        .expect("single-copy review should bind its resulting state");
+    execution_plan.copy_commit_snapshots.push(snapshot);
 
     let simulation_root = temp.path().join("simulation-device");
     fs::create_dir_all(&simulation_root).expect("simulation root should be created empty");
@@ -2351,13 +2358,18 @@ fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
     );
     input.explicit_input_bindings.insert(
         "feature.copy_roms/destination".to_string(),
-        json!("/sdcard/Games"),
+        json!("internal-games"),
     );
     input
         .explicit_input_bindings
         .insert("feature.copy_roms/policy".to_string(), json!("sync"));
     let result = plan_execution(input);
     let mut execution_plan = result.execution_plan.expect("ROM copy should plan");
+    execution_plan.device_plan = Some(crate::planner::ExecutionDevicePlanSnapshot {
+        id: "test.plan".to_string(),
+        name: None,
+        description: None,
+    });
     let step = execution_plan
         .steps
         .iter()
@@ -2379,7 +2391,20 @@ fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
     let runtime_root = tmp.path().join("runtime");
     let cache_root = tmp.path().join("cache");
     let fake_device_root = tmp.path().join("device");
-    fs::create_dir_all(&fake_device_root).unwrap();
+    fs::create_dir_all(fake_device_root.join("storage/emulated/0")).unwrap();
+    let setup_location = StorageTargetBinding {
+        id: "internal-games".to_string(),
+        device_plan: "test.plan".to_string(),
+        session_epoch: 1,
+        name: "Internal games".to_string(),
+        relative_path: "Games".to_string(),
+        volume_handle: "a".repeat(32),
+        volume_kind: StorageTargetVolumeKind::InternalShared,
+        mount_root: "/storage/emulated/0".to_string(),
+        volume_identity: "b".repeat(32),
+        volume_continuity: "c".repeat(32),
+        observation_token: "d".repeat(32),
+    };
     let mut runner = ExecutorRunner::new(sandbox_adapters(
         &runtime_root,
         &cache_root,
@@ -2387,13 +2412,13 @@ fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
         vec![source.clone()],
     ));
     runner
-        .prepare_copy_commit_snapshots(&mut execution_plan)
+        .prepare_copy_commit_snapshots_with_storage_targets(&mut execution_plan, &[setup_location])
         .expect("reviewed ROM destination snapshot should be prepared");
     let actual = serde_json::to_value(runner.run(&execution_plan))
         .expect("ROM copy result should serialize");
     assert_eq!(actual["success"], true, "{actual:#}");
     assert_eq!(
-        fs::read(fake_device_root.join("sdcard/Games/game.rom")).unwrap(),
+        fs::read(fake_device_root.join("storage/emulated/0/Games/game.rom")).unwrap(),
         b"rom"
     );
 }

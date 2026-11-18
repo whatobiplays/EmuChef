@@ -301,19 +301,36 @@ announce loading, unavailable, and successfully empty list states and associate
 the current state with the Setup Location selector. A location-list failure
 does not block Recipe input description or become an empty-list result.
 
-Only active destination writers participate in collision checks: Setup Location
-writers and legacy shared-path writers are compared using canonical resolved
-scopes and reviewed effects, including when distinct location IDs resolve to
-the same or nested directories. Conflicting file or destructive effects fail
-closed. Shared directory creation also fails when it would invalidate another
-writer's reviewed missing-path precondition; an already-existing directory
-effect may be shared when the remaining effects do not conflict. Unused named
-locations may overlap.
-Checks also follow plan order. If an earlier active writer would change any part
-of a later writer's reviewed destination snapshot, planning rejects the plan
-before execution. This keeps the later whole-tree precondition fresh when its
-step starts; effects outside that scope may coexist when other reviewed
-preconditions remain valid.
+Only active destination writers enter copy review. Distinct Recipes may write
+to overlapping App Targets, shared paths, and Setup Locations. The executor
+keeps the existing serial plan order and records each overlapping predecessor,
+the projected incoming and resulting manifests, operation digest, and exact
+deletion set in the immutable reviewed plan. A later operation's own
+`merge`, `replace`, or `sync` policy determines whether it updates earlier
+files or includes them in its reviewed deletion set. Destination overlap does
+not trigger a semantic compatibility check or add a plan dependency.
+
+Overlapping copy destinations within one Recipe remain blocked. Snapshot
+preparation and execution-plan admission require every ordered predecessor to
+belong to a distinct Recipe.
+
+Before a later overlapping copy mutates, the executor requires complete
+successful predecessor reports whose after-manifests match the reviewed
+projections. It replays those reports and compares the live destination with
+that exact state, including observed entry identity, then applies the later
+operation's ordinary source, destination, volume, confinement, and mutation
+preconditions. Known earlier EmuChef writes therefore satisfy the state
+expected by later reviews; unexplained drift fails the affected operation. A
+skipped, failed, partial, uncertain, or mismatched predecessor leaves only its
+overlapping later operations without a valid review state. Disjoint operations
+remain independently eligible. Unused named locations may overlap.
+
+Shared directory creation still fails when it invalidates a later writer's
+reviewed missing-path precondition. An already-existing directory effect may
+be shared when the remaining preconditions hold. Unreviewable device-side
+extraction effects do not join the ordered copy projection and keep their
+existing fail-closed boundary. If an intermediate state cannot be reviewed,
+the workflow needs a separate fresh review; execution does not invent one.
 Initially absent destination suffixes are eligible only below an existing,
 verified directory. Review records each planned directory creation, and
 execution rechecks volume continuity, access, confinement, the existing anchor,

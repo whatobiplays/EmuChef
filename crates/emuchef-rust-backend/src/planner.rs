@@ -147,6 +147,15 @@ mod static_contract_tests {
         );
         assert_eq!(validate_recipe_static_contracts(&recipe), vec![]);
     }
+
+    #[test]
+    fn unclassified_non_toggleable_step_is_required_when_capabilities_are_missing() {
+        let recipe = recipe(
+            "steps:\n  - id: future_operation\n    type: future_operation\n    constraints:\n      capabilities: [root_shell]\n    params: {}\n",
+        );
+
+        assert!(operation_requires_capability(&recipe.steps[0]));
+    }
 }
 
 /// Build an App Definition lookup and reject ambiguous identities before planning.
@@ -1286,6 +1295,7 @@ fn plan_execution_with_app_definitions_inner(
             config_create_destination: input.config_create_destination.as_deref(),
         },
         &target_usage,
+        &permission_plans,
         assume_unrecognized_capabilities_available,
         report_unrecognized_capability_warnings,
     );
@@ -1918,6 +1928,7 @@ fn selected_step_ids(
     input_bindings: &OrderedMap<Value>,
     availability_context: StepAvailabilityContext<'_>,
     target_usage: &HashMap<String, app_targets::ResolvedStepUsage>,
+    permission_plans: &HashMap<String, PermissionPlan>,
     assume_unrecognized_capabilities_available: bool,
     report_unrecognized_capability_warnings: bool,
 ) -> (HashSet<String>, Vec<PlannerMessage>, Vec<PlannerMessage>) {
@@ -1937,6 +1948,18 @@ fn selected_step_ids(
             let step_id = make_execution_step_id(recipe_id, &step.id);
             let usage = &target_usage[&step_id];
             let step_capabilities = &usage.capabilities;
+            // An elevated permission set supplies the root-only gate. When
+            // that authority is absent, the permission operation is
+            // inapplicable on this path and may be omitted. Its on_failure
+            // policy applies only after applicable permission actions run.
+            let elevated_permission_without_root =
+                permission_plans
+                    .get(&step_id)
+                    .is_some_and(|permission_plan| {
+                        permission_plan.permission_set == PermissionSetKind::Elevated
+                            && permission_plan.has_applicable_actions()
+                            && !availability_context.runtime_capabilities.root_shell
+                    });
             let config_create_write_authorized_for_step = is_retroarch_config_create_operation(
                 recipe,
                 step,
@@ -1975,22 +1998,20 @@ fn selected_step_ids(
                     },
                 )
             });
-            if !available && !step.user_toggleable {
+            if !available && operation_requires_capability(step) {
                 for name in step_capabilities {
-                    let Some(capability) = RuntimeCapability::from_name(name) else {
-                        continue;
-                    };
-                    // A selected recipe cannot succeed if a required install or launch action is omitted.
-                    if !matches!(
-                        capability,
-                        RuntimeCapability::ApkInstall | RuntimeCapability::AppLaunch
-                    ) {
-                        continue;
-                    }
-                    if capability.is_available_for_step(
-                        availability_context.runtime_capabilities,
-                        config_create_write_authorized_for_step,
-                    ) {
+                    let capability_available = RuntimeCapability::from_name(name).map_or(
+                        assume_unrecognized_capabilities_available,
+                        |capability| {
+                            capability.is_available_for_step(
+                                availability_context.runtime_capabilities,
+                                config_create_write_authorized_for_step,
+                            )
+                        },
+                    );
+                    if capability_available
+                        || (elevated_permission_without_root && name == "root_shell")
+                    {
                         continue;
                     }
                     errors.push(PlannerMessage {
@@ -2042,6 +2063,16 @@ fn selected_step_ids(
     )
 }
 
+/// Keep capability pruning explicit for known preparation and observation steps.
+/// New non-toggleable operation types default to required until classified.
+fn operation_requires_capability(step: &Step) -> bool {
+    !step.user_toggleable
+        && !matches!(
+            step.type_name.as_str(),
+            "download_remote_file" | "extract_artifacts" | "resolve_artifacts" | "wait"
+        )
+}
+
 fn select_local_step_ids(
     recipe: &Recipe,
     requested_local_step_ids: &[String],
@@ -2062,7 +2093,8 @@ fn select_local_step_ids(
     let mut errors = Vec::new();
 
     for requested_id in requested_local_step_ids {
-        if can_select_local_step(
+        let error_count_before_selection = errors.len();
+        let can_select = can_select_local_step(
             recipe,
             requested_id,
             &by_id,
@@ -2070,8 +2102,41 @@ fn select_local_step_ids(
             &mut can_select_cache,
             &mut HashSet::new(),
             &mut errors,
-        ) {
+        );
+        if can_select {
             add_local_step_with_dependencies(requested_id, &by_id, &mut selected);
+        } else if errors.len() == error_count_before_selection
+            && by_id
+                .get(requested_id)
+                .is_some_and(|step| !step.user_toggleable)
+        {
+            if let Some(step) = by_id.get(requested_id) {
+                let unavailable_dependency = step.dependencies.iter().find(|dependency| {
+                    !can_select_local_step(
+                        recipe,
+                        dependency,
+                        &by_id,
+                        available_by_local_step_id,
+                        &mut can_select_cache,
+                        &mut HashSet::new(),
+                        &mut errors,
+                    )
+                });
+                if let Some(dependency) = unavailable_dependency {
+                    errors.push(PlannerMessage {
+                        code: "required_step_dependency_unavailable".to_string(),
+                        message: format!(
+                            "Required step '{}' in recipe '{}' depends on unavailable step '{}'.",
+                            requested_id, recipe.id, dependency
+                        ),
+                        details: json!({
+                            "recipe_ref": recipe.id,
+                            "step_id": requested_id,
+                            "dependency": dependency,
+                        }),
+                    });
+                }
+            }
         }
     }
 

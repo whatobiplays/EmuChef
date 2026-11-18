@@ -245,7 +245,7 @@ pub(super) fn resolve_usage(
         for (second_recipe, second_target, _second_identity, second_path) in
             destination_targets.iter().skip(first_index + 1)
         {
-            if device_paths_overlap(first_path, second_path) {
+            if first_recipe == second_recipe && device_paths_overlap(first_path, second_path) {
                 errors.push(destination_target_overlap_message(
                     first_recipe,
                     first_target,
@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn retroarch_provision_and_bios_recipes_cannot_share_the_system_target() {
+    fn retroarch_provision_and_bios_recipes_may_share_the_system_target() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
         let provision =
             load_recipe_from_path(root.join("recipes/app.retroarch.provision.yaml")).unwrap();
@@ -824,11 +824,7 @@ mod tests {
         let recipes = HashMap::from([(provision.id.clone(), provision), (bios.id.clone(), bios)]);
         let apps = HashMap::from([(app.id.clone(), app)]);
 
-        let errors = resolve_usage(&recipes, &recipe_refs, &apps, None)
-            .expect_err("merge and sync copies cannot share the same selected destination");
-        assert!(errors
-            .iter()
-            .any(|error| error.code == "app_target_destination_overlap"));
+        assert!(resolve_usage(&recipes, &recipe_refs, &apps, None).is_ok());
     }
 
     #[test]
@@ -854,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn the_same_target_id_for_different_apps_is_still_an_overlap() {
+    fn different_apps_may_use_the_same_target_path_in_distinct_recipes() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
         let template = load_recipe_from_path(root.join("recipes/feature.copy_bios.yaml")).unwrap();
         let mut first = template.clone();
@@ -882,25 +878,31 @@ mod tests {
             (second_app.id.clone(), second_app),
         ]);
 
-        let errors = resolve_usage(&recipes, &recipe_refs, &apps, None).unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|error| error.code == "app_target_destination_overlap"));
+        assert!(resolve_usage(&recipes, &recipe_refs, &apps, None).is_ok());
     }
 
     #[test]
-    fn selected_destination_targets_with_the_same_boundary_are_rejected() {
-        assert_destination_overlap("/opt/retroarch/system", "/opt/retroarch/system");
+    fn distinct_recipes_may_select_the_same_destination_target() {
+        assert_destination_overlap_allowed(resolve_two_destination_targets(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system",
+        ));
     }
 
     #[test]
-    fn selected_destination_target_ancestor_overlap_is_rejected() {
-        assert_destination_overlap("/opt/retroarch/system", "/opt/retroarch/system/bios");
+    fn distinct_recipes_may_select_ancestor_and_descendant_targets() {
+        assert_destination_overlap_allowed(resolve_two_destination_targets(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system/bios",
+        ));
     }
 
     #[test]
-    fn selected_destination_target_descendant_overlap_is_rejected() {
-        assert_destination_overlap("/opt/retroarch/system/bios", "/opt/retroarch/system");
+    fn distinct_recipes_may_select_descendant_and_ancestor_targets() {
+        assert_destination_overlap_allowed(resolve_two_destination_targets(
+            "/opt/retroarch/system/bios",
+            "/opt/retroarch/system",
+        ));
     }
 
     #[test]
@@ -913,18 +915,27 @@ mod tests {
     }
 
     #[test]
-    fn selected_app_target_and_literal_destination_with_the_same_boundary_are_rejected() {
-        assert_app_target_literal_overlap("/opt/retroarch/system", "/opt/retroarch/system");
+    fn distinct_recipes_may_share_app_target_and_literal_destination() {
+        assert_destination_overlap_allowed(resolve_app_target_literal_destinations(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system",
+        ));
     }
 
     #[test]
-    fn selected_app_target_and_literal_destination_ancestor_overlap_is_rejected() {
-        assert_app_target_literal_overlap("/opt/retroarch/system", "/opt/retroarch/system/bios");
+    fn distinct_recipes_may_share_ancestor_and_literal_destination() {
+        assert_destination_overlap_allowed(resolve_app_target_literal_destinations(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system/bios",
+        ));
     }
 
     #[test]
-    fn selected_app_target_and_literal_destination_descendant_overlap_is_rejected() {
-        assert_app_target_literal_overlap("/opt/retroarch/system/bios", "/opt/retroarch/system");
+    fn distinct_recipes_may_share_descendant_and_literal_destination() {
+        assert_destination_overlap_allowed(resolve_app_target_literal_destinations(
+            "/opt/retroarch/system/bios",
+            "/opt/retroarch/system",
+        ));
     }
 
     #[test]
@@ -937,66 +948,26 @@ mod tests {
     }
 
     #[test]
-    fn selected_literal_destinations_with_the_same_boundary_are_rejected() {
-        assert_literal_destination_overlap("/opt/retroarch/system", "/opt/retroarch/system");
+    fn distinct_recipes_may_use_the_same_literal_destination() {
+        assert_destination_overlap_allowed(resolve_two_literal_destinations(
+            "/opt/retroarch/system",
+            "/opt/retroarch/system",
+        ));
     }
 
     #[test]
-    fn selected_literal_destinations_with_android_storage_aliases_are_rejected() {
-        assert_literal_destination_overlap("/sdcard/ROMs", "/storage/emulated/0/ROMs");
+    fn distinct_recipes_may_use_overlapping_android_storage_aliases() {
+        assert_destination_overlap_allowed(resolve_two_literal_destinations(
+            "/sdcard/ROMs",
+            "/storage/emulated/0/ROMs",
+        ));
     }
 
-    fn assert_destination_overlap(first_path: &str, second_path: &str) {
-        assert_destination_overlap_result(
-            resolve_two_destination_targets(first_path, second_path),
-            first_path,
-            second_path,
-            "first_destination",
-            "second_destination",
+    fn assert_destination_overlap_allowed(result: Result<(), Vec<PlannerMessage>>) {
+        assert!(
+            result.is_ok(),
+            "cross-Recipe overlap should remain plannable: {result:?}"
         );
-    }
-
-    fn assert_app_target_literal_overlap(first_path: &str, second_path: &str) {
-        assert_destination_overlap_result(
-            resolve_app_target_literal_destinations(first_path, second_path),
-            first_path,
-            second_path,
-            "first_destination",
-            "literal_destination",
-        );
-    }
-
-    fn assert_literal_destination_overlap(first_path: &str, second_path: &str) {
-        assert_destination_overlap_result(
-            resolve_two_literal_destinations(first_path, second_path),
-            first_path,
-            second_path,
-            "literal_destination",
-            "literal_destination",
-        );
-    }
-
-    fn assert_destination_overlap_result(
-        result: Result<(), Vec<PlannerMessage>>,
-        first_path: &str,
-        second_path: &str,
-        first_destination: &str,
-        second_destination: &str,
-    ) {
-        let errors = result.expect_err("overlapping selected destination targets must be rejected");
-        let error = errors
-            .iter()
-            .find(|error| error.code == "app_target_destination_overlap")
-            .expect("overlap must have a dedicated planner error");
-
-        assert!(error.message.contains("planner_overlap_first"));
-        assert!(error.message.contains("planner_overlap_second"));
-        assert!(error.message.contains(first_destination));
-        assert!(error.message.contains(second_destination));
-        assert!(!error.message.contains(first_path));
-        assert!(!error.message.contains(second_path));
-        assert!(!error.details.to_string().contains(first_path));
-        assert!(!error.details.to_string().contains(second_path));
     }
 
     fn resolve_two_destination_targets(

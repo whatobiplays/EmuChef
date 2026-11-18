@@ -4,7 +4,7 @@
 //! identity. Adapter implementations validate the captured manifests before
 //! mutation and report the resulting tree and explicit deletions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fmt;
@@ -16,12 +16,21 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::owned_process::ProcessCleanup;
 use crate::storage_targets::{
     SetupDestinationPrecondition, SetupLocationMutationLease, StorageTargetBinding,
+};
+
+mod ordered;
+#[cfg(test)]
+pub(super) use ordered::ordered_runtime_destination_state;
+pub(super) use ordered::{
+    current_copy_destination_manifest, prepare_ordered_copy_projections,
+    reviewed_destination_manifest_for_execution, validate_ordered_copy_commit_result,
+    validate_ordered_copy_snapshot_links, validate_ordered_writer_preconditions,
 };
 
 /// One copy policy with semantics defined for a selected directory tree.
@@ -464,6 +473,23 @@ pub struct ExecutionCopyCommitSnapshot {
     pub(crate) destination_before_manifest: Vec<CopyManifestEntry>,
     /// SHA-256 digest of the serialized destination-before manifest.
     pub(crate) destination_before_digest_sha256: String,
+    /// Destination state observed during the initial review, before ordered
+    /// Recipe writes are projected into later snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) destination_initial_manifest: Vec<CopyManifestEntry>,
+    /// Digest of the initial destination state, including an empty tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination_initial_digest_sha256: Option<String>,
+    /// Earlier reviewed copy steps whose destination scopes overlap this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ordered_predecessor_step_ids: Vec<String>,
+    /// Expected destination state after this operation, with unknown future
+    /// filesystem identities omitted for entries written by the operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) projected_destination_after_manifest: Vec<CopyManifestEntry>,
+    /// Digest proving that the resulting projection has not changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) projected_destination_after_digest_sha256: Option<String>,
     /// Exact relative paths that the selected operation is allowed to remove.
     pub(crate) reviewed_deletion_set: Vec<String>,
 }
@@ -491,8 +517,81 @@ impl ExecutionCopyCommitSnapshot {
             setup_destination_precondition: request.setup_destination_precondition.clone(),
             destination_before_manifest: request.destination_manifest.clone(),
             destination_before_digest_sha256: manifest_digest(&request.destination_manifest),
+            destination_initial_manifest: request.destination_manifest.clone(),
+            destination_initial_digest_sha256: Some(manifest_digest(&request.destination_manifest)),
+            ordered_predecessor_step_ids: Vec::new(),
+            projected_destination_after_manifest: Vec::new(),
+            projected_destination_after_digest_sha256: None,
             reviewed_deletion_set: request.reviewed_deletion_set.clone(),
         }
+    }
+
+    /// Binds this operation to the state produced by earlier reviewed writes.
+    pub(crate) fn set_ordered_projection(
+        &mut self,
+        destination_before_manifest: Vec<CopyManifestEntry>,
+        predecessor_step_ids: Vec<String>,
+    ) -> Result<(), CopyCommitError> {
+        let (reviewed_deletion_set, projected_after) = project_copy_destination(
+            self.operation,
+            &self.source_manifest,
+            &destination_before_manifest,
+        )?;
+        self.destination_before_digest_sha256 = manifest_digest(&destination_before_manifest);
+        self.destination_before_manifest = destination_before_manifest;
+        self.reviewed_deletion_set = reviewed_deletion_set;
+        self.ordered_predecessor_step_ids = predecessor_step_ids;
+        self.projected_destination_after_digest_sha256 = Some(manifest_digest(&projected_after));
+        self.projected_destination_after_manifest = projected_after;
+        Ok(())
+    }
+
+    pub(crate) fn has_ordered_projection(&self) -> bool {
+        self.projected_destination_after_digest_sha256.is_some()
+    }
+
+    pub(crate) fn validate_ordered_projection(&self) -> Result<(), CopyCommitError> {
+        let Some(initial_digest) = self.destination_initial_digest_sha256.as_deref() else {
+            if self.has_ordered_projection() || !self.ordered_predecessor_step_ids.is_empty() {
+                return Err(CopyCommitError::Rejected(
+                    "ordered copy snapshot is missing its initial destination digest".to_string(),
+                ));
+            }
+            return Ok(());
+        };
+        if manifest_digest(&self.destination_initial_manifest) != initial_digest {
+            return Err(CopyCommitError::Rejected(
+                "initial destination digest does not match its reviewed snapshot".to_string(),
+            ));
+        }
+        let Some(projected_digest) = self.projected_destination_after_digest_sha256.as_deref()
+        else {
+            return Err(CopyCommitError::Rejected(
+                "ordered copy snapshot is missing its resulting destination digest".to_string(),
+            ));
+        };
+        if manifest_digest(&self.destination_before_manifest)
+            != self.destination_before_digest_sha256
+        {
+            return Err(CopyCommitError::Rejected(
+                "projected destination-before digest does not match its reviewed snapshot"
+                    .to_string(),
+            ));
+        }
+        let (deletions, projected_after) = project_copy_destination(
+            self.operation,
+            &self.source_manifest,
+            &self.destination_before_manifest,
+        )?;
+        if deletions != self.reviewed_deletion_set
+            || projected_after != self.projected_destination_after_manifest
+            || manifest_digest(&projected_after) != projected_digest
+        {
+            return Err(CopyCommitError::Rejected(
+                "ordered copy projection does not match its reviewed operation".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Rebuild the adapter request from the reviewed bytes, rejecting any
@@ -527,6 +626,7 @@ impl ExecutionCopyCommitSnapshot {
         destination_kind: CopyCommitDestinationKind,
         operation: CopyCommitOperation,
     ) -> Result<CopyCommitRequest, CopyCommitError> {
+        self.validate_ordered_projection()?;
         let expected_destination_reference =
             if self.destination_kind == CopyCommitDestinationKind::SetupLocation {
                 self.setup_location_binding
@@ -621,6 +721,54 @@ impl ExecutionCopyCommitSnapshot {
         })
     }
 
+    pub(crate) fn request_for_execution_with_destination(
+        &self,
+        step_id: &str,
+        source_path: &Path,
+        fake_device_root: &Path,
+        destination_identity: &str,
+        destination_kind: CopyCommitDestinationKind,
+        operation: CopyCommitOperation,
+        current_destination_manifest: Vec<CopyManifestEntry>,
+    ) -> Result<CopyCommitRequest, CopyCommitError> {
+        let mut request = self.request_for_execution(
+            step_id,
+            source_path,
+            fake_device_root,
+            destination_identity,
+            destination_kind,
+            operation,
+        )?;
+        let expected_deletions = reviewed_deletions(
+            self.operation,
+            &self.source_manifest,
+            &current_destination_manifest,
+        )?;
+        if expected_deletions != self.reviewed_deletion_set {
+            return Err(CopyCommitError::Stale(
+                "current destination changes the reviewed deletion set".to_string(),
+            ));
+        }
+        if self.has_ordered_projection() {
+            if !manifest_matches_projection(
+                &self.destination_before_manifest,
+                &current_destination_manifest,
+            ) {
+                return Err(CopyCommitError::Stale(
+                    "current destination does not match the ordered reviewed projection"
+                        .to_string(),
+                ));
+            }
+        } else if self.destination_before_manifest != current_destination_manifest {
+            return Err(CopyCommitError::Stale(
+                "selected destination changed after review".to_string(),
+            ));
+        }
+        request.destination_manifest = current_destination_manifest;
+        request.reviewed_deletion_set = expected_deletions;
+        Ok(request)
+    }
+
     /// Builds an isolated simulation request from a real reviewed destination snapshot.
     ///
     /// The simulation tree contains empty files with the reviewed paths and kinds. Its
@@ -634,14 +782,16 @@ impl ExecutionCopyCommitSnapshot {
         destination_identity: &str,
         destination_kind: CopyCommitDestinationKind,
         operation: CopyCommitOperation,
+        current_destination_manifest: Vec<CopyManifestEntry>,
     ) -> Result<CopyCommitRequest, CopyCommitError> {
-        let reviewed_request = self.request_for_execution(
+        let reviewed_request = self.request_for_execution_with_destination(
             step_id,
             source_path,
             fake_device_root,
             destination_identity,
             destination_kind,
             operation,
+            current_destination_manifest,
         )?;
         materialize_simulation_destination(&reviewed_request)?;
 
@@ -688,7 +838,7 @@ impl ExecutionCopyCommitSnapshot {
 }
 
 /// The observable result of a selected-tree copy commit.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CopyCommitReport {
     pub operation: CopyCommitOperation,
@@ -711,7 +861,7 @@ pub struct CopyCommitReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_mutation_attempted: Option<bool>,
     /// Setup Location scope directories created before copy entries were applied.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created_directories: Vec<String>,
     pub source_digest_sha256: String,
     /// A pending cleanup message includes the exact stage path and failure reason.
@@ -728,7 +878,7 @@ pub struct CopyCommitReport {
 }
 
 /// Describes the observable destination result after a selected-tree attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CopyCommitOutcome {
     Succeeded,
@@ -4368,13 +4518,8 @@ fn materialize_simulation_destination(request: &CopyCommitRequest) -> Result<(),
     validate_manifest(&request.destination_manifest)?;
     validate_path_binding(&request.fake_device_root, &request.selected_root)?;
 
-    if request.selected_root.exists() {
-        let existing = scan_tree(&request.selected_root)?;
-        if !existing.is_empty() {
-            return Err(CopyCommitError::Stale(
-                "simulation destination was not empty before baseline seeding".to_string(),
-            ));
-        }
+    let existing = if request.selected_root.exists() {
+        scan_tree(&request.selected_root)?
     } else {
         fs::create_dir_all(&request.selected_root).map_err(|error| {
             CopyCommitError::Io(format!(
@@ -4382,6 +4527,16 @@ fn materialize_simulation_destination(request: &CopyCommitRequest) -> Result<(),
                 request.selected_root.display()
             ))
         })?;
+        Vec::new()
+    };
+    if existing == request.destination_manifest {
+        validate_path_binding(&request.fake_device_root, &request.selected_root)?;
+        return Ok(());
+    }
+    if !existing.is_empty() {
+        return Err(CopyCommitError::Stale(
+            "simulation destination differs from the reviewed ordered state".to_string(),
+        ));
     }
     validate_path_binding(&request.fake_device_root, &request.selected_root)?;
 
@@ -4525,23 +4680,95 @@ fn validate_add_update_types(
     Ok(())
 }
 
+pub(crate) fn project_copy_destination(
+    operation: CopyCommitOperation,
+    source_manifest: &[CopyManifestEntry],
+    destination_manifest: &[CopyManifestEntry],
+) -> Result<(Vec<String>, Vec<CopyManifestEntry>), CopyCommitError> {
+    let deletions = reviewed_deletions(operation, source_manifest, destination_manifest)?;
+    let deleted = deletions.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut destination_directory_identities = HashMap::with_capacity(destination_manifest.len());
+    for entry in destination_manifest
+        .iter()
+        .filter(|entry| entry.kind == CopyEntryKind::Directory)
+    {
+        destination_directory_identities
+            .entry(entry.relative_path.as_str())
+            .or_insert_with(|| entry.entry_identity.clone());
+    }
+    let mut after = expected_manifest_for(operation, source_manifest, destination_manifest)?;
+    for entry in &mut after {
+        if entry.kind == CopyEntryKind::File {
+            entry.entry_identity = None;
+        } else if !deleted.contains(entry.relative_path.as_str()) {
+            entry.entry_identity = destination_directory_identities
+                .get(entry.relative_path.as_str())
+                .cloned()
+                .flatten();
+        } else {
+            entry.entry_identity = None;
+        }
+    }
+    after.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok((deletions, after))
+}
+
+pub(crate) fn manifest_matches_projection(
+    expected: &[CopyManifestEntry],
+    actual: &[CopyManifestEntry],
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut actual_by_path = HashMap::with_capacity(actual.len());
+    for entry in actual {
+        actual_by_path
+            .entry(entry.relative_path.as_str())
+            .or_insert(entry);
+    }
+    expected.iter().all(|expected_entry| {
+        actual_by_path
+            .get(expected_entry.relative_path.as_str())
+            .is_some_and(|actual_entry| {
+                actual_entry.kind == expected_entry.kind
+                    && actual_entry.sha256 == expected_entry.sha256
+                    && expected_entry
+                        .entry_identity
+                        .as_ref()
+                        .is_none_or(|identity| {
+                            actual_entry.entry_identity.as_ref() == Some(identity)
+                        })
+            })
+    })
+}
+
 fn expected_manifest(
     request: &CopyCommitRequest,
 ) -> Result<Vec<CopyManifestEntry>, CopyCommitError> {
-    match request.operation {
-        CopyCommitOperation::Replace | CopyCommitOperation::Mirror => {
-            Ok(request.source_manifest.clone())
-        }
+    expected_manifest_for(
+        request.operation,
+        &request.source_manifest,
+        &request.destination_manifest,
+    )
+}
+
+fn expected_manifest_for(
+    operation: CopyCommitOperation,
+    source_manifest: &[CopyManifestEntry],
+    destination_manifest: &[CopyManifestEntry],
+) -> Result<Vec<CopyManifestEntry>, CopyCommitError> {
+    match operation {
+        CopyCommitOperation::Replace | CopyCommitOperation::Mirror => Ok(source_manifest.to_vec()),
         CopyCommitOperation::AddUpdate => {
-            let mut merged: BTreeMap<String, CopyManifestEntry> = request
-                .destination_manifest
+            let mut merged: BTreeMap<String, CopyManifestEntry> = destination_manifest
                 .iter()
                 .cloned()
                 .map(|entry| (entry.relative_path.clone(), entry))
                 .collect();
-            for entry in &request.source_manifest {
+            for entry in source_manifest {
                 merged.insert(entry.relative_path.clone(), entry.clone());
             }
+            validate_add_update_types(source_manifest, destination_manifest)?;
             Ok(merged.into_values().collect())
         }
     }
@@ -7396,6 +7623,120 @@ mod tests {
         );
         assert_eq!(fs::read(&outside).unwrap(), b"unreviewed outside bytes");
         assert_ne!(hash_file(&outside).unwrap(), reviewed_later_digest);
+    }
+
+    #[test]
+    fn large_manifest_projection_preserves_paths_kinds_hashes_and_optional_identities() {
+        let mut source_manifest = Vec::new();
+        let mut destination_manifest = Vec::new();
+        for index in 0..2048 {
+            let directory = format!("system-{index:04}");
+            destination_manifest.push(CopyManifestEntry {
+                relative_path: directory.clone(),
+                kind: CopyEntryKind::Directory,
+                sha256: None,
+                entry_identity: Some(format!("directory-{index}")),
+            });
+            destination_manifest.push(CopyManifestEntry {
+                relative_path: format!("obsolete-{index:04}.bin"),
+                kind: CopyEntryKind::File,
+                sha256: Some("b".repeat(64)),
+                entry_identity: None,
+            });
+            source_manifest.push(CopyManifestEntry {
+                relative_path: directory.clone(),
+                kind: CopyEntryKind::Directory,
+                sha256: None,
+                entry_identity: None,
+            });
+            source_manifest.push(CopyManifestEntry {
+                relative_path: format!("{directory}/game-{index:04}.rom"),
+                kind: CopyEntryKind::File,
+                sha256: Some(format!("{index:064x}")),
+                entry_identity: None,
+            });
+        }
+
+        let (deletions, projected) = project_copy_destination(
+            CopyCommitOperation::AddUpdate,
+            &source_manifest,
+            &destination_manifest,
+        )
+        .expect("large add/update manifests should project successfully");
+
+        assert!(deletions.is_empty());
+        assert_eq!(projected.len(), 6144);
+        assert_eq!(
+            projected
+                .iter()
+                .find(|entry| entry.relative_path == "system-0007")
+                .unwrap()
+                .entry_identity
+                .as_deref(),
+            Some("directory-7")
+        );
+        let expected_sha = format!("{:064x}", 7);
+        assert_eq!(
+            projected
+                .iter()
+                .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+                .unwrap()
+                .sha256
+                .as_deref(),
+            Some(expected_sha.as_str())
+        );
+        let mut actual = projected.clone();
+        actual.reverse();
+        assert!(manifest_matches_projection(&projected, &actual));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .sha256 = Some("e".repeat(64));
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .relative_path = "system-0007/renamed.rom".to_string();
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007")
+            .unwrap()
+            .kind = CopyEntryKind::File;
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007")
+            .unwrap()
+            .entry_identity = Some("wrong-directory-identity".to_string());
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut expected_without_identity = projected.clone();
+        expected_without_identity
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .entry_identity = None;
+        let mut actual_with_optional_identity = actual;
+        actual_with_optional_identity
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .entry_identity = Some("unrequired-file-identity".to_string());
+        assert!(manifest_matches_projection(
+            &expected_without_identity,
+            &actual_with_optional_identity
+        ));
     }
 
     #[cfg(all(unix, feature = "android-copy-commit-helper"))]

@@ -296,15 +296,27 @@ fn configuration_create_requires_evidence_for_both_profiles_recipes_and_sources(
                 assert!(super::retroarch_config_create_selected(
                     &prepared.binding_resolution.resolved_inputs
                 ));
-                let plan = plan_configuration(request(true))
-                    .unwrap()
-                    .plan
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "current scoped evidence should retain {profile_ref}/{recipe_id}/{source}: {:?}",
-                            prepared.diagnostics
-                        )
-                    });
+                let planned = plan_configuration(request(true)).unwrap();
+                if profile_ref == "konkr.pocket_advance" && recipe_id == "app.retroarch.provision" {
+                    assert!(
+                        planned.plan.is_none(),
+                        "scoped config evidence must not make unavailable provisioning copies eligible"
+                    );
+                    assert!(planned.diagnostics.iter().any(|diagnostic| {
+                        diagnostic.code == "required_step_capability_unavailable"
+                    }));
+                    assert!(!planned
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| { diagnostic.code == "config_create_write_unverified" }));
+                    continue;
+                }
+                let plan = planned.plan.unwrap_or_else(|| {
+                    panic!(
+                        "current scoped evidence should retain {profile_ref}/{recipe_id}/{source}: {:?}",
+                        planned.diagnostics
+                    )
+                });
                 assert!(plan
                     .steps
                     .iter()
@@ -336,26 +348,13 @@ fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
     )
     .unwrap();
 
-    let profile_path = authored_root.join("device_profiles/konkr.pocket_advance.yaml");
-    let profile_yaml = std::fs::read_to_string(&profile_path).unwrap();
-    std::fs::write(
-        &profile_path,
-        profile_yaml
-            .replace("apk_install: false", "apk_install: true")
-            .replace("app_launch: false", "app_launch: true")
-            // The host fixture supplies an explicitly selected root-capable
-            // profile; the production KONKR defaults remain unchanged.
-            .replace("root_shell: false", "root_shell: true"),
-    )
-    .unwrap();
-
     let mut bindings = OrderedMap::new();
     bindings.insert(
-        "app.retroarch.provision/retroarch_cfg_source".to_string(),
+        "app.retroarch.configure/retroarch_cfg_source".to_string(),
         serde_json::json!("managed"),
     );
     let request =
-        config_create_plan_request(&authored_root, "app.retroarch.provision", bindings, true);
+        config_create_plan_request(&authored_root, "app.retroarch.configure", bindings, true);
     let response = plan_configuration(request).unwrap();
     assert!(
         response.plan.is_some(),
@@ -389,7 +388,7 @@ fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
         config_step,
         "app_data_write"
     ));
-    assert!(crate::executor::reviewed_root_authorized(&plan));
+    assert!(!crate::executor::reviewed_root_authorized(&plan));
     let mut wrong_destination = plan.clone();
     let wrong_destination_step = wrong_destination
         .steps
