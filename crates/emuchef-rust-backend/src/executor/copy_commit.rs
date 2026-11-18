@@ -4,7 +4,7 @@
 //! identity. Adapter implementations validate the captured manifests before
 //! mutation and report the resulting tree and explicit deletions.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fmt;
@@ -4687,18 +4687,24 @@ pub(crate) fn project_copy_destination(
 ) -> Result<(Vec<String>, Vec<CopyManifestEntry>), CopyCommitError> {
     let deletions = reviewed_deletions(operation, source_manifest, destination_manifest)?;
     let deleted = deletions.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut destination_directory_identities = HashMap::with_capacity(destination_manifest.len());
+    for entry in destination_manifest
+        .iter()
+        .filter(|entry| entry.kind == CopyEntryKind::Directory)
+    {
+        destination_directory_identities
+            .entry(entry.relative_path.as_str())
+            .or_insert_with(|| entry.entry_identity.clone());
+    }
     let mut after = expected_manifest_for(operation, source_manifest, destination_manifest)?;
     for entry in &mut after {
         if entry.kind == CopyEntryKind::File {
             entry.entry_identity = None;
         } else if !deleted.contains(entry.relative_path.as_str()) {
-            entry.entry_identity = destination_manifest
-                .iter()
-                .find(|before| {
-                    before.relative_path == entry.relative_path
-                        && before.kind == CopyEntryKind::Directory
-                })
-                .and_then(|before| before.entry_identity.clone());
+            entry.entry_identity = destination_directory_identities
+                .get(entry.relative_path.as_str())
+                .cloned()
+                .flatten();
         } else {
             entry.entry_identity = None;
         }
@@ -4711,22 +4717,29 @@ pub(crate) fn manifest_matches_projection(
     expected: &[CopyManifestEntry],
     actual: &[CopyManifestEntry],
 ) -> bool {
-    expected.len() == actual.len()
-        && expected.iter().all(|expected_entry| {
-            actual
-                .iter()
-                .find(|actual_entry| actual_entry.relative_path == expected_entry.relative_path)
-                .is_some_and(|actual_entry| {
-                    actual_entry.kind == expected_entry.kind
-                        && actual_entry.sha256 == expected_entry.sha256
-                        && expected_entry
-                            .entry_identity
-                            .as_ref()
-                            .is_none_or(|identity| {
-                                actual_entry.entry_identity.as_ref() == Some(identity)
-                            })
-                })
-        })
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut actual_by_path = HashMap::with_capacity(actual.len());
+    for entry in actual {
+        actual_by_path
+            .entry(entry.relative_path.as_str())
+            .or_insert(entry);
+    }
+    expected.iter().all(|expected_entry| {
+        actual_by_path
+            .get(expected_entry.relative_path.as_str())
+            .is_some_and(|actual_entry| {
+                actual_entry.kind == expected_entry.kind
+                    && actual_entry.sha256 == expected_entry.sha256
+                    && expected_entry
+                        .entry_identity
+                        .as_ref()
+                        .is_none_or(|identity| {
+                            actual_entry.entry_identity.as_ref() == Some(identity)
+                        })
+            })
+    })
 }
 
 fn expected_manifest(
@@ -7610,6 +7623,120 @@ mod tests {
         );
         assert_eq!(fs::read(&outside).unwrap(), b"unreviewed outside bytes");
         assert_ne!(hash_file(&outside).unwrap(), reviewed_later_digest);
+    }
+
+    #[test]
+    fn large_manifest_projection_preserves_paths_kinds_hashes_and_optional_identities() {
+        let mut source_manifest = Vec::new();
+        let mut destination_manifest = Vec::new();
+        for index in 0..2048 {
+            let directory = format!("system-{index:04}");
+            destination_manifest.push(CopyManifestEntry {
+                relative_path: directory.clone(),
+                kind: CopyEntryKind::Directory,
+                sha256: None,
+                entry_identity: Some(format!("directory-{index}")),
+            });
+            destination_manifest.push(CopyManifestEntry {
+                relative_path: format!("obsolete-{index:04}.bin"),
+                kind: CopyEntryKind::File,
+                sha256: Some("b".repeat(64)),
+                entry_identity: None,
+            });
+            source_manifest.push(CopyManifestEntry {
+                relative_path: directory.clone(),
+                kind: CopyEntryKind::Directory,
+                sha256: None,
+                entry_identity: None,
+            });
+            source_manifest.push(CopyManifestEntry {
+                relative_path: format!("{directory}/game-{index:04}.rom"),
+                kind: CopyEntryKind::File,
+                sha256: Some(format!("{index:064x}")),
+                entry_identity: None,
+            });
+        }
+
+        let (deletions, projected) = project_copy_destination(
+            CopyCommitOperation::AddUpdate,
+            &source_manifest,
+            &destination_manifest,
+        )
+        .expect("large add/update manifests should project successfully");
+
+        assert!(deletions.is_empty());
+        assert_eq!(projected.len(), 6144);
+        assert_eq!(
+            projected
+                .iter()
+                .find(|entry| entry.relative_path == "system-0007")
+                .unwrap()
+                .entry_identity
+                .as_deref(),
+            Some("directory-7")
+        );
+        let expected_sha = format!("{:064x}", 7);
+        assert_eq!(
+            projected
+                .iter()
+                .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+                .unwrap()
+                .sha256
+                .as_deref(),
+            Some(expected_sha.as_str())
+        );
+        let mut actual = projected.clone();
+        actual.reverse();
+        assert!(manifest_matches_projection(&projected, &actual));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .sha256 = Some("e".repeat(64));
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .relative_path = "system-0007/renamed.rom".to_string();
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007")
+            .unwrap()
+            .kind = CopyEntryKind::File;
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut changed = actual.clone();
+        changed
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007")
+            .unwrap()
+            .entry_identity = Some("wrong-directory-identity".to_string());
+        assert!(!manifest_matches_projection(&projected, &changed));
+
+        let mut expected_without_identity = projected.clone();
+        expected_without_identity
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .entry_identity = None;
+        let mut actual_with_optional_identity = actual;
+        actual_with_optional_identity
+            .iter_mut()
+            .find(|entry| entry.relative_path == "system-0007/game-0007.rom")
+            .unwrap()
+            .entry_identity = Some("unrequired-file-identity".to_string());
+        assert!(manifest_matches_projection(
+            &expected_without_identity,
+            &actual_with_optional_identity
+        ));
     }
 
     #[cfg(all(unix, feature = "android-copy-commit-helper"))]

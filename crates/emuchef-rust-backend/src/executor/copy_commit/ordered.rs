@@ -274,11 +274,11 @@ fn project_manifest_between_scopes(
             .strip_prefix(predecessor_scope)
             .map_err(|_| "ordered copy destination scope is invalid".to_string())?;
         let relative = relative.to_string_lossy().replace('\\', "/");
-        let root = current_manifest
+        let root = predecessor_after_manifest
             .iter()
             .find(|entry| entry.relative_path == relative)
             .ok_or_else(|| {
-                "the reviewed destination parent does not contain the nested copy scope; prepare a fresh review".to_string()
+                "the earlier reviewed projection does not contain the nested copy scope; prepare a fresh review".to_string()
             })?;
         if root.kind != CopyEntryKind::Directory {
             return Err(
