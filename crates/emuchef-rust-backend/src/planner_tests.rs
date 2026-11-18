@@ -200,7 +200,7 @@ fn authored_corpus_planner_input_with_bindings(
     input
 }
 
-fn repo_device_plan_planner_input_with_bindings(
+pub(crate) fn repo_device_plan_planner_input_with_bindings(
     device_plan_ref: &str,
     input_bindings: &[(&str, Value)],
 ) -> PlannerInput {
@@ -512,7 +512,7 @@ fn repo_plan_e2e_no_app_data_write_cases() -> Vec<RepoPlanE2eCase> {
     ]
 }
 
-fn planning_result_value(input: PlannerInput) -> Value {
+pub(crate) fn planning_result_value(input: PlannerInput) -> Value {
     let has_app_context = input
         .recipes
         .iter()
@@ -3631,7 +3631,7 @@ fn konkr_provisioning_reports_unavailable_required_capabilities() {
     }
 }
 
-fn unrooted_ayaneo_provisioning_input(device_plan_ref: &str) -> PlannerInput {
+pub(crate) fn unrooted_ayaneo_provisioning_input(device_plan_ref: &str) -> PlannerInput {
     let mut input = repo_device_plan_planner_input_with_bindings(device_plan_ref, &[]);
     input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
     input.device_context.android_api_level = Some(35);

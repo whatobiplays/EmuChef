@@ -856,9 +856,20 @@ export function retroarchConfigCreateMaterialInputs(repoRoot) {
   };
 }
 
-export function sidecarCargoBuildArgs(profile, manifest) {
+export function sidecarCargoBuildArgs(
+  profile,
+  manifest,
+  { restrictedExecution = false } = {},
+) {
   const args = ["build", "--manifest-path", manifest, "--bin", "emuchef"];
-  if (profile === "debug") return args;
+  if (restrictedExecution && profile !== "debug") {
+    throw new Error("restricted execution sidecars must use the debug profile");
+  }
+  if (profile === "debug") {
+    return restrictedExecution
+      ? [...args, "--features", "real-execution"]
+      : args;
+  }
   if (profile === "release") {
     return [...args, "--release", "--features", "android-copy-commit-helper"];
   }

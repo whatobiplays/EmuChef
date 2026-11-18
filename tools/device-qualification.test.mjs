@@ -1196,6 +1196,342 @@ test("changing a bound report invalidates the bundle", () => {
   );
 });
 
+function restrictedExecutionBundle(
+  updateReport = () => {},
+  updateRecord = () => {},
+) {
+  const bundle = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const reviewedPlanId = "konkr-restricted-test";
+  const reviewedPlanDigest = "a".repeat(64);
+  const report = {
+    schema: "emuchef.execution-report",
+    schemaVersion: 1,
+    app: {
+      version: bundle.record.fingerprint.emuchefBuild.appVersion,
+    },
+    plan: {
+      planId: reviewedPlanId,
+      planDigest: reviewedPlanDigest,
+    },
+    execution: {
+      simulated: false,
+      status: "succeeded",
+    },
+    qualification: {
+      claim: "restricted_unprivileged",
+      attemptId: "qualification-attempt-0001",
+      executionMode: "real",
+      strategy: "adb_unprivileged",
+      restriction: "privileged_execution_disabled",
+      observedRootState: bundle.record.fingerprint.rootState,
+      effectiveCapabilities: ["app_install"],
+      buildIdentity: structuredClone(bundle.record.fingerprint.emuchefBuild),
+      deviceTargetId: bundle.record.deviceTarget.id,
+      deviceProfileId: bundle.record.fingerprint.deviceProfile,
+      reviewedPlanId,
+      reviewedPlanDigest,
+      requiredOperationIds: [
+        "app.retroarch.provision",
+        "feature.copy_bios",
+      ],
+      operationOutcomes: [
+        { operationId: "app.retroarch.provision", outcome: "executed" },
+        { operationId: "feature.copy_bios", outcome: "executed" },
+      ],
+    },
+  };
+  updateReport(report);
+  const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
+  const record = structuredClone(bundle.record);
+  record.artifacts[0].sha256 = createHash("sha256")
+    .update(reportBytes)
+    .digest("hex");
+  updateRecord(record);
+  return { record: sealEvidenceRecord(record), reportBytes };
+}
+
+test("a restricted claim requires a digest-bound real unprivileged ADB attempt", () => {
+  const bundle = restrictedExecutionBundle();
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("historical execution reports remain readable without a restricted claim", () => {
+  const bundle = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const report = JSON.parse(bundle.reportBytes.toString("utf8"));
+
+  assert.equal(report.qualification, undefined);
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("restricted reports reject missing labels, simulation, and privileged strategies", () => {
+  const invalidReports = [
+    ["missing claim", (report) => delete report.qualification.claim],
+    [
+      "incorrect report schema",
+      (report) => {
+        report.schema = "unknown.execution-report";
+      },
+    ],
+    [
+      "incorrect claim",
+      (report) => {
+        report.qualification.claim = "unrestricted";
+      },
+    ],
+    [
+      "missing attempt identity",
+      (report) => {
+        report.qualification.attemptId = "";
+      },
+    ],
+    [
+      "simulation mode",
+      (report) => {
+        report.qualification.executionMode = "simulation";
+      },
+    ],
+    [
+      "simulated execution",
+      (report) => {
+        report.execution.simulated = true;
+      },
+    ],
+    [
+      "simulated build identity",
+      (report) => {
+        report.qualification.buildIdentity.realExecutionEnabled = false;
+      },
+    ],
+    [
+      "direct root strategy",
+      (report) => {
+        report.qualification.strategy = "direct_root";
+      },
+    ],
+    [
+      "OEM strategy",
+      (report) => {
+        report.qualification.strategy = "oem_assisted";
+      },
+    ],
+    [
+      "missing restriction label",
+      (report) => {
+        delete report.qualification.restriction;
+      },
+    ],
+    [
+      "root capability restored",
+      (report) => {
+        report.qualification.effectiveCapabilities.push("root_shell");
+      },
+    ],
+    [
+      "app data write restored",
+      (report) => {
+        report.qualification.effectiveCapabilities.push("app_data_write");
+      },
+    ],
+  ];
+
+  for (const [label, updateReport] of invalidReports) {
+    const bundle = restrictedExecutionBundle(updateReport);
+    assert.throws(
+      () => validateEvidenceBundle(bundle, syntheticContext()),
+      /restricted|qualification|strategy|simulat|capabilit/i,
+      label,
+    );
+  }
+});
+
+test("restricted reports bind build, target, profile, and reviewed plan", () => {
+  const invalidReports = [
+    [
+      "build identity",
+      (report) => {
+        report.qualification.buildIdentity.gitCommit = "f".repeat(40);
+      },
+    ],
+    [
+      "report app version",
+      (report) => {
+        report.app.version = "0.0.0";
+      },
+    ],
+    [
+      "device target",
+      (report) => {
+        report.qualification.deviceTargetId = "device-target-sha256:wrong";
+      },
+    ],
+    [
+      "device profile",
+      (report) => {
+        report.qualification.deviceProfileId = "another-profile";
+      },
+    ],
+    [
+      "observed root state",
+      (report) => {
+        report.qualification.observedRootState = "unknown";
+      },
+    ],
+    [
+      "plan identity",
+      (report) => {
+        report.qualification.reviewedPlanId = "another-plan";
+      },
+    ],
+    [
+      "plan digest",
+      (report) => {
+        report.qualification.reviewedPlanDigest = `sha256:${"b".repeat(64)}`;
+      },
+    ],
+  ];
+
+  for (const [label, updateReport] of invalidReports) {
+    const bundle = restrictedExecutionBundle(updateReport);
+    assert.throws(
+      () => validateEvidenceBundle(bundle, syntheticContext()),
+      /restricted|qualification|build|target|profile|plan/i,
+      label,
+    );
+  }
+});
+
+test("restricted reports require one terminal outcome for every required operation", () => {
+  const invalidReports = [
+    [
+      "missing outcome",
+      (report) => {
+        report.qualification.operationOutcomes.pop();
+      },
+    ],
+    [
+      "duplicate outcome",
+      (report) => {
+        report.qualification.operationOutcomes.push({
+          operationId: "app.retroarch.provision",
+          outcome: "executed",
+        });
+      },
+    ],
+    [
+      "unexpected operation",
+      (report) => {
+        report.qualification.operationOutcomes[0].operationId =
+          "another-operation";
+      },
+    ],
+    [
+      "nonterminal outcome",
+      (report) => {
+        report.qualification.operationOutcomes[0].outcome = "pending";
+      },
+    ],
+  ];
+
+  for (const [label, updateReport] of invalidReports) {
+    const bundle = restrictedExecutionBundle(updateReport);
+    assert.throws(
+      () => validateEvidenceBundle(bundle, syntheticContext()),
+      /restricted|qualification|operation|outcome/i,
+      label,
+    );
+  }
+});
+
+test("restricted reports cannot omit a required workflow recipe and its outcome", () => {
+  const bundle = restrictedExecutionBundle((report) => {
+    report.qualification.requiredOperationIds.pop();
+    report.qualification.operationOutcomes.pop();
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /workflow|required operation/i,
+  );
+});
+
+test("a restricted report status cannot change without matching its valid qualification outcome", () => {
+  const bundle = restrictedExecutionBundle((report) => {
+    report.execution.status = "failed";
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /execution status|qualification outcome|execution-report observation/i,
+  );
+});
+
+test("restricted execution status follows native passed and failed outcome semantics", () => {
+  const warningBundle = restrictedExecutionBundle((report) => {
+    report.execution.status = "succeeded_with_warnings";
+  });
+  assert.doesNotThrow(() =>
+    validateEvidenceBundle(warningBundle, syntheticContext()),
+  );
+
+  const failedExecutionBundle = restrictedExecutionBundle(
+    (report) => {
+      report.execution.status = "failed";
+    },
+    (record) => {
+      record.qualificationOutcome = "failed";
+      record.automatedObservations[0].outcome = "failed";
+      record.limitations = ["execution-report failed"];
+    },
+  );
+  assert.doesNotThrow(() =>
+    validateEvidenceBundle(failedExecutionBundle, syntheticContext()),
+  );
+
+  const context = syntheticContext();
+  context.workflowCatalog.workflows
+    .find((workflow) => workflow.id === "retroarch-plus-bios")
+    .humanCheckpoints.push({
+      id: "device_behavior_verified",
+      instruction: "Verify the device behavior.",
+      fact: "The device behavior was verified.",
+      allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+      required: false,
+    });
+  const failedCheckpointBundle = restrictedExecutionBundle(
+    () => {},
+    (record) => {
+      record.qualificationOutcome = "failed";
+      record.humanCheckpoints.push({
+        checkpointId: "device_behavior_verified",
+        outcome: "fail",
+        observedAt: "2026-11-18T20:00:00Z",
+      });
+      record.limitations.push("device_behavior_verified failed");
+    },
+  );
+  assert.doesNotThrow(() =>
+    validateEvidenceBundle(failedCheckpointBundle, context),
+  );
+});
+
+test("a changed restricted report is rejected against its stored digest", () => {
+  const bundle = restrictedExecutionBundle();
+  const changedBytes = Buffer.from(bundle.reportBytes);
+  changedBytes[0] ^= 1;
+  assert.throws(
+    () =>
+      validateEvidenceBundle(
+        { ...bundle, reportBytes: changedBytes },
+        syntheticContext(),
+      ),
+    /execution report digest/i,
+  );
+});
+
 test("a retroarch run cannot validate as valid when its required human checkpoint is missing", () => {
   const bundle = loadEvidenceBundle(
     path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),

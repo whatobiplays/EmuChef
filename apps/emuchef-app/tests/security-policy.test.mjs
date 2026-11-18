@@ -683,6 +683,36 @@ test("React cannot supply trusted real-execution or launch data", () => {
   );
 });
 
+test("public React requests cannot choose privileged restriction or carry review authority", () => {
+  const api = read("src/api.ts");
+  const configurationApi = sourceSlice(api, "describeConfiguration:", "\n  prepareExecutionReview:");
+  const reviewApi = sourceSlice(api, "prepareExecutionReview:", "\n  discardReview:");
+  const startApi = sourceSlice(api, "startRealExecution:", "\n  getRealExecution:");
+  const privatePolicyFields =
+    /\b(?:restrict(?:ed)?PrivilegedExecution|restrict(?:ed)?_privileged_execution|privilegedExecutionRestriction|privileged_execution_restriction|restrictedExecution|reviewAuthority(?:Id)?|review_authority(?:_id)?)\b/i;
+
+  assert.match(
+    configurationApi,
+    /invoke<ConfigurationDescription>\("describe_configuration", request\)/,
+  );
+  assert.match(reviewApi, /invoke<ReviewSummary>\("prepare_execution_review", request\)/);
+  assert.match(
+    startApi,
+    /invoke<RealExecutionSnapshot>\("start_real_execution",\s*\{\s*request:\s*\{\s*reviewHandle,\s*confirmation,?\s*\},\s*\}\)/,
+  );
+  assert.doesNotMatch(api, privatePolicyFields);
+
+  const frontendSources = fs
+    .readdirSync(path.join(appDir, "src"), { recursive: true })
+    .filter((entry) => typeof entry === "string" && /\.tsx?$/.test(entry))
+    .map((entry) => fs.readFileSync(path.join(appDir, "src", entry), "utf8"))
+    .join("\n");
+  assert.doesNotMatch(
+    frontendSources,
+    /\b(?:restrict(?:ed)?PrivilegedExecution|restrict(?:ed)?_privileged_execution|privilegedExecutionRestriction|privileged_execution_restriction|restrictedExecution|reviewAuthority(?:Id)?|review_authority(?:_id)?)\b|\b(?:enable|disable|restrict|allow)\s+(?:privileged|root)\s+(?:execution|access)\b|\b(?:privileged|root)\s+(?:execution|access)\s+(?:mode|setting|option|toggle)\b/i,
+  );
+});
+
 test("Tauri alone constructs the fixed real-mode sidecar request", () => {
   const execution = read("src-tauri/src/execution.rs");
   const trustedRequest = sourceSlice(execution, "fn request_real_start", "\nfn bind_real_start_result");

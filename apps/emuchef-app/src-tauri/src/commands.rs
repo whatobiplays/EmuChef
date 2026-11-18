@@ -2092,16 +2092,21 @@ where
     else {
         return Ok(plan_configuration);
     };
+    let plan_authority_id = plan_configuration
+        .get("executionRestrictionPlanAuthorityId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let storage_targets = resolve_storage_targets(&plan, request)?;
-    request(
-        "prepareExecutionReview",
-        json!({
-            "plan": plan,
-            "mode": mode,
-            "targetDevice": target_device,
-            "storageTargets": storage_targets,
-        }),
-    )
+    let mut prepare_payload = json!({
+        "plan": plan,
+        "mode": mode,
+        "targetDevice": target_device,
+        "storageTargets": storage_targets,
+    });
+    if let Some(authority_id) = plan_authority_id {
+        prepare_payload["executionRestrictionPlanAuthorityId"] = json!(authority_id);
+    }
+    request("prepareExecutionReview", prepare_payload)
 }
 
 #[tauri::command]
@@ -2212,6 +2217,16 @@ where
         .get("targetDevice")
         .cloned()
         .expect("configuration payload always binds a target");
+    let restricted_generation = if state.sidecar.restricted_execution_enabled() {
+        Some(state.sidecar.try_generation().map_err(|_| {
+            safe_error(
+                "runtime_generation_unavailable",
+                "The reviewed execution runtime is temporarily unavailable.",
+            )
+        })?)
+    } else {
+        None
+    };
     let catalog_identity = payload
         .get("catalog")
         .cloned()
@@ -2311,6 +2326,43 @@ where
     result["executionMode"] = json!(mode);
     result["profileSelectionHandle"] = json!(authority.handle);
     result["profileSetupGeneration"] = json!(authority.setup_generation);
+    let restricted_execution = if let Some(reviewed_generation) = restricted_generation {
+        let current_generation = state.sidecar.try_generation().map_err(|_| {
+            safe_error(
+                "runtime_generation_unavailable",
+                "The reviewed execution runtime is temporarily unavailable.",
+            )
+        })?;
+        if current_generation != reviewed_generation {
+            return Err(safe_error(
+                "execution_review_stale",
+                "The execution runtime changed while the review was prepared.",
+            ));
+        }
+        let review_authority_id = result
+            .get("reviewAuthorityId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                safe_error(
+                    "review_authority_missing",
+                    "The restricted execution review did not retain its sidecar authority.",
+                )
+            })?;
+        result
+            .as_object_mut()
+            .ok_or_else(|| {
+                safe_error("review_response_invalid", "The review response is invalid.")
+            })?
+            .remove("reviewAuthorityId");
+        Some(crate::handles::RestrictedExecutionReview {
+            review_authority_id,
+            runtime_generation: reviewed_generation,
+        })
+    } else {
+        None
+    };
     let plan = result
         .get("plan")
         .filter(|value| !value.is_null())
@@ -2368,6 +2420,7 @@ where
             })?
             .qualification_context(&device_handle),
         platform_tools_identity: Some(platform_tools_identity),
+        restricted_execution,
         created: Instant::now(),
         last_access: Instant::now(),
     };
@@ -4367,6 +4420,7 @@ mod tests {
                 device_handle: device.clone(),
                 qualification_context: None,
                 platform_tools_identity: None,
+                restricted_execution: None,
                 created: Instant::now(),
                 last_access: Instant::now(),
             });
@@ -5671,6 +5725,7 @@ mod tests {
             device_handle: device_handle.to_string(),
             qualification_context: None,
             platform_tools_identity: None,
+            restricted_execution: None,
             created: Instant::now(),
             last_access: Instant::now(),
         }

@@ -3,7 +3,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const RESTRICTED_EXECUTION_BUILD_IDENTITY_ENV: &str =
+    "EMU_CHEF_RESTRICTED_EXECUTION_BUILD_IDENTITY";
+
 fn main() {
+    println!("cargo:rerun-if-env-changed={RESTRICTED_EXECUTION_BUILD_IDENTITY_ENV}");
+    let restricted_execution = embed_restricted_execution_identity();
+    // A restricted sidecar still uses Android CopyCommit. Its existing build
+    // identity enables the helper without changing Cargo feature provenance.
+    println!("cargo:rustc-check-cfg=cfg(restricted_execution_copy_commit_helper)");
+    if restricted_execution {
+        println!("cargo:rustc-cfg=restricted_execution_copy_commit_helper");
+    }
     let source = PathBuf::from("src/executor/copy_commit_helper.c");
     println!("cargo:rerun-if-changed={}", source.display());
     let qualification_identity = [
@@ -53,7 +64,7 @@ fn main() {
         println!("cargo:rerun-if-env-changed={name}");
     }
 
-    if env::var_os("CARGO_FEATURE_ANDROID_COPY_COMMIT_HELPER").is_none() {
+    if env::var_os("CARGO_FEATURE_ANDROID_COPY_COMMIT_HELPER").is_none() && !restricted_execution {
         return;
     }
 
@@ -145,6 +156,24 @@ fn main() {
         "cargo:rustc-env=EMU_CHEF_COPY_COMMIT_HELPER_HOST={}",
         host_output.display()
     );
+}
+
+fn embed_restricted_execution_identity() -> bool {
+    let Some(identity) = env::var_os(RESTRICTED_EXECUTION_BUILD_IDENTITY_ENV) else {
+        println!("cargo:rustc-env={RESTRICTED_EXECUTION_BUILD_IDENTITY_ENV}=");
+        return false;
+    };
+    let identity = identity.to_string_lossy();
+    if identity.is_empty() || identity.contains(['\n', '\r']) {
+        panic!("restricted execution build identity is malformed");
+    }
+    if env::var("PROFILE").as_deref() != Ok("debug")
+        || env::var_os("CARGO_FEATURE_REAL_EXECUTION").is_none()
+    {
+        panic!("restricted execution identity requires a debug real-execution build");
+    }
+    println!("cargo:rustc-env={RESTRICTED_EXECUTION_BUILD_IDENTITY_ENV}={identity}");
+    true
 }
 
 fn find_ndk() -> Option<PathBuf> {

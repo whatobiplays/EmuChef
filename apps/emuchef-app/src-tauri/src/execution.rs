@@ -68,6 +68,7 @@ enum ExecutionKind {
 struct StoredExecutionReport {
     report: Value,
     runtime: Value,
+    qualification: Option<Value>,
 }
 
 /// Sanitized projection of one retained launch action record.
@@ -102,6 +103,7 @@ fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
         device_handle: "device-test".to_string(),
         qualification_context: None,
         platform_tools_identity: None,
+        restricted_execution: None,
         created: std::time::Instant::now(),
         last_access: std::time::Instant::now(),
     }
@@ -567,10 +569,25 @@ impl ExecutionHandleStore {
         report: Value,
         runtime: Value,
     ) -> bool {
+        self.mark_terminal_with_qualification_report(kind, public_handle, report, runtime, None)
+    }
+
+    fn mark_terminal_with_qualification_report(
+        &mut self,
+        kind: ExecutionKind,
+        public_handle: &str,
+        report: Value,
+        runtime: Value,
+        qualification: Option<Value>,
+    ) -> bool {
         self.promote_active_to_terminal(
             kind,
             public_handle,
-            Some(StoredExecutionReport { report, runtime }),
+            Some(StoredExecutionReport {
+                report,
+                runtime,
+                qualification,
+            }),
         )
     }
 
@@ -855,11 +872,19 @@ impl ExecutionHandleStore {
 
 pub(crate) trait RuntimeRequester {
     fn request(&self, request_type: &str, payload: Value) -> Result<Value, String>;
+
+    fn generation(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl RuntimeRequester for SidecarState {
     fn request(&self, request_type: &str, payload: Value) -> Result<Value, String> {
         SidecarState::request(self, request_type, payload)
+    }
+
+    fn generation(&self) -> Option<u64> {
+        self.try_generation().ok()
     }
 }
 
@@ -1047,6 +1072,17 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
         .clone();
 
     validate_review_executable(&review, "dry_run")?;
+    if review
+        .restricted_execution
+        .as_ref()
+        .is_some_and(|authority| {
+            state.sidecar.try_generation().ok() != Some(authority.runtime_generation)
+        })
+    {
+        return Err(stale_review(
+            "The execution runtime changed after this review was prepared.",
+        ));
+    }
     let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
     let _devices =
         list_and_reconcile_preflight_inventory(state, runtime, &platform_tools, Some(executions))
@@ -1170,7 +1206,14 @@ pub(crate) fn request_dry_run_start(
         "mode": "dry_run",
         "targetDevice": review.target,
     });
-    if let Some(review_authority_id) = review
+    if let Some(authority) = review.restricted_execution.as_ref() {
+        if runtime.generation() != Some(authority.runtime_generation) {
+            return Err(stale_review(
+                "The execution runtime changed after this review was prepared.",
+            ));
+        }
+        payload["reviewAuthorityId"] = json!(authority.review_authority_id);
+    } else if let Some(review_authority_id) = review
         .response
         .get("reviewAuthorityId")
         .and_then(Value::as_str)
@@ -1823,6 +1866,16 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         .clone();
     validate_review_executable(&review, "real")?;
 
+    if review
+        .restricted_execution
+        .as_ref()
+        .is_some_and(|authority| authority.runtime_generation != platform_tools.runtime_generation)
+    {
+        return Err(stale_review(
+            "The execution runtime changed after this review was prepared.",
+        ));
+    }
+
     let inventory_request =
         |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
     let inventory = inventory_request(
@@ -2395,6 +2448,14 @@ fn request_real_start(
         "mode": "real",
         "targetDevice": review.target,
     });
+    if let Some(authority) = review.restricted_execution.as_ref() {
+        if runtime.generation() != Some(authority.runtime_generation) {
+            return Err(stale_review(
+                "The execution runtime changed after this review was prepared.",
+            ));
+        }
+        payload["reviewAuthorityId"] = json!(authority.review_authority_id);
+    }
     if let Some(lease) = setup_location_lease {
         payload["setupLocationLease"] =
             serde_json::to_value(lease).map_err(|_| runtime_session_lost_error())?;
@@ -2648,7 +2709,7 @@ where
 {
     let mut interval = REAL_EXECUTION_MONITOR_INTERVAL;
     let mut pending_loss: Option<String> = None;
-    let mut pending_terminal: Option<(ExecutionMapping, Value, String)> = None;
+    let mut pending_terminal: Option<(ExecutionMapping, Value, String, String)> = None;
     loop {
         if let Some(error) = pending_loss.as_deref() {
             match recover_loss(state, execution_handle, error) {
@@ -2664,8 +2725,14 @@ where
                 }
             }
         }
-        if let Some((mapping, report, observed_at)) = pending_terminal.as_ref() {
-            match retain_terminal_real_execution(state, mapping, report, observed_at) {
+        if let Some((mapping, report, observed_status, observed_at)) = pending_terminal.as_ref() {
+            match retain_terminal_real_execution(
+                state,
+                mapping,
+                report,
+                observed_status,
+                observed_at,
+            ) {
                 Ok(Some(event)) => return Some(event),
                 Ok(None) => return None,
                 Err(_) if state.executions.is_poisoned() => {
@@ -2710,9 +2777,17 @@ where
             Ok(response) => {
                 let report = response.get("execution").cloned().unwrap_or(Value::Null);
                 if is_terminal_status(report.get("status").and_then(Value::as_str)) {
+                    let Some(observed_status) = report
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                    else {
+                        continue;
+                    };
                     match crate::qualification_session::current_timestamp() {
                         Ok(observed_at) => {
-                            pending_terminal = Some((mapping, report, observed_at));
+                            pending_terminal =
+                                Some((mapping, report, observed_status, observed_at));
                             interval = REAL_EXECUTION_MONITOR_INTERVAL;
                             continue;
                         }
@@ -2746,12 +2821,14 @@ fn retain_terminal_real_execution(
     state: &AppState,
     mapping: &ExecutionMapping,
     report: &Value,
+    observed_status: &str,
     observed_at: &str,
 ) -> Result<Option<RealExecutionMonitorEvent>, String> {
     retain_terminal_real_execution_with_lease_revoker(
         state,
         mapping,
         report,
+        observed_status,
         observed_at,
         |lease| revoke_setup_location_lease(state, lease),
     )
@@ -2761,6 +2838,7 @@ fn retain_terminal_real_execution_with_lease_revoker(
     state: &AppState,
     mapping: &ExecutionMapping,
     report: &Value,
+    observed_status: &str,
     observed_at: &str,
     revoke_lease: impl FnOnce(&SetupLocationExecutionLease) -> Result<(), String>,
 ) -> Result<Option<RealExecutionMonitorEvent>, String> {
@@ -2781,14 +2859,12 @@ fn retain_terminal_real_execution_with_lease_revoker(
             return Ok(None);
         }
     }
-    let report_runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
+    let report_runtime = state.sidecar.execution_report_runtime().map_err(|_| {
         safe_error(
             "report_serialization_failed",
             "The sanitized execution runtime metadata could not be serialized.",
         )
     })?;
-    let report_bytes =
-        production_execution_report_bytes_for(mapping, report, report_runtime.clone())?;
     let identity_failed = report_has_identity_failure(report);
     let root_failed = !identity_failed && report_has_root_authority_failure(report);
     // Execution state precedes the transition gate everywhere it is needed.
@@ -2807,6 +2883,29 @@ fn retain_terminal_real_execution_with_lease_revoker(
     if !executions.owns_active_mapping(mapping) {
         return Ok(None);
     }
+    let restricted_qualification =
+        crate::qualification_session::restricted_qualification_report_for_terminal_in_transition(
+            state,
+            &mapping.public_handle,
+            &mapping.review_handle,
+            &mapping.review.device_handle,
+            mapping.review.response.get("plan").unwrap_or(&Value::Null),
+            &mapping.review.plan_digest,
+            report,
+            &report_runtime,
+            mapping
+                .review
+                .restricted_execution
+                .as_ref()
+                .map(|authority| authority.runtime_generation),
+            observed_status,
+        )?;
+    let report_bytes = production_execution_report_bytes_for_with_qualification(
+        mapping,
+        report,
+        report_runtime.clone(),
+        restricted_qualification.clone(),
+    )?;
     if identity_failed {
         if let Some(lease) = executions.setup_location_lease() {
             revoke_lease(&lease)?;
@@ -2826,11 +2925,12 @@ fn retain_terminal_real_execution_with_lease_revoker(
             "The completed execution action could not be retained.",
         ));
     }
-    if !executions.mark_terminal_with_report(
+    if !executions.mark_terminal_with_qualification_report(
         ExecutionKind::Real,
         &mapping.public_handle,
         report.clone(),
         report_runtime,
+        restricted_qualification,
     ) {
         return Err(safe_error(
             "execution_state_unavailable",
@@ -2839,10 +2939,7 @@ fn retain_terminal_real_execution_with_lease_revoker(
     }
     let observation = crate::qualification_session::TerminalExecutionObservation {
         execution_handle: mapping.public_handle.clone(),
-        status: report
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        status: Some(observed_status.to_string()),
         observed_at: observed_at.to_string(),
         report_available: true,
         report_bytes: Some(report_bytes),
@@ -3535,13 +3632,19 @@ pub(crate) fn production_execution_report_bytes(
 ) -> Result<Vec<u8>, String> {
     let mapping = store.mapping_any(execution_handle)?;
     let stored = store.terminal_report(execution_handle)?;
-    production_execution_report_bytes_for(&mapping, &stored.report, stored.runtime)
+    production_execution_report_bytes_for_with_qualification(
+        &mapping,
+        &stored.report,
+        stored.runtime,
+        stored.qualification,
+    )
 }
 
-fn production_execution_report_bytes_for(
+fn production_execution_report_bytes_for_with_qualification(
     mapping: &ExecutionMapping,
     report: &Value,
     runtime: Value,
+    qualification: Option<Value>,
 ) -> Result<Vec<u8>, String> {
     if !is_terminal_status(report.get("status").and_then(Value::as_str)) {
         return Err(safe_error(
@@ -3553,7 +3656,13 @@ fn production_execution_report_bytes_for(
         ExecutionKind::Simulated => project_snapshot(mapping, report),
         ExecutionKind::Real => project_real_snapshot(mapping, report),
     };
-    let document = execution_report_document(mapping, report, &public, runtime);
+    let document = execution_report_document_with_qualification(
+        mapping,
+        report,
+        &public,
+        runtime,
+        qualification,
+    );
     let mut serialized = serde_json::to_string_pretty(&document).map_err(|_| {
         safe_error(
             "report_serialization_failed",
@@ -3629,6 +3738,16 @@ fn execution_report_document(
     public: &Value,
     runtime: Value,
 ) -> Value {
+    execution_report_document_with_qualification(mapping, report, public, runtime, None)
+}
+
+fn execution_report_document_with_qualification(
+    mapping: &ExecutionMapping,
+    report: &Value,
+    public: &Value,
+    runtime: Value,
+    qualification: Option<Value>,
+) -> Value {
     let mut document = json!({
         "schema": "emuchef.execution-report",
         "schemaVersion": 1,
@@ -3656,6 +3775,9 @@ fn execution_report_document(
             "resolvedReleases": project_resolved_releases(report.get("resolvedReleases")),
         },
     });
+    if let Some(qualification) = qualification {
+        document["qualification"] = qualification;
+    }
     let exact_serial = mapping
         .review
         .target
@@ -4320,6 +4442,7 @@ pub(crate) fn project_phase6d6_terminal(public_handle: &str, report: Value) -> V
             device_handle: String::new(),
             qualification_context: None,
             platform_tools_identity: None,
+            restricted_execution: None,
             created: std::time::Instant::now(),
             last_access: std::time::Instant::now(),
         },
@@ -5918,6 +6041,7 @@ pub(crate) mod tests {
             device_handle: "device_one".to_string(),
             qualification_context: None,
             platform_tools_identity: None,
+            restricted_execution: None,
             created: Instant::now(),
             last_access: Instant::now(),
         }
@@ -6526,6 +6650,7 @@ pub(crate) mod tests {
             &state,
             &mapping,
             &report,
+            "failed",
             "2026-11-05T00:00:00Z",
             |_| Err(runtime_session_lost_error()),
         );
@@ -6549,6 +6674,7 @@ pub(crate) mod tests {
             &state,
             &mapping,
             &report,
+            "failed",
             "2026-11-05T00:00:01Z",
             |revoked| {
                 assert_eq!(revoked, &lease);
@@ -7317,6 +7443,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn restricted_execution_denial_is_not_misclassified_as_root_authority_failure() {
+        let report = json!({
+            "status": "failed",
+            "errors": [{
+                "code": "restricted_execution_denied",
+                "message": "Restricted execution denied a privileged device operation."
+            }]
+        });
+
+        assert!(!report_has_root_authority_failure(&report));
+        assert!(!report_has_identity_failure(&report));
+    }
+
+    #[test]
     fn only_the_exact_post_identity_marker_allows_real_partial_warning_without_prior_evidence() {
         let mapping = ExecutionMapping {
             kind: ExecutionKind::Real,
@@ -7857,6 +7997,366 @@ pub(crate) mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&actual).unwrap(),
             expected_document
+        );
+    }
+
+    #[test]
+    fn restricted_qualification_report_is_retained_and_matches_validator_contract() {
+        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+            &[],
+            &["required.first", "required.second"],
+        );
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.restricted",
+            "recipes": [
+                { "id": "required.first" },
+                { "id": "required.second" }
+            ],
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "steps": []
+        });
+        let plan_digest = canonical_json_digest(&plan).unwrap();
+        let terminal_report = json!({
+            "planId": "plan.restricted",
+            "status": "succeeded",
+            "recipes": [
+                { "recipeId": "required.second", "status": "succeeded" },
+                { "recipeId": "required.first", "status": "succeeded" }
+            ]
+        });
+        let runtime = json!({
+            "status": "ready",
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 7,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+        let qualification =
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &plan,
+                &plan_digest,
+                &terminal_report,
+                &runtime,
+                Some(7),
+                "succeeded",
+            )
+            .expect("native producer should create the restricted claim");
+
+        let mut reviewed = review();
+        reviewed.response["plan"] = plan.clone();
+        reviewed.plan_digest = plan_digest.clone();
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-private-id".into(),
+            "review-private-id".into(),
+            reviewed,
+        );
+        assert!(store.mark_terminal_with_qualification_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            terminal_report,
+            runtime.clone(),
+            Some(qualification),
+        ));
+
+        let bytes = production_execution_report_bytes(&store, &mapping.public_handle)
+            .expect("the normal report export should retain the restricted claim");
+        let document = serde_json::from_slice::<Value>(&bytes).unwrap();
+        let qualification = document["qualification"]
+            .as_object()
+            .expect("report should contain the validator-facing qualification object");
+        let mut fields = qualification.keys().cloned().collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(
+            fields,
+            vec![
+                "attemptId",
+                "buildIdentity",
+                "claim",
+                "deviceProfileId",
+                "deviceTargetId",
+                "effectiveCapabilities",
+                "executionMode",
+                "observedRootState",
+                "operationOutcomes",
+                "requiredOperationIds",
+                "restriction",
+                "reviewedPlanDigest",
+                "reviewedPlanId",
+                "strategy",
+            ]
+        );
+        assert_eq!(document["execution"]["simulated"], false);
+        assert_eq!(qualification["claim"], "restricted_unprivileged");
+        assert_eq!(qualification["attemptId"], session.candidate_handle());
+        assert_eq!(qualification["executionMode"], "real");
+        assert_eq!(
+            document["app"]["version"],
+            qualification["buildIdentity"]["appVersion"]
+        );
+        assert_eq!(qualification["strategy"], "adb_unprivileged");
+        assert_eq!(
+            qualification["restriction"],
+            "privileged_execution_disabled"
+        );
+        assert_eq!(qualification["observedRootState"], "non_root");
+        assert_eq!(
+            qualification["effectiveCapabilities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(
+            qualification["buildIdentity"],
+            json!(session.build_identity())
+        );
+        assert_eq!(qualification["deviceTargetId"], "target-test");
+        assert_eq!(qualification["deviceProfileId"], "profile.test");
+        assert_eq!(qualification["reviewedPlanId"], "plan.restricted");
+        assert_eq!(qualification["reviewedPlanDigest"], plan_digest);
+        assert_eq!(
+            document["plan"]["planDigest"],
+            qualification["reviewedPlanDigest"]
+        );
+        assert_eq!(
+            qualification["requiredOperationIds"],
+            json!(["required.first", "required.second"])
+        );
+        assert_eq!(
+            qualification["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "executed" },
+                { "operationId": "required.second", "outcome": "executed" }
+            ])
+        );
+
+        let failed_report = json!({
+            "planId": "plan.restricted",
+            "status": "failed",
+            "recipes": [
+                { "recipeId": "required.first", "status": "failed" },
+                { "recipeId": "required.second", "status": "succeeded" }
+            ]
+        });
+        let failed_claim =
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &plan,
+                &plan_digest,
+                &failed_report,
+                &runtime,
+                Some(7),
+                "failed",
+            )
+            .expect("a matching failed terminal report should remain recordable");
+        let mut failed_review = review();
+        failed_review.response["plan"] = plan.clone();
+        failed_review.plan_digest = plan_digest.clone();
+        let mut failed_store = ExecutionHandleStore::default();
+        failed_store.reserve_start(ExecutionKind::Real).unwrap();
+        let failed_mapping = failed_store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-failed-id".into(),
+            "review-failed-id".into(),
+            failed_review,
+        );
+        assert!(failed_store.mark_terminal_with_qualification_report(
+            ExecutionKind::Real,
+            &failed_mapping.public_handle,
+            failed_report,
+            runtime.clone(),
+            Some(failed_claim),
+        ));
+        let failed_bytes =
+            production_execution_report_bytes(&failed_store, &failed_mapping.public_handle)
+                .expect("the failed terminal report should be retained for export");
+        let failed_document = serde_json::from_slice::<Value>(&failed_bytes).unwrap();
+        assert_eq!(failed_document["execution"]["status"], "failed");
+        assert_eq!(
+            failed_document["qualification"]["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "failed" },
+                { "operationId": "required.second", "outcome": "executed" }
+            ])
+        );
+
+        let missing_operation_report = json!({
+            "planId": "plan.restricted",
+            "status": "succeeded",
+            "recipes": []
+        });
+        let incomplete_claim =
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &plan,
+                &plan_digest,
+                &missing_operation_report,
+                &json!({
+                    "executionRestriction": {
+                        "enabled": true,
+                        "buildIdentity": session.build_identity(),
+                        "runtimeGeneration": 7,
+                        "strategy": "adb_shell",
+                        "rootShell": false,
+                        "appDataWrite": false
+                    }
+                }),
+                Some(7),
+                "succeeded",
+            )
+            .unwrap();
+        assert_eq!(
+            incomplete_claim["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "blocked" },
+                { "operationId": "required.second", "outcome": "blocked" }
+            ])
+        );
+
+        let mut privileged_plan = plan.clone();
+        privileged_plan["runtime_capabilities"]["root_shell"] = Value::Bool(true);
+        assert!(
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &privileged_plan,
+                &plan_digest,
+                &json!({
+                    "planId": "plan.restricted",
+                    "status": "succeeded",
+                    "recipes": [
+                        { "recipeId": "required.first", "status": "succeeded" },
+                        { "recipeId": "required.second", "status": "succeeded" }
+                    ]
+                }),
+                &runtime,
+                Some(7),
+                "succeeded",
+            )
+            .is_err()
+        );
+
+        let stale_runtime = json!({
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 8,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+        assert!(
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &plan,
+                &plan_digest,
+                &json!({
+                    "planId": "plan.restricted",
+                    "status": "succeeded",
+                    "recipes": [
+                        { "recipeId": "required.first", "status": "succeeded" },
+                        { "recipeId": "required.second", "status": "succeeded" }
+                    ]
+                }),
+                &stale_runtime,
+                Some(7),
+                "succeeded",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restricted_qualification_claim_binds_observed_terminal_status_and_keeps_failures() {
+        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+            &[],
+            &["required.first", "required.second"],
+        );
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.restricted",
+            "recipes": [
+                { "id": "required.first" },
+                { "id": "required.second" }
+            ],
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "steps": []
+        });
+        let plan_digest = canonical_json_digest(&plan).unwrap();
+        let report = json!({
+            "planId": "plan.restricted",
+            "status": "failed",
+            "recipes": [
+                { "recipeId": "required.first", "status": "failed" },
+                { "recipeId": "required.second", "status": "succeeded" }
+            ]
+        });
+        let runtime = json!({
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 7,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+
+        let claim = crate::qualification_session::restricted_qualification_claim_for_session(
+            &session,
+            &plan,
+            &plan_digest,
+            &report,
+            &runtime,
+            Some(7),
+            "failed",
+        )
+        .expect("matching failed terminal status should retain a failure claim");
+        assert_eq!(
+            claim["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "failed" },
+                { "operationId": "required.second", "outcome": "executed" }
+            ])
+        );
+        assert!(
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &plan,
+                &plan_digest,
+                &report,
+                &runtime,
+                Some(7),
+                "succeeded",
+            )
+            .is_err()
         );
     }
 
@@ -9952,6 +10452,7 @@ pub(crate) mod tests {
                     state,
                     &mapping,
                     &report,
+                    "succeeded",
                     "2026-10-03T12:00:00Z",
                 );
                 terminal_done_tx
@@ -10024,9 +10525,15 @@ pub(crate) mod tests {
             "recipes": []
         });
 
-        retain_terminal_real_execution(state, &mapping, &report, "2026-10-03T12:00:00Z")
-            .expect("the terminal product transition should be retained")
-            .expect("the terminal product transition should be new");
+        retain_terminal_real_execution(
+            state,
+            &mapping,
+            &report,
+            "succeeded",
+            "2026-10-03T12:00:00Z",
+        )
+        .expect("the terminal product transition should be retained")
+        .expect("the terminal product transition should be new");
         crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
             state,
             &json!({ "devices": [] }),
@@ -10074,9 +10581,15 @@ pub(crate) mod tests {
             "errors": [],
             "recipes": []
         });
-        retain_terminal_real_execution(&state, &mapping, &report, "2026-10-03T12:00:00Z")
-            .expect("the product terminal result should be retained")
-            .expect("the terminal transition should be new");
+        retain_terminal_real_execution(
+            &state,
+            &mapping,
+            &report,
+            "succeeded",
+            "2026-10-03T12:00:00Z",
+        )
+        .expect("the product terminal result should be retained")
+        .expect("the terminal transition should be new");
 
         std::fs::write(&recipe_path, b"id: test.recipe\n").unwrap();
         let error = safe_error("runtime_session_lost", "the runtime session is gone");

@@ -367,6 +367,7 @@ pub(crate) enum StepFailureKind {
     DeviceIdentityUnverified(identity::IdentityCheckPhase),
     RootAuthorityRevoked,
     RootAuthorityUnverified,
+    RestrictedExecutionDenied,
     RootDenied,
     RootUnavailable,
     InstallSigningRejected,
@@ -392,6 +393,7 @@ impl StepFailureKind {
                 | Self::DeviceIdentityUnverified(_)
                 | Self::RootAuthorityRevoked
                 | Self::RootAuthorityUnverified
+                | Self::RestrictedExecutionDenied
         )
     }
 
@@ -433,6 +435,7 @@ pub(crate) enum DeviceOperationKind {
     DeviceIdentityUnverified(identity::IdentityCheckPhase),
     RootAuthorityRevoked,
     RootAuthorityUnverified,
+    RestrictedExecutionDenied,
     RootDenied,
     RootUnavailable,
     InstallSigningRejected,
@@ -457,6 +460,7 @@ impl DeviceOperationKind {
                 | Self::DeviceIdentityUnverified(_)
                 | Self::RootAuthorityRevoked
                 | Self::RootAuthorityUnverified
+                | Self::RestrictedExecutionDenied
         )
     }
     /// Returns whether a failed request may outlive its local ADB client.
@@ -6142,6 +6146,29 @@ pub(crate) fn reviewed_plan_requires_root(plan: &ExecutionPlan) -> bool {
         .any(|step| plan_step_root_requirements(plan, step).any())
 }
 
+/// Reject plans that advertise or require a privileged strategy in a restricted launch.
+pub(crate) fn validate_restricted_execution_plan(plan: &ExecutionPlan) -> Result<(), String> {
+    let has_privileged_constraint = plan.steps.iter().any(|step| {
+        let (root_shell, app_data_write) = root_requirements::root_requirement_constraints(
+            step.constraints.capabilities.iter().map(String::as_str),
+        );
+        root_shell || app_data_write
+    });
+    if plan.runtime_capabilities.root_shell
+        || plan.runtime_capabilities.app_data_write
+        || plan.runtime_capabilities.root_shell_route.is_some()
+        || plan.device_context.root_shell_mode.is_some()
+        || has_privileged_constraint
+        || reviewed_plan_requires_root(plan)
+    {
+        return Err(
+            "Restricted execution does not allow root-dependent steps or root-shell capabilities."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn reviewed_root_authorized(plan: &ExecutionPlan) -> bool {
     if !reviewed_plan_requires_root(plan) {
         return false;
@@ -7036,6 +7063,17 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
             DeviceOperationKind::DeviceIdentityUnverified(phase),
             phase,
         ),
+        adb::AdbCommandError::RestrictedExecutionIdentityUnverified { phase } => {
+            DeviceOperationError::identity(
+                DeviceOperationKind::DeviceIdentityUnverified(phase),
+                phase,
+            )
+        }
+        adb::AdbCommandError::RestrictedExecutionPrivilegedEffectDenied => DeviceOperationError {
+            kind: DeviceOperationKind::RestrictedExecutionDenied,
+            message: "Restricted execution denied a privileged device operation.".to_string(),
+            cleanup: None,
+        },
         adb::AdbCommandError::ProcessFailed { cleanup, .. } => DeviceOperationError {
             kind: DeviceOperationKind::ProcessFailed,
             message: "The device process failed before a trustworthy result was available."
@@ -7783,6 +7821,9 @@ impl From<DeviceOperationError> for StepFailure {
             }
             DeviceOperationKind::RootAuthorityUnverified => {
                 Some(StepFailureKind::RootAuthorityUnverified)
+            }
+            DeviceOperationKind::RestrictedExecutionDenied => {
+                Some(StepFailureKind::RestrictedExecutionDenied)
             }
             DeviceOperationKind::RootDenied => Some(StepFailureKind::RootDenied),
             DeviceOperationKind::RootUnavailable => Some(StepFailureKind::RootUnavailable),

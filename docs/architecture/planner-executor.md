@@ -80,6 +80,51 @@ still checks its other required capabilities. `policy.on_failure` controls how
 applicable permission-action failures are reported; it does not determine
 operation selection.
 
+## Qualification-only capability restriction
+
+The qualification restriction is a trusted policy set at launch. The clean
+qualification launcher parses and forwards `--restrict-privileged-execution`
+when requested. It uses standard qualification by default.
+The native app must accept that request only when its debug,
+`real-execution`, runtime opt-in and embedded clean-build gates pass. The
+sidecar must independently require debug, `real-execution` and matching
+embedded qualification source identity, and verify the effective policy during
+the private handshake. The setting is fixed for the process lifetime. Changing
+it requires a relaunch and fresh current-session profile resolution, planning
+and review.
+
+Rust remains the authority for the plan. Restriction monotonically removes
+`root_shell` and `app_data_write` from effective capabilities and prevents
+direct-root or OEM-assisted strategies. Device observations retain actual
+root and OEM eligibility facts. Ordinary unprivileged ADB remains the only
+execution strategy. Required operation and dependency checks continue to
+apply, including the typed omission rule for optional elevated permissions.
+
+Restricted review must use a bounded, one-use sidecar authority for the retained
+Rust planning result. It binds the plan digest, mode, exact target, sidecar
+generation, restriction and ordinary ADB strategy. Tauri retains it with the
+current profile selection, catalog, device epoch and Platform-Tools identity.
+Start must consume the authority and pass the same policy to the worker. The
+worker and ADB adapter must reject privileged routes and require the ordinary
+shell identity where device operations need it. Missing, stale, mismatched or
+lost authority fails closed. Existing start-reservation, uncertain-outcome,
+mandatory-operation, copy-review, configuration and cancellation protections
+continue to govern the restricted run.
+
+Restricted CopyCommit streams ordinary staged files and the helper through
+ADB shell. The adapter gates the route on the ADB daemon and checks the shell
+UID and security context in the same command that writes the stream. It also
+checks the digest derived from the Android ID and build fingerprint before
+opening the staging destination. Raw sync or directory transfers can fail
+when the adapter cannot establish a guarded ordinary route.
+
+Qualification evidence must record the accepted review and terminal report with
+source/build identity, target, profile and plan, observed root, effective
+capabilities, strategy, reviewed digest, required operation identities and
+outcomes. The bundle validator must accept a restricted-unprivileged claim only
+when these facts agree. Historical bundles remain readable and do not acquire
+that classification without the attestation. Physical acceptance is `NOT RUN`.
+
 Distinct Recipes may write to overlapping App Targets, shared paths, and Setup
 Locations. Overlap alone does not make the plan invalid or trigger a semantic
 compatibility check. Overlapping writers from the same Recipe remain blocked;

@@ -151,8 +151,18 @@ fn handle_validated_sidecar_object(
             handle_set_user_configuration_authored_root(object, sessions)
         }
         "closeUserConfiguration" => handle_close_user_configuration(object, sessions),
-        "describeConfiguration" => handle_describe_configuration(object),
-        "planConfiguration" => handle_plan_configuration(object),
+        "describeConfiguration" => handle_runtime_configuration_request(
+            object,
+            false,
+            sessions.executions().restrict_privileged_execution(),
+            Some(sessions),
+        ),
+        "planConfiguration" => handle_runtime_configuration_request(
+            object,
+            true,
+            sessions.executions().restrict_privileged_execution(),
+            Some(sessions),
+        ),
         "prepareExecutionReview" => handle_prepare_execution_review(object, sessions),
         "startExecution" => handle_start_execution(object, sessions),
         "getExecution" => handle_get_execution(object, sessions),
@@ -281,6 +291,13 @@ fn handle_sidecar_hello(
     sessions: &DocumentSessionManager,
 ) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
+    let restricted = sessions.executions().restrict_privileged_execution();
+    if restricted && !payload.contains_key("runtimeGeneration") {
+        return Err(ApiError::invalid_request_with_details(
+            "Restricted execution hello must match the native runtime generation.",
+            json!({ "field": "runtimeGeneration" }),
+        ));
+    }
     if let Some(value) = payload.get("runtimeGeneration") {
         let runtime_generation = value.as_u64().ok_or_else(|| {
             ApiError::invalid_request_with_details(
@@ -292,7 +309,26 @@ fn handle_sidecar_hello(
             .executions()
             .set_runtime_generation(runtime_generation)?;
     }
-    Ok(envelope::success(protocol::hello_result()))
+    let runtime_generation = sessions.executions().runtime_generation();
+    if restricted && runtime_generation.is_none() {
+        return Err(ApiError::invalid_request_with_details(
+            "Restricted execution requires a positive native runtime generation.",
+            json!({ "field": "runtimeGeneration" }),
+        ));
+    }
+    let mut result = protocol::hello_result();
+    let mut execution_restriction = json!({
+        "enabled": restricted,
+        "buildIdentity": sessions.executions().restricted_build_identity(),
+        "runtimeGeneration": runtime_generation,
+        "strategy": "adb_shell",
+    });
+    if restricted {
+        execution_restriction["rootShell"] = json!(false);
+        execution_restriction["appDataWrite"] = json!(false);
+    }
+    result["executionRestriction"] = execution_restriction;
+    Ok(envelope::success(result))
 }
 
 fn handle_prepare_execution_review(
@@ -332,6 +368,24 @@ fn handle_prepare_execution_review(
         }
     };
     let target = optional_target_device(payload, "targetDevice")?;
+    let restricted = sessions.executions().restrict_privileged_execution();
+    let plan_authority_id = match payload.get("executionRestrictionPlanAuthorityId") {
+        Some(Value::String(value)) if restricted && !value.is_empty() => Some(value.as_str()),
+        None if !restricted => None,
+        _ => {
+            return Err(ApiError::invalid_request_with_details(
+                "Restricted review requires the private authority issued with its plan.",
+                json!({ "field": "executionRestrictionPlanAuthorityId" }),
+            ));
+        }
+    };
+    if let Some(authority_id) = plan_authority_id {
+        sessions.executions().consume_restricted_plan_authority(
+            authority_id,
+            &plan,
+            target.as_ref(),
+        )?;
+    }
     let storage_targets = match payload.get("storageTargets") {
         Some(value) => serde_json::from_value::<Vec<crate::storage_targets::StorageTargetBinding>>(
             value.clone(),
@@ -806,7 +860,11 @@ fn validate_prepare_execution_review_payload(object: &Map<String, Value>) -> Res
     for field in payload.keys() {
         if !matches!(
             field.as_str(),
-            "plan" | "mode" | "targetDevice" | "storageTargets"
+            "plan"
+                | "mode"
+                | "targetDevice"
+                | "storageTargets"
+                | "executionRestrictionPlanAuthorityId"
         ) {
             return Err(ApiError::invalid_request_with_details(
                 format!("Request field '{field}' is not supported for review preparation."),
@@ -1019,7 +1077,7 @@ fn handle_validate_user_configuration_path(object: &Map<String, Value>) -> Resul
 }
 
 fn handle_describe_configuration(object: &Map<String, Value>) -> Result<Value, ApiError> {
-    handle_runtime_configuration_request(object, false)
+    handle_runtime_configuration_request(object, false, false, None)
 }
 
 fn handle_describe_catalog(object: &Map<String, Value>) -> Result<Value, ApiError> {
@@ -1781,14 +1839,29 @@ fn handle_match_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
 }
 
 fn handle_plan_configuration(object: &Map<String, Value>) -> Result<Value, ApiError> {
-    handle_runtime_configuration_request(object, true)
+    handle_runtime_configuration_request(object, true, false, None)
 }
 
 fn handle_runtime_configuration_request(
     object: &Map<String, Value>,
     plan: bool,
+    restrict_privileged_execution: bool,
+    sessions: Option<&DocumentSessionManager>,
 ) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
+    for forbidden in [
+        "restrictPrivilegedExecution",
+        "executionRestriction",
+        "qualificationSourceIdentity",
+        "executionRestrictionPlanAuthorityId",
+    ] {
+        if payload.contains_key(forbidden) {
+            return Err(ApiError::invalid_request_with_details(
+                format!("Request field '{forbidden}' is controlled by sidecar startup."),
+                json!({ "field": forbidden }),
+            ));
+        }
+    }
     let catalog = resolved_catalog(payload, true)?;
     let configuration_root = optional_string(payload, "configurationRoot")?;
     let user_configuration = optional_user_configuration_source(payload)?;
@@ -1816,8 +1889,12 @@ fn handle_runtime_configuration_request(
         target_device,
         runtime_capability_availability,
     };
-    let result = if plan {
-        runtime_configuration::plan_configuration(request).and_then(|result| {
+    let mut result = if plan {
+        runtime_configuration::plan_configuration_with_restriction(
+            request,
+            restrict_privileged_execution,
+        )
+        .and_then(|result| {
             serde_json::to_value(result).map_err(|error| {
                 runtime_configuration::ConfigurationContextError::Catalog(
                     crate::planner::PlannerLoadError::new(
@@ -1828,7 +1905,11 @@ fn handle_runtime_configuration_request(
             })
         })
     } else {
-        runtime_configuration::describe_configuration(request).and_then(|result| {
+        runtime_configuration::describe_configuration_with_restriction(
+            request,
+            restrict_privileged_execution,
+        )
+        .and_then(|result| {
             serde_json::to_value(result).map_err(|error| {
                 runtime_configuration::ConfigurationContextError::Catalog(
                     crate::planner::PlannerLoadError::new(
@@ -1845,6 +1926,30 @@ fn handle_runtime_configuration_request(
             json!({ "operation": if plan { "planConfiguration" } else { "describeConfiguration" } }),
         )
     })?;
+    if plan && restrict_privileged_execution {
+        let plan_value = result.get("plan").filter(|value| !value.is_null());
+        if let Some(plan_value) = plan_value {
+            let reviewed_plan =
+                crate::cli::parse_execution_plan_json(plan_value).map_err(|_| {
+                    ApiError::new(
+                        crate::errors::ApiErrorCode::InvalidExecutionPlan,
+                        "Restricted planner output could not be validated.",
+                        json!({ "field": "plan" }),
+                    )
+                })?;
+            let sessions = sessions.ok_or_else(|| {
+                ApiError::new(
+                    crate::errors::ApiErrorCode::InternalError,
+                    "Restricted execution authority is unavailable outside the sidecar session.",
+                    json!({}),
+                )
+            })?;
+            let authority_id = sessions
+                .executions()
+                .retain_restricted_plan_authority(&reviewed_plan)?;
+            result["executionRestrictionPlanAuthorityId"] = json!(authority_id);
+        }
+    }
     Ok(envelope::success(result))
 }
 
@@ -2750,6 +2855,52 @@ steps:
     }
 
     #[test]
+    fn restricted_hello_requires_the_exact_native_startup_generation() {
+        let mut sessions = crate::session::DocumentSessionManager::with_runtime_startup_policy(
+            crate::execution_session::SidecarRuntimeConfig::default(),
+            Some("trusted-build-identity".to_string()),
+            Some(7),
+        );
+        let missing = handle_sidecar_value(
+            json!({ "id": "missing-generation", "type": "hello", "payload": {} }),
+            &mut sessions,
+        );
+        assert_eq!(missing["ok"], false);
+        assert_eq!(missing["error"]["details"]["field"], "runtimeGeneration");
+        assert_eq!(sessions.executions().runtime_generation(), Some(7));
+
+        let changed = handle_sidecar_value(
+            json!({
+                "id": "changed-generation",
+                "type": "hello",
+                "payload": { "runtimeGeneration": 8 },
+            }),
+            &mut sessions,
+        );
+        assert_eq!(changed["ok"], false);
+        assert_eq!(sessions.executions().runtime_generation(), Some(7));
+
+        let exact = handle_sidecar_value(
+            json!({
+                "id": "exact-generation",
+                "type": "hello",
+                "payload": { "runtimeGeneration": 7 },
+            }),
+            &mut sessions,
+        );
+        assert_eq!(exact["ok"], true);
+        assert_eq!(
+            exact["result"]["executionRestriction"]["runtimeGeneration"],
+            7
+        );
+        assert_eq!(exact["result"]["executionRestriction"]["rootShell"], false);
+        assert_eq!(
+            exact["result"]["executionRestriction"]["appDataWrite"],
+            false
+        );
+    }
+
+    #[test]
     fn retire_setup_location_attempt_dispatches_through_the_trusted_session_manager() {
         let mut sessions = crate::session::DocumentSessionManager::default();
         sessions.executions().set_runtime_generation(7).unwrap();
@@ -3634,5 +3785,63 @@ steps:
                 .and_then(Value::as_str),
             Some(app_target_path)
         );
+    }
+
+    #[test]
+    fn restricted_one_shot_jsonl_rejects_private_policy_and_sidecar_authority_fields() {
+        for field in [
+            "restrictPrivilegedExecution",
+            "executionRestriction",
+            "qualificationSourceIdentity",
+            "executionRestrictionPlanAuthorityId",
+        ] {
+            let mut payload = serde_json::Map::new();
+            payload.insert(field.to_string(), json!(true));
+            let response = handle_one_shot_value(json!({
+                "type": "planConfiguration",
+                "payload": payload,
+            }));
+
+            assert_eq!(response["ok"], false, "{field}: {response:#}");
+            assert_eq!(response["error"]["details"]["field"], field);
+        }
+
+        for request_type in ["prepareExecutionReview", "startExecution"] {
+            let response = handle_one_shot_value(json!({
+                "type": request_type,
+                "payload": { "reviewAuthorityId": "forged-review-authority" },
+            }));
+            assert_eq!(response["ok"], false, "{request_type}: {response:#}");
+        }
+    }
+
+    #[test]
+    fn restricted_sidecar_planning_rejects_client_supplied_policy_and_plan_authority() {
+        let mut sessions = crate::session::DocumentSessionManager::with_runtime_startup_policy(
+            crate::execution_session::SidecarRuntimeConfig::default(),
+            Some("trusted-build-identity".to_string()),
+            Some(7),
+        );
+
+        for field in [
+            "restrictPrivilegedExecution",
+            "executionRestriction",
+            "qualificationSourceIdentity",
+            "executionRestrictionPlanAuthorityId",
+        ] {
+            let mut payload = serde_json::Map::new();
+            payload.insert(field.to_string(), json!(true));
+            let response = handle_sidecar_value(
+                json!({
+                    "id": format!("forged-{field}"),
+                    "type": "planConfiguration",
+                    "payload": payload,
+                }),
+                &mut sessions,
+            );
+
+            assert_eq!(response["ok"], false, "{field}: {response:#}");
+            assert_eq!(response["error"]["details"]["field"], field);
+        }
     }
 }

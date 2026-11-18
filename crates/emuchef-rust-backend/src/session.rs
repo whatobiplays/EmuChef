@@ -275,6 +275,22 @@ impl DocumentSessionManager {
         }
     }
 
+    /// Build process-local execution state from trusted sidecar startup identity.
+    pub(crate) fn with_runtime_startup_policy(
+        config: SidecarRuntimeConfig,
+        restricted_build_identity: Option<String>,
+        runtime_generation: Option<u64>,
+    ) -> Self {
+        Self {
+            executions: ExecutionSessionManager::new_with_startup_policy(
+                config,
+                restricted_build_identity,
+                runtime_generation,
+            ),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn executions(&self) -> &ExecutionSessionManager {
         &self.executions
     }

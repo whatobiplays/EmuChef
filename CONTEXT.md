@@ -198,6 +198,40 @@ This document is the standalone current-state contract for the repository.
 
 ## Product
 
+### Qualification-only restricted execution
+
+The approved capability restriction is internal to clean development
+qualification. The launcher forwards `--restrict-privileged-execution` when
+requested and uses standard qualification by default. The native app accepts
+the restriction only when its debug,
+`real-execution`, runtime opt-in and embedded clean-build gates pass. The
+sidecar independently requires debug, `real-execution` and matching embedded
+qualification source identity, then verifies the effective policy during the
+private handshake. The restriction is fixed for the process lifetime. Changing it
+requires a relaunch, current-session profile resolution, fresh planning and
+fresh review.
+
+When the restriction is active, the contract requires Rust to apply it to the
+authoritative plan after authored support and observed availability. It
+removes effective `root_shell` and
+`app_data_write`, and excludes direct-root and OEM-assisted strategies while
+preserving actual root observations and OEM eligibility. Ordinary
+unprivileged ADB remains the only execution strategy. A one-use sidecar review
+authority must bind the retained Rust plan, digest, mode, exact target,
+sidecar generation and strategy. The worker and ADB adapter must enforce the
+same policy and reject privileged dispatch. Restricted evidence must attest the accepted
+source/build identity, target, profile and plan, observed root, effective
+capabilities, reviewed digest, strategy, required operations and outcomes.
+
+Restricted CopyCommit sends staged files and its helper through ordinary ADB
+shell streaming with device and shell identity checks before opening the
+staging destinations. Raw sync and directory transfers can fail when the
+adapter cannot establish a guarded ordinary route.
+
+Physical acceptance is `NOT RUN` pending separate authorization and a physical
+run. Success under the restricted path qualifies only the tested unprivileged
+workflow. OEM-assisted execution requires separate on-runner evidence.
+
 Native Device Profile resolution retains one opaque resolution handle and one selected-profile handle per current setup session. Every authored profile participates independently of Device Plans, including profiles with no plans. Known conflicts exclude a profile; missing declared evidence leaves it incomplete. A plausible incomplete non-generic competitor blocks model resolution even when another profile is eligible. Multiple eligible non-generics require an affirmative user choice regardless of rank or confidence. Generics require complete independent evidence and their explicit limitations acknowledgment. Profile auto-resolution does not select arbitrarily among multiple plans.
 
 Descriptions, input contracts and pickers, Setup Locations, review and both execution modes require the current native selection. Explicit changes consume the resolution token; switching A to B and back to A does not restore A's old authority. Material device/session, firmware/eligibility, catalog, runtime, Platform-Tools or qualification changes retire selection and review with safe retry guidance. Equivalent observations preserve selection. Active or uncertain execution blocks automatic and explicit profile changes without deleting unresolved records. Saved intent remains staged until fresh same-profile selection and compatibility revalidation; changing profiles starts a clean setup and preserves existing saved files. Compatibility warnings cannot authorize automatic restoration through a retargeted plan ID. See the [runtime ownership boundary](docs/architecture/runtime-ownership.md#device-profile-selection-authority).

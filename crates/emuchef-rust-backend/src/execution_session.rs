@@ -219,27 +219,55 @@ struct ExecutionRecord {
 struct ExecutionState {
     next_execution_id: u64,
     active_execution_id: Option<String>,
+    runtime_generation: Option<u64>,
     records: HashMap<String, ExecutionRecord>,
-    pending_copy_review_authorities: HashMap<String, PreparedCopyReviewAuthority>,
-    copy_review_authority_order: VecDeque<String>,
+    pending_restricted_plan_authorities: HashMap<String, RestrictedPlanAuthority>,
+    restricted_plan_authority_order: VecDeque<String>,
+    pending_execution_review_authorities: HashMap<String, PreparedExecutionReviewAuthority>,
+    execution_review_authority_order: VecDeque<String>,
 }
 
-/// Keeps one prepared configuration-create plan bound to the sandbox root recorded in its digest.
+/// Keeps a Rust-produced plan bound to its digest, target, and sidecar generation.
 #[derive(Debug)]
-struct PreparedCopyReviewAuthority {
+struct RestrictedPlanAuthority {
+    plan_digest: String,
+    target: Option<TargetDeviceBinding>,
+    runtime_generation: u64,
+}
+
+/// Keeps one reviewed execution bound to its plan, target, generation, and optional sandbox.
+#[derive(Debug)]
+struct PreparedExecutionReviewAuthority {
     plan_digest: String,
     mode: ExecutionMode,
     target: Option<TargetDeviceBinding>,
-    sandbox_root: PathBuf,
+    sandbox_root: Option<PathBuf>,
+    restricted_runtime_generation: Option<u64>,
 }
 
-/// Matches the number of reviewed plans Tauri retains at once.
-const MAX_PENDING_COPY_REVIEW_AUTHORITIES: usize = 16;
-static NEXT_COPY_REVIEW_AUTHORITY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Bounds plan and review authority state to the native review capacity.
+const MAX_PENDING_RESTRICTED_PLAN_AUTHORITIES: usize = 16;
+const MAX_PENDING_EXECUTION_REVIEW_AUTHORITIES: usize = 16;
+static NEXT_EXECUTION_REVIEW_AUTHORITY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static NEXT_RESTRICTED_PLAN_AUTHORITY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-fn next_copy_review_authority_id() -> String {
-    let sequence = NEXT_COPY_REVIEW_AUTHORITY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("copy-review-{}-{sequence}", std::process::id())
+fn next_execution_review_authority_id(runtime_generation: Option<u64>) -> String {
+    let sequence = NEXT_EXECUTION_REVIEW_AUTHORITY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let generation = runtime_generation
+        .map(|generation| generation.to_string())
+        .unwrap_or_else(|| "unbound".to_string());
+    format!(
+        "execution-review-{}-{generation}-{sequence}",
+        std::process::id()
+    )
+}
+
+fn next_restricted_plan_authority_id(runtime_generation: u64) -> String {
+    let sequence = NEXT_RESTRICTED_PLAN_AUTHORITY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "execution-plan-{}-{runtime_generation}-{sequence}",
+        std::process::id()
+    )
 }
 
 #[derive(Debug, Default)]
@@ -261,6 +289,16 @@ pub(crate) struct SetupLocationLeaseRegistry {
 }
 
 impl SetupLocationLeaseRegistry {
+    fn with_runtime_generation(runtime_generation: u64) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SetupLocationLeaseRegistryState {
+                runtime_generation: Some(runtime_generation),
+                ..SetupLocationLeaseRegistryState::default()
+            })),
+            registry_poisoned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub(crate) fn set_runtime_generation(&self, runtime_generation: u64) -> Result<(), ApiError> {
         if runtime_generation == 0 {
             return Err(setup_location_lease_error(
@@ -572,6 +610,7 @@ fn acquire_execution_slot_locked(
 #[derive(Clone, Debug)]
 pub struct ExecutionSessionManager {
     config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
     state: Arc<Mutex<ExecutionState>>,
     setup_location_leases: SetupLocationLeaseRegistry,
 }
@@ -584,16 +623,132 @@ impl Default for ExecutionSessionManager {
 
 impl ExecutionSessionManager {
     pub fn new(config: SidecarRuntimeConfig) -> Self {
+        Self::new_with_restriction(config, None)
+    }
+
+    pub(crate) fn new_with_restriction(
+        config: SidecarRuntimeConfig,
+        restricted_build_identity: Option<String>,
+    ) -> Self {
+        Self::new_with_startup_policy(config, restricted_build_identity, None)
+    }
+
+    pub(crate) fn new_with_startup_policy(
+        config: SidecarRuntimeConfig,
+        restricted_build_identity: Option<String>,
+        runtime_generation: Option<u64>,
+    ) -> Self {
+        let setup_location_leases = runtime_generation.map_or_else(
+            SetupLocationLeaseRegistry::default,
+            SetupLocationLeaseRegistry::with_runtime_generation,
+        );
         Self {
             config,
-            state: Arc::new(Mutex::new(ExecutionState::default())),
-            setup_location_leases: SetupLocationLeaseRegistry::default(),
+            restricted_build_identity,
+            state: Arc::new(Mutex::new(ExecutionState {
+                runtime_generation,
+                ..ExecutionState::default()
+            })),
+            setup_location_leases,
         }
+    }
+
+    pub(crate) fn restrict_privileged_execution(&self) -> bool {
+        self.restricted_build_identity.is_some()
+    }
+
+    pub(crate) fn restricted_build_identity(&self) -> Option<&str> {
+        self.restricted_build_identity.as_deref()
+    }
+
+    pub(crate) fn runtime_generation(&self) -> Option<u64> {
+        lock(&self.state).runtime_generation
     }
 
     pub(crate) fn set_runtime_generation(&self, runtime_generation: u64) -> Result<(), ApiError> {
         self.setup_location_leases
-            .set_runtime_generation(runtime_generation)
+            .set_runtime_generation(runtime_generation)?;
+        let mut state = lock(&self.state);
+        match state.runtime_generation {
+            None => state.runtime_generation = Some(runtime_generation),
+            Some(current) if current == runtime_generation => {}
+            Some(_) => return Err(restricted_plan_authority_error()),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retain_restricted_plan_authority(
+        &self,
+        plan: &ExecutionPlan,
+    ) -> Result<String, ApiError> {
+        if !self.restrict_privileged_execution() {
+            return Err(restricted_plan_authority_error());
+        }
+        let plan_digest = crate::plan_digest::execution_plan_digest(plan).map_err(|_| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                "Execution plan could not be canonically hashed.",
+                json!({ "field": "plan" }),
+            )
+        })?;
+        let mut state = lock(&self.state);
+        let runtime_generation = state
+            .runtime_generation
+            .ok_or_else(restricted_plan_authority_error)?;
+        let authority_id = next_restricted_plan_authority_id(runtime_generation);
+        while state.pending_restricted_plan_authorities.len()
+            >= MAX_PENDING_RESTRICTED_PLAN_AUTHORITIES
+        {
+            let Some(expired) = state.restricted_plan_authority_order.pop_front() else {
+                break;
+            };
+            state.pending_restricted_plan_authorities.remove(&expired);
+        }
+        state.pending_restricted_plan_authorities.insert(
+            authority_id.clone(),
+            RestrictedPlanAuthority {
+                plan_digest,
+                target: plan.target_device.clone(),
+                runtime_generation,
+            },
+        );
+        state
+            .restricted_plan_authority_order
+            .push_back(authority_id.clone());
+        Ok(authority_id)
+    }
+
+    pub(crate) fn consume_restricted_plan_authority(
+        &self,
+        authority_id: &str,
+        plan: &ExecutionPlan,
+        target: Option<&TargetDeviceBinding>,
+    ) -> Result<(), ApiError> {
+        if !self.restrict_privileged_execution() {
+            return Err(restricted_plan_authority_error());
+        }
+        let plan_digest = crate::plan_digest::execution_plan_digest(plan).map_err(|_| {
+            ApiError::new(
+                ApiErrorCode::InvalidExecutionPlan,
+                "Execution plan could not be canonically hashed.",
+                json!({ "field": "plan" }),
+            )
+        })?;
+        let mut state = lock(&self.state);
+        let authority = state
+            .pending_restricted_plan_authorities
+            .remove(authority_id)
+            .ok_or_else(restricted_plan_authority_error)?;
+        state
+            .restricted_plan_authority_order
+            .retain(|queued| queued != authority_id);
+        if authority.plan_digest != plan_digest
+            || authority.target.as_ref() != target
+            || authority.runtime_generation != state.runtime_generation.unwrap_or_default()
+        {
+            return Err(restricted_plan_authority_error());
+        }
+        Ok(())
     }
 
     pub(crate) fn revoke_setup_location_lease(
@@ -683,6 +838,15 @@ impl ExecutionSessionManager {
         setup_location_lease_context: Option<SetupLocationExecutionLease>,
         review_authority_id: Option<String>,
     ) -> Result<Value, ApiError> {
+        if self.restrict_privileged_execution() {
+            crate::executor::validate_restricted_execution_plan(&plan).map_err(|message| {
+                ApiError::new(
+                    ApiErrorCode::InvalidExecutionPlan,
+                    message,
+                    json!({ "field": "plan" }),
+                )
+            })?;
+        }
         crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
             ApiError::new(
                 ApiErrorCode::InvalidExecutionPlan,
@@ -729,10 +893,12 @@ impl ExecutionSessionManager {
             &actual_digest,
         )?;
 
-        let requires_review_authority = mode == ExecutionMode::DryRun
+        let requires_copy_review_authority = mode == ExecutionMode::DryRun
             && crate::executor::plan_requires_retroarch_config_create(&plan);
+        let requires_review_authority =
+            self.restrict_privileged_execution() || requires_copy_review_authority;
         if requires_review_authority != review_authority_id.is_some() {
-            return Err(copy_review_authority_error());
+            return Err(execution_review_authority_error());
         }
 
         let (execution_id, report, cancel_requested, slot_lease, mutation_lease, attempt_root) = {
@@ -744,20 +910,31 @@ impl ExecutionSessionManager {
                     json!({ "activeExecutionId": active }),
                 ));
             }
-            let reviewed_sandbox = match review_authority_id.as_deref() {
+            let reviewed_authority = match review_authority_id.as_deref() {
                 Some(authority_id) => {
                     let prepared = state
-                        .pending_copy_review_authorities
+                        .pending_execution_review_authorities
                         .remove(authority_id)
-                        .ok_or_else(copy_review_authority_error)?;
+                        .ok_or_else(execution_review_authority_error)?;
                     state
-                        .copy_review_authority_order
+                        .execution_review_authority_order
                         .retain(|queued| queued != authority_id);
+                    let required_generation = if self.restrict_privileged_execution() {
+                        Some(
+                            state
+                                .runtime_generation
+                                .ok_or_else(execution_review_authority_error)?,
+                        )
+                    } else {
+                        None
+                    };
                     if prepared.plan_digest != actual_digest
                         || prepared.mode != mode
                         || prepared.target != target
+                        || prepared.restricted_runtime_generation != required_generation
+                        || (requires_copy_review_authority && prepared.sandbox_root.is_none())
                     {
-                        return Err(copy_review_authority_error());
+                        return Err(execution_review_authority_error());
                     }
                     Some(prepared)
                 }
@@ -765,8 +942,8 @@ impl ExecutionSessionManager {
             };
             let prospective_number = state.next_execution_id + 1;
             let execution_id = format!("execution-{prospective_number}");
-            let attempt_root = reviewed_sandbox
-                .map(|prepared| prepared.sandbox_root)
+            let attempt_root = reviewed_authority
+                .and_then(|prepared| prepared.sandbox_root)
                 .unwrap_or_else(|| {
                     self.config
                         .runtime_root
@@ -828,6 +1005,7 @@ impl ExecutionSessionManager {
         let lease_context = mutation_lease.as_ref().map(|lease| lease.context().clone());
         let state = Arc::clone(&self.state);
         let config = self.config.clone();
+        let restricted_execution = self.restrict_privileged_execution();
         let worker_execution_id = execution_id.clone();
         std::thread::spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -841,6 +1019,7 @@ impl ExecutionSessionManager {
                     attempt_root,
                     cancel_requested,
                     mutation_lease,
+                    restricted_execution,
                 )
             }));
             if let Some(context) = lease_context.as_ref() {
@@ -988,31 +1167,51 @@ impl ExecutionSessionManager {
     where
         F: FnOnce(String, Option<String>) -> crate::executor::adb::RealAdbDevice,
     {
-        if !crate::executor::plan_requires_copy_commit_preparation(&plan) {
+        let restricted = self.restrict_privileged_execution();
+        let requires_copy_preparation =
+            crate::executor::plan_requires_copy_commit_preparation(&plan);
+        if restricted {
+            crate::executor::validate_restricted_execution_plan(&plan).map_err(|message| {
+                ApiError::new(
+                    ApiErrorCode::InvalidExecutionPlan,
+                    format!("Restricted execution review failed: {message}"),
+                    json!({ "field": "plan" }),
+                )
+            })?;
+        }
+        if !requires_copy_preparation && !restricted {
             return Ok((plan, None));
         }
 
-        crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
-            ApiError::new(
-                ApiErrorCode::InvalidExecutionPlan,
-                format!("Copy review preparation failed: {message}"),
-                json!({ "field": "plan" }),
-            )
-        })?;
+        if requires_copy_preparation {
+            crate::executor::validate_supported_copy_plan(&plan).map_err(|message| {
+                ApiError::new(
+                    ApiErrorCode::InvalidExecutionPlan,
+                    format!("Copy review preparation failed: {message}"),
+                    json!({ "field": "plan" }),
+                )
+            })?;
+        }
 
         let target = preflight_target(&plan, mode, supplied_target, &self.config.adb_path)?;
-        if mode == ExecutionMode::Real && target.is_none() {
+        if mode == ExecutionMode::Real
+            && target.is_none()
+            && (requires_copy_preparation || restricted)
+        {
             return Err(ApiError::new(
                 ApiErrorCode::InvalidExecutionPlan,
-                "A selected device is required to prepare a real copy review.",
+                "A selected device is required to prepare this real execution review.",
                 json!({ "field": "targetDevice" }),
             ));
         }
 
-        let requires_retroarch_config_create =
-            crate::executor::plan_requires_retroarch_config_create(&plan);
-        let (review_id, review_root, fake_device_root) =
-            if mode == ExecutionMode::DryRun && requires_retroarch_config_create {
+        let mut sandbox_root = None;
+        if requires_copy_preparation {
+            let requires_retroarch_config_create =
+                crate::executor::plan_requires_retroarch_config_create(&plan);
+            let (review_id, review_root, fake_device_root) = if mode == ExecutionMode::DryRun
+                && requires_retroarch_config_create
+            {
                 let review_root_parent = self.config.runtime_root.join("copy-review-preparation");
                 std::fs::create_dir_all(&review_root_parent).map_err(|error| {
                     ApiError::new(
@@ -1022,7 +1221,7 @@ impl ExecutionSessionManager {
                     )
                 })?;
                 let (review_id, review_root) = loop {
-                    let review_id = next_copy_review_authority_id();
+                    let review_id = next_execution_review_authority_id(None);
                     let review_root = review_root_parent.join(&review_id);
                     match std::fs::create_dir(&review_root) {
                         Ok(()) => break (review_id, review_root),
@@ -1057,71 +1256,93 @@ impl ExecutionSessionManager {
                 })?;
                 (None, review_root, fake_device_root)
             };
-        let read_only_roots = read_only_roots(&plan);
-        let preparation = match mode {
-            ExecutionMode::DryRun => {
-                let adapters = ExecutorAdapters::<FakeDryRunDevice>::with_sandbox_roots(
-                    review_root.clone(),
-                    self.config.cache_root.clone(),
-                    fake_device_root.clone(),
-                    read_only_roots,
-                );
-                prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
+            let read_only_roots = read_only_roots(&plan);
+            let preparation = match mode {
+                ExecutionMode::DryRun => {
+                    let adapters = ExecutorAdapters::<FakeDryRunDevice>::with_sandbox_roots(
+                        review_root.clone(),
+                        self.config.cache_root.clone(),
+                        fake_device_root.clone(),
+                        read_only_roots,
+                    );
+                    prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
+                }
+                ExecutionMode::Real => {
+                    let serial = target.as_ref().map(|binding| binding.serial.clone());
+                    let mut device = real_device_factory(self.config.adb_path.clone(), serial);
+                    device.configure_restricted_execution(restricted);
+                    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+                        device,
+                        review_root.clone(),
+                        self.config.cache_root.clone(),
+                        fake_device_root.clone(),
+                        read_only_roots,
+                        true,
+                    );
+                    prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
+                }
+            };
+            preparation.map_err(|message| {
+                ApiError::new(
+                    ApiErrorCode::InvalidExecutionPlan,
+                    format!("Copy review preparation failed: {message}"),
+                    json!({ "field": "plan" }),
+                )
+            })?;
+            if retain_dry_run_authority && mode == ExecutionMode::DryRun {
+                sandbox_root = Some(review_root);
             }
-            ExecutionMode::Real => {
-                let serial = target.as_ref().map(|binding| binding.serial.clone());
-                let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
-                    real_device_factory(self.config.adb_path.clone(), serial),
-                    review_root.clone(),
-                    self.config.cache_root.clone(),
-                    fake_device_root.clone(),
-                    read_only_roots,
-                    true,
-                );
-                prepare_copy_commit_snapshots(&mut plan, adapters, storage_targets)
-            }
-        };
-        preparation.map_err(|message| {
-            ApiError::new(
-                ApiErrorCode::InvalidExecutionPlan,
-                format!("Copy review preparation failed: {message}"),
-                json!({ "field": "plan" }),
-            )
-        })?;
-        let review_authority_id = if retain_dry_run_authority && mode == ExecutionMode::DryRun {
-            review_id
-        } else {
-            None
-        };
-        if let Some(authority_id) = review_authority_id.as_ref() {
+            let _ = review_id;
+        }
+
+        let retain_review_authority = restricted
+            || (retain_dry_run_authority
+                && mode == ExecutionMode::DryRun
+                && crate::executor::plan_requires_retroarch_config_create(&plan));
+        let review_authority_id = if retain_review_authority {
             let plan_digest = crate::plan_digest::execution_plan_digest(&plan).map_err(|_| {
                 ApiError::new(
                     ApiErrorCode::InvalidExecutionPlan,
-                    "Prepared copy review could not be canonically hashed.",
+                    "Prepared execution review could not be canonically hashed.",
                     json!({ "field": "plan" }),
                 )
             })?;
             let mut state = lock(&self.state);
-            while state.pending_copy_review_authorities.len() >= MAX_PENDING_COPY_REVIEW_AUTHORITIES
+            let restricted_runtime_generation = if restricted {
+                Some(
+                    state
+                        .runtime_generation
+                        .ok_or_else(execution_review_authority_error)?,
+                )
+            } else {
+                None
+            };
+            let authority_id = next_execution_review_authority_id(restricted_runtime_generation);
+            while state.pending_execution_review_authorities.len()
+                >= MAX_PENDING_EXECUTION_REVIEW_AUTHORITIES
             {
-                let Some(expired) = state.copy_review_authority_order.pop_front() else {
+                let Some(expired) = state.execution_review_authority_order.pop_front() else {
                     break;
                 };
-                state.pending_copy_review_authorities.remove(&expired);
+                state.pending_execution_review_authorities.remove(&expired);
             }
-            state.pending_copy_review_authorities.insert(
+            state.pending_execution_review_authorities.insert(
                 authority_id.clone(),
-                PreparedCopyReviewAuthority {
+                PreparedExecutionReviewAuthority {
                     plan_digest,
                     mode,
                     target,
-                    sandbox_root: review_root,
+                    sandbox_root,
+                    restricted_runtime_generation,
                 },
             );
             state
-                .copy_review_authority_order
+                .execution_review_authority_order
                 .push_back(authority_id.clone());
-        }
+            Some(authority_id)
+        } else {
+            None
+        };
         Ok((plan, review_authority_id))
     }
 
@@ -1160,17 +1381,32 @@ impl ExecutionSessionManager {
                 json!({}),
             )
         })?;
-        RealAdbDevice::new(&self.config.adb_path, Some(target.serial))
-            .launch_app(&package_name, activity.as_deref())
-            .map_err(|_| {
-                ApiError::new(
-                    ApiErrorCode::LaunchFailed,
-                    "The configured app could not be launched.",
-                    json!({}),
-                )
-            })?;
+        let mut device = RealAdbDevice::new(&self.config.adb_path, Some(target.serial));
+        launch_app_with_policy(
+            &mut device,
+            self.restrict_privileged_execution(),
+            &package_name,
+            activity.as_deref(),
+        )
+        .map_err(|_| {
+            ApiError::new(
+                ApiErrorCode::LaunchFailed,
+                "The configured app could not be launched.",
+                json!({}),
+            )
+        })?;
         Ok(json!({ "launched": true }))
     }
+}
+
+fn launch_app_with_policy<E: crate::executor::adb::AdbCommandExecutor>(
+    device: &mut RealAdbDevice<E>,
+    restricted_execution: bool,
+    package_name: &str,
+    activity: Option<&str>,
+) -> Result<(), String> {
+    device.configure_restricted_execution(restricted_execution);
+    device.launch_app(package_name, activity)
 }
 
 fn eligible_launch_candidate(
@@ -1653,6 +1889,7 @@ fn execute_attempt(
     attempt_root: PathBuf,
     cancel_requested: Arc<AtomicBool>,
     mutation_lease: Option<Arc<SetupLocationMutationLease>>,
+    restricted_execution: bool,
 ) -> ExecutionRunResult {
     #[cfg(test)]
     if plan.id == "__test_execution_worker_panics__" {
@@ -1710,16 +1947,18 @@ fn execute_attempt(
                     push_test_identity_sample(&mut command_executor, "a1b2");
                 }
                 command_executor.push_completed(1, "", "error: device offline");
+                let mut device = RealAdbDevice::with_executor(
+                    config.adb_path.clone(),
+                    serial.as_deref(),
+                    command_executor,
+                );
+                device.configure_restricted_execution(restricted_execution);
                 return run_with_device(
                     state,
                     execution_id,
                     plan,
                     ExecutorAdapters::with_device_and_sandbox_roots(
-                        RealAdbDevice::with_executor(
-                            config.adb_path,
-                            serial.as_deref(),
-                            command_executor,
-                        ),
+                        device,
                         attempt_root,
                         config.cache_root,
                         fake_device_root,
@@ -1730,12 +1969,14 @@ fn execute_attempt(
                     mutation_lease.clone(),
                 );
             }
+            let mut device = RealAdbDevice::new(config.adb_path, serial);
+            device.configure_restricted_execution(restricted_execution);
             run_with_device(
                 state,
                 execution_id,
                 plan,
                 ExecutorAdapters::with_device_and_sandbox_roots(
-                    RealAdbDevice::new(config.adb_path, serial),
+                    device,
                     attempt_root,
                     config.cache_root,
                     fake_device_root,
@@ -2122,6 +2363,9 @@ fn issue_code(
         Some(StepFailureKind::RootAuthorityUnverified) => {
             return "root_authority_unverified".to_string()
         }
+        Some(StepFailureKind::RestrictedExecutionDenied) => {
+            return "restricted_execution_denied".to_string()
+        }
         Some(StepFailureKind::DeviceStorageExhausted) => {
             return "device_storage_exhausted".to_string()
         }
@@ -2323,10 +2567,18 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn copy_review_authority_error() -> ApiError {
+fn restricted_plan_authority_error() -> ApiError {
     ApiError::new(
         ApiErrorCode::StaleReview,
-        "The RetroArch configuration review is stale or belongs to another execution.",
+        "The planned execution authority is stale or belongs to another sidecar session.",
+        json!({ "field": "executionRestrictionPlanAuthorityId" }),
+    )
+}
+
+fn execution_review_authority_error() -> ApiError {
+    ApiError::new(
+        ApiErrorCode::StaleReview,
+        "The reviewed execution authority is stale or belongs to another sidecar session.",
         json!({ "field": "reviewAuthorityId" }),
     )
 }
@@ -2346,6 +2598,27 @@ mod tests {
         PermissionFailurePolicy, PermissionPlan, PermissionPlanAction, PermissionSetKind,
         RuntimeCapabilities,
     };
+
+    #[test]
+    fn restricted_deferred_launch_denies_a_fake_root_device() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "0\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        assert!(launch_app_with_policy(
+            &mut device,
+            true,
+            "com.example.fixture",
+            Some(".MainActivity"),
+        )
+        .is_err());
+
+        assert_eq!(device.command_executor().calls().len(), 1);
+        assert!(!device
+            .command_executor()
+            .operations()
+            .contains(&crate::owned_process::ProcessOperation::Launch));
+    }
 
     fn setup_location_lease_context(
         attempt_sequence: u64,
@@ -5164,6 +5437,126 @@ mod tests {
                 expects_uncertainty,
                 "unexpected uncertainty classification for {case_name}"
             );
+        }
+    }
+
+    #[test]
+    fn restricted_plan_authority_is_one_use_and_binds_digest_and_target() {
+        let manager = restricted_manager();
+        manager.set_runtime_generation(7).unwrap();
+        let mut plan = test_plan("restricted-plan");
+        let target = target_binding("device-a");
+        plan.target_device = Some(target.clone());
+
+        let authority = manager
+            .retain_restricted_plan_authority(&plan)
+            .expect("the restricted planner should retain its exact result");
+        manager
+            .consume_restricted_plan_authority(&authority, &plan, Some(&target))
+            .expect("the matching plan and target should consume the authority");
+        assert!(manager
+            .consume_restricted_plan_authority(&authority, &plan, Some(&target))
+            .is_err());
+    }
+
+    #[test]
+    fn restricted_plan_authority_rejects_changed_digest_or_target() {
+        let manager = restricted_manager();
+        manager.set_runtime_generation(7).unwrap();
+        let mut plan = test_plan("restricted-plan");
+        let target = target_binding("device-a");
+        plan.target_device = Some(target.clone());
+        let authority = manager.retain_restricted_plan_authority(&plan).unwrap();
+
+        let mut changed_plan = plan.clone();
+        changed_plan.id = "changed-plan".to_string();
+        assert!(manager
+            .consume_restricted_plan_authority(&authority, &changed_plan, Some(&target))
+            .is_err());
+
+        let second_authority = manager.retain_restricted_plan_authority(&plan).unwrap();
+        let different_target = target_binding("device-b");
+        assert!(manager
+            .consume_restricted_plan_authority(&second_authority, &plan, Some(&different_target))
+            .is_err());
+    }
+
+    #[test]
+    fn restricted_plan_authority_cannot_be_replayed_after_sidecar_restart() {
+        let first = restricted_manager();
+        first.set_runtime_generation(7).unwrap();
+        let mut plan = test_plan("restricted-plan");
+        let target = target_binding("device-a");
+        plan.target_device = Some(target.clone());
+        let authority = first.retain_restricted_plan_authority(&plan).unwrap();
+
+        let restarted = restricted_manager();
+        restarted.set_runtime_generation(8).unwrap();
+        assert!(restarted
+            .consume_restricted_plan_authority(&authority, &plan, Some(&target))
+            .is_err());
+    }
+
+    #[test]
+    fn restricted_plan_authority_rejects_unknown_and_evicted_ids() {
+        let manager = restricted_manager();
+        manager.set_runtime_generation(7).unwrap();
+        let mut plan = test_plan("restricted-plan");
+        let target = target_binding("device-a");
+        plan.target_device = Some(target.clone());
+
+        let authorities = (0..=MAX_PENDING_RESTRICTED_PLAN_AUTHORITIES)
+            .map(|_| {
+                manager
+                    .retain_restricted_plan_authority(&plan)
+                    .expect("restricted manager should issue a fresh plan authority")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(manager
+            .consume_restricted_plan_authority("unknown-plan-authority", &plan, Some(&target))
+            .is_err());
+        assert!(manager
+            .consume_restricted_plan_authority(&authorities[0], &plan, Some(&target))
+            .is_err());
+
+        let newest = authorities
+            .last()
+            .expect("at least one authority was retained");
+        manager
+            .consume_restricted_plan_authority(newest, &plan, Some(&target))
+            .expect("the newest retained authority should be usable once");
+        assert!(manager
+            .consume_restricted_plan_authority(newest, &plan, Some(&target))
+            .is_err());
+    }
+
+    #[test]
+    fn unrestricted_manager_cannot_issue_or_consume_restricted_plan_authority() {
+        let manager = ExecutionSessionManager::new(SidecarRuntimeConfig::default());
+        let mut plan = test_plan("restricted-plan");
+        let target = target_binding("device-a");
+        plan.target_device = Some(target.clone());
+
+        assert!(manager.retain_restricted_plan_authority(&plan).is_err());
+        assert!(manager
+            .consume_restricted_plan_authority("forged-plan-authority", &plan, Some(&target))
+            .is_err());
+    }
+
+    fn restricted_manager() -> ExecutionSessionManager {
+        ExecutionSessionManager::new_with_restriction(
+            SidecarRuntimeConfig::default(),
+            Some("qualification-build-identity".to_string()),
+        )
+    }
+
+    fn target_binding(serial: &str) -> TargetDeviceBinding {
+        TargetDeviceBinding {
+            serial: serial.to_string(),
+            manufacturer: Some("Example".to_string()),
+            model: Some("Example".to_string()),
+            android_api_level: Some(35),
         }
     }
 }

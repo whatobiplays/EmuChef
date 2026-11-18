@@ -387,6 +387,14 @@ export function prepareRustSidecar(
     throw new Error("--profile must be debug, release, or qualification");
   }
   const repoRoot = path.resolve(appDir, "../..");
+  const restrictionBuildValue = env.EMUCHEF_RESTRICTED_EXECUTION_BUILD;
+  if (restrictionBuildValue !== undefined && restrictionBuildValue !== "1") {
+    throw new Error("restricted execution sidecar build opt-in must be '1'");
+  }
+  const restrictedExecutionBuildRequested = restrictionBuildValue === "1";
+  if (restrictedExecutionBuildRequested && profile !== "debug") {
+    throw new Error("restricted execution sidecars must use the debug profile");
+  }
   const targetId = requireConfigCreateQualificationTarget(profile, env);
   const manifestPath = path.join(
     repoRoot,
@@ -451,6 +459,7 @@ export function prepareRustSidecar(
 
     let qualificationSourceIdentity = null;
     let qualificationMaterialInputs = null;
+    let restrictedExecutionBuildIdentity = null;
     if (profile === "qualification") {
       qualificationSourceIdentity = buildIdentity({
         repoRoot,
@@ -472,35 +481,79 @@ export function prepareRustSidecar(
         );
       }
     }
+    if (restrictedExecutionBuildRequested) {
+      restrictedExecutionBuildIdentity = buildIdentity({
+        repoRoot,
+        requireClean: true,
+      });
+      if (restrictedExecutionBuildIdentity.realExecutionEnabled !== true) {
+        throw new Error("restricted execution sidecar requires real execution support");
+      }
+      const sourceStateBeforeBuild = runCommand(
+        "git",
+        ["status", "--porcelain", "--untracked-files=all"],
+        { cwd: repoRoot, encoding: "utf8" },
+      );
+      if (
+        sourceStateBeforeBuild.error ||
+        sourceStateBeforeBuild.status !== 0 ||
+        sourceStateBeforeBuild.stdout.length !== 0
+      ) {
+        throw new Error("restricted execution sidecar requires clean source before the build");
+      }
+    }
 
-    const args = sidecarCargoBuildArgs(profile, manifestPath);
+    const args = sidecarCargoBuildArgs(profile, manifestPath, {
+      restrictedExecution: restrictedExecutionBuildRequested,
+    });
     const lockDescriptor =
       releaseBuildLock.leaseFileDescriptor ?? releaseBuildLock.lockFileDescriptor;
     const buildStdio = lockDescriptor === undefined
       ? "inherit"
       : ["inherit", "inherit", "inherit", lockDescriptor];
+    let buildEnvironment;
+    if (profile === "qualification") {
+      buildEnvironment = {
+        ...env,
+        EMUCHEF_CONFIG_CREATE_QUALIFICATION_BUILD_GIT_COMMIT:
+          qualificationSourceIdentity.gitCommit,
+        EMUCHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_DIGEST:
+          qualificationSourceIdentity.materialBuildDigest,
+        EMUCHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_INPUTS_DIGEST:
+          qualificationMaterialInputs.digest,
+      };
+    } else if (restrictedExecutionBuildRequested) {
+      buildEnvironment = {
+        ...env,
+        EMU_CHEF_RESTRICTED_EXECUTION_BUILD_IDENTITY: JSON.stringify(
+          restrictedExecutionBuildIdentity,
+        ),
+      };
+    }
     const build = runCommand(
       "cargo",
       args,
-      profile === "qualification"
-        ? {
-            stdio: buildStdio,
-            env: {
-              ...env,
-              EMUCHEF_CONFIG_CREATE_QUALIFICATION_BUILD_GIT_COMMIT:
-                qualificationSourceIdentity.gitCommit,
-              EMUCHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_DIGEST:
-                qualificationSourceIdentity.materialBuildDigest,
-              EMUCHEF_CONFIG_CREATE_QUALIFICATION_MATERIAL_INPUTS_DIGEST:
-                qualificationMaterialInputs.digest,
-            },
-          }
+      buildEnvironment
+        ? { stdio: buildStdio, env: buildEnvironment }
         : { stdio: buildStdio },
     );
     if (build.error || build.status !== 0) {
       throw new Error(
         `cargo sidecar build failed${build.status === null ? "" : ` with status ${build.status}`}`,
       );
+    }
+
+    if (restrictedExecutionBuildRequested) {
+      const identityAfterBuild = buildIdentity({
+        repoRoot,
+        requireClean: true,
+      });
+      if (
+        JSON.stringify(identityAfterBuild) !==
+        JSON.stringify(restrictedExecutionBuildIdentity)
+      ) {
+        throw new Error("source identity changed during restricted execution sidecar build");
+      }
     }
 
     const cargoProfileDirectory =
