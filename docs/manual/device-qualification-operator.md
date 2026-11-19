@@ -51,6 +51,86 @@ Physical use still requires separate authorization for the target, build,
 actions, paths and run scope. No capability-restricted physical run has been
 performed. Physical acceptance is `NOT RUN`.
 
+## Future KONKR Pocket Advance ROM Merge candidate
+
+A future, separately authorized run may qualify only the ROM-copy operation on
+the KONKR Pocket Advance. The bounded scenario selects `feature.copy_roms`,
+retains the required `copy_rom_library` step, and merges ROM files into the
+reviewed internal shared-storage location. It does not qualify RetroArch's
+full provisioning journey or other recipes.
+
+### Candidate source and capability assumptions
+
+Build a future candidate from a clean, isolated source snapshot. Record its
+source commit and material build digest, the effective policy revision, and
+the exact capability values used for planning and execution. Production device
+profile and plan defaults remain unchanged. The host-only planner check may
+provide `shared_storage_write` in memory to prove that the normal KONKR plan
+retains the required ROM-copy step and reviewed destination binding. That
+synthetic planning input does not establish that a physical device supports
+the route.
+
+If a future candidate needs a capability value that production does not
+advertise, keep that candidate source isolated from production and obtain
+separate review and owner authorization before building or running it. The
+capability assumption must be explicit in the candidate evidence. Do not
+silently promote a production capability or change a required step to make the
+plan pass.
+
+### Restricted ordinary execution path
+
+Use the restricted qualification launch command above. The planned ROM-copy
+operation must remain `unprivileged` and use the reviewed internal storage
+binding through the existing guarded ADB shell CopyCommit path described above.
+That path must pass the device/build identity digest check described above
+before opening the staging destination. If it cannot establish the guarded
+route, the operation must fail closed.
+
+Record the device's observed root state separately from `root_authority_used`.
+A rooted device may still use the restricted unprivileged route. The evidence
+must show that execution used no root authority, OEM compiler, or OEM stage.
+
+### Required evidence and approval checkpoints
+
+Before any physical run, separately review and authorize the candidate source,
+capability assumption, exact target, build, operation, destination path, ROM
+inputs, and run scope. Identify the preinstalled RetroArch package and compare
+its package identity and installed APK SHA-256 with the pinned artifact.
+Approve any RetroArch launch, force-stop, or cleanup separately if the run
+needs it. The evidence must identify:
+
+1. The device identity and session, selected profile `konkr.pocket_advance`,
+   profile-match resolution, Android version and API level, and build
+   fingerprint.
+2. The candidate source commit and digest, qualification build identity, pinned
+   APK SHA-256, artifact source and version or build ID, and preinstalled
+   package identity.
+3. The effective policy revision and execution strategy ID and digest. Record
+   the observed device root state separately from `root_authority_used`, and
+   show that no root authority, OEM compiler, or OEM stage was used.
+4. The selected plan `konkr.pocket_advance.base`, selected recipe and required
+   step, Merge policy, and the reviewed destination path and volume identity.
+   Before a future candidate is built, add and review a check that confirms the
+   executed plan has the same immutable ID and digest as the reviewed plan. It
+   must match the terminal result for `rom_copy` to the fully qualified step
+   `feature.copy_roms/copy_rom_library`. A skipped, missing, partial, or
+   unsuccessful required step is not qualified.
+   The current recipe-level validator does not establish required-step
+   completion or emulator usability; these checks are future prerequisites.
+5. Before and after ROM manifests, each with every file's relative path and
+   SHA-256. Identify the destination sentinel by relative path and expected
+   SHA-256, then verify that its content remains unchanged after the merge.
+6. On the device, proof that RetroArch can see and load the copied ROM. A
+   successful host plan or copy result alone does not establish emulator
+   usability.
+
+Host-only planning evidence does not authorize device connection or writes.
+Physical operation requires its own approval checkpoints before the target is
+connected and before the reviewed storage write. Release qualification needs
+separate review of the release scope and its required workflows; this ROM-only
+result cannot support a full-setup or release claim. Physical status is
+`NOT RUN`, and emulator-side usability is unverified.
+
 ## Operator flow
 
 1. Launch a clean qualification build with `npm --prefix apps/emuchef-app run device-qualification`.
