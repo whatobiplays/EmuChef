@@ -117,9 +117,24 @@ needs it. The evidence must identify:
    unsuccessful required step is not qualified.
    The current recipe-level validator does not establish required-step
    completion or emulator usability; these checks are future prerequisites.
-5. Before and after ROM manifests, each with every file's relative path and
-   SHA-256. Identify the destination sentinel by relative path and expected
-   SHA-256, then verify that its content remains unchanged after the merge.
+5. Capture the source and destination in three independent manifests. For
+   each file, record its relative path and SHA-256.
+   - `S` records the reviewed ROM source snapshot before copying.
+   - `B` records the reviewed destination snapshot before mutation.
+   - `A` records the same destination after the operation.
+
+   Bind all three to the same reviewed source identity, destination and volume
+   identity, immutable reviewed-plan ID and digest, and terminal result for
+   `feature.copy_roms/copy_rom_library`. For every path in `S`, require the
+   same path and SHA-256 in `A`, including paths that also appear in `B`. For
+   every path in `B` absent from `S`, require the same path and SHA-256 in `A`.
+   Every path in `A` must also appear in `S` or `B`.
+   Identify the destination sentinel by relative path and expected SHA-256.
+   Require the sentinel to be absent from `S` and to match its expected path
+   and hash in both `B` and `A`. The full `S`/`B`/`A` comparison and sentinel
+   check must each pass. Missing entries, unexpected paths, wrong hashes, or
+   partial or unverifiable manifests fail the corresponding postcondition. If
+   any postcondition fails, do not report a passing ROM Merge result.
 6. On the device, proof that RetroArch can see and load the copied ROM. A
    successful host plan or copy result alone does not establish emulator
    usability.
