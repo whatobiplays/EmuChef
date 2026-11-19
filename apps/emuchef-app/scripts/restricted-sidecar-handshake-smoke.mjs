@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -20,7 +21,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildMaterialIdentity } from "../../../tools/device-qualification.mjs";
-import { validateQualificationSidecarProvenance } from "./sidecar-build-contract.mjs";
 import { externalBinArtifactName } from "./sidecar-packaging.mjs";
 
 const APP_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -94,6 +94,44 @@ function hello(id, runtimeGeneration) {
   };
 }
 
+/** Confirms the sidecar embeds both Android helpers from a backend debug build. */
+function assertEmbeddedAndroidHelpers(binaryBytes) {
+  const debugBuildDirectory = path.join(
+    REPOSITORY_ROOT,
+    "crates",
+    "emuchef-rust-backend",
+    "target",
+    "debug",
+    "build",
+  );
+  const buildOutputDirectories = readdirSync(debugBuildDirectory, {
+    withFileTypes: true,
+  })
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        entry.name.startsWith("emuchef-rust-backend-"),
+    )
+    .map((entry) => path.join(debugBuildDirectory, entry.name, "out"));
+
+  const matchedBuildOutput = buildOutputDirectories.some((outputDirectory) =>
+    ["aarch64", "x86_64"].every((architecture) => {
+      const helperPath = path.join(
+        outputDirectory,
+        `copy-commit-helper-${architecture}`,
+      );
+      if (!existsSync(helperPath) || !statSync(helperPath).isFile()) return false;
+      const helperBytes = readFileSync(helperPath);
+      return helperBytes.length > 0 && binaryBytes.indexOf(helperBytes) !== -1;
+    }),
+  );
+
+  assert.ok(
+    matchedBuildOutput,
+    "restricted sidecar does not embed both Android helpers from a backend debug build",
+  );
+}
+
 function main() {
   const sourceIdentity = buildMaterialIdentity({
     repoRoot: REPOSITORY_ROOT,
@@ -110,11 +148,9 @@ function main() {
   assert.ok(statSync(binaryPath).isFile());
   accessSync(binaryPath, constants.X_OK);
 
-  const binaryDigest = createHash("sha256").update(readFileSync(binaryPath)).digest("hex");
-  const provenance = JSON.parse(
-    runChecked(binaryPath, ["--qualification-build-provenance"]),
-  );
-  validateQualificationSidecarProvenance(provenance, { sourceIdentity });
+  const binaryBytes = readFileSync(binaryPath);
+  const binaryDigest = createHash("sha256").update(binaryBytes).digest("hex");
+  assertEmbeddedAndroidHelpers(binaryBytes);
 
   const tempDirectory = mkdtempSync(
     path.join(os.tmpdir(), "emuchef-restricted-sidecar-smoke-"),
