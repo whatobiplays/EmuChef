@@ -100,6 +100,16 @@ impl SidecarState {
         }
     }
 
+    /// Construct the end-user runtime with a qualification build identity bound to startup.
+    pub(crate) fn new_with_restriction(cache_root: PathBuf, build_identity: String) -> Self {
+        Self {
+            inner: Mutex::new(SidecarClient::with_restriction(
+                cache_root,
+                Some(build_identity),
+            )),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_backend(
         cache_root: PathBuf,
@@ -134,12 +144,26 @@ impl SidecarState {
             .map_err(|_| ())
     }
 
+    pub(crate) fn restricted_execution_enabled(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|client| client.restricted_build_identity.is_some())
+            .unwrap_or(false)
+    }
+
     pub fn status(&self) -> RuntimeStatusDto {
         self.inner
             .lock()
             .expect("sidecar mutex poisoned")
             .status
             .clone()
+    }
+
+    pub(crate) fn execution_report_runtime(&self) -> Result<Value, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "Execution runtime state is unavailable.".to_string())?
+            .execution_report_runtime()
     }
 
     /// Report whether the current process generation lost its protocol
@@ -244,10 +268,16 @@ struct SidecarClient {
     next_request_id: u64,
     cache_root: PathBuf,
     generation: u64,
+    restricted_build_identity: Option<String>,
+    verified_execution_restriction: Option<Value>,
 }
 
 impl SidecarClient {
     fn new(cache_root: PathBuf) -> Self {
+        Self::with_restriction(cache_root, None)
+    }
+
+    fn with_restriction(cache_root: PathBuf, restricted_build_identity: Option<String>) -> Self {
         Self {
             process: None,
             status: RuntimeStatusDto::Starting,
@@ -256,6 +286,8 @@ impl SidecarClient {
             next_request_id: 1,
             cache_root,
             generation: 0,
+            restricted_build_identity,
+            verified_execution_restriction: None,
         }
     }
 
@@ -274,6 +306,7 @@ impl SidecarClient {
             return;
         }
         self.generation = self.generation.saturating_add(1).max(1);
+        self.verified_execution_restriction = None;
         // A new generation starts with no cleanup obligation. Any process
         // created below will replace this evidence if startup later fails.
         self.last_cleanup = SidecarCleanup::NotRequired;
@@ -327,11 +360,14 @@ impl SidecarClient {
     }
 
     fn start_and_negotiate(&mut self) -> Result<u64, StartFailure> {
-        let process = start_process(&self.cache_root, self.generation).map_err(|failure| {
-            StartFailure::Failed {
-                message: failure.message,
-                cleanup: failure.cleanup,
-            }
+        let process = start_process(
+            &self.cache_root,
+            self.generation,
+            self.restricted_build_identity.as_deref(),
+        )
+        .map_err(|failure| StartFailure::Failed {
+            message: failure.message,
+            cleanup: failure.cleanup,
         })?;
         self.process = Some(process);
         self.negotiate_existing_process()
@@ -342,6 +378,46 @@ impl SidecarClient {
             .raw_request("hello", json!({ "runtimeGeneration": self.generation }))
             .map_err(StartFailure::SessionLost)?;
         let result = startup_result(&hello)?;
+        let restriction = result
+            .get("executionRestriction")
+            .filter(|restriction| restriction.is_object())
+            .ok_or_else(|| {
+                StartFailure::Unsupported(
+                    "Rust runtime omitted its execution restriction state.".to_string(),
+                )
+            })?;
+        let restriction_identity = restriction.get("buildIdentity").and_then(Value::as_str);
+        if restriction.get("enabled").and_then(Value::as_bool)
+            != Some(self.restricted_build_identity.is_some())
+            || restriction_identity != self.restricted_build_identity.as_deref()
+            || restriction.get("runtimeGeneration").and_then(Value::as_u64) != Some(self.generation)
+            || restriction.get("strategy").and_then(Value::as_str) != Some("adb_shell")
+            || (self.restricted_build_identity.is_some()
+                && (restriction.get("rootShell").and_then(Value::as_bool) != Some(false)
+                    || restriction.get("appDataWrite").and_then(Value::as_bool) != Some(false)))
+        {
+            return Err(StartFailure::Unsupported(
+                "Rust runtime execution restriction does not match native startup policy."
+                    .to_string(),
+            ));
+        }
+        self.verified_execution_restriction = if let Some(identity) = restriction_identity {
+            let build_identity = serde_json::from_str::<Value>(identity).map_err(|_| {
+                StartFailure::Unsupported(
+                    "Rust runtime returned an invalid execution restriction identity.".to_string(),
+                )
+            })?;
+            Some(json!({
+                "enabled": true,
+                "buildIdentity": build_identity,
+                "runtimeGeneration": self.generation,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false,
+            }))
+        } else {
+            None
+        };
         let protocol_version = result
             .get("protocolVersion")
             .and_then(Value::as_u64)
@@ -433,6 +509,19 @@ impl SidecarClient {
             }
             None => Err(self.fail_runtime_session()),
         }
+    }
+
+    fn execution_report_runtime(&self) -> Result<Value, String> {
+        let mut runtime = serde_json::to_value(&self.status)
+            .map_err(|_| "The execution runtime report could not be prepared.".to_string())?;
+        if self.restricted_build_identity.is_some() {
+            let restriction = self
+                .verified_execution_restriction
+                .as_ref()
+                .ok_or_else(|| "The restricted runtime handshake is unavailable.".to_string())?;
+            runtime["executionRestriction"] = restriction.clone();
+        }
+        Ok(runtime)
     }
 
     fn fail_runtime_session(&mut self) -> String {
@@ -712,12 +801,18 @@ fn cleanup_child(child: OwnedProcessGroup) -> SidecarCleanup {
 fn start_process(
     cache_root: &Path,
     generation: u64,
+    restricted_build_identity: Option<&str>,
 ) -> Result<SidecarProcess, StartProcessFailure> {
     let (program, cwd) = resolve_sidecar().map_err(|message| StartProcessFailure {
         message,
         cleanup: SidecarCleanup::NotRequired,
     })?;
-    let mut command = sidecar_command(&program, cache_root);
+    let mut command = sidecar_command_with_restriction(
+        &program,
+        cache_root,
+        restricted_build_identity,
+        Some(generation),
+    );
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -766,8 +861,28 @@ fn start_process(
 }
 
 fn sidecar_command(program: &Path, cache_root: &Path) -> std::process::Command {
+    sidecar_command_with_restriction(program, cache_root, None, None)
+}
+
+fn sidecar_command_with_restriction(
+    program: &Path,
+    cache_root: &Path,
+    restricted_build_identity: Option<&str>,
+    runtime_generation: Option<u64>,
+) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     command.arg("--sidecar").arg("--cache-root").arg(cache_root);
+    if let Some(build_identity) = restricted_build_identity {
+        command
+            .arg("--restrict-privileged-execution")
+            .arg("--qualification-source-identity")
+            .arg(build_identity);
+    }
+    if let Some(runtime_generation) = runtime_generation {
+        command
+            .arg("--runtime-generation")
+            .arg(runtime_generation.to_string());
+    }
     command
 }
 
@@ -1328,6 +1443,145 @@ mod tests {
     }
 
     #[test]
+    fn restricted_command_passes_native_generation_as_startup_identity() {
+        let command = sidecar_command_with_restriction(
+            Path::new("emuchef"),
+            Path::new("/trusted/app/cache"),
+            Some(r#"{"appVersion":"0.1.0"}"#),
+            Some(7),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "--sidecar",
+                "--cache-root",
+                "/trusted/app/cache",
+                "--restrict-privileged-execution",
+                "--qualification-source-identity",
+                r#"{"appVersion":"0.1.0"}"#,
+                "--runtime-generation",
+                "7",
+            ]
+        );
+    }
+
+    #[test]
+    fn restricted_hello_rejects_a_generation_other_than_native_startup() {
+        let build_identity = r#"{"appVersion":"0.1.0"}"#;
+        let response = json!({
+            "id": "app-1",
+            "ok": true,
+            "result": {
+                "executionRestriction": {
+                    "enabled": true,
+                    "buildIdentity": build_identity,
+                    "runtimeGeneration": 8,
+                    "strategy": "adb_shell",
+                    "rootShell": false,
+                    "appDataWrite": false,
+                },
+            },
+        });
+        let encoded = format!("{}\n", response);
+        let (mut process, _) = scripted_process(Some(encoded.as_bytes()));
+        if let SidecarProcess::Scripted { generation, .. } = &mut process {
+            *generation = 7;
+        }
+        let mut client = SidecarClient::with_restriction(
+            PathBuf::from("unused-test-cache"),
+            Some(build_identity.to_string()),
+        );
+        client.generation = 7;
+        client.process = Some(process);
+
+        assert!(matches!(
+            client.negotiate_existing_process(),
+            Err(StartFailure::Unsupported(_))
+        ));
+        assert!(client.verified_execution_restriction.is_none());
+    }
+
+    #[test]
+    fn restricted_hello_rejects_a_mismatched_build_identity() {
+        let expected_identity = r#"{"appVersion":"0.1.0"}"#;
+        let reported_identity = r#"{"appVersion":"0.1.0","sourceIdentity":"different"}"#;
+        let response = json!({
+            "id": "app-1",
+            "ok": true,
+            "result": {
+                "executionRestriction": {
+                    "enabled": true,
+                    "buildIdentity": reported_identity,
+                    "runtimeGeneration": 7,
+                    "strategy": "adb_shell",
+                    "rootShell": false,
+                    "appDataWrite": false,
+                },
+            },
+        });
+        let encoded = format!("{}\n", response);
+        let (mut process, _) = scripted_process(Some(encoded.as_bytes()));
+        if let SidecarProcess::Scripted { generation, .. } = &mut process {
+            *generation = 7;
+        }
+        let mut client = SidecarClient::with_restriction(
+            PathBuf::from("unused-test-cache"),
+            Some(expected_identity.to_string()),
+        );
+        client.generation = 7;
+        client.process = Some(process);
+
+        assert!(matches!(
+            client.negotiate_existing_process(),
+            Err(StartFailure::Unsupported(_))
+        ));
+        assert!(client.verified_execution_restriction.is_none());
+    }
+
+    #[test]
+    fn restricted_execution_report_includes_only_verified_policy_identity() {
+        let build_identity = json!({
+            "appVersion": "0.1.0",
+            "gitCommit": "1".repeat(40),
+            "materialBuildDigest": format!("sha256:{}", "a".repeat(64)),
+            "realExecutionEnabled": true,
+            "qualificationContract": 1,
+        });
+        let mut client = SidecarClient::with_restriction(
+            PathBuf::from("unused-test-cache"),
+            Some(build_identity.to_string()),
+        );
+        client.status = RuntimeStatusDto::Ready {
+            protocol_version: 1,
+            catalog_version: Some("test".to_string()),
+        };
+        client.generation = 7;
+        client.verified_execution_restriction = Some(json!({
+            "enabled": true,
+            "buildIdentity": build_identity,
+            "runtimeGeneration": 7,
+            "strategy": "adb_shell",
+            "rootShell": false,
+            "appDataWrite": false,
+        }));
+
+        let runtime = client.execution_report_runtime().unwrap();
+        assert_eq!(runtime["executionRestriction"]["enabled"], true);
+        assert_eq!(runtime["executionRestriction"]["runtimeGeneration"], 7);
+        assert_eq!(runtime["executionRestriction"]["strategy"], "adb_shell");
+        assert_eq!(runtime["executionRestriction"]["rootShell"], false);
+        assert_eq!(runtime["executionRestriction"]["appDataWrite"], false);
+        assert_eq!(
+            runtime["executionRestriction"]["buildIdentity"]["gitCommit"],
+            "1".repeat(40)
+        );
+    }
+
+    #[test]
     fn diagnostics_omit_runtime_error_messages() {
         let state = SidecarState {
             inner: Mutex::new(SidecarClient {
@@ -1344,6 +1598,8 @@ mod tests {
                 next_request_id: 1,
                 cache_root: PathBuf::from("/trusted/app/cache"),
                 generation: 1,
+                restricted_build_identity: None,
+                verified_execution_restriction: None,
             }),
         };
         let diagnostics = state.diagnostics();

@@ -19,6 +19,58 @@ import { externalBinArtifactName } from "./sidecar-packaging.mjs";
 
 const TARGET = "aarch64-apple-darwin";
 
+test("restricted debug sidecar embeds a clean source identity with real execution support", (t) => {
+  const state = fixture(t, { pinned: false });
+  const identity = {
+    appVersion: "0.1.0",
+    gitCommit: "a".repeat(40),
+    materialBuildDigest: `sha256:${"b".repeat(64)}`,
+    realExecutionEnabled: true,
+    qualificationContract: 1,
+  };
+  const debugSource = path.join(
+    state.repoRoot,
+    "crates/emuchef-rust-backend/target/debug/emuchef",
+  );
+  const calls = [];
+  let identityReads = 0;
+  const runCommand = (program, args, options) => {
+    calls.push({ program, args, options });
+    if (program === "rustc") return { status: 0, stdout: `${TARGET}\n` };
+    if (program === "git") return { status: 0, stdout: "" };
+    if (program === "cargo") {
+      fs.mkdirSync(path.dirname(debugSource), { recursive: true });
+      fs.writeFileSync(debugSource, "restricted debug sidecar");
+      return { status: 0 };
+    }
+    throw new Error(`unexpected command: ${program}`);
+  };
+
+  prepareRustSidecar(
+    "debug",
+    { EMUCHEF_RESTRICTED_EXECUTION_BUILD: "1" },
+    {
+      appDir: state.appDir,
+      runCommand,
+      buildIdentity(options) {
+        identityReads += 1;
+        assert.equal(options.repoRoot, state.repoRoot);
+        assert.equal(options.requireClean, true);
+        return identity;
+      },
+    },
+  );
+
+  const build = calls.find((call) => call.program === "cargo");
+  assert.deepEqual(build.args.slice(-2), ["--features", "real-execution"]);
+  assert.equal(
+    build.options.env.EMU_CHEF_RESTRICTED_EXECUTION_BUILD_IDENTITY,
+    JSON.stringify(identity),
+  );
+  assert.equal(identityReads, 2);
+  assert.equal(fs.readFileSync(state.externalBin, "utf8"), "restricted debug sidecar");
+});
+
 function fixture(t, { pinned = true } = {}) {
   const repoRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "emuchef-release-sidecar-"),

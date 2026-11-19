@@ -14,19 +14,22 @@ fn main() {
         return;
     }
     if args.first().is_some_and(|argument| argument == "--sidecar") {
-        let config = match sidecar_runtime_config(&args[1..]) {
-            Ok(config) => config,
-            Err(message) => {
-                eprintln!("{message}");
-                std::process::exit(2);
-            }
-        };
+        let (config, restricted_build_identity, runtime_generation) =
+            match sidecar_startup_policy(&args[1..]) {
+                Ok(policy) => policy,
+                Err(message) => {
+                    eprintln!("{message}");
+                    std::process::exit(2);
+                }
+            };
         let stdin = io::stdin();
         let stdout = io::stdout();
-        if let Err(error) = emuchef_rust_backend::jsonl::run_jsonl_sidecar_with_config(
+        if let Err(error) = emuchef_rust_backend::jsonl::run_jsonl_sidecar_with_startup_policy(
             stdin.lock(),
             stdout.lock(),
             config,
+            restricted_build_identity,
+            runtime_generation,
         ) {
             eprintln!("sidecar failed: {error}");
             std::process::exit(1);
@@ -44,22 +47,58 @@ fn main() {
     std::process::exit(output.exit_code);
 }
 
-fn sidecar_runtime_config(
+fn sidecar_startup_policy(
     args: &[String],
-) -> Result<emuchef_rust_backend::execution_session::SidecarRuntimeConfig, String> {
+) -> Result<
+    (
+        emuchef_rust_backend::execution_session::SidecarRuntimeConfig,
+        Option<String>,
+        Option<u64>,
+    ),
+    String,
+> {
+    let restricted_build_identity =
+        emuchef_rust_backend::qualification_build::restricted_execution_policy(
+            args,
+            cfg!(debug_assertions),
+            cfg!(feature = "real-execution"),
+            std::env::var("EMUCHEF_DEVICE_QUALIFICATION")
+                .ok()
+                .as_deref()
+                == Some("1"),
+            emuchef_rust_backend::qualification_build::embedded_restricted_execution_build_identity(
+            ),
+        )?;
+    let runtime_generation =
+        emuchef_rust_backend::qualification_build::restricted_execution_runtime_generation(
+            args,
+            restricted_build_identity.is_some(),
+        )?;
     let mut config = emuchef_rust_backend::execution_session::SidecarRuntimeConfig::default();
     let mut index = 0;
     while index < args.len() {
         let option = args[index].as_str();
+        if option == "--restrict-privileged-execution" {
+            index += 1;
+            continue;
+        }
+        if option == "--qualification-source-identity" {
+            index += 2;
+            continue;
+        }
+        if option == "--runtime-generation" {
+            index += 2;
+            continue;
+        }
         if !matches!(option, "--runtime-root" | "--cache-root" | "--adb") {
             return Err(format!(
-                "unknown sidecar option: {option}\nusage: emuchef --sidecar [--runtime-root PATH] [--cache-root PATH] [--adb PATH]"
+                "unknown sidecar option: {option}\nusage: emuchef --sidecar [--runtime-root PATH] [--cache-root PATH] [--adb PATH] [--restrict-privileged-execution --qualification-source-identity JSON --runtime-generation N]"
             ));
         }
         index += 1;
         let value = args.get(index).ok_or_else(|| {
             format!(
-                "missing value for {option}\nusage: emuchef --sidecar [--runtime-root PATH] [--cache-root PATH] [--adb PATH]"
+                "missing value for {option}\nusage: emuchef --sidecar [--runtime-root PATH] [--cache-root PATH] [--adb PATH] [--restrict-privileged-execution --qualification-source-identity JSON --runtime-generation N]"
             )
         })?;
         match option {
@@ -70,5 +109,5 @@ fn sidecar_runtime_config(
         }
         index += 1;
     }
-    Ok(config)
+    Ok((config, restricted_build_identity, runtime_generation))
 }

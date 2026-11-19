@@ -507,6 +507,14 @@ impl QualificationSession {
 
     #[cfg(test)]
     pub(crate) fn for_test(checkpoint_ids: &[&str]) -> Self {
+        Self::for_test_with_recipes(checkpoint_ids, &["test.recipe"])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_recipes(
+        checkpoint_ids: &[&str],
+        production_recipes: &[&str],
+    ) -> Self {
         let checkpoints = checkpoint_ids
             .iter()
             .map(|id| QualificationWorkflowCheckpoint {
@@ -525,7 +533,10 @@ impl QualificationSession {
             id: "test-workflow".to_string(),
             version: 1,
             purpose: "test".to_string(),
-            production_recipes: vec!["test.recipe".to_string()],
+            production_recipes: production_recipes
+                .iter()
+                .map(|recipe| (*recipe).to_string())
+                .collect(),
             required_capabilities: Vec::new(),
             prerequisites: checkpoint_ids
                 .iter()
@@ -1278,6 +1289,391 @@ pub(crate) fn project_root_state(root: &RootQualificationState) -> Option<Qualif
         }
         RootQualificationState::CheckFailed { .. } => None,
     }
+}
+
+/// Build the validator-facing claim from one immutable reviewed plan and the
+/// matching active qualification attempt. The caller owns the product
+/// transition gate while this function reads the process-local bindings.
+pub(crate) fn restricted_qualification_report_for_terminal_in_transition(
+    state: &AppState,
+    execution_handle: &str,
+    review_handle: &str,
+    device_handle: &str,
+    plan: &Value,
+    reviewed_step_requirements: Option<&crate::handles::RestrictedQualificationStepRequirements>,
+    report: &Value,
+    runtime: &Value,
+    reviewed_runtime_generation: Option<u64>,
+    observed_terminal_status: &str,
+) -> Result<Option<Value>, String> {
+    if !is_terminal_execution_status(observed_terminal_status)
+        || report.get("status").and_then(Value::as_str) != Some(observed_terminal_status)
+    {
+        return Ok(None);
+    }
+    if !state.sidecar.restricted_execution_enabled() {
+        return Ok(None);
+    }
+    let current_runtime_generation = state
+        .sidecar
+        .try_generation()
+        .map_err(|_| persistence_error())?;
+    if reviewed_runtime_generation != Some(current_runtime_generation) {
+        return Err(persistence_error());
+    }
+    let Some(provider) = state.qualification_repository.get() else {
+        return Ok(None);
+    };
+    let mut store = lock_session_store(state);
+    if ensure_recovered(state, provider, &mut store).is_err() {
+        return Ok(None);
+    }
+    let Some(candidate_handle) = store.active_candidate.clone() else {
+        return Ok(None);
+    };
+    if store.is_poisoned(&candidate_handle)
+        || store.bound_execution_handle() != Some(execution_handle)
+        || store.bound_review_handle() != Some(review_handle)
+        || store.associated_device_handle() != Some(device_handle)
+    {
+        return Ok(None);
+    }
+    let Ok(session) = load_active_session(state, provider, &mut store, &candidate_handle) else {
+        return Ok(None);
+    };
+    if session.bound_execution_handle() != Some(execution_handle)
+        || session.bound_review_handle.as_deref() != Some(review_handle)
+        || !session.execution_admitted()
+        || !session.recordable()
+    {
+        return Ok(None);
+    }
+    let reviewed_step_requirements = reviewed_step_requirements.ok_or_else(persistence_error)?;
+    restricted_qualification_claim_for_session(
+        &session,
+        plan,
+        reviewed_step_requirements,
+        report,
+        runtime,
+        reviewed_runtime_generation,
+        observed_terminal_status,
+    )
+    .map(Some)
+}
+
+/// Project one exact reviewed restricted run into the public evidence
+/// contract. Privileged capability values are checked before any claim is
+/// emitted, and outcomes are ordered by the workflow's required operations.
+pub(crate) fn restricted_qualification_claim_for_session(
+    session: &QualificationSession,
+    plan: &Value,
+    reviewed_step_requirements: &crate::handles::RestrictedQualificationStepRequirements,
+    report: &Value,
+    runtime: &Value,
+    reviewed_runtime_generation: Option<u64>,
+    observed_terminal_status: &str,
+) -> Result<Value, String> {
+    let plan_digest = reviewed_step_requirements.plan_digest.as_str();
+    let plan_id = plan
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(persistence_error)?;
+    if report.get("planId").and_then(Value::as_str) != Some(plan_id)
+        || report.get("planDigest").and_then(Value::as_str) != Some(plan_digest)
+        || !is_sha256_hex(plan_digest)
+    {
+        return Err(persistence_error());
+    }
+
+    let expected_generation = reviewed_runtime_generation.ok_or_else(persistence_error)?;
+    let restriction = runtime
+        .get("executionRestriction")
+        .filter(|value| value.is_object())
+        .ok_or_else(persistence_error)?;
+    let build_identity =
+        serde_json::to_value(session.build_identity()).map_err(|_| persistence_error())?;
+    if restriction.get("enabled").and_then(Value::as_bool) != Some(true)
+        || restriction.get("runtimeGeneration").and_then(Value::as_u64) != Some(expected_generation)
+        || restriction.get("strategy").and_then(Value::as_str) != Some("adb_shell")
+        || restriction.get("rootShell").and_then(Value::as_bool) != Some(false)
+        || restriction.get("appDataWrite").and_then(Value::as_bool) != Some(false)
+        || restriction.get("buildIdentity") != Some(&build_identity)
+    {
+        return Err(persistence_error());
+    }
+
+    let capabilities = plan
+        .get("runtime_capabilities")
+        .filter(|value| value.is_object())
+        .ok_or_else(persistence_error)?;
+    if capabilities.get("root_shell").and_then(Value::as_bool) != Some(false)
+        || capabilities.get("app_data_write").and_then(Value::as_bool) != Some(false)
+        || capabilities
+            .get("root_shell_route")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(persistence_error());
+    }
+    let capability_names = [
+        "adb_available",
+        "apk_install",
+        "shared_storage_write",
+        "app_launch",
+        "shell_command",
+        "package_remove_for_user",
+    ];
+    if capability_names
+        .iter()
+        .any(|name| capabilities.get(name).and_then(Value::as_bool).is_none())
+    {
+        return Err(persistence_error());
+    }
+    let effective_capabilities = capability_names
+        .into_iter()
+        .filter_map(|name| {
+            capabilities
+                .get(name)
+                .and_then(Value::as_bool)
+                .filter(|available| *available)
+                .map(|_| Value::String(name.to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    let required_operation_ids = &session.required_recipes;
+    if required_operation_ids.is_empty()
+        || required_operation_ids.iter().any(|id| id.is_empty())
+        || required_operation_ids.iter().collect::<BTreeSet<_>>().len()
+            != required_operation_ids.len()
+    {
+        return Err(persistence_error());
+    }
+    let plan_recipes = plan
+        .get("recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(persistence_error)?;
+    let mut plan_recipe_ids = BTreeSet::new();
+    for recipe in plan_recipes {
+        let recipe_id = recipe
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        if !plan_recipe_ids.insert(recipe_id) {
+            return Err(persistence_error());
+        }
+    }
+    if required_operation_ids
+        .iter()
+        .any(|operation_id| !plan_recipe_ids.contains(operation_id.as_str()))
+    {
+        return Err(persistence_error());
+    }
+
+    let plan_steps: &[Value] = match plan.get("steps") {
+        Some(steps) => steps.as_array().ok_or_else(persistence_error)?.as_slice(),
+        None => &[],
+    };
+    let mut planned_step_recipes = std::collections::HashMap::new();
+    for step in plan_steps {
+        let step_id = step
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        let recipe_id = step
+            .get("recipe_ref")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        if !plan_recipe_ids.contains(recipe_id)
+            || planned_step_recipes
+                .insert(step_id.to_string(), recipe_id.to_string())
+                .is_some()
+        {
+            return Err(persistence_error());
+        }
+    }
+    let required_step_ids = &reviewed_step_requirements.required_operation_step_ids;
+    if required_step_ids.iter().any(String::is_empty)
+        || required_step_ids.iter().collect::<BTreeSet<_>>().len() != required_step_ids.len()
+        || required_step_ids
+            .iter()
+            .any(|step_id| !planned_step_recipes.contains_key(step_id))
+    {
+        return Err(persistence_error());
+    }
+    let required_step_id_set = required_step_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    let execution_status = report.get("status").and_then(Value::as_str);
+    if execution_status != Some(observed_terminal_status)
+        || !is_terminal_execution_status(observed_terminal_status)
+    {
+        return Err(persistence_error());
+    }
+    let recipes = report
+        .get("recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(persistence_error)?;
+    let mut reported_outcomes = std::collections::HashMap::new();
+    let mut reported_step_outcomes = std::collections::HashMap::new();
+    for recipe in recipes {
+        let recipe_id = recipe
+            .get("recipeId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        if !plan_recipe_ids.contains(recipe_id) {
+            return Err(persistence_error());
+        }
+        let status = recipe
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(persistence_error)?;
+        if reported_outcomes
+            .insert(recipe_id.to_string(), status.to_string())
+            .is_some()
+        {
+            return Err(persistence_error());
+        }
+        let steps = recipe
+            .get("steps")
+            .and_then(Value::as_array)
+            .ok_or_else(persistence_error)?;
+        for step in steps {
+            let step_id = step
+                .get("stepId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(persistence_error)?;
+            let step_recipe_id = step
+                .get("recipeId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(persistence_error)?;
+            let step_status = step
+                .get("status")
+                .and_then(Value::as_str)
+                .ok_or_else(persistence_error)?;
+            if step_recipe_id != recipe_id
+                || planned_step_recipes.get(step_id).map(String::as_str) != Some(step_recipe_id)
+                || !matches!(
+                    step_status,
+                    "pending"
+                        | "running"
+                        | "succeeded"
+                        | "skipped"
+                        | "failed"
+                        | "blocked"
+                        | "cancelled"
+                )
+                || reported_step_outcomes
+                    .insert(step_id.to_string(), step_status.to_string())
+                    .is_some()
+            {
+                return Err(persistence_error());
+            }
+        }
+    }
+
+    let operation_outcomes = required_operation_ids
+        .iter()
+        .map(|operation_id| {
+            let recipe_status = reported_outcomes
+                .get(operation_id.as_str())
+                .map(String::as_str);
+            let planned_step_ids = planned_step_recipes
+                .iter()
+                .filter_map(|(step_id, recipe_id)| {
+                    (recipe_id == operation_id).then_some(step_id.as_str())
+                })
+                .collect::<Vec<_>>();
+            let step_statuses = planned_step_ids
+                .iter()
+                .filter_map(|step_id| reported_step_outcomes.get(*step_id).map(String::as_str))
+                .collect::<Vec<_>>();
+            let has_missing_step_result = step_statuses.len() != planned_step_ids.len();
+            let has_skipped_required_step = planned_step_ids.iter().any(|step_id| {
+                required_step_id_set.contains(*step_id)
+                    && reported_step_outcomes.get(*step_id).map(String::as_str) == Some("skipped")
+            });
+            let outcome = if recipe_status == Some("failed") || step_statuses.contains(&"failed") {
+                "failed"
+            } else if recipe_status == Some("blocked") || step_statuses.contains(&"blocked") {
+                "blocked"
+            } else if recipe_status == Some("cancelled") || step_statuses.contains(&"cancelled") {
+                "cancelled"
+            } else if recipe_status.is_none() {
+                if execution_status == Some("cancelled") {
+                    "cancelled"
+                } else {
+                    "blocked"
+                }
+            } else if matches!(recipe_status, Some("pending" | "running")) {
+                if execution_status == Some("cancelled") {
+                    "cancelled"
+                } else if planned_step_ids.is_empty() {
+                    "skipped"
+                } else {
+                    "blocked"
+                }
+            } else if matches!(recipe_status, Some("succeeded" | "succeeded_with_warnings")) {
+                if planned_step_ids.is_empty() {
+                    "skipped"
+                } else if has_missing_step_result
+                    || step_statuses.contains(&"pending")
+                    || step_statuses.contains(&"running")
+                    || has_skipped_required_step
+                {
+                    if execution_status == Some("cancelled") {
+                        "cancelled"
+                    } else {
+                        "blocked"
+                    }
+                } else if step_statuses.contains(&"succeeded") {
+                    "executed"
+                } else if !step_statuses.is_empty()
+                    && step_statuses.iter().all(|status| *status == "skipped")
+                {
+                    "skipped"
+                } else {
+                    return Err(persistence_error());
+                }
+            } else {
+                return Err(persistence_error());
+            };
+            Ok(json!({ "operationId": operation_id, "outcome": outcome }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let observed_root_state =
+        serde_json::to_value(&session.target.root_state).map_err(|_| persistence_error())?;
+
+    Ok(json!({
+        "claim": "restricted_unprivileged",
+        "attemptId": session.candidate_handle,
+        "executionMode": "real",
+        "strategy": "adb_unprivileged",
+        "restriction": "privileged_execution_disabled",
+        "observedRootState": observed_root_state,
+        "effectiveCapabilities": effective_capabilities,
+        "buildIdentity": build_identity,
+        "deviceTargetId": session.target_id,
+        "deviceProfileId": session.target.profile_id,
+        "reviewedPlanId": plan_id,
+        "reviewedPlanDigest": plan_digest,
+        "requiredOperationIds": required_operation_ids,
+        "operationOutcomes": operation_outcomes,
+    }))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_persisted_session_fields(fields: PersistedSessionValidation<'_>) -> Result<(), String> {
@@ -10744,6 +11140,7 @@ mod tests {
                     device_handle: device_handle.clone(),
                     qualification_context: Some(old_context.clone()),
                     platform_tools_identity: None,
+                    restricted_execution: None,
                     created: std::time::Instant::now(),
                     last_access: std::time::Instant::now(),
                 });

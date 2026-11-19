@@ -14,8 +14,8 @@ use crate::artifact_resolver::artifact_local_filename;
 use crate::executor::identity::IdentityCheckPhase;
 use crate::executor::{
     adb::{AdbCommandError, FakeAdbCommandExecutor, RealAdbDevice},
-    map_adb_error, DeviceOperationKind, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
-    OperationLifecycle, PermissionOperation, StepFailureKind,
+    map_adb_error, validate_restricted_execution_plan, DeviceOperationKind, DryRunExecutorAdapters,
+    ExecutorAdapters, ExecutorRunner, OperationLifecycle, PermissionOperation, StepFailureKind,
 };
 use crate::model::OrderedMap;
 use crate::owned_process::{ProcessCleanup, ProcessFailureKind, ProcessOperation};
@@ -1092,6 +1092,62 @@ fn sandbox_adapters(
         fake_device_root.to_path_buf(),
         read_only_roots,
     )
+}
+
+#[test]
+fn restricted_execution_plan_allows_ordinary_adb_only_capabilities() {
+    let mut reviewed = plan(Vec::new());
+    reviewed.runtime_capabilities.root_shell = false;
+    reviewed.runtime_capabilities.app_data_write = false;
+    reviewed.runtime_capabilities.root_shell_route = None;
+    reviewed.device_context.root_shell_mode = None;
+
+    assert!(validate_restricted_execution_plan(&reviewed).is_ok());
+}
+
+#[test]
+fn restricted_execution_plan_rejects_root_capabilities_and_routes() {
+    let mut reviewed = plan(Vec::new());
+    reviewed.runtime_capabilities.root_shell = false;
+    reviewed.runtime_capabilities.app_data_write = false;
+    reviewed.runtime_capabilities.root_shell_route = None;
+    reviewed.device_context.root_shell_mode = None;
+
+    let mut root_capability = reviewed.clone();
+    root_capability.runtime_capabilities.root_shell = true;
+    assert!(validate_restricted_execution_plan(&root_capability).is_err());
+
+    let mut app_data_write = reviewed.clone();
+    app_data_write.runtime_capabilities.app_data_write = true;
+    assert!(validate_restricted_execution_plan(&app_data_write).is_err());
+
+    let mut capability_route = reviewed.clone();
+    capability_route.runtime_capabilities.root_shell_route =
+        Some(crate::planner::RootShellRoute::SuCommand);
+    assert!(validate_restricted_execution_plan(&capability_route).is_err());
+
+    let mut observed_route = reviewed;
+    observed_route.device_context.root_shell_mode = Some(crate::planner::RootShellRoute::SuZero);
+    assert!(validate_restricted_execution_plan(&observed_route).is_err());
+}
+
+#[test]
+fn restricted_execution_plan_rejects_root_dependent_steps_without_capability_claims() {
+    let action = app_permission_action(
+        "android.permission.EXAMPLE",
+        PermissionActionApplicability::Applicable,
+    );
+    let mut reviewed = app_permission_plan(
+        PermissionSetKind::Elevated,
+        PermissionFailurePolicy::Fail,
+        vec![action],
+    );
+    reviewed.runtime_capabilities.root_shell = false;
+    reviewed.runtime_capabilities.app_data_write = false;
+    reviewed.runtime_capabilities.root_shell_route = None;
+    reviewed.device_context.root_shell_mode = None;
+
+    assert!(validate_restricted_execution_plan(&reviewed).is_err());
 }
 
 #[test]
@@ -3248,6 +3304,16 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
         .kind,
         DeviceOperationKind::CommandFailed
     );
+    let restricted_denial =
+        map_adb_error(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+    assert_eq!(
+        restricted_denial.kind,
+        DeviceOperationKind::RestrictedExecutionDenied
+    );
+    assert!(restricted_denial.kind.requires_device_fail_stop());
+    assert!(!restricted_denial
+        .kind
+        .may_have_unconfirmed_remote_completion());
 }
 
 #[test]

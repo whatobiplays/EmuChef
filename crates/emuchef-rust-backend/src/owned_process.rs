@@ -8,6 +8,7 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::File;
 use std::future::Future;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -1218,9 +1219,27 @@ fn run_owned_process_with_deadline_and_observer(
     operation: ProcessOperation,
     observer: Option<OwnedProcessObservationHandle>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    run_owned_process_with_deadline_and_observer_and_stdin(
+        program,
+        args,
+        deadline,
+        operation,
+        observer,
+        Stdio::null(),
+    )
+}
+
+fn run_owned_process_with_deadline_and_observer_and_stdin(
+    program: &str,
+    args: &[String],
+    deadline: Duration,
+    operation: ProcessOperation,
+    observer: Option<OwnedProcessObservationHandle>,
+    stdin: Stdio,
+) -> Result<CapturedProcessOutput, OwnedProcessError> {
     let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1310,6 +1329,24 @@ pub(crate) fn run_owned_process(
     run_owned_process_with_deadline(program, args, deadline, operation)
 }
 
+/// Run one owned child with a preopened file attached directly to its stdin.
+pub(crate) fn run_owned_process_with_stdin_file(
+    program: &str,
+    args: &[String],
+    operation: ProcessOperation,
+    stdin: File,
+) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    let deadline = take_test_process_deadline(operation).unwrap_or_else(|| operation.deadline());
+    run_owned_process_with_deadline_and_observer_and_stdin(
+        program,
+        args,
+        deadline,
+        operation,
+        None,
+        Stdio::from(stdin),
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn run_owned_process_observed(
     program: &str,
@@ -1319,6 +1356,25 @@ pub(crate) fn run_owned_process_observed(
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
     let deadline = take_test_process_deadline(operation).unwrap_or_else(|| operation.deadline());
     run_owned_process_with_deadline_and_observer(program, args, deadline, operation, Some(observer))
+}
+
+#[cfg(test)]
+pub(crate) fn run_owned_process_observed_with_stdin_file(
+    program: &str,
+    args: &[String],
+    operation: ProcessOperation,
+    observer: OwnedProcessObservationHandle,
+    stdin: File,
+) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    let deadline = take_test_process_deadline(operation).unwrap_or_else(|| operation.deadline());
+    run_owned_process_with_deadline_and_observer_and_stdin(
+        program,
+        args,
+        deadline,
+        operation,
+        Some(observer),
+        Stdio::from(stdin),
+    )
 }
 
 #[cfg(test)]
@@ -1344,6 +1400,28 @@ fn run_owned_process_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_process_can_stream_from_a_preopened_file() {
+        use std::io::Write;
+
+        let payload = b"reviewed staged file contents";
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(payload).unwrap();
+        source.flush().unwrap();
+
+        let output = run_owned_process_with_stdin_file(
+            "/bin/cat",
+            &[],
+            ProcessOperation::DeviceCopy,
+            File::open(source.path()).unwrap(),
+        )
+        .expect("the owned child should read the preopened file");
+
+        assert_eq!(output.stdout, payload);
+        assert_eq!(output.status_code, Some(0));
+    }
 
     #[test]
     fn fixed_operation_deadlines_cover_the_exhaustive_inventory() {

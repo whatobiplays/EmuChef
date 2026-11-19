@@ -11,6 +11,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+const RESTRICTION_FLAG = "--restrict-privileged-execution";
+
+/**
+ * @typedef {object} RunQualificationOptions
+ * @property {string} [cwd]
+ * @property {NodeJS.ProcessEnv} [env]
+ * @property {typeof nodeSpawnSync} [spawnSync]
+ * @property {(status: number) => void} [exit]
+ * @property {boolean} [restrictPrivilegedExecution]
+ */
+
 /**
  * Runs one launcher step and exits the process when it cannot complete.
  *
@@ -36,30 +47,98 @@ export function run(
 }
 
 /**
- * Runs the pinned qualification sequence in its production application
- * working directory. The qualification opt-in is scoped to the final app
- * process and is not leaked into the preceding preparation steps.
+ * Runs the qualification sequence in its production application working
+ * directory. Restriction is opt-in and applies to sidecar preparation and
+ * the final app process only.
+ *
+ * @param {RunQualificationOptions} [options]
+ * @returns {boolean}
  */
 export function runQualification({
   cwd = APP_ROOT,
   env = process.env,
   spawnSync = nodeSpawnSync,
   exit = process.exit,
+  restrictPrivilegedExecution = false,
 } = {}) {
-  if (!run("npm", ["run", "build"], { cwd, env, spawnSync, exit })) return false;
-  if (!run("npm", ["run", "sidecar:dev"], { cwd, env, spawnSync, exit })) return false;
+  if (typeof restrictPrivilegedExecution !== "boolean") {
+    throw new TypeError("restrictPrivilegedExecution must be a boolean");
+  }
+
+  const preparationEnvironment = { ...env };
+  delete preparationEnvironment.EMUCHEF_DEVICE_QUALIFICATION;
+  delete preparationEnvironment.EMUCHEF_RESTRICTED_EXECUTION_BUILD;
+  if (!run("npm", ["run", "build"], {
+    cwd,
+    env: preparationEnvironment,
+    spawnSync,
+    exit,
+  })) return false;
+  const sidecarEnvironment = restrictPrivilegedExecution
+    ? {
+        ...preparationEnvironment,
+        EMUCHEF_RESTRICTED_EXECUTION_BUILD: "1",
+      }
+    : preparationEnvironment;
+  if (!run("npm", ["run", "sidecar:dev"], {
+    cwd,
+    env: sidecarEnvironment,
+    spawnSync,
+    exit,
+  })) return false;
+
+  const appArguments = [
+    "run",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--features",
+    "real-execution",
+  ];
+  if (restrictPrivilegedExecution) {
+    appArguments.push("--", RESTRICTION_FLAG);
+  }
   return run(
     "cargo",
-    ["run", "--manifest-path", "src-tauri/Cargo.toml", "--features", "real-execution"],
+    appArguments,
     {
       cwd,
-      env: { ...env, EMUCHEF_DEVICE_QUALIFICATION: "1" },
+      env: { ...preparationEnvironment, EMUCHEF_DEVICE_QUALIFICATION: "1" },
       spawnSync,
       exit,
     },
   );
 }
 
+/**
+ * Parses launcher arguments before starting any build or application process.
+ *
+ * @param {string[]} [args]
+ * @param {RunQualificationOptions} [dependencies]
+ * @returns {boolean}
+ */
+export function runQualificationCli(
+  args = process.argv.slice(2),
+  dependencies = {},
+) {
+  let restrictPrivilegedExecution = false;
+  for (const argument of args) {
+    if (argument === RESTRICTION_FLAG) {
+      restrictPrivilegedExecution = true;
+      continue;
+    }
+    throw new Error(
+      `Unknown option "${argument}". Supported option: ${RESTRICTION_FLAG}`,
+    );
+  }
+
+  return runQualification({ ...dependencies, restrictPrivilegedExecution });
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  runQualification();
+  try {
+    runQualificationCli();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 2;
+  }
 }

@@ -50,8 +50,24 @@ pub struct ReviewedPlanSnapshot {
     /// capability changes, so real execution compares this opaque context.
     pub qualification_context: Option<QualificationContextKey>,
     pub platform_tools_identity: Option<AdbInstallationIdentity>,
+    /// Sidecar-only one-use authority retained outside renderer-visible review data.
+    pub(crate) restricted_execution: Option<RestrictedExecutionReview>,
     pub created: Instant,
     pub last_access: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RestrictedExecutionReview {
+    pub(crate) review_authority_id: String,
+    pub(crate) runtime_generation: u64,
+    pub(crate) step_requirements: RestrictedQualificationStepRequirements,
+}
+
+/// Records required operation steps from the plan used to prepare a restricted review.
+#[derive(Clone, Debug)]
+pub(crate) struct RestrictedQualificationStepRequirements {
+    pub(crate) plan_digest: String,
+    pub(crate) required_operation_step_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -727,6 +743,7 @@ mod tests {
             device_handle: device_handle.to_string(),
             qualification_context: None,
             platform_tools_identity: None,
+            restricted_execution: None,
             created: Instant::now(),
             last_access: Instant::now(),
         }

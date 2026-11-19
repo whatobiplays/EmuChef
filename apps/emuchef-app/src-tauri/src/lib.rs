@@ -38,6 +38,17 @@ pub fn run() {
         };
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let qualification_probe = qualification::requested(&arguments);
+    let restricted_build_identity = match qualification_build::restricted_execution_identity(
+        &arguments,
+        qualification_build::qualification_mode_enabled_at_runtime(),
+        qualification_build::embedded_build_identity(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("Could not start restricted execution: {error}");
+            std::process::exit(2);
+        }
+    };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -49,7 +60,12 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| format!("Application data directory is unavailable: {error}"))?;
             let cache_root = app_data.join("artifact-cache");
-            let sidecar = sidecar::SidecarState::new(cache_root.clone());
+            let sidecar = match restricted_build_identity.clone() {
+                Some(identity) => {
+                    sidecar::SidecarState::new_with_restriction(cache_root.clone(), identity)
+                }
+                None => sidecar::SidecarState::new(cache_root.clone()),
+            };
             sidecar.initialize();
             let catalog = catalog::CatalogDescriptor::resolve(app.handle());
             if qualification_probe {

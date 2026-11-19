@@ -12,6 +12,45 @@ observes the production workflow; it does not replace planner, executor,
 device-probe, or Tauri authority. A matching authored device profile does not
 itself imply support.
 
+## Capability-restricted qualification
+
+Restriction is an explicit launcher option for clean development
+qualification builds. Use this command for an authorized restricted run.
+
+```sh
+npm --prefix apps/emuchef-app run device-qualification -- --restrict-privileged-execution
+```
+
+Without the option, the launcher uses the standard qualification build and
+sidecar preparation and starts the app without a restriction argument. Unknown
+options fail before the launcher starts a build. With the option, the launcher
+prepares a restricted sidecar and passes the restriction argument to the
+native app. The native app requires debug mode, the `real-execution` feature,
+runtime opt-in and the embedded clean-build gate. The sidecar checks its own
+debug and `real-execution` gates, verifies the embedded qualification source
+identity, and confirms the effective policy during its private handshake.
+Restriction stays fixed for the process lifetime. Changing it requires a
+relaunch and fresh profile resolution, planning and review.
+
+The Rust planner suppresses effective `root_shell` and `app_data_write` while
+preserving the device's observed root state. Execution uses ordinary
+unprivileged ADB. Operations that require privilege or lack a verifiable
+unprivileged route are blocked. Restricted CopyCommit streams staged files
+and its helper through ADB shell. The adapter checks the daemon, then verifies
+the shell UID and security context in the same command that writes the stream.
+It checks the digest derived from the Android ID and build fingerprint before
+opening the staging destination. Raw sync or directory transfers can fail if
+the adapter cannot establish a guarded ordinary route.
+
+A rooted target can provide evidence for the tested unprivileged path when
+the accepted review and terminal report establish the restriction, target,
+profile and plan, source and build identity, reviewed digest, required
+operations and outcomes. OEM-assisted execution needs separate evidence.
+
+Physical use still requires separate authorization for the target, build,
+actions, paths and run scope. No capability-restricted physical run has been
+performed. Physical acceptance is `NOT RUN`.
+
 ## Operator flow
 
 1. Launch a clean qualification build with `npm --prefix apps/emuchef-app run device-qualification`.

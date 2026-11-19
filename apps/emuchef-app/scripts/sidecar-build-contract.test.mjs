@@ -26,11 +26,24 @@ import {
   requireConfigCreateQualificationTarget,
   sidecarBuildBorrowerDirectoryPath,
   sidecarBuildLockPath,
+  sidecarCargoBuildArgs,
   validateQualificationSidecarManifest,
   withReleasePackageLock,
 } from "./sidecar-build-contract.mjs";
 
 const digest = (character) => `sha256:${character.repeat(64)}`;
+
+test("restricted execution sidecar builds are debug-only and include real execution support", () => {
+  const manifest = "/repo/crates/emuchef-rust-backend/Cargo.toml";
+  assert.deepEqual(
+    sidecarCargoBuildArgs("debug", manifest, { restrictedExecution: true }),
+    ["build", "--manifest-path", manifest, "--bin", "emuchef", "--features", "real-execution"],
+  );
+  assert.throws(
+    () => sidecarCargoBuildArgs("release", manifest, { restrictedExecution: true }),
+    /debug profile/i,
+  );
+});
 
 function fixture() {
   const sourceIdentity = {

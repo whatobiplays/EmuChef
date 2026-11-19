@@ -1,5 +1,8 @@
 use std::cell::RefCell;
 use std::fmt;
+use std::fs::File;
+#[cfg(test)]
+use std::io::Read;
 use std::path::Path;
 
 #[cfg(test)]
@@ -7,15 +10,22 @@ use std::collections::VecDeque;
 
 use crate::device_probe::{CommandOutput, CommandRunner, DeviceProbeError};
 use crate::owned_process::{
-    run_owned_process, OwnedProcessError, ProcessCleanup, ProcessFailureKind, ProcessOperation,
+    run_owned_process, run_owned_process_with_stdin_file, OwnedProcessError, ProcessCleanup,
+    ProcessFailureKind, ProcessOperation,
 };
 #[cfg(test)]
-use crate::owned_process::{run_owned_process_observed, OwnedProcessObservationHandle};
+use crate::owned_process::{
+    run_owned_process_observed, run_owned_process_observed_with_stdin_file,
+    OwnedProcessObservationHandle,
+};
 use crate::planner::{RootShellRoute, TargetDeviceBinding};
 use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
 
 use super::copy_commit::{CopyCommitMutation, CopyEntryKind, CopyManifestEntry};
-use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
+use super::identity::{
+    IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER,
+    RESTRICTED_FILE_STREAM_IDENTITY_DOMAIN,
+};
 use super::root_authority::{self, DeviceCommandEffect};
 use super::root_requirements::is_app_private_path;
 use super::PermissionOperation;
@@ -61,6 +71,10 @@ pub enum AdbCommandError {
     RootCheckFailed,
     RootAuthorityRevoked,
     RootAuthorityUnverified,
+    RestrictedExecutionIdentityUnverified {
+        phase: IdentityCheckPhase,
+    },
+    RestrictedExecutionPrivilegedEffectDenied,
 }
 
 /// Generic public result message for a completed ADB command failure.
@@ -131,6 +145,16 @@ impl fmt::Display for AdbCommandError {
             AdbCommandError::RootAuthorityUnverified => {
                 formatter.write_str("Continued root authority could not be confirmed safely.")
             }
+            AdbCommandError::RestrictedExecutionIdentityUnverified { phase } => {
+                if *phase == IdentityCheckPhase::PostOperation {
+                    formatter.write_str(POST_OPERATION_IDENTITY_FAILURE_MARKER)
+                } else {
+                    formatter.write_str("The restricted shell identity could not be confirmed.")
+                }
+            }
+            AdbCommandError::RestrictedExecutionPrivilegedEffectDenied => {
+                formatter.write_str("Restricted execution denied a privileged device operation.")
+            }
         }
     }
 }
@@ -140,6 +164,7 @@ const MAX_ADB_DIAGNOSTIC_INPUT_CHARS: usize = 4096;
 const MAX_ADB_DIAGNOSTIC_CHARS: usize = 1024;
 const MAX_ADB_DIAGNOSTIC_TOKEN_CHARS: usize = 256;
 const REDACTED_DIAGNOSTIC_VALUE: &str = "[REDACTED]";
+const RESTRICTED_IDENTITY_FAILURE_MARKER: &str = "__emuchef_restricted_identity_unverified__";
 
 fn command_failed(result: &AdbCommandResult) -> AdbCommandError {
     let mut redact_next = 0;
@@ -255,6 +280,17 @@ pub trait AdbCommandExecutor: fmt::Debug {
         args: &[String],
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError>;
+
+    fn run_for_with_stdin_file(
+        &mut self,
+        _args: &[String],
+        _operation: ProcessOperation,
+        _stdin: File,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        Err(AdbCommandError::Resolution(
+            "this ADB command executor cannot attach a file to child stdin".to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -264,6 +300,58 @@ pub struct ProcessAdbCommandExecutor {
 }
 
 impl ProcessAdbCommandExecutor {
+    fn run_with_optional_stdin(
+        &self,
+        args: &[String],
+        operation: ProcessOperation,
+        stdin: Option<File>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let (executable, command_args) = args.split_first().ok_or_else(|| {
+            AdbCommandError::Resolution("ADB command must not be empty.".to_string())
+        })?;
+        #[cfg(test)]
+        let output = if let Some(observer) = self.process_observer.as_ref() {
+            match stdin {
+                Some(stdin) => run_owned_process_observed_with_stdin_file(
+                    executable,
+                    command_args,
+                    operation,
+                    observer.clone(),
+                    stdin,
+                ),
+                None => run_owned_process_observed(
+                    executable,
+                    command_args,
+                    operation,
+                    observer.clone(),
+                ),
+            }
+        } else {
+            match stdin {
+                Some(stdin) => {
+                    run_owned_process_with_stdin_file(executable, command_args, operation, stdin)
+                }
+                None => run_owned_process(executable, command_args, operation),
+            }
+        }
+        .map_err(|error| map_process_error(args, error))?;
+        #[cfg(not(test))]
+        let output = match stdin {
+            Some(stdin) => {
+                run_owned_process_with_stdin_file(executable, command_args, operation, stdin)
+            }
+            None => run_owned_process(executable, command_args, operation),
+        }
+        .map_err(|error| map_process_error(args, error))?;
+
+        classify_completed_transport(AdbCommandResult {
+            args: args.to_vec(),
+            returncode: output.status_code.unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn with_process_observer(observer: OwnedProcessObservationHandle) -> Self {
         Self {
@@ -278,26 +366,16 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
         args: &[String],
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
-        let (executable, command_args) = args.split_first().ok_or_else(|| {
-            AdbCommandError::Resolution("ADB command must not be empty.".to_string())
-        })?;
-        #[cfg(test)]
-        let output = match self.process_observer.as_ref() {
-            Some(observer) => {
-                run_owned_process_observed(executable, command_args, operation, observer.clone())
-            }
-            None => run_owned_process(executable, command_args, operation),
-        }
-        .map_err(|error| map_process_error(args, error))?;
-        #[cfg(not(test))]
-        let output = run_owned_process(executable, command_args, operation)
-            .map_err(|error| map_process_error(args, error))?;
-        classify_completed_transport(AdbCommandResult {
-            args: args.to_vec(),
-            returncode: output.status_code.unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        self.run_with_optional_stdin(args, operation, None)
+    }
+
+    fn run_for_with_stdin_file(
+        &mut self,
+        args: &[String],
+        operation: ProcessOperation,
+        stdin: File,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        self.run_with_optional_stdin(args, operation, Some(stdin))
     }
 }
 
@@ -671,6 +749,22 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         self.run_raw(full_args, check, operation)
     }
 
+    fn run_with_stdin_file(
+        &mut self,
+        args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+        stdin: File,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let mut full_args = vec![self.executable.clone()];
+        if let Some(serial) = self.serial.as_deref() {
+            full_args.push("-s".to_string());
+            full_args.push(serial.to_string());
+        }
+        full_args.extend(args);
+        self.run_raw_with_stdin_file(full_args, check, operation, stdin)
+    }
+
     fn run_raw(
         &mut self,
         full_args: Vec<String>,
@@ -678,6 +772,31 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
         let result = self.executor.run_for(&full_args, operation)?;
+        let result = classify_completed_transport(result)?;
+        if classify_completed_storage(operation, &full_args, &result) {
+            return Err(AdbCommandError::DeviceStorageExhausted);
+        }
+        if check && result.returncode != 0 {
+            if operation == ProcessOperation::Install {
+                Err(classify_install_rejection(&result))
+            } else {
+                Err(command_failed(&result))
+            }
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn run_raw_with_stdin_file(
+        &mut self,
+        full_args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+        stdin: File,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let result = self
+            .executor
+            .run_for_with_stdin_file(&full_args, operation, stdin)?;
         let result = classify_completed_transport(result)?;
         if classify_completed_storage(operation, &full_args, &result) {
             return Err(AdbCommandError::DeviceStorageExhausted);
@@ -800,7 +919,10 @@ fn reviewed_plan_operation(args: &[String]) -> ProcessOperation {
 /// Tauri packages the backend sidecar, not Cargo's build directory. Embedding
 /// the Android helper keeps the packaged sidecar self-contained; a private
 /// temporary file supplies the local pathname required by `adb push`.
-#[cfg(feature = "android-copy-commit-helper")]
+#[cfg(any(
+    feature = "android-copy-commit-helper",
+    restricted_execution_copy_commit_helper
+))]
 fn stage_android_copy_commit_helper(abi: &str) -> Result<tempfile::NamedTempFile, AdbCommandError> {
     let payload: &[u8] = match abi {
         "arm64-v8a" => include_bytes!(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64")),
@@ -827,6 +949,7 @@ pub struct RealAdbDevice<E: AdbCommandExecutor = ProcessAdbCommandExecutor> {
     identity: super::identity::IdentityGuard,
     root_authority: root_authority::RootAuthorityGuard,
     root_shell_mode: RootShellMode,
+    restricted_execution: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -852,6 +975,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
             root_shell_mode: RootShellMode::SuCommand,
+            restricted_execution: false,
         }
     }
 
@@ -871,6 +995,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
             root_shell_mode: RootShellMode::SuCommand,
+            restricted_execution: false,
         }
     }
 }
@@ -888,6 +1013,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
             root_shell_mode: RootShellMode::SuCommand,
+            restricted_execution: false,
         }
     }
 
@@ -916,6 +1042,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.root_shell_mode = route
             .map(RootShellMode::from)
             .unwrap_or(RootShellMode::SuCommand);
+    }
+
+    pub(crate) fn configure_restricted_execution(&mut self, restricted: bool) {
+        self.restricted_execution = restricted;
     }
 
     pub(crate) fn root_authority_failure_after_mutation(&self) -> bool {
@@ -953,6 +1083,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             self.last_error = Some(error.clone());
             return Err(error);
         }
+        if let Err(error) = self.check_restricted_shell_identity(IdentityCheckPhase::PreOperation) {
+            self.last_error = Some(error.clone());
+            return Err(error);
+        }
         let result = operation(self);
         self.root_authority.record_result(effect, &result);
         let should_post_check = result
@@ -960,6 +1094,12 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             .err()
             .is_none_or(AdbCommandError::allows_post_identity_probe);
         if should_post_check {
+            if let Err(error) =
+                self.check_restricted_shell_identity(IdentityCheckPhase::PostOperation)
+            {
+                self.last_error = Some(error.clone());
+                return Err(error);
+            }
             if let Err(error) = self
                 .identity
                 .check(&mut self.runner, IdentityCheckPhase::PostOperation)
@@ -974,6 +1114,38 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         result
     }
 
+    fn check_restricted_shell_identity(
+        &mut self,
+        phase: IdentityCheckPhase,
+    ) -> Result<(), AdbCommandError> {
+        if !self.restricted_execution {
+            return Ok(());
+        }
+        let mut probe = |command: &str| {
+            self.runner
+                .run(
+                    vec!["shell".to_string(), command.to_string()],
+                    false,
+                    ProcessOperation::Predicate,
+                )
+                .ok()
+                .filter(|result| result.returncode == 0)
+                .map(|result| result.stdout.trim_end_matches(['\r', '\n']).to_owned())
+        };
+        if probe("id -u").as_deref() != Some("2000")
+            || probe("id -Z").as_deref() != Some("u:r:shell:s0")
+        {
+            return Err(AdbCommandError::RestrictedExecutionIdentityUnverified { phase });
+        }
+        // adbd drops privileges by default on secure builds. An explicit 0 also
+        // requests that it drop privileges, regardless of the build default.
+        match probe("getprop service.adb.root").as_deref() {
+            Some("0") => Ok(()),
+            Some("") if probe("getprop ro.secure").as_deref() == Some("1") => Ok(()),
+            _ => Err(AdbCommandError::RestrictedExecutionIdentityUnverified { phase }),
+        }
+    }
+
     pub fn check_root(&mut self) -> Result<(), String> {
         self.guarded(DeviceCommandEffect::ReadOnly, |device| {
             device.check_root_unchecked()
@@ -981,6 +1153,9 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     fn check_root_unchecked(&mut self) -> Result<(), AdbCommandError> {
+        if self.restricted_execution {
+            return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+        }
         let Some(serial) = self.runner.serial.clone() else {
             let error = AdbCommandError::RootCheckFailed;
             return Err(error);
@@ -1015,35 +1190,96 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+        let dest = dest.to_string();
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
+            device.push_file_unchecked(source, &dest, sync)
+        })
+    }
+
+    /// Keep directory and sync pushes on ADB's standard service. Restricted
+    /// runs stream individual reviewed files through one identity-guarded shell.
+    fn push_file_unchecked(
+        &mut self,
+        source: &Path,
+        destination: &str,
+        sync: bool,
+    ) -> Result<(), AdbCommandError> {
+        if self.restricted_execution {
+            if sync || !source.is_file() || contains_app_private_device_path(destination) {
+                return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+            }
+            let identity_digest = self
+                .identity
+                .restricted_file_stream_identity_digest()
+                .ok_or(AdbCommandError::DeviceIdentityUnverified {
+                    phase: IdentityCheckPhase::PreOperation,
+                })?;
+            let input = File::open(source).map_err(|_| {
+                AdbCommandError::Resolution(
+                    "The reviewed file could not be opened for restricted transfer.".to_string(),
+                )
+            })?;
+            let metadata = input.metadata().map_err(|_| {
+                AdbCommandError::Resolution(
+                    "The reviewed file could not be opened for restricted transfer.".to_string(),
+                )
+            })?;
+            if !metadata.is_file() {
+                return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+            }
+            let quoted_destination = shell_quote(destination);
+            let command = format!(
+                "cat > {quoted_destination} && dd if=/dev/null of={quoted_destination} count=0 conv=notrunc,fsync"
+            );
+            let result = self.runner.run_with_stdin_file(
+                vec![
+                    "shell".to_string(),
+                    guard_restricted_file_stream_identity(&command, &identity_digest),
+                ],
+                false,
+                ProcessOperation::Push,
+                input,
+            )?;
+            if result.returncode == 125
+                && result.stderr.contains(RESTRICTED_IDENTITY_FAILURE_MARKER)
+            {
+                return Err(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                    phase: IdentityCheckPhase::PreOperation,
+                });
+            }
+            if result.returncode != 0 {
+                return Err(command_failed(&result));
+            }
+            return Ok(());
+        }
+
         let durable_file = !source.is_dir();
         let mut args = vec!["push".to_string()];
         if sync {
             args.push("--sync".to_string());
         }
         args.push(source.to_string_lossy().to_string());
-        args.push(dest.to_string());
-        self.guarded(DeviceCommandEffect::Mutating, |device| {
-            device.runner.run(args, true, ProcessOperation::Push)?;
-            if durable_file {
-                // ADB sync completion is not a durability boundary. Reopen the
-                // exact copied file writable through dd and request conv=fsync
-                // without truncating or changing its contents. The standalone
-                // fsync applet opens shared-storage paths in a mode that can be
-                // rejected even when a writable descriptor can be synchronized.
-                device.run_shell_unchecked(
-                    vec![
-                        "dd".to_string(),
-                        "if=/dev/null".to_string(),
-                        format!("of={dest}"),
-                        "count=0".to_string(),
-                        "conv=notrunc,fsync".to_string(),
-                    ],
-                    true,
-                    ProcessOperation::DeviceCopy,
-                )?;
-            }
-            Ok(())
-        })
+        args.push(destination.to_string());
+        self.runner.run(args, true, ProcessOperation::Push)?;
+        if durable_file {
+            // ADB sync completion is not a durability boundary. Reopen the
+            // exact copied file writable through dd and request conv=fsync
+            // without truncating or changing its contents. The standalone
+            // fsync applet opens shared-storage paths in a mode that can be
+            // rejected even when a writable descriptor can be synchronized.
+            self.run_shell_unchecked(
+                vec![
+                    "dd".to_string(),
+                    "if=/dev/null".to_string(),
+                    format!("of={destination}"),
+                    "count=0".to_string(),
+                    "conv=notrunc,fsync".to_string(),
+                ],
+                true,
+                ProcessOperation::DeviceCopy,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
@@ -1109,9 +1345,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
 
     pub fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
         self.guarded(DeviceCommandEffect::ReadOnly, |device| {
-            let result = device.runner.run(
+            let result = device.run_android_shell_unchecked(
                 vec![
-                    "shell".to_string(),
                     "pm".to_string(),
                     "path".to_string(),
                     package_name.to_string(),
@@ -1528,7 +1763,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         stage_root: &str,
         helper_path: &str,
     ) -> Result<(), AdbCommandError> {
-        #[cfg(not(feature = "android-copy-commit-helper"))]
+        #[cfg(not(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        )))]
         {
             let _ = (stage_root, helper_path);
             Err(AdbCommandError::Resolution(
@@ -1537,7 +1775,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             ))
         }
 
-        #[cfg(feature = "android-copy-commit-helper")]
+        #[cfg(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        ))]
         {
             if helper_path != format!("{stage_root}-helper") {
                 return Err(AdbCommandError::Resolution(
@@ -1561,15 +1802,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             }
             let staged_helper = stage_android_copy_commit_helper(abi.stdout.trim())?;
             let local_helper = staged_helper.path().to_string_lossy().into_owned();
-            device.runner.run(
-                    vec![
-                        "push".to_string(),
-                    local_helper,
-                        helper_path.to_string(),
-                    ],
-                    true,
-                    ProcessOperation::Push,
-                )?;
+            device.push_file_unchecked(Path::new(&local_helper), helper_path, false)?;
                 device.run_shell_unchecked(
                     vec![
                         "chmod".to_string(),
@@ -1595,7 +1828,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         expected_entry: &str,
         mutation: &CopyCommitMutation,
     ) -> Result<(), AdbCommandError> {
-        #[cfg(not(feature = "android-copy-commit-helper"))]
+        #[cfg(not(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        )))]
         {
             let _ = (
                 selected_root,
@@ -1611,7 +1847,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             ))
         }
 
-        #[cfg(feature = "android-copy-commit-helper")]
+        #[cfg(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        ))]
         {
             let privileged = super::root_requirements::is_app_private_path(selected_root);
             if !privileged && self.copy_commit_path_binding(selected_root)? != destination_binding {
@@ -1669,7 +1908,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
 
     /// Create the final selected-root file with O_EXCL and return the helper's
     /// exact readback outcome. The helper never removes a file after opening it.
-    #[cfg(feature = "android-copy-commit-helper")]
+    #[cfg(any(
+        feature = "android-copy-commit-helper",
+        restricted_execution_copy_commit_helper
+    ))]
     fn copy_commit_create_file_outcome_for_return_code(
         returncode: i32,
     ) -> Option<super::CopyCommitCreateFileOutcome> {
@@ -1697,7 +1939,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                     .to_string(),
             ));
         }
-        #[cfg(not(feature = "android-copy-commit-helper"))]
+        #[cfg(not(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        )))]
         {
             let _ = (
                 selected_root,
@@ -1711,7 +1956,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                     .to_string(),
             ))
         }
-        #[cfg(feature = "android-copy-commit-helper")]
+        #[cfg(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        ))]
         {
             let privileged = is_app_private_path(selected_root);
             if !privileged && self.copy_commit_path_binding(selected_root)? != destination_binding {
@@ -1774,7 +2022,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     /// Extracts the canonical path and selected identity for separate helper arguments.
-    #[cfg(feature = "android-copy-commit-helper")]
+    #[cfg(any(
+        feature = "android-copy-commit-helper",
+        restricted_execution_copy_commit_helper
+    ))]
     fn copy_commit_helper_binding_arguments(
         binding: &str,
     ) -> Result<(String, String), AdbCommandError> {
@@ -1840,9 +2091,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         activity: Option<&str>,
     ) -> Result<(), AdbCommandError> {
         if let Some(activity) = activity.filter(|value| !value.is_empty()) {
-            let result = self.runner.run(
+            let result = self.run_android_shell_unchecked(
                 vec![
-                    "shell".to_string(),
                     "am".to_string(),
                     "start".to_string(),
                     "-n".to_string(),
@@ -1855,9 +2105,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
 
         if let Some(resolved_activity) = self.resolve_launcher_activity_unchecked(package_name)? {
-            let result = self.runner.run(
+            let result = self.run_android_shell_unchecked(
                 vec![
-                    "shell".to_string(),
                     "am".to_string(),
                     "start".to_string(),
                     "-n".to_string(),
@@ -1869,9 +2118,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             return result.map(|_| ());
         }
 
-        let result = self.runner.run(
+        let result = self.run_android_shell_unchecked(
             vec![
-                "shell".to_string(),
                 "monkey".to_string(),
                 "-p".to_string(),
                 package_name.to_string(),
@@ -1889,14 +2137,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         let package_name = package_name.to_string();
         self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
-                .runner
-                .run(
-                    vec![
-                        "shell".to_string(),
-                        "am".to_string(),
-                        "force-stop".to_string(),
-                        package_name,
-                    ],
+                .run_android_shell_unchecked(
+                    vec!["am".to_string(), "force-stop".to_string(), package_name],
                     true,
                     ProcessOperation::ForceStop,
                 )
@@ -1910,7 +2152,6 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     ) -> Result<Option<String>, AdbCommandError> {
         for command in [
             vec![
-                "shell".to_string(),
                 "cmd".to_string(),
                 "package".to_string(),
                 "resolve-activity".to_string(),
@@ -1918,14 +2159,13 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 package_name.to_string(),
             ],
             vec![
-                "shell".to_string(),
                 "pm".to_string(),
                 "resolve-activity".to_string(),
                 "--brief".to_string(),
                 package_name.to_string(),
             ],
         ] {
-            let result = self.runner.run(command, false, ProcessOperation::Launch);
+            let result = self.run_android_shell_unchecked(command, false, ProcessOperation::Launch);
             let result = result?;
             if result.returncode != 0 {
                 continue;
@@ -1935,6 +2175,20 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             }
         }
         Ok(None)
+    }
+
+    fn run_android_shell_unchecked(
+        &mut self,
+        args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        if self.restricted_execution {
+            return self.run_shell_unchecked(args, check, operation);
+        }
+        let mut command = vec!["shell".to_string()];
+        command.extend(args);
+        self.runner.run(command, check, operation)
     }
 
     fn run_shell_unchecked(
@@ -1957,20 +2211,45 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         privileged: bool,
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
+        if self.restricted_execution
+            && (privileged
+                || args
+                    .iter()
+                    .any(|argument| contains_app_private_device_path(argument))
+                || contains_root_escalation_command(&args))
+        {
+            return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+        }
         if privileged {
             self.revalidate_root_authority_unchecked()?;
         }
-        self.runner.run(
-            vec![
-                "shell".to_string(),
-                build_shell_command_with_mode(&args, privileged, self.root_shell_mode),
-            ],
-            check,
-            operation,
-        )
+        let command = build_shell_command_with_mode(&args, privileged, self.root_shell_mode);
+        let command = if self.restricted_execution {
+            guard_restricted_shell_identity(&command)
+        } else {
+            command
+        };
+        let result = self
+            .runner
+            .run(vec!["shell".to_string(), command], false, operation)?;
+        if self.restricted_execution
+            && result.returncode == 125
+            && result.stderr.contains(RESTRICTED_IDENTITY_FAILURE_MARKER)
+        {
+            return Err(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            });
+        }
+        if check && result.returncode != 0 {
+            return Err(command_failed(&result));
+        }
+        Ok(result)
     }
 
     fn revalidate_root_authority_unchecked(&mut self) -> Result<(), AdbCommandError> {
+        if self.restricted_execution {
+            return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+        }
         if !self.root_authority.is_authorized() {
             return Err(AdbCommandError::RootAuthorityUnverified);
         }
@@ -2001,6 +2280,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
 pub struct FakeAdbCommandExecutor {
     calls: Vec<Vec<String>>,
     operations: Vec<ProcessOperation>,
+    stdin_contents: Vec<Vec<u8>>,
     responses: VecDeque<FakeAdbResponse>,
 }
 
@@ -2194,6 +2474,10 @@ impl FakeAdbCommandExecutor {
         &self.operations
     }
 
+    pub fn stdin_contents(&self) -> &[Vec<u8>] {
+        &self.stdin_contents
+    }
+
     pub fn push_completed(&mut self, returncode: i32, stdout: &str, stderr: &str) {
         self.responses.push_back(FakeAdbResponse::Completed {
             returncode,
@@ -2253,6 +2537,20 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
                 stderr: String::new(),
             }),
         }
+    }
+
+    fn run_for_with_stdin_file(
+        &mut self,
+        args: &[String],
+        operation: ProcessOperation,
+        mut stdin: File,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let mut contents = Vec::new();
+        stdin.read_to_end(&mut contents).map_err(|_| {
+            AdbCommandError::Resolution("fake ADB input file could not be read".to_string())
+        })?;
+        self.stdin_contents.push(contents);
+        self.run_for(args, operation)
     }
 }
 
@@ -2328,8 +2626,10 @@ fn classify_completed_storage(
             {
                 return true;
             }
-            if operation == ProcessOperation::DeviceCopy
-                && line.ends_with(": fsync: no space left on device")
+            if matches!(
+                operation,
+                ProcessOperation::DeviceCopy | ProcessOperation::Push
+            ) && line.ends_with(": fsync: no space left on device")
             {
                 return true;
             }
@@ -2443,6 +2743,73 @@ fn build_shell_command_with_mode(
     }
 }
 
+fn contains_root_escalation_command(args: &[String]) -> bool {
+    const ROOT_ESCALATION_COMMANDS: &[&str] = &[
+        "su",
+        "run-as",
+        "sudo",
+        "doas",
+        "magisk",
+        "magiskpolicy",
+        "ksu",
+        "ksud",
+        "setenforce",
+    ];
+    args.iter().any(|argument| {
+        argument
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| {
+                ROOT_ESCALATION_COMMANDS
+                    .iter()
+                    .any(|command| token.eq_ignore_ascii_case(command))
+            })
+    })
+}
+
+fn guard_restricted_shell_identity(command: &str) -> String {
+    let identity_failure =
+        format!("printf '%s\\n' '{RESTRICTED_IDENTITY_FAILURE_MARKER}' >&2; exit 125");
+    format!(
+        "if ! shell_uid=$(id -u 2>/dev/null) || [ \"$shell_uid\" != '2000' ] || \
+         ! shell_context=$(id -Z 2>/dev/null) || [ \"$shell_context\" != 'u:r:shell:s0' ] || \
+         ! adbd_root=$(getprop service.adb.root 2>/dev/null); then {identity_failure}; fi; \
+         case \"$adbd_root\" in \
+         '0') ;; \
+         '') if ! secure=$(getprop ro.secure 2>/dev/null) || [ \"$secure\" != '1' ]; \
+             then {identity_failure}; fi ;; \
+         *) {identity_failure} ;; \
+         esac; {command}"
+    )
+}
+
+fn guard_restricted_file_stream_identity(command: &str, expected_digest: &str) -> String {
+    let identity_failure = format!(
+        "printf '%s\\n' {} >&2; exit 125",
+        shell_quote(RESTRICTED_IDENTITY_FAILURE_MARKER)
+    );
+    let identity_check = format!(
+        "set -f; \
+         actual_android_id=$(settings get secure android_id 2>/dev/null); \
+         set -- $actual_android_id; \
+         if [ \"$#\" -ne 1 ]; then {identity_failure}; fi; \
+         actual_android_id=$(printf '%s' \"$1\" | tr '[:upper:]' '[:lower:]' 2>/dev/null); \
+         case \"$actual_android_id\" in ''|*[!0-9a-f]*) {identity_failure};; esac; \
+         actual_build_fingerprint=$(getprop ro.build.fingerprint 2>/dev/null); \
+         set -- $actual_build_fingerprint; \
+         actual_build_fingerprint=\"$*\"; \
+         actual_digest=$(printf '%s\\n%s\\n%s' {} \"$actual_android_id\" \"$actual_build_fingerprint\" | sha256sum 2>/dev/null); \
+         actual_digest=${{actual_digest%% *}}; \
+         if [ \"$actual_digest\" != {} ]; then {identity_failure}; fi",
+        shell_quote(RESTRICTED_FILE_STREAM_IDENTITY_DOMAIN),
+        shell_quote(expected_digest),
+    );
+    guard_restricted_shell_identity(&format!("{identity_check}; {command}"))
+}
+
+fn contains_app_private_device_path(argument: &str) -> bool {
+    argument.contains("/data/data/") || argument.contains("/data/user/")
+}
+
 fn shell_join(args: &[String]) -> String {
     args.iter()
         .map(|arg| shell_quote(arg))
@@ -2475,7 +2842,23 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "android-copy-commit-helper")]
+    #[test]
+    fn restricted_build_identity_enables_copy_commit_helper_support() {
+        let restricted_identity_present =
+            option_env!("EMU_CHEF_RESTRICTED_EXECUTION_BUILD_IDENTITY")
+                .is_some_and(|identity| !identity.is_empty());
+
+        assert_eq!(
+            cfg!(restricted_execution_copy_commit_helper),
+            restricted_identity_present,
+            "restricted sidecar builds must compile their CopyCommit helper support",
+        );
+    }
+
+    #[cfg(any(
+        feature = "android-copy-commit-helper",
+        restricted_execution_copy_commit_helper
+    ))]
     #[test]
     fn helper_existing_target_status_maps_to_the_adapter_existing_outcome() {
         assert!(matches!(
@@ -2485,7 +2868,10 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "android-copy-commit-helper")]
+    #[cfg(any(
+        feature = "android-copy-commit-helper",
+        restricted_execution_copy_commit_helper
+    ))]
     #[test]
     fn helper_binding_fields_are_separate_and_preserve_pipe_in_canonical_path() {
         let binding = serde_json::json!({
@@ -2508,28 +2894,57 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "android-copy-commit-helper")]
+    #[cfg(any(
+        feature = "android-copy-commit-helper",
+        restricted_execution_copy_commit_helper
+    ))]
     #[test]
     fn packaged_android_helper_materializes_outside_the_cargo_build_tree() {
-        let helper = stage_android_copy_commit_helper("arm64-v8a")
-            .expect("packaged Android helper should materialize for adb push");
-        let bytes = std::fs::read(helper.path()).expect("materialized helper should be readable");
-        let build_output = std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64"));
-
-        assert_eq!(
-            &bytes[..4],
-            b"\x7fELF",
-            "helper payload should be an Android ELF"
-        );
-        assert_ne!(
-            helper.path(),
-            build_output,
-            "ADB must push the packaged payload staged at runtime, not Cargo OUT_DIR"
-        );
-        assert!(
-            !helper.path().starts_with(build_output.parent().unwrap()),
-            "runtime helper payload must not depend on the Cargo build tree"
-        );
+        for (abi, expected_machine, build_output) in [
+            (
+                "arm64-v8a",
+                183_u16,
+                std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64")),
+            ),
+            (
+                "x86_64",
+                62_u16,
+                std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_X86_64")),
+            ),
+        ] {
+            let helper = stage_android_copy_commit_helper(abi)
+                .expect("packaged Android helper should materialize for adb push");
+            let bytes =
+                std::fs::read(helper.path()).expect("materialized helper should be readable");
+            assert!(
+                bytes.len() >= 20,
+                "helper payload should contain an ELF header"
+            );
+            assert_eq!(
+                &bytes[..4],
+                b"\x7fELF",
+                "helper payload should be Android ELF"
+            );
+            assert_eq!(
+                u16::from_le_bytes([bytes[18], bytes[19]]),
+                expected_machine,
+                "helper payload should match the requested Android ABI"
+            );
+            assert_eq!(
+                bytes,
+                std::fs::read(build_output).expect("compiled helper output should be readable"),
+                "materialized helper should preserve the compiled Cargo output"
+            );
+            assert_ne!(
+                helper.path(),
+                build_output,
+                "ADB must push packaged payload staged at runtime, not Cargo OUT_DIR"
+            );
+            assert!(
+                !helper.path().starts_with(build_output.parent().unwrap()),
+                "runtime helper payload must not depend on Cargo build tree"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -3458,6 +3873,22 @@ Internal storage (/storage/emulated/0) total size: 32000000000 (30517 MiB)\n";
     }
 
     #[test]
+    fn streamed_push_classifies_fsync_storage_exhaustion() {
+        let result = AdbCommandResult {
+            args: vec!["adb".to_string(), "shell".to_string()],
+            returncode: 1,
+            stdout: String::new(),
+            stderr: "dd: fsync: No space left on device\n".to_string(),
+        };
+
+        assert!(classify_completed_storage(
+            ProcessOperation::Push,
+            &result.args,
+            &result,
+        ));
+    }
+
+    #[test]
     fn failed_file_push_does_not_run_durability_flush() {
         let mut executor = FakeAdbCommandExecutor::default();
         executor.push_completed(1, "", "remote write failed\n");
@@ -3785,6 +4216,600 @@ Internal storage (/storage/emulated/0) total size: 32000000000 (30517 MiB)\n";
                 ProcessOperation::Launch,
                 ProcessOperation::Launch,
             ]
+        );
+    }
+
+    fn push_restricted_identity(
+        executor: &mut FakeAdbCommandExecutor,
+        uid: &str,
+        context: &str,
+        adbd_root: &str,
+    ) {
+        executor.push_completed(0, uid, "");
+        executor.push_completed(0, context, "");
+        executor.push_completed(0, adbd_root, "");
+    }
+
+    const RESTRICTED_STREAM_IDENTITY_DOMAIN: &str = "emuchef-restricted-file-stream-identity-v1";
+
+    fn test_restricted_stream_identity_digest(android_id: &str, build_fingerprint: &str) -> String {
+        let material =
+            format!("{RESTRICTED_STREAM_IDENTITY_DOMAIN}\n{android_id}\n{build_fingerprint}");
+        crate::runtime_configuration::sha256_hex(material.as_bytes())
+    }
+
+    fn complete_identity_getprop(build_fingerprint: &str) -> String {
+        format!(
+            "[ro.product.manufacturer]: [acme]\n\
+             [ro.product.brand]: [acme]\n\
+             [ro.product.model]: [Pocket S]\n\
+             [ro.product.name]: [pocket]\n\
+             [ro.product.device]: [pocket]\n\
+             [ro.product.board]: [board]\n\
+             [ro.hardware]: [hardware]\n\
+             [ro.build.version.sdk]: [33]\n\
+             [ro.product.cpu.abilist]: [arm64-v8a]\n\
+             [ro.build.fingerprint]: [{build_fingerprint}]\n"
+        )
+    }
+
+    fn push_identity_samples(
+        executor: &mut FakeAdbCommandExecutor,
+        android_id: &str,
+        build_fingerprint: &str,
+    ) {
+        let getprop = complete_identity_getprop(build_fingerprint);
+        for _ in 0..2 {
+            executor.push_completed(0, &getprop, "");
+            executor.push_completed(0, &format!("{android_id}\n"), "");
+        }
+    }
+
+    fn reviewed_target(serial: &str) -> TargetDeviceBinding {
+        TargetDeviceBinding {
+            serial: serial.to_string(),
+            manufacturer: Some("acme".to_string()),
+            model: Some("Pocket S".to_string()),
+            android_api_level: Some(33),
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_test_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).expect("fake shell utility should be written");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake shell utility metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions)
+            .expect("fake shell utility should be executable");
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct ShellExecutingAdbCommandExecutor {
+        scripted: FakeAdbCommandExecutor,
+        path: std::ffi::OsString,
+    }
+
+    #[cfg(unix)]
+    impl AdbCommandExecutor for ShellExecutingAdbCommandExecutor {
+        fn run_for(
+            &mut self,
+            args: &[String],
+            operation: ProcessOperation,
+        ) -> Result<AdbCommandResult, AdbCommandError> {
+            self.scripted.run_for(args, operation)
+        }
+
+        fn run_for_with_stdin_file(
+            &mut self,
+            args: &[String],
+            operation: ProcessOperation,
+            stdin: File,
+        ) -> Result<AdbCommandResult, AdbCommandError> {
+            use std::process::{Command, Stdio};
+
+            self.scripted.calls.push(args.to_vec());
+            self.scripted.operations.push(operation);
+            let shell_command = args.last().ok_or_else(|| {
+                AdbCommandError::Resolution("fake shell command is missing".to_string())
+            })?;
+            let output = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(shell_command)
+                .env("PATH", &self.path)
+                .stdin(Stdio::from(stdin))
+                .output()
+                .map_err(|_| {
+                    AdbCommandError::Resolution("fake shell could not be started".to_string())
+                })?;
+            Ok(AdbCommandResult {
+                args: args.to_vec(),
+                returncode: output.status.code().unwrap_or(125),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
+        }
+    }
+
+    #[test]
+    fn restricted_execution_rejects_root_or_unverified_shell_identity_before_effects() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "0\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        assert!(device.mkdir_p("/storage/fixture").is_err());
+        assert_eq!(device.command_executor().calls().len(), 1);
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            })
+        );
+    }
+
+    #[test]
+    fn restricted_shell_effect_checks_identity_in_the_same_invocation() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        executor.push_completed(0, "", "");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        device.mkdir_p("/storage/fixture").unwrap();
+
+        let command = device.command_executor().calls()[3][4].as_str();
+        assert!(command.contains("id -u"));
+        assert!(command.contains("id -Z"));
+        assert!(command.contains("getprop service.adb.root"));
+        assert!(command.contains("mkdir -p /storage/fixture"));
+    }
+
+    #[test]
+    fn restricted_execution_accepts_secure_default_daemon_at_host_checks() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "\n");
+        executor.push_completed(0, "1\n", "");
+        executor.push_completed(0, "", "");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "\n");
+        executor.push_completed(0, "1\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        device.mkdir_p("/storage/fixture").unwrap();
+
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 9);
+        assert_eq!(calls[3][4], "getprop ro.secure");
+        assert!(calls[4][4].contains("mkdir -p /storage/fixture"));
+        assert_eq!(calls[8][4], "getprop ro.secure");
+    }
+
+    #[test]
+    fn restricted_execution_rejects_lost_daemon_privilege_proof_after_effect() {
+        for (adbd_root, secure) in [("1\n", None), ("\n", Some("0\n"))] {
+            let mut executor = FakeAdbCommandExecutor::default();
+            push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "\n");
+            executor.push_completed(0, "1\n", "");
+            executor.push_completed(0, "", "");
+            push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", adbd_root);
+            if let Some(secure) = secure {
+                executor.push_completed(0, secure, "");
+            }
+            let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+            device.configure_restricted_execution(true);
+
+            assert!(device.mkdir_p("/storage/fixture").is_err());
+            assert_eq!(
+                device.take_last_error(),
+                Some(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                    phase: IdentityCheckPhase::PostOperation,
+                })
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restricted_shell_effect_requires_proven_unprivileged_daemon() {
+        use std::process::Command;
+
+        let bin = tempfile::tempdir().unwrap();
+        write_test_executable(
+            &bin.path().join("id"),
+            "#!/bin/sh\ncase \"$1\" in -u) echo 2000;; -Z) echo u:r:shell:s0;; esac\n",
+        );
+        write_test_executable(
+            &bin.path().join("su"),
+            "#!/bin/sh\nprintf 'unexpected su invocation\\n' >&2; exit 1\n",
+        );
+        write_test_executable(
+            &bin.path().join("getprop"),
+            "#!/bin/sh\ncase \"$1\" in\nservice.adb.root) printf '%s\\n' \"$TEST_ADBD_ROOT\"; exit \"$TEST_ADBD_STATUS\";;\nro.secure) printf '%s\\n' \"$TEST_RO_SECURE\"; exit \"$TEST_SECURE_STATUS\";;\n*) exit 1;;\nesac\n",
+        );
+        let command = guard_restricted_shell_identity("printf '%s\\n' effect");
+        for (adbd_root, adbd_status, secure, secure_status, allowed) in [
+            ("0", "0", "", "1", true),
+            ("", "0", "1", "0", true),
+            ("", "0", "", "0", false),
+            ("", "0", "0", "0", false),
+            ("1", "0", "1", "0", false),
+            (" 0", "0", "1", "0", false),
+            ("0", "1", "1", "0", false),
+            ("", "1", "1", "0", false),
+            ("", "0", "1", "1", false),
+        ] {
+            let output = Command::new("/bin/sh")
+                .args(["-c", &command])
+                .env("PATH", bin.path())
+                .env("TEST_ADBD_ROOT", adbd_root)
+                .env("TEST_ADBD_STATUS", adbd_status)
+                .env("TEST_RO_SECURE", secure)
+                .env("TEST_SECURE_STATUS", secure_status)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if allowed { 0 } else { 125 }),
+                "daemon root={adbd_root:?} ({adbd_status}), ro.secure={secure:?} ({secure_status})"
+            );
+            if allowed {
+                assert_eq!(output.stdout, b"effect\n");
+                assert!(output.stderr.is_empty());
+            } else {
+                assert!(output.stdout.is_empty());
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr).trim_end(),
+                    RESTRICTED_IDENTITY_FAILURE_MARKER
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn restricted_execution_denies_privileged_paths_without_running_the_effect() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        assert!(device
+            .copy_on_device("/storage/source", "/data/data/example/file", false, false)
+            .is_err());
+        assert_eq!(device.command_executor().calls().len(), 3);
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied)
+        );
+    }
+
+    #[test]
+    fn restricted_execution_rejects_embedded_private_paths_and_root_commands() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        assert_eq!(
+            device.run_shell_with_privilege_unchecked(
+                vec!["dd".to_string(), "of=/data/data/example/file".to_string()],
+                true,
+                false,
+                ProcessOperation::DeviceCopy,
+            ),
+            Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied)
+        );
+        assert_eq!(
+            device.run_shell_with_privilege_unchecked(
+                vec!["su".to_string(), "-c".to_string(), "id".to_string()],
+                true,
+                false,
+                ProcessOperation::ShellMutation,
+            ),
+            Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied)
+        );
+        assert_eq!(device.command_executor().calls().len(), 0);
+    }
+
+    #[test]
+    fn restricted_execution_denies_adb_push_to_app_private_storage() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        assert!(device
+            .push(Path::new("/tmp/source"), "/data/data/example/file", false)
+            .is_err());
+        assert_eq!(device.command_executor().calls().len(), 3);
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied)
+        );
+    }
+
+    #[test]
+    fn restricted_execution_streams_copy_files_through_the_guarded_shell_identity() {
+        use std::io::Write;
+
+        let payload = b"reviewed BIOS staging bytes";
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(payload).unwrap();
+        source.flush().unwrap();
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_identity_samples(&mut executor, "a1b2", "Build-Fingerprint-A");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        executor.push_completed(0, "", "");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        push_identity_samples(&mut executor, "a1b2", "Build-Fingerprint-A");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_identity_guard(Some(&reviewed_target("serial")));
+        device.configure_restricted_execution(true);
+        let destination = "/storage/emulated/0/EmuChef's data/firmware.bin";
+
+        device
+            .push(source.path(), destination, false)
+            .expect("the shell-guarded file stream should preserve ordinary copy staging");
+
+        assert_eq!(device.command_executor().calls().len(), 15);
+        assert_eq!(
+            device.command_executor().stdin_contents(),
+            &[payload.to_vec()]
+        );
+        assert_eq!(
+            device.command_executor().operations()[7],
+            ProcessOperation::Push
+        );
+        let transfer = &device.command_executor().calls()[7];
+        assert_eq!(
+            &transfer[..4],
+            &[
+                "adb".to_string(),
+                "-s".to_string(),
+                "serial".to_string(),
+                "shell".to_string(),
+            ]
+        );
+        let command = transfer[4].as_str();
+        assert!(command.contains("id -u"));
+        assert!(command.contains("id -Z"));
+        assert!(command.contains("getprop service.adb.root"));
+        assert!(command.contains("settings get secure android_id"));
+        assert!(command.contains("getprop ro.build.fingerprint"));
+        assert!(command.contains("sha256sum"));
+        let quoted_destination = shell_quote(destination);
+        let cat_position = command.find(&format!("cat > {quoted_destination}"));
+        let digest_position = command.find("sha256sum");
+        assert!(digest_position < cat_position);
+        assert!(
+            command.contains(&shell_quote(&test_restricted_stream_identity_digest(
+                "a1b2",
+                "Build-Fingerprint-A"
+            )))
+        );
+        assert!(!command.contains("a1b2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restricted_stream_rejects_same_serial_reselection_before_overwriting_target() {
+        let temporary = tempfile::tempdir().unwrap();
+        let fake_tools = temporary.path().join("fake-tools");
+        std::fs::create_dir(&fake_tools).unwrap();
+        write_test_executable(
+            &fake_tools.join("id"),
+            "#!/bin/sh\ncase \"$1\" in\n-u) printf '2000\\n' ;;\n-Z) printf 'u:r:shell:s0\\n' ;;\n*) exit 1 ;;\nesac\n",
+        );
+        write_test_executable(
+            &fake_tools.join("getprop"),
+            "#!/bin/sh\ncase \"$1\" in\nservice.adb.root) printf '0\\n' ;;\nro.build.fingerprint) printf '  Build-Fingerprint-B  \\n' ;;\n*) exit 1 ;;\nesac\n",
+        );
+        write_test_executable(
+            &fake_tools.join("settings"),
+            "#!/bin/sh\nprintf '  B2B2  \\n'\n",
+        );
+        write_test_executable(&fake_tools.join("dd"), "#!/bin/sh\nexit 0\n");
+
+        let swapped_android_id = "b2b2";
+        let swapped_fingerprint = "Build-Fingerprint-B";
+        let expected_hash_input = format!(
+            "{RESTRICTED_STREAM_IDENTITY_DOMAIN}\n{swapped_android_id}\n{swapped_fingerprint}"
+        );
+        let swapped_digest =
+            test_restricted_stream_identity_digest(swapped_android_id, swapped_fingerprint);
+        let observed_hash_input = temporary.path().join("observed-identity-input");
+        write_test_executable(
+            &fake_tools.join("sha256sum"),
+            &format!(
+                "#!/bin/sh\nactual=$(cat)\n[ \"$actual\" = {} ] || exit 1\nprintf '%s' \"$actual\" > {}\nprintf '%s  -\\n' {}\n",
+                shell_quote(&expected_hash_input),
+                shell_quote(&observed_hash_input.to_string_lossy()),
+                shell_quote(&swapped_digest),
+            ),
+        );
+
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(fake_tools.clone()).chain(std::env::split_paths(&original_path)),
+        )
+        .expect("fake shell PATH should be valid");
+
+        let source = temporary.path().join("source.bin");
+        let payload = b"reviewed file bytes";
+        std::fs::write(&source, payload).unwrap();
+        let destination = temporary.path().join("remote target.bin");
+        let original_target = b"existing target bytes";
+        std::fs::write(&destination, original_target).unwrap();
+
+        let mut scripted = FakeAdbCommandExecutor::default();
+        push_identity_samples(&mut scripted, "a1b2", "Build-Fingerprint-A");
+        push_restricted_identity(&mut scripted, "2000\n", "u:r:shell:s0\n", "0\n");
+        push_restricted_identity(&mut scripted, "2000\n", "u:r:shell:s0\n", "0\n");
+        push_identity_samples(&mut scripted, "a1b2", "Build-Fingerprint-A");
+        let executor = ShellExecutingAdbCommandExecutor { scripted, path };
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial-a"), executor);
+        device.configure_identity_guard(Some(&reviewed_target("serial-a")));
+        device.configure_restricted_execution(true);
+
+        let result = device.push(&source, &destination.to_string_lossy(), false);
+
+        assert!(
+            result.is_err(),
+            "the same serial must not authorize a stream to a different device identity"
+        );
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(&observed_hash_input).unwrap(),
+            expected_hash_input
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), original_target);
+
+        let transfer = device
+            .command_executor()
+            .scripted
+            .calls()
+            .last()
+            .expect("stream command should use the same configured serial");
+        assert_eq!(&transfer[1..3], &["-s", "serial-a"]);
+        let command = transfer.last().unwrap();
+        assert!(command.contains("settings get secure android_id"));
+        assert!(command.contains("getprop ro.build.fingerprint"));
+        assert!(command.contains("sha256sum"));
+        assert!(command.find("sha256sum") < command.find("cat >"));
+        assert!(
+            command.contains(&shell_quote(&test_restricted_stream_identity_digest(
+                "a1b2",
+                "Build-Fingerprint-A"
+            )))
+        );
+        assert!(!command.contains("a1b2"));
+        assert!(!command.contains("b2b2"));
+    }
+
+    #[test]
+    fn restricted_stream_denies_missing_identity_baseline_before_adb_write() {
+        use std::io::Write;
+
+        let mut source = tempfile::NamedTempFile::new().unwrap();
+        source.write_all(b"reviewed bytes").unwrap();
+        source.flush().unwrap();
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        assert!(device
+            .push(source.path(), "/storage/emulated/0/fixture.bin", false)
+            .is_err());
+        assert_eq!(device.command_executor().calls().len(), 3);
+        assert!(device.command_executor().stdin_contents().is_empty());
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::DeviceIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            })
+        );
+    }
+
+    #[test]
+    fn restricted_execution_preserves_the_android_install_service_route() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        executor.push_completed(0, "Success\n", "");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        device
+            .install_apk(Path::new("fixture.apk"), false)
+            .expect("restricted APK installation should keep the ordinary install service");
+
+        assert_eq!(device.command_executor().calls().len(), 7);
+        assert_eq!(
+            device.command_executor().calls()[3],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "serial".to_string(),
+                "install".to_string(),
+                "fixture.apk".to_string(),
+            ]
+        );
+        assert_eq!(
+            device.command_executor().operations()[3],
+            ProcessOperation::Install
+        );
+    }
+
+    #[cfg(any(
+        feature = "android-copy-commit-helper",
+        restricted_execution_copy_commit_helper
+    ))]
+    #[test]
+    fn restricted_copy_commit_helper_uses_the_same_guarded_file_stream() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_identity_samples(&mut executor, "a1b2", "Build-Fingerprint-A");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        executor.push_completed(0, "arm64-v8a\n", "");
+        executor.push_completed(0, "", "");
+        executor.push_completed(0, "", "");
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        push_identity_samples(&mut executor, "a1b2", "Build-Fingerprint-A");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_identity_guard(Some(&reviewed_target("serial")));
+        device.configure_restricted_execution(true);
+        let stage_root = "/storage/emulated/0/.emuchef-stage-test";
+        let helper_path = "/storage/emulated/0/.emuchef-stage-test-helper";
+
+        device
+            .copy_commit_prepare_mutation_helper(stage_root, helper_path)
+            .expect("the copy helper should stage through the restricted file stream");
+
+        assert_eq!(device.command_executor().calls().len(), 17);
+        assert_eq!(device.command_executor().stdin_contents().len(), 1);
+        assert!(!device.command_executor().stdin_contents()[0].is_empty());
+        let transfer = &device.command_executor().calls()[8];
+        assert_eq!(transfer[3], "shell");
+        let command = transfer[4].as_str();
+        assert!(command.contains("id -u"));
+        assert!(command.contains("settings get secure android_id"));
+        assert!(command.contains("getprop ro.build.fingerprint"));
+        assert!(command.contains("sha256sum"));
+        assert!(command.contains(&format!("cat > {}", shell_quote(helper_path))));
+        assert!(command.find("sha256sum") < command.find("cat >"));
+        assert_eq!(
+            device.command_executor().operations()[8],
+            ProcessOperation::Push
+        );
+    }
+
+    #[test]
+    fn restricted_execution_reports_a_shell_identity_change_after_a_mutation() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        push_restricted_identity(&mut executor, "2000\n", "u:r:shell:s0\n", "0\n");
+        executor.push_completed(0, "", "");
+        push_restricted_identity(&mut executor, "0\n", "u:r:shell:s0\n", "0\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+        device.configure_restricted_execution(true);
+
+        assert!(device.mkdir_p("/storage/fixture").is_err());
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                phase: IdentityCheckPhase::PostOperation,
+            })
         );
     }
 }

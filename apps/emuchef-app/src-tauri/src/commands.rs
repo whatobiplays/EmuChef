@@ -2092,16 +2092,28 @@ where
     else {
         return Ok(plan_configuration);
     };
+    let restricted_required_step_ids = plan_configuration
+        .get("restrictedQualificationRequiredStepIds")
+        .cloned();
+    let plan_authority_id = plan_configuration
+        .get("executionRestrictionPlanAuthorityId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let storage_targets = resolve_storage_targets(&plan, request)?;
-    request(
-        "prepareExecutionReview",
-        json!({
-            "plan": plan,
-            "mode": mode,
-            "targetDevice": target_device,
-            "storageTargets": storage_targets,
-        }),
-    )
+    let mut prepare_payload = json!({
+        "plan": plan,
+        "mode": mode,
+        "targetDevice": target_device,
+        "storageTargets": storage_targets,
+    });
+    if let Some(authority_id) = plan_authority_id {
+        prepare_payload["executionRestrictionPlanAuthorityId"] = json!(authority_id);
+    }
+    let mut prepared = request("prepareExecutionReview", prepare_payload)?;
+    if let Some(required_step_ids) = restricted_required_step_ids {
+        prepared["restrictedQualificationRequiredStepIds"] = required_step_ids;
+    }
+    Ok(prepared)
 }
 
 #[tauri::command]
@@ -2212,6 +2224,16 @@ where
         .get("targetDevice")
         .cloned()
         .expect("configuration payload always binds a target");
+    let restricted_generation = if state.sidecar.restricted_execution_enabled() {
+        Some(state.sidecar.try_generation().map_err(|_| {
+            safe_error(
+                "runtime_generation_unavailable",
+                "The reviewed execution runtime is temporarily unavailable.",
+            )
+        })?)
+    } else {
+        None
+    };
     let catalog_identity = payload
         .get("catalog")
         .cloned()
@@ -2311,6 +2333,40 @@ where
     result["executionMode"] = json!(mode);
     result["profileSelectionHandle"] = json!(authority.handle);
     result["profileSetupGeneration"] = json!(authority.setup_generation);
+    let restricted_review_authority = if let Some(reviewed_generation) = restricted_generation {
+        let current_generation = state.sidecar.try_generation().map_err(|_| {
+            safe_error(
+                "runtime_generation_unavailable",
+                "The reviewed execution runtime is temporarily unavailable.",
+            )
+        })?;
+        if current_generation != reviewed_generation {
+            return Err(safe_error(
+                "execution_review_stale",
+                "The execution runtime changed while the review was prepared.",
+            ));
+        }
+        let review_authority_id = result
+            .get("reviewAuthorityId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                safe_error(
+                    "review_authority_missing",
+                    "The restricted execution review did not retain its sidecar authority.",
+                )
+            })?;
+        result
+            .as_object_mut()
+            .ok_or_else(|| {
+                safe_error("review_response_invalid", "The review response is invalid.")
+            })?
+            .remove("reviewAuthorityId");
+        Some((review_authority_id, reviewed_generation))
+    } else {
+        None
+    };
     let plan = result
         .get("plan")
         .filter(|value| !value.is_null())
@@ -2331,6 +2387,71 @@ where
             )
         })?
         .to_string();
+    let restricted_required_step_ids = result
+        .as_object_mut()
+        .ok_or_else(|| safe_error("review_response_invalid", "The review response is invalid."))?
+        .remove("restrictedQualificationRequiredStepIds");
+    let restricted_execution =
+        if let Some((review_authority_id, runtime_generation)) = restricted_review_authority {
+            let required_step_values = restricted_required_step_ids
+                .as_ref()
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    safe_error(
+                        "restricted_qualification_requirements_invalid",
+                        "The restricted review omitted required operation steps.",
+                    )
+                })?;
+            let required_operation_step_ids = required_step_values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|step_id| !step_id.is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            safe_error(
+                                "restricted_qualification_requirements_invalid",
+                                "The restricted review omitted required operation steps.",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let planned_steps = plan.get("steps").and_then(Value::as_array).ok_or_else(|| {
+                safe_error(
+                    "restricted_qualification_requirements_invalid",
+                    "The restricted review omitted required operation steps.",
+                )
+            })?;
+            let planned_step_ids = planned_steps
+                .iter()
+                .filter_map(|step| step.get("id").and_then(Value::as_str))
+                .collect::<std::collections::BTreeSet<_>>();
+            if required_operation_step_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != required_operation_step_ids.len()
+                || required_operation_step_ids
+                    .iter()
+                    .any(|step_id| !planned_step_ids.contains(step_id.as_str()))
+            {
+                return Err(safe_error(
+                    "restricted_qualification_requirements_invalid",
+                    "The restricted review omitted required operation steps.",
+                ));
+            }
+            Some(crate::handles::RestrictedExecutionReview {
+                review_authority_id,
+                runtime_generation,
+                step_requirements: crate::handles::RestrictedQualificationStepRequirements {
+                    plan_digest: digest.clone(),
+                    required_operation_step_ids,
+                },
+            })
+        } else {
+            None
+        };
     let review = result
         .get("review")
         .filter(|value| value.is_object())
@@ -2368,6 +2489,7 @@ where
             })?
             .qualification_context(&device_handle),
         platform_tools_identity: Some(platform_tools_identity),
+        restricted_execution,
         created: Instant::now(),
         last_access: Instant::now(),
     };
@@ -4367,6 +4489,7 @@ mod tests {
                 device_handle: device.clone(),
                 qualification_context: None,
                 platform_tools_identity: None,
+                restricted_execution: None,
                 created: Instant::now(),
                 last_access: Instant::now(),
             });
@@ -5671,6 +5794,7 @@ mod tests {
             device_handle: device_handle.to_string(),
             qualification_context: None,
             platform_tools_identity: None,
+            restricted_execution: None,
             created: Instant::now(),
             last_access: Instant::now(),
         }

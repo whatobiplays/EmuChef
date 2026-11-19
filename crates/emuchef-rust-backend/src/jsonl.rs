@@ -15,8 +15,31 @@ pub fn process_jsonl(input: &str) -> String {
 
 /// Process JSON Lines with filesystem policy fixed for this sidecar process.
 pub fn process_jsonl_with_config(input: &str, config: SidecarRuntimeConfig) -> String {
+    process_jsonl_with_restriction(input, config, None)
+}
+
+/// Process JSON Lines with startup-bound restricted execution identity.
+pub fn process_jsonl_with_restriction(
+    input: &str,
+    config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
+) -> String {
+    process_jsonl_with_startup_policy(input, config, restricted_build_identity, None)
+}
+
+/// Process JSON Lines with startup-bound restriction and native generation.
+pub fn process_jsonl_with_startup_policy(
+    input: &str,
+    config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
+    runtime_generation: Option<u64>,
+) -> String {
     let mut output = String::new();
-    let mut sessions = DocumentSessionManager::with_runtime_config(config);
+    let mut sessions = DocumentSessionManager::with_runtime_startup_policy(
+        config,
+        restricted_build_identity,
+        runtime_generation,
+    );
     for line in input.lines() {
         let response = match crate::raw_request::parse(line) {
             Ok(request) => request::handle_sidecar_value(request, &mut sessions),
@@ -56,7 +79,46 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut sessions = DocumentSessionManager::with_runtime_config(config);
+    run_jsonl_sidecar_with_restriction(&mut reader, &mut writer, config, None)
+}
+
+/// Run an interactive sidecar with an optional startup-bound execution restriction.
+pub fn run_jsonl_sidecar_with_restriction<R, W>(
+    mut reader: R,
+    mut writer: W,
+    config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_jsonl_sidecar_with_startup_policy(
+        &mut reader,
+        &mut writer,
+        config,
+        restricted_build_identity,
+        None,
+    )
+}
+
+/// Run an interactive sidecar bound to trusted native startup identity.
+pub fn run_jsonl_sidecar_with_startup_policy<R, W>(
+    mut reader: R,
+    mut writer: W,
+    config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
+    runtime_generation: Option<u64>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut sessions = DocumentSessionManager::with_runtime_startup_policy(
+        config,
+        restricted_build_identity,
+        runtime_generation,
+    );
     let mut line = String::new();
     loop {
         line.clear();

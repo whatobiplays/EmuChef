@@ -81,3 +81,29 @@ jobs:
             ${{ runner.temp }}/second.json
           if-no-files-found: error
           retention-days: 14
+  restricted-sidecar-build:
+    name: Build restricted debug sidecar
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v4
+      - name: Install locked Android NDK toolchain
+        run: sdkmanager --install "ndk;30.0.16248370"
+      - name: Build restricted debug sidecar with clean source identity
+        run: |
+          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
+            npm --prefix apps/emuchef-app run sidecar:dev
+        env:
+          EMUCHEF_RESTRICTED_EXECUTION_BUILD: "1"
+      - name: Smoke-test restricted host sidecar handshake
+        run: |
+          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
+            node apps/emuchef-app/scripts/restricted-sidecar-handshake-smoke.mjs

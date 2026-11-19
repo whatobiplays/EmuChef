@@ -200,7 +200,7 @@ fn authored_corpus_planner_input_with_bindings(
     input
 }
 
-fn repo_device_plan_planner_input_with_bindings(
+pub(crate) fn repo_device_plan_planner_input_with_bindings(
     device_plan_ref: &str,
     input_bindings: &[(&str, Value)],
 ) -> PlannerInput {
@@ -512,7 +512,7 @@ fn repo_plan_e2e_no_app_data_write_cases() -> Vec<RepoPlanE2eCase> {
     ]
 }
 
-fn planning_result_value(input: PlannerInput) -> Value {
+pub(crate) fn planning_result_value(input: PlannerInput) -> Value {
     let has_app_context = input
         .recipes
         .iter()
@@ -3631,7 +3631,7 @@ fn konkr_provisioning_reports_unavailable_required_capabilities() {
     }
 }
 
-fn unrooted_ayaneo_provisioning_input(device_plan_ref: &str) -> PlannerInput {
+pub(crate) fn unrooted_ayaneo_provisioning_input(device_plan_ref: &str) -> PlannerInput {
     let mut input = repo_device_plan_planner_input_with_bindings(device_plan_ref, &[]);
     input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
     input.device_context.android_api_level = Some(35);
@@ -3920,6 +3920,40 @@ fn required_app_target_step_fails_when_protected_write_capability_is_unavailable
             && error["details"]["step_id"] == "copy_assets"
             && error["details"]["capability"] == "app_data_write"
     }));
+}
+
+#[test]
+fn restricted_qualification_step_ids_follow_operation_classification() {
+    let mut required_operation = dependency_step("required_operation", Vec::new());
+    required_operation.type_name = "copy_files".to_string();
+
+    let mut optional_operation = dependency_step("optional_operation", Vec::new());
+    optional_operation.type_name = "copy_files".to_string();
+    optional_operation.user_toggleable = true;
+
+    let non_operation = dependency_step("wait", Vec::new());
+    let planned_steps = vec![
+        (
+            "recipe.first/required_operation".to_string(),
+            "recipe.first".to_string(),
+            required_operation,
+        ),
+        (
+            "recipe.first/optional_operation".to_string(),
+            "recipe.first".to_string(),
+            optional_operation,
+        ),
+        (
+            "recipe.second/wait".to_string(),
+            "recipe.second".to_string(),
+            non_operation,
+        ),
+    ];
+
+    assert_eq!(
+        crate::planner::required_operation_step_ids(&planned_steps),
+        vec!["recipe.first/required_operation".to_string()]
+    );
 }
 
 #[test]

@@ -181,7 +181,7 @@ impl From<TargetDeviceBinding> for ConfigurationTargetDevice {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanConfigurationResult {
     pub plan: Option<ExecutionPlan>,
@@ -192,6 +192,8 @@ pub struct PlanConfigurationResult {
     pub copy_commit_preparation_required: bool,
     pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
+    #[serde(skip)]
+    pub(crate) restricted_qualification_required_step_ids: Vec<String>,
 }
 
 /// One source selected for the optional RetroArch configuration write.
@@ -785,6 +787,13 @@ impl std::error::Error for ConfigurationContextError {}
 pub(crate) fn prepare_configuration(
     request: ConfigurationContextRequest,
 ) -> Result<PreparedConfiguration, ConfigurationContextError> {
+    prepare_configuration_with_restriction(request, false)
+}
+
+fn prepare_configuration_with_restriction(
+    request: ConfigurationContextRequest,
+    restrict_privileged_execution: bool,
+) -> Result<PreparedConfiguration, ConfigurationContextError> {
     let recipes = crate::planner::load_top_level_recipes(request.catalog.root())
         .map_err(ConfigurationContextError::Catalog)?;
     let recipe_map = recipes
@@ -827,10 +836,20 @@ pub(crate) fn prepare_configuration(
             None
         }
     };
+    let mut runtime_capability_availability = request.runtime_capability_availability;
+    if restrict_privileged_execution {
+        if let Some(availability) = runtime_capability_availability.as_mut() {
+            availability.root_shell = false;
+            availability.app_data_write = false;
+            availability.root_shell_route = None;
+            availability.config_create_write_evidence = None;
+        }
+    }
     let runtime_capabilities = device_plan_parts.as_ref().map(|parts| {
         apply_runtime_capability_availability(
             parts.runtime_capabilities.clone(),
-            request.runtime_capability_availability.as_ref(),
+            runtime_capability_availability.as_ref(),
+            restrict_privileged_execution,
         )
     });
     let selected_recipe_refs = request
@@ -901,7 +920,7 @@ pub(crate) fn prepare_configuration(
             app_data_write: false,
             root_shell_route: None,
         }),
-        runtime_capability_availability: request.runtime_capability_availability,
+        runtime_capability_availability,
         device_context: request.device_context,
         target_device: request.target_device,
         binding_resolution,
@@ -957,7 +976,14 @@ impl PreparedConfiguration {
 pub(crate) fn plan_configuration(
     request: ConfigurationContextRequest,
 ) -> Result<PlanConfigurationResult, ConfigurationContextError> {
-    let prepared = prepare_configuration(request)?;
+    plan_configuration_with_restriction(request, false)
+}
+
+pub(crate) fn plan_configuration_with_restriction(
+    request: ConfigurationContextRequest,
+    restrict_privileged_execution: bool,
+) -> Result<PlanConfigurationResult, ConfigurationContextError> {
+    let prepared = prepare_configuration_with_restriction(request, restrict_privileged_execution)?;
     let resolved_inputs = prepared.binding_resolution.resolved_inputs.clone();
     if prepared
         .diagnostics
@@ -971,6 +997,8 @@ pub(crate) fn plan_configuration(
             copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
+
+            ..Default::default()
         });
     }
     let selected_configuration = match select_retroarch_configuration_source(&resolved_inputs) {
@@ -988,6 +1016,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         }
     };
@@ -1013,6 +1043,8 @@ pub(crate) fn plan_configuration(
                     copy_commit_preparation_required: false,
                     resolved_inputs,
                     diagnostics,
+
+                    ..Default::default()
                 });
             }
         },
@@ -1035,6 +1067,8 @@ pub(crate) fn plan_configuration(
                     copy_commit_preparation_required: false,
                     resolved_inputs,
                     diagnostics,
+
+                    ..Default::default()
                 });
             }
         },
@@ -1060,6 +1094,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         }
     };
@@ -1082,6 +1118,8 @@ pub(crate) fn plan_configuration(
             copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics,
+
+            ..Default::default()
         });
     }
 
@@ -1094,6 +1132,8 @@ pub(crate) fn plan_configuration(
             copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
+
+            ..Default::default()
         });
     };
     if let Some(target_identity) = retroarch_config_create_target.as_ref() {
@@ -1114,6 +1154,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         let Some(target_path) = target_identity
@@ -1133,6 +1175,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         input.config_create_destination = Some(format!(
@@ -1157,6 +1201,7 @@ pub(crate) fn plan_configuration(
     }
 
     let result = plan_prepared_input(&prepared.catalog, input);
+    let required_operation_step_ids = result.required_operation_step_ids;
     let mut diagnostics = prepared.diagnostics.clone();
     diagnostics.extend(
         result
@@ -1185,6 +1230,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         let Some(plan) = execution_plan.as_mut() else {
@@ -1195,6 +1242,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         if let Err(code) = bind_frozen_configuration_to_plan(
@@ -1213,6 +1262,8 @@ pub(crate) fn plan_configuration(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         }
     }
@@ -1242,6 +1293,12 @@ pub(crate) fn plan_configuration(
             .as_ref()
             .map(|plan| project_review(plan, &diagnostics))
     };
+    let restricted_qualification_required_step_ids =
+        if restrict_privileged_execution && execution_plan.is_some() {
+            required_operation_step_ids
+        } else {
+            Vec::new()
+        };
     Ok(PlanConfigurationResult {
         plan: execution_plan,
         plan_digest,
@@ -1249,6 +1306,9 @@ pub(crate) fn plan_configuration(
         copy_commit_preparation_required,
         resolved_inputs,
         diagnostics,
+        restricted_qualification_required_step_ids,
+
+        ..Default::default()
     })
 }
 
@@ -1811,7 +1871,14 @@ pub(crate) fn input_reuse_diagnostics(
 pub(crate) fn describe_configuration(
     request: ConfigurationContextRequest,
 ) -> Result<ConfigurationDescription, ConfigurationContextError> {
-    let prepared = prepare_configuration(request)?;
+    describe_configuration_with_restriction(request, false)
+}
+
+pub(crate) fn describe_configuration_with_restriction(
+    request: ConfigurationContextRequest,
+    restrict_privileged_execution: bool,
+) -> Result<ConfigurationDescription, ConfigurationContextError> {
+    let prepared = prepare_configuration_with_restriction(request, restrict_privileged_execution)?;
     let recipes = prepared
         .recipes
         .iter()
@@ -1931,6 +1998,7 @@ pub(crate) fn describe_configuration(
 fn apply_runtime_capability_availability(
     mut capabilities: crate::planner::RuntimeCapabilities,
     availability: Option<&RuntimeCapabilityAvailability>,
+    restrict_privileged_execution: bool,
 ) -> crate::planner::RuntimeCapabilities {
     if let Some(availability) = availability {
         let route_is_verified = availability.root_shell_route.is_some();
@@ -1939,6 +2007,11 @@ fn apply_runtime_capability_availability(
         capabilities.root_shell_route = (availability.root_shell && route_is_verified)
             .then_some(availability.root_shell_route)
             .flatten();
+    }
+    if restrict_privileged_execution {
+        capabilities.root_shell = false;
+        capabilities.app_data_write = false;
+        capabilities.root_shell_route = None;
     }
     capabilities
 }
@@ -2014,13 +2087,14 @@ mod tests {
                 root_shell_route: None,
                 config_create_write_evidence: None,
             }),
+            false,
         );
         assert!(!masked.root_shell);
         assert!(!masked.app_data_write);
         assert!(masked.adb_available);
         assert!(masked.shared_storage_write);
 
-        let granted = apply_runtime_capability_availability(capabilities(), None);
+        let granted = apply_runtime_capability_availability(capabilities(), None, false);
         assert!(granted.root_shell);
         assert!(granted.app_data_write);
     }
@@ -2062,6 +2136,7 @@ mod tests {
                 root_shell_route: None,
                 config_create_write_evidence: None,
             }),
+            false,
         );
         assert!(!masked.root_shell);
         assert!(!masked.app_data_write);
@@ -2075,6 +2150,7 @@ mod tests {
                 root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
                 config_create_write_evidence: None,
             }),
+            false,
         );
         assert!(selected.root_shell);
         assert!(selected.app_data_write);
@@ -2086,6 +2162,179 @@ mod tests {
             serde_json::to_value(selected).unwrap()["root_shell_route"],
             "suZero"
         );
+    }
+
+    #[test]
+    fn restricted_execution_suppresses_root_capabilities_and_preserves_ordinary_ones() {
+        let availability = RuntimeCapabilityAvailability {
+            root_shell: true,
+            app_data_write: true,
+            root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
+            config_create_write_evidence: None,
+        };
+
+        let restricted =
+            apply_runtime_capability_availability(capabilities(), Some(&availability), true);
+
+        assert!(!restricted.root_shell);
+        assert!(!restricted.app_data_write);
+        assert_eq!(restricted.root_shell_route, None);
+        assert!(restricted.adb_available);
+        assert!(restricted.shared_storage_write);
+        assert!(restricted.shell_command);
+    }
+
+    #[test]
+    fn restricted_rooted_plan_matches_unrooted_and_preserves_root_observation() {
+        let mut planner_input = crate::planner_tests::repo_device_plan_planner_input_with_bindings(
+            "ayaneo.konkr_pocket_fit.base",
+            &[(
+                "app.xaniteog.install/xaniteog_apk",
+                serde_json::json!("/tmp/emuchef-p7h-xaniteog.apk"),
+            )],
+        );
+        planner_input.selected_recipe_refs = vec!["app.xaniteog.install".to_string()];
+        planner_input.device_context.android_api_level = Some(35);
+        planner_input.runtime_capabilities = capabilities();
+
+        let rooted_observation = RuntimeCapabilityAvailability {
+            root_shell: true,
+            app_data_write: true,
+            root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
+            config_create_write_evidence: None,
+        };
+        let unrooted_observation = RuntimeCapabilityAvailability {
+            root_shell: false,
+            app_data_write: false,
+            root_shell_route: None,
+            config_create_write_evidence: None,
+        };
+
+        let mut restricted_rooted_input = planner_input.clone();
+        restricted_rooted_input.runtime_capabilities = apply_runtime_capability_availability(
+            planner_input.runtime_capabilities.clone(),
+            Some(&rooted_observation),
+            true,
+        );
+
+        let mut ordinary_unrooted_input = planner_input.clone();
+        ordinary_unrooted_input.runtime_capabilities = apply_runtime_capability_availability(
+            planner_input.runtime_capabilities.clone(),
+            Some(&unrooted_observation),
+            false,
+        );
+
+        let mut unrestricted_rooted_input = planner_input.clone();
+        unrestricted_rooted_input.runtime_capabilities = apply_runtime_capability_availability(
+            planner_input.runtime_capabilities.clone(),
+            Some(&rooted_observation),
+            false,
+        );
+
+        assert!(rooted_observation.root_shell);
+        assert_eq!(
+            rooted_observation.root_shell_route,
+            Some(crate::planner::RootShellRoute::SuZero)
+        );
+        assert!(!restricted_rooted_input.runtime_capabilities.root_shell);
+        assert!(!restricted_rooted_input.runtime_capabilities.app_data_write);
+        assert!(unrestricted_rooted_input.runtime_capabilities.root_shell);
+        assert!(
+            unrestricted_rooted_input
+                .runtime_capabilities
+                .app_data_write
+        );
+        assert_eq!(
+            restricted_rooted_input.runtime_capabilities,
+            ordinary_unrooted_input.runtime_capabilities
+        );
+
+        let restricted_result =
+            crate::planner_tests::planning_result_value(restricted_rooted_input);
+        let unrooted_result = crate::planner_tests::planning_result_value(ordinary_unrooted_input);
+        let unrestricted_rooted_result =
+            crate::planner_tests::planning_result_value(unrestricted_rooted_input);
+        assert_eq!(
+            restricted_result["status"], "success",
+            "{restricted_result:#}"
+        );
+        assert_eq!(unrooted_result["status"], "success", "{unrooted_result:#}");
+        assert_eq!(
+            unrestricted_rooted_result["status"], "success",
+            "{unrestricted_rooted_result:#}"
+        );
+
+        let step_ids = |result: &serde_json::Value| {
+            result["execution_plan"]["steps"]
+                .as_array()
+                .expect("successful plan should contain steps")
+                .iter()
+                .map(|step| {
+                    step["id"]
+                        .as_str()
+                        .expect("step id should be a string")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        let restricted_ids = step_ids(&restricted_result);
+        let unrooted_ids = step_ids(&unrooted_result);
+        let unrestricted_rooted_ids = step_ids(&unrestricted_rooted_result);
+
+        assert_eq!(restricted_ids, unrooted_ids);
+        assert_eq!(restricted_ids, unrestricted_rooted_ids);
+    }
+
+    #[test]
+    fn restricted_planning_preserves_unavailable_konkr_capability_defaults() {
+        let mut planner_input = crate::planner_tests::repo_device_plan_planner_input_with_bindings(
+            "konkr.pocket_advance.base",
+            &[],
+        );
+        planner_input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
+        planner_input.device_context.android_api_level = Some(31);
+
+        let rooted_observation = RuntimeCapabilityAvailability {
+            root_shell: true,
+            app_data_write: true,
+            root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
+            config_create_write_evidence: None,
+        };
+        let unrestricted_capabilities = apply_runtime_capability_availability(
+            planner_input.runtime_capabilities.clone(),
+            Some(&rooted_observation),
+            false,
+        );
+        let restricted_capabilities = apply_runtime_capability_availability(
+            planner_input.runtime_capabilities.clone(),
+            Some(&rooted_observation),
+            true,
+        );
+        assert!(!unrestricted_capabilities.apk_install);
+        assert!(!restricted_capabilities.apk_install);
+        assert_eq!(
+            unrestricted_capabilities.apk_install,
+            restricted_capabilities.apk_install
+        );
+
+        let mut unrestricted_input = planner_input.clone();
+        unrestricted_input.runtime_capabilities = unrestricted_capabilities;
+        let mut restricted_input = planner_input;
+        restricted_input.runtime_capabilities = restricted_capabilities;
+        let unrestricted_result = crate::planner_tests::planning_result_value(unrestricted_input);
+        let restricted_result = crate::planner_tests::planning_result_value(restricted_input);
+
+        assert_eq!(
+            unrestricted_result["status"], "error",
+            "{unrestricted_result:#}"
+        );
+        assert_eq!(
+            restricted_result["status"], "error",
+            "{restricted_result:#}"
+        );
+        assert!(unrestricted_result["execution_plan"].is_null());
+        assert!(restricted_result["execution_plan"].is_null());
+        assert_eq!(restricted_result["errors"], unrestricted_result["errors"]);
     }
 }
 

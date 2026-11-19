@@ -7,6 +7,8 @@ use crate::planner::TargetDeviceBinding;
 /// projection. It is deliberately generic and contains no identity evidence.
 pub(crate) const POST_OPERATION_IDENTITY_FAILURE_MARKER: &str =
     "The device identity could not be verified after the operation may have run.";
+pub(crate) const RESTRICTED_FILE_STREAM_IDENTITY_DOMAIN: &str =
+    "emuchef-restricted-file-stream-identity-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IdentityCheckPhase {
@@ -91,6 +93,18 @@ impl IdentityGuard {
             None => ReviewedIdentityTarget::Insufficient,
         });
         self.baseline = None;
+    }
+
+    /// Hashes the established Android ID and exact build fingerprint for restricted file streams.
+    pub(crate) fn restricted_file_stream_identity_digest(&self) -> Option<String> {
+        let baseline = self.baseline.as_ref()?;
+        let material = format!(
+            "{RESTRICTED_FILE_STREAM_IDENTITY_DOMAIN}\n{}\n{}",
+            baseline.android_id, baseline.build_fingerprint
+        );
+        Some(crate::runtime_configuration::sha256_hex(
+            material.as_bytes(),
+        ))
     }
 
     pub(crate) fn check<E: AdbCommandExecutor>(
