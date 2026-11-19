@@ -30,6 +30,14 @@ const BUILD_MODULE_SOURCE = path.join(
   "src/qualification_build.rs",
 );
 const TOOL_SOURCE = path.join(REPO_ROOT, "tools/device-qualification.mjs");
+const EXECUTION_REPORT_TOOL_SOURCE = path.join(
+  REPO_ROOT,
+  "tools/device-qualification-execution-report.mjs",
+);
+const EXECUTION_REPORT_SCHEMA_SOURCE = path.join(
+  REPO_ROOT,
+  "docs/testing/device-qualification/execution-report.schema.json",
+);
 const INHERITED_BUILD_IDENTITY = JSON.stringify({
   appVersion: "0.1.0",
   gitCommit: "1".repeat(40),
@@ -158,6 +166,16 @@ mod tests {
     copyFileSync(BUILD_SCRIPT_SOURCE, buildScriptPath);
     mkdirSync(path.dirname(toolPath), { recursive: true });
     copyFileSync(TOOL_SOURCE, toolPath);
+    copyFileSync(
+      EXECUTION_REPORT_TOOL_SOURCE,
+      path.join(fixtureRoot, "tools/device-qualification-execution-report.mjs"),
+    );
+    const executionReportSchemaPath = path.join(
+      fixtureRoot,
+      "docs/testing/device-qualification/execution-report.schema.json",
+    );
+    mkdirSync(path.dirname(executionReportSchemaPath), { recursive: true });
+    copyFileSync(EXECUTION_REPORT_SCHEMA_SOURCE, executionReportSchemaPath);
     execFileSync("git", ["init"], { cwd: fixtureRoot, stdio: "pipe" });
     execFileSync("git", ["config", "user.name", "Codex"], {
       cwd: fixtureRoot,
