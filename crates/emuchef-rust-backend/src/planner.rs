@@ -188,6 +188,8 @@ pub struct PlanningResult {
     pub execution_plan: Option<ExecutionPlan>,
     pub schema_version: i64,
     pub kind: &'static str,
+    #[serde(skip)]
+    pub(crate) required_operation_step_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1379,6 +1381,7 @@ fn plan_execution_with_app_definitions_inner(
                 return result;
             }
         };
+    let required_operation_step_ids = required_operation_step_ids(&ordered_steps);
     let execution_plan = ExecutionPlan {
         id: input.plan_id,
         source: ExecutionPlanSource {
@@ -1505,6 +1508,7 @@ fn plan_execution_with_app_definitions_inner(
         execution_plan: Some(execution_plan),
         schema_version: SCHEMA_VERSION,
         kind: "planning_result",
+        required_operation_step_ids,
     }
 }
 
@@ -1730,6 +1734,7 @@ fn error_result(errors: Vec<PlannerMessage>) -> PlanningResult {
         execution_plan: None,
         schema_version: SCHEMA_VERSION,
         kind: "planning_result",
+        required_operation_step_ids: Vec::new(),
     }
 }
 
@@ -2071,6 +2076,15 @@ fn operation_requires_capability(step: &Step) -> bool {
             step.type_name.as_str(),
             "download_remote_file" | "extract_artifacts" | "resolve_artifacts" | "wait"
         )
+}
+
+/// Return the planned step IDs that the planner classifies as required operations.
+pub(crate) fn required_operation_step_ids(planned_steps: &[(String, String, Step)]) -> Vec<String> {
+    planned_steps
+        .iter()
+        .filter(|(_, _, step)| operation_requires_capability(step))
+        .map(|(step_id, _, _)| step_id.clone())
+        .collect()
 }
 
 fn select_local_step_ids(

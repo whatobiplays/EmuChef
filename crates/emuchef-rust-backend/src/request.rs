@@ -1895,14 +1895,24 @@ fn handle_runtime_configuration_request(
             restrict_privileged_execution,
         )
         .and_then(|result| {
-            serde_json::to_value(result).map_err(|error| {
-                runtime_configuration::ConfigurationContextError::Catalog(
-                    crate::planner::PlannerLoadError::new(
-                        "serialization_failed",
-                        error.to_string(),
-                    ),
-                )
-            })
+            let required_step_ids = result.restricted_qualification_required_step_ids.clone();
+            let has_plan = result.plan.is_some();
+            serde_json::to_value(result)
+                .map(|mut value| {
+                    if restrict_privileged_execution && has_plan {
+                        value["restrictedQualificationRequiredStepIds"] =
+                            json!(required_step_ids);
+                    }
+                    value
+                })
+                .map_err(|error| {
+                    runtime_configuration::ConfigurationContextError::Catalog(
+                        crate::planner::PlannerLoadError::new(
+                            "serialization_failed",
+                            error.to_string(),
+                        ),
+                    )
+                })
         })
     } else {
         runtime_configuration::describe_configuration_with_restriction(

@@ -1300,7 +1300,7 @@ pub(crate) fn restricted_qualification_report_for_terminal_in_transition(
     review_handle: &str,
     device_handle: &str,
     plan: &Value,
-    plan_digest: &str,
+    reviewed_step_requirements: Option<&crate::handles::RestrictedQualificationStepRequirements>,
     report: &Value,
     runtime: &Value,
     reviewed_runtime_generation: Option<u64>,
@@ -1348,10 +1348,11 @@ pub(crate) fn restricted_qualification_report_for_terminal_in_transition(
     {
         return Ok(None);
     }
+    let reviewed_step_requirements = reviewed_step_requirements.ok_or_else(persistence_error)?;
     restricted_qualification_claim_for_session(
         &session,
         plan,
-        plan_digest,
+        reviewed_step_requirements,
         report,
         runtime,
         reviewed_runtime_generation,
@@ -1366,18 +1367,21 @@ pub(crate) fn restricted_qualification_report_for_terminal_in_transition(
 pub(crate) fn restricted_qualification_claim_for_session(
     session: &QualificationSession,
     plan: &Value,
-    plan_digest: &str,
+    reviewed_step_requirements: &crate::handles::RestrictedQualificationStepRequirements,
     report: &Value,
     runtime: &Value,
     reviewed_runtime_generation: Option<u64>,
     observed_terminal_status: &str,
 ) -> Result<Value, String> {
+    let plan_digest = reviewed_step_requirements.plan_digest.as_str();
     let plan_id = plan
         .get("id")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(persistence_error)?;
-    if report.get("planId").and_then(Value::as_str) != Some(plan_id) || !is_sha256_hex(plan_digest)
+    if report.get("planId").and_then(Value::as_str) != Some(plan_id)
+        || report.get("planDigest").and_then(Value::as_str) != Some(plan_digest)
+        || !is_sha256_hex(plan_digest)
     {
         return Err(persistence_error());
     }
@@ -1466,44 +1470,180 @@ pub(crate) fn restricted_qualification_claim_for_session(
         return Err(persistence_error());
     }
 
+    let plan_steps: &[Value] = match plan.get("steps") {
+        Some(steps) => steps.as_array().ok_or_else(persistence_error)?.as_slice(),
+        None => &[],
+    };
+    let mut planned_step_recipes = std::collections::HashMap::new();
+    for step in plan_steps {
+        let step_id = step
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        let recipe_id = step
+            .get("recipe_ref")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        if !plan_recipe_ids.contains(recipe_id)
+            || planned_step_recipes
+                .insert(step_id.to_string(), recipe_id.to_string())
+                .is_some()
+        {
+            return Err(persistence_error());
+        }
+    }
+    let required_step_ids = &reviewed_step_requirements.required_operation_step_ids;
+    if required_step_ids.iter().any(String::is_empty)
+        || required_step_ids.iter().collect::<BTreeSet<_>>().len() != required_step_ids.len()
+        || required_step_ids
+            .iter()
+            .any(|step_id| !planned_step_recipes.contains_key(step_id))
+    {
+        return Err(persistence_error());
+    }
+    let required_step_id_set = required_step_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
     let execution_status = report.get("status").and_then(Value::as_str);
     if execution_status != Some(observed_terminal_status)
         || !is_terminal_execution_status(observed_terminal_status)
     {
         return Err(persistence_error());
     }
+    let recipes = report
+        .get("recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(persistence_error)?;
     let mut reported_outcomes = std::collections::HashMap::new();
-    if let Some(recipes) = report.get("recipes").and_then(Value::as_array) {
-        for recipe in recipes {
-            let Some(recipe_id) = recipe.get("recipeId").and_then(Value::as_str) else {
-                continue;
-            };
-            let status = recipe
+    let mut reported_step_outcomes = std::collections::HashMap::new();
+    for recipe in recipes {
+        let recipe_id = recipe
+            .get("recipeId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(persistence_error)?;
+        if !plan_recipe_ids.contains(recipe_id) {
+            return Err(persistence_error());
+        }
+        let status = recipe
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(persistence_error)?;
+        if reported_outcomes
+            .insert(recipe_id.to_string(), status.to_string())
+            .is_some()
+        {
+            return Err(persistence_error());
+        }
+        let steps = recipe
+            .get("steps")
+            .and_then(Value::as_array)
+            .ok_or_else(persistence_error)?;
+        for step in steps {
+            let step_id = step
+                .get("stepId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(persistence_error)?;
+            let step_recipe_id = step
+                .get("recipeId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(persistence_error)?;
+            let step_status = step
                 .get("status")
                 .and_then(Value::as_str)
                 .ok_or_else(persistence_error)?;
-            if reported_outcomes.insert(recipe_id, status).is_some() {
+            if step_recipe_id != recipe_id
+                || planned_step_recipes.get(step_id).map(String::as_str) != Some(step_recipe_id)
+                || !matches!(
+                    step_status,
+                    "pending"
+                        | "running"
+                        | "succeeded"
+                        | "skipped"
+                        | "failed"
+                        | "blocked"
+                        | "cancelled"
+                )
+                || reported_step_outcomes
+                    .insert(step_id.to_string(), step_status.to_string())
+                    .is_some()
+            {
                 return Err(persistence_error());
             }
         }
     }
+
     let operation_outcomes = required_operation_ids
         .iter()
         .map(|operation_id| {
-            let outcome = match reported_outcomes.get(operation_id.as_str()).copied() {
-                Some("succeeded" | "succeeded_with_warnings") => "executed",
-                Some("failed") => "failed",
-                Some("blocked") => "blocked",
-                Some("cancelled") => "cancelled",
-                Some("skipped") => "skipped",
-                Some("pending" | "running") | None => {
+            let recipe_status = reported_outcomes
+                .get(operation_id.as_str())
+                .map(String::as_str);
+            let planned_step_ids = planned_step_recipes
+                .iter()
+                .filter_map(|(step_id, recipe_id)| {
+                    (recipe_id == operation_id).then_some(step_id.as_str())
+                })
+                .collect::<Vec<_>>();
+            let step_statuses = planned_step_ids
+                .iter()
+                .filter_map(|step_id| reported_step_outcomes.get(*step_id).map(String::as_str))
+                .collect::<Vec<_>>();
+            let has_missing_step_result = step_statuses.len() != planned_step_ids.len();
+            let has_skipped_required_step = planned_step_ids.iter().any(|step_id| {
+                required_step_id_set.contains(*step_id)
+                    && reported_step_outcomes.get(*step_id).map(String::as_str) == Some("skipped")
+            });
+            let outcome = if recipe_status == Some("failed") || step_statuses.contains(&"failed") {
+                "failed"
+            } else if recipe_status == Some("blocked") || step_statuses.contains(&"blocked") {
+                "blocked"
+            } else if recipe_status == Some("cancelled") || step_statuses.contains(&"cancelled") {
+                "cancelled"
+            } else if recipe_status.is_none() {
+                if execution_status == Some("cancelled") {
+                    "cancelled"
+                } else {
+                    "blocked"
+                }
+            } else if matches!(recipe_status, Some("pending" | "running")) {
+                if execution_status == Some("cancelled") {
+                    "cancelled"
+                } else if planned_step_ids.is_empty() {
+                    "skipped"
+                } else {
+                    "blocked"
+                }
+            } else if matches!(recipe_status, Some("succeeded" | "succeeded_with_warnings")) {
+                if planned_step_ids.is_empty() {
+                    "skipped"
+                } else if has_missing_step_result
+                    || step_statuses.contains(&"pending")
+                    || step_statuses.contains(&"running")
+                    || has_skipped_required_step
+                {
                     if execution_status == Some("cancelled") {
                         "cancelled"
                     } else {
                         "blocked"
                     }
+                } else if step_statuses.contains(&"succeeded") {
+                    "executed"
+                } else if !step_statuses.is_empty()
+                    && step_statuses.iter().all(|status| *status == "skipped")
+                {
+                    "skipped"
+                } else {
+                    return Err(persistence_error());
                 }
-                _ => return Err(persistence_error()),
+            } else {
+                return Err(persistence_error());
             };
             Ok(json!({ "operationId": operation_id, "outcome": outcome }))
         })

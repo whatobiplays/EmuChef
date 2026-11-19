@@ -181,7 +181,7 @@ impl From<TargetDeviceBinding> for ConfigurationTargetDevice {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanConfigurationResult {
     pub plan: Option<ExecutionPlan>,
@@ -192,6 +192,8 @@ pub struct PlanConfigurationResult {
     pub copy_commit_preparation_required: bool,
     pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
+    #[serde(skip)]
+    pub(crate) restricted_qualification_required_step_ids: Vec<String>,
 }
 
 /// One source selected for the optional RetroArch configuration write.
@@ -995,6 +997,8 @@ pub(crate) fn plan_configuration_with_restriction(
             copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
+
+            ..Default::default()
         });
     }
     let selected_configuration = match select_retroarch_configuration_source(&resolved_inputs) {
@@ -1012,6 +1016,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         }
     };
@@ -1037,6 +1043,8 @@ pub(crate) fn plan_configuration_with_restriction(
                     copy_commit_preparation_required: false,
                     resolved_inputs,
                     diagnostics,
+
+                    ..Default::default()
                 });
             }
         },
@@ -1059,6 +1067,8 @@ pub(crate) fn plan_configuration_with_restriction(
                     copy_commit_preparation_required: false,
                     resolved_inputs,
                     diagnostics,
+
+                    ..Default::default()
                 });
             }
         },
@@ -1084,6 +1094,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         }
     };
@@ -1106,6 +1118,8 @@ pub(crate) fn plan_configuration_with_restriction(
             copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics,
+
+            ..Default::default()
         });
     }
 
@@ -1118,6 +1132,8 @@ pub(crate) fn plan_configuration_with_restriction(
             copy_commit_preparation_required: false,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
+
+            ..Default::default()
         });
     };
     if let Some(target_identity) = retroarch_config_create_target.as_ref() {
@@ -1138,6 +1154,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         let Some(target_path) = target_identity
@@ -1157,6 +1175,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         input.config_create_destination = Some(format!(
@@ -1181,6 +1201,7 @@ pub(crate) fn plan_configuration_with_restriction(
     }
 
     let result = plan_prepared_input(&prepared.catalog, input);
+    let required_operation_step_ids = result.required_operation_step_ids;
     let mut diagnostics = prepared.diagnostics.clone();
     diagnostics.extend(
         result
@@ -1209,6 +1230,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         let Some(plan) = execution_plan.as_mut() else {
@@ -1219,6 +1242,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         };
         if let Err(code) = bind_frozen_configuration_to_plan(
@@ -1237,6 +1262,8 @@ pub(crate) fn plan_configuration_with_restriction(
                 copy_commit_preparation_required: false,
                 resolved_inputs,
                 diagnostics,
+
+                ..Default::default()
             });
         }
     }
@@ -1266,6 +1293,12 @@ pub(crate) fn plan_configuration_with_restriction(
             .as_ref()
             .map(|plan| project_review(plan, &diagnostics))
     };
+    let restricted_qualification_required_step_ids =
+        if restrict_privileged_execution && execution_plan.is_some() {
+            required_operation_step_ids
+        } else {
+            Vec::new()
+        };
     Ok(PlanConfigurationResult {
         plan: execution_plan,
         plan_digest,
@@ -1273,6 +1306,9 @@ pub(crate) fn plan_configuration_with_restriction(
         copy_commit_preparation_required,
         resolved_inputs,
         diagnostics,
+        restricted_qualification_required_step_ids,
+
+        ..Default::default()
     })
 }
 

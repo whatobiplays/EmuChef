@@ -1193,6 +1193,9 @@ function validateRestrictedQualificationReport(reportBytes, record, workflow) {
   if (report.execution.simulated !== false) {
     fail("restricted qualification execution must not be simulated");
   }
+  if (!Array.isArray(report.execution.recipes)) {
+    fail("restricted qualification execution must include Recipe results");
+  }
   if (record.runValidity === "valid") {
     const status = report.execution.status;
     let observationOutcome;
@@ -1331,6 +1334,28 @@ function validateRestrictedQualificationReport(reportBytes, record, workflow) {
     }
     if (!RESTRICTED_OPERATION_OUTCOMES.has(outcome.outcome)) {
       fail(`restricted qualification operation outcome ${outcome.outcome} is not terminal`);
+    }
+    if (outcome.outcome === "executed") {
+      const matchingRecipes = report.execution.recipes.filter(
+        (candidate) => candidate?.recipeId === outcome.operationId,
+      );
+      const recipe = matchingRecipes[0];
+      const hasSuccessfulStep = Array.isArray(recipe?.steps) && recipe.steps.some(
+        (step) =>
+          step?.recipeId === outcome.operationId &&
+          typeof step.stepId === "string" &&
+          step.stepId.length > 0 &&
+          step.status === "succeeded",
+      );
+      if (
+        matchingRecipes.length !== 1 ||
+        !["succeeded", "succeeded_with_warnings"].includes(recipe.status) ||
+        !hasSuccessfulStep
+      ) {
+        fail(
+          `restricted qualification operation ${outcome.operationId} has no matching successful step result`,
+        );
+      }
     }
     if (
       record.qualificationOutcome === "passed" &&

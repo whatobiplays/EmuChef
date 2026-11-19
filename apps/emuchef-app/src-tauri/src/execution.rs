@@ -2890,7 +2890,11 @@ fn retain_terminal_real_execution_with_lease_revoker(
             &mapping.review_handle,
             &mapping.review.device_handle,
             mapping.review.response.get("plan").unwrap_or(&Value::Null),
-            &mapping.review.plan_digest,
+            mapping
+                .review
+                .restricted_execution
+                .as_ref()
+                .map(|authority| &authority.step_requirements),
             report,
             &report_runtime,
             mapping
@@ -8023,15 +8027,39 @@ pub(crate) mod tests {
                 "root_shell": false,
                 "app_data_write": false
             },
-            "steps": []
+            "steps": [
+                { "id": "step.first", "recipe_ref": "required.first" },
+                { "id": "step.second", "recipe_ref": "required.second" }
+            ]
         });
         let plan_digest = canonical_json_digest(&plan).unwrap();
+        let reviewed_requirements = crate::handles::RestrictedQualificationStepRequirements {
+            plan_digest: plan_digest.clone(),
+            required_operation_step_ids: vec!["step.first".to_string(), "step.second".to_string()],
+        };
         let terminal_report = json!({
             "planId": "plan.restricted",
+            "planDigest": plan_digest.clone(),
             "status": "succeeded",
             "recipes": [
-                { "recipeId": "required.second", "status": "succeeded" },
-                { "recipeId": "required.first", "status": "succeeded" }
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.second",
+                        "recipeId": "required.second",
+                        "status": "succeeded"
+                    }]
+                },
+                {
+                    "recipeId": "required.first",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.first",
+                        "recipeId": "required.first",
+                        "status": "succeeded"
+                    }]
+                }
             ]
         });
         let runtime = json!({
@@ -8049,7 +8077,7 @@ pub(crate) mod tests {
             crate::qualification_session::restricted_qualification_claim_for_session(
                 &session,
                 &plan,
-                &plan_digest,
+                &reviewed_requirements,
                 &terminal_report,
                 &runtime,
                 Some(7),
@@ -8071,7 +8099,7 @@ pub(crate) mod tests {
         assert!(store.mark_terminal_with_qualification_report(
             ExecutionKind::Real,
             &mapping.public_handle,
-            terminal_report,
+            terminal_report.clone(),
             runtime.clone(),
             Some(qualification),
         ));
@@ -8150,17 +8178,34 @@ pub(crate) mod tests {
 
         let failed_report = json!({
             "planId": "plan.restricted",
+            "planDigest": plan_digest.clone(),
             "status": "failed",
             "recipes": [
-                { "recipeId": "required.first", "status": "failed" },
-                { "recipeId": "required.second", "status": "succeeded" }
+                {
+                    "recipeId": "required.first",
+                    "status": "failed",
+                    "steps": [{
+                        "stepId": "step.first",
+                        "recipeId": "required.first",
+                        "status": "failed"
+                    }]
+                },
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.second",
+                        "recipeId": "required.second",
+                        "status": "succeeded"
+                    }]
+                }
             ]
         });
         let failed_claim =
             crate::qualification_session::restricted_qualification_claim_for_session(
                 &session,
                 &plan,
-                &plan_digest,
+                &reviewed_requirements,
                 &failed_report,
                 &runtime,
                 Some(7),
@@ -8200,6 +8245,7 @@ pub(crate) mod tests {
 
         let missing_operation_report = json!({
             "planId": "plan.restricted",
+            "planDigest": plan_digest.clone(),
             "status": "succeeded",
             "recipes": []
         });
@@ -8207,7 +8253,7 @@ pub(crate) mod tests {
             crate::qualification_session::restricted_qualification_claim_for_session(
                 &session,
                 &plan,
-                &plan_digest,
+                &reviewed_requirements,
                 &missing_operation_report,
                 &json!({
                     "executionRestriction": {
@@ -8237,15 +8283,8 @@ pub(crate) mod tests {
             crate::qualification_session::restricted_qualification_claim_for_session(
                 &session,
                 &privileged_plan,
-                &plan_digest,
-                &json!({
-                    "planId": "plan.restricted",
-                    "status": "succeeded",
-                    "recipes": [
-                        { "recipeId": "required.first", "status": "succeeded" },
-                        { "recipeId": "required.second", "status": "succeeded" }
-                    ]
-                }),
+                &reviewed_requirements,
+                &terminal_report,
                 &runtime,
                 Some(7),
                 "succeeded",
@@ -8267,20 +8306,388 @@ pub(crate) mod tests {
             crate::qualification_session::restricted_qualification_claim_for_session(
                 &session,
                 &plan,
-                &plan_digest,
-                &json!({
-                    "planId": "plan.restricted",
-                    "status": "succeeded",
-                    "recipes": [
-                        { "recipeId": "required.first", "status": "succeeded" },
-                        { "recipeId": "required.second", "status": "succeeded" }
-                    ]
-                }),
+                &reviewed_requirements,
+                &terminal_report,
                 &stale_runtime,
                 Some(7),
                 "succeeded",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn restricted_qualification_skips_a_required_recipe_without_executed_steps() {
+        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+            &[],
+            &["required.first", "required.second"],
+        );
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.restricted",
+            "recipes": [
+                { "id": "required.first" },
+                { "id": "required.second" }
+            ],
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "steps": [{ "id": "step.first", "recipe_ref": "required.first" }]
+        });
+        let plan_digest = canonical_json_digest(&plan).unwrap();
+        let reviewed_requirements = crate::handles::RestrictedQualificationStepRequirements {
+            plan_digest: plan_digest.clone(),
+            required_operation_step_ids: vec!["step.first".to_string()],
+        };
+        let terminal_report = json!({
+            "planId": "plan.restricted",
+            "planDigest": plan_digest.clone(),
+            "status": "succeeded",
+            "recipes": [
+                {
+                    "recipeId": "required.first",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.first",
+                        "recipeId": "required.first",
+                        "status": "succeeded"
+                    }]
+                },
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": []
+                }
+            ]
+        });
+        let runtime = json!({
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 7,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+
+        let claim = crate::qualification_session::restricted_qualification_claim_for_session(
+            &session,
+            &plan,
+            &reviewed_requirements,
+            &terminal_report,
+            &runtime,
+            Some(7),
+            "succeeded",
+        )
+        .expect("a terminal report should preserve the unexecuted Recipe outcome");
+
+        assert_eq!(
+            claim["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "executed" },
+                { "operationId": "required.second", "outcome": "skipped" }
+            ])
+        );
+    }
+
+    #[test]
+    fn restricted_qualification_does_not_let_optional_work_mask_a_skipped_required_step() {
+        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+            &[],
+            &["required.first", "required.second"],
+        );
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.restricted",
+            "recipes": [
+                { "id": "required.first" },
+                { "id": "required.second" }
+            ],
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "steps": [
+                { "id": "step.first.required", "recipe_ref": "required.first" },
+                { "id": "step.first.optional", "recipe_ref": "required.first" },
+                { "id": "step.second.required", "recipe_ref": "required.second" }
+            ]
+        });
+        let plan_digest = canonical_json_digest(&plan).unwrap();
+        let reviewed_requirements = crate::handles::RestrictedQualificationStepRequirements {
+            plan_digest,
+            required_operation_step_ids: vec![
+                "step.first.required".to_string(),
+                "step.second.required".to_string(),
+            ],
+        };
+        let terminal_report = json!({
+            "planId": "plan.restricted",
+            "planDigest": reviewed_requirements.plan_digest,
+            "status": "succeeded",
+            "recipes": [
+                {
+                    "recipeId": "required.first",
+                    "status": "succeeded",
+                    "steps": [
+                        {
+                            "stepId": "step.first.required",
+                            "recipeId": "required.first",
+                            "status": "skipped"
+                        },
+                        {
+                            "stepId": "step.first.optional",
+                            "recipeId": "required.first",
+                            "status": "succeeded"
+                        }
+                    ]
+                },
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.second.required",
+                        "recipeId": "required.second",
+                        "status": "succeeded"
+                    }]
+                }
+            ]
+        });
+        let runtime = json!({
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 7,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+
+        let claim = crate::qualification_session::restricted_qualification_claim_for_session(
+            &session,
+            &plan,
+            &reviewed_requirements,
+            &terminal_report,
+            &runtime,
+            Some(7),
+            "succeeded",
+        )
+        .expect("terminal evidence should preserve each operation's own outcome");
+
+        assert_eq!(
+            claim["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "blocked" },
+                { "operationId": "required.second", "outcome": "executed" }
+            ])
+        );
+    }
+
+    #[test]
+    fn restricted_qualification_allows_an_optional_step_to_be_skipped() {
+        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+            &[],
+            &["required.first", "required.second"],
+        );
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.restricted",
+            "recipes": [
+                { "id": "required.first" },
+                { "id": "required.second" }
+            ],
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "steps": [
+                { "id": "step.first.required", "recipe_ref": "required.first" },
+                { "id": "step.first.optional", "recipe_ref": "required.first" },
+                { "id": "step.second.required", "recipe_ref": "required.second" }
+            ]
+        });
+        let plan_digest = canonical_json_digest(&plan).unwrap();
+        let reviewed_requirements = crate::handles::RestrictedQualificationStepRequirements {
+            plan_digest,
+            required_operation_step_ids: vec![
+                "step.first.required".to_string(),
+                "step.second.required".to_string(),
+            ],
+        };
+        let terminal_report = json!({
+            "planId": "plan.restricted",
+            "planDigest": reviewed_requirements.plan_digest,
+            "status": "succeeded",
+            "recipes": [
+                {
+                    "recipeId": "required.first",
+                    "status": "succeeded",
+                    "steps": [
+                        {
+                            "stepId": "step.first.required",
+                            "recipeId": "required.first",
+                            "status": "succeeded"
+                        },
+                        {
+                            "stepId": "step.first.optional",
+                            "recipeId": "required.first",
+                            "status": "skipped"
+                        }
+                    ]
+                },
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.second.required",
+                        "recipeId": "required.second",
+                        "status": "succeeded"
+                    }]
+                }
+            ]
+        });
+        let runtime = json!({
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 7,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+
+        let claim = crate::qualification_session::restricted_qualification_claim_for_session(
+            &session,
+            &plan,
+            &reviewed_requirements,
+            &terminal_report,
+            &runtime,
+            Some(7),
+            "succeeded",
+        )
+        .expect("optional work may be skipped after required work succeeds");
+
+        assert_eq!(
+            claim["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "executed" },
+                { "operationId": "required.second", "outcome": "executed" }
+            ])
+        );
+    }
+
+    #[test]
+    fn restricted_qualification_blocks_incomplete_step_results() {
+        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+            &[],
+            &["required.first", "required.second"],
+        );
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.restricted",
+            "recipes": [
+                { "id": "required.first" },
+                { "id": "required.second" }
+            ],
+            "runtime_capabilities": {
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": false,
+                "app_data_write": false
+            },
+            "steps": [
+                { "id": "step.first.required", "recipe_ref": "required.first" },
+                { "id": "step.first.optional", "recipe_ref": "required.first" },
+                { "id": "step.second.required", "recipe_ref": "required.second" }
+            ]
+        });
+        let plan_digest = canonical_json_digest(&plan).unwrap();
+        let reviewed_requirements = crate::handles::RestrictedQualificationStepRequirements {
+            plan_digest,
+            required_operation_step_ids: vec![
+                "step.first.required".to_string(),
+                "step.second.required".to_string(),
+            ],
+        };
+        let terminal_report = json!({
+            "planId": "plan.restricted",
+            "planDigest": reviewed_requirements.plan_digest,
+            "status": "succeeded",
+            "recipes": [
+                {
+                    "recipeId": "required.first",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.first.optional",
+                        "recipeId": "required.first",
+                        "status": "succeeded"
+                    }]
+                },
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.second.required",
+                        "recipeId": "required.second",
+                        "status": "succeeded"
+                    }]
+                }
+            ]
+        });
+        let runtime = json!({
+            "executionRestriction": {
+                "enabled": true,
+                "buildIdentity": session.build_identity(),
+                "runtimeGeneration": 7,
+                "strategy": "adb_shell",
+                "rootShell": false,
+                "appDataWrite": false
+            }
+        });
+
+        let claim = crate::qualification_session::restricted_qualification_claim_for_session(
+            &session,
+            &plan,
+            &reviewed_requirements,
+            &terminal_report,
+            &runtime,
+            Some(7),
+            "succeeded",
+        )
+        .expect("incomplete terminal evidence should remain observable as blocked");
+
+        assert_eq!(
+            claim["operationOutcomes"],
+            json!([
+                { "operationId": "required.first", "outcome": "blocked" },
+                { "operationId": "required.second", "outcome": "executed" }
+            ])
         );
     }
 
@@ -8307,15 +8714,39 @@ pub(crate) mod tests {
                 "root_shell": false,
                 "app_data_write": false
             },
-            "steps": []
+            "steps": [
+                { "id": "step.first", "recipe_ref": "required.first" },
+                { "id": "step.second", "recipe_ref": "required.second" }
+            ]
         });
         let plan_digest = canonical_json_digest(&plan).unwrap();
+        let reviewed_requirements = crate::handles::RestrictedQualificationStepRequirements {
+            plan_digest: plan_digest.clone(),
+            required_operation_step_ids: vec!["step.first".to_string(), "step.second".to_string()],
+        };
         let report = json!({
             "planId": "plan.restricted",
+            "planDigest": plan_digest.clone(),
             "status": "failed",
             "recipes": [
-                { "recipeId": "required.first", "status": "failed" },
-                { "recipeId": "required.second", "status": "succeeded" }
+                {
+                    "recipeId": "required.first",
+                    "status": "failed",
+                    "steps": [{
+                        "stepId": "step.first",
+                        "recipeId": "required.first",
+                        "status": "failed"
+                    }]
+                },
+                {
+                    "recipeId": "required.second",
+                    "status": "succeeded",
+                    "steps": [{
+                        "stepId": "step.second",
+                        "recipeId": "required.second",
+                        "status": "succeeded"
+                    }]
+                }
             ]
         });
         let runtime = json!({
@@ -8332,7 +8763,7 @@ pub(crate) mod tests {
         let claim = crate::qualification_session::restricted_qualification_claim_for_session(
             &session,
             &plan,
-            &plan_digest,
+            &reviewed_requirements,
             &report,
             &runtime,
             Some(7),
@@ -8346,11 +8777,25 @@ pub(crate) mod tests {
                 { "operationId": "required.second", "outcome": "executed" }
             ])
         );
+        let mut mismatched_digest_report = report.clone();
+        mismatched_digest_report["planDigest"] = json!("b".repeat(64));
         assert!(
             crate::qualification_session::restricted_qualification_claim_for_session(
                 &session,
                 &plan,
-                &plan_digest,
+                &reviewed_requirements,
+                &mismatched_digest_report,
+                &runtime,
+                Some(7),
+                "failed",
+            )
+            .is_err()
+        );
+        assert!(
+            crate::qualification_session::restricted_qualification_claim_for_session(
+                &session,
+                &plan,
+                &reviewed_requirements,
                 &report,
                 &runtime,
                 Some(7),

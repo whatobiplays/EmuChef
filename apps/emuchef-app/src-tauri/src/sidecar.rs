@@ -1506,6 +1506,43 @@ mod tests {
     }
 
     #[test]
+    fn restricted_hello_rejects_a_mismatched_build_identity() {
+        let expected_identity = r#"{"appVersion":"0.1.0"}"#;
+        let reported_identity = r#"{"appVersion":"0.1.0","sourceIdentity":"different"}"#;
+        let response = json!({
+            "id": "app-1",
+            "ok": true,
+            "result": {
+                "executionRestriction": {
+                    "enabled": true,
+                    "buildIdentity": reported_identity,
+                    "runtimeGeneration": 7,
+                    "strategy": "adb_shell",
+                    "rootShell": false,
+                    "appDataWrite": false,
+                },
+            },
+        });
+        let encoded = format!("{}\n", response);
+        let (mut process, _) = scripted_process(Some(encoded.as_bytes()));
+        if let SidecarProcess::Scripted { generation, .. } = &mut process {
+            *generation = 7;
+        }
+        let mut client = SidecarClient::with_restriction(
+            PathBuf::from("unused-test-cache"),
+            Some(expected_identity.to_string()),
+        );
+        client.generation = 7;
+        client.process = Some(process);
+
+        assert!(matches!(
+            client.negotiate_existing_process(),
+            Err(StartFailure::Unsupported(_))
+        ));
+        assert!(client.verified_execution_restriction.is_none());
+    }
+
+    #[test]
     fn restricted_execution_report_includes_only_verified_policy_identity() {
         let build_identity = json!({
             "appVersion": "0.1.0",

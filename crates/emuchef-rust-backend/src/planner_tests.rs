@@ -3923,6 +3923,40 @@ fn required_app_target_step_fails_when_protected_write_capability_is_unavailable
 }
 
 #[test]
+fn restricted_qualification_step_ids_follow_operation_classification() {
+    let mut required_operation = dependency_step("required_operation", Vec::new());
+    required_operation.type_name = "copy_files".to_string();
+
+    let mut optional_operation = dependency_step("optional_operation", Vec::new());
+    optional_operation.type_name = "copy_files".to_string();
+    optional_operation.user_toggleable = true;
+
+    let non_operation = dependency_step("wait", Vec::new());
+    let planned_steps = vec![
+        (
+            "recipe.first/required_operation".to_string(),
+            "recipe.first".to_string(),
+            required_operation,
+        ),
+        (
+            "recipe.first/optional_operation".to_string(),
+            "recipe.first".to_string(),
+            optional_operation,
+        ),
+        (
+            "recipe.second/wait".to_string(),
+            "recipe.second".to_string(),
+            non_operation,
+        ),
+    ];
+
+    assert_eq!(
+        crate::planner::required_operation_step_ids(&planned_steps),
+        vec!["recipe.first/required_operation".to_string()]
+    );
+}
+
+#[test]
 fn required_step_fails_when_an_optional_dependency_is_unavailable() {
     let mut unavailable_dependency = dependency_step_with_capabilities(
         "optional_dependency",

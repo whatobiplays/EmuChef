@@ -2092,6 +2092,9 @@ where
     else {
         return Ok(plan_configuration);
     };
+    let restricted_required_step_ids = plan_configuration
+        .get("restrictedQualificationRequiredStepIds")
+        .cloned();
     let plan_authority_id = plan_configuration
         .get("executionRestrictionPlanAuthorityId")
         .and_then(Value::as_str)
@@ -2106,7 +2109,11 @@ where
     if let Some(authority_id) = plan_authority_id {
         prepare_payload["executionRestrictionPlanAuthorityId"] = json!(authority_id);
     }
-    request("prepareExecutionReview", prepare_payload)
+    let mut prepared = request("prepareExecutionReview", prepare_payload)?;
+    if let Some(required_step_ids) = restricted_required_step_ids {
+        prepared["restrictedQualificationRequiredStepIds"] = required_step_ids;
+    }
+    Ok(prepared)
 }
 
 #[tauri::command]
@@ -2326,7 +2333,7 @@ where
     result["executionMode"] = json!(mode);
     result["profileSelectionHandle"] = json!(authority.handle);
     result["profileSetupGeneration"] = json!(authority.setup_generation);
-    let restricted_execution = if let Some(reviewed_generation) = restricted_generation {
+    let restricted_review_authority = if let Some(reviewed_generation) = restricted_generation {
         let current_generation = state.sidecar.try_generation().map_err(|_| {
             safe_error(
                 "runtime_generation_unavailable",
@@ -2356,10 +2363,7 @@ where
                 safe_error("review_response_invalid", "The review response is invalid.")
             })?
             .remove("reviewAuthorityId");
-        Some(crate::handles::RestrictedExecutionReview {
-            review_authority_id,
-            runtime_generation: reviewed_generation,
-        })
+        Some((review_authority_id, reviewed_generation))
     } else {
         None
     };
@@ -2383,6 +2387,71 @@ where
             )
         })?
         .to_string();
+    let restricted_required_step_ids = result
+        .as_object_mut()
+        .ok_or_else(|| safe_error("review_response_invalid", "The review response is invalid."))?
+        .remove("restrictedQualificationRequiredStepIds");
+    let restricted_execution =
+        if let Some((review_authority_id, runtime_generation)) = restricted_review_authority {
+            let required_step_values = restricted_required_step_ids
+                .as_ref()
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    safe_error(
+                        "restricted_qualification_requirements_invalid",
+                        "The restricted review omitted required operation steps.",
+                    )
+                })?;
+            let required_operation_step_ids = required_step_values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|step_id| !step_id.is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            safe_error(
+                                "restricted_qualification_requirements_invalid",
+                                "The restricted review omitted required operation steps.",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let planned_steps = plan.get("steps").and_then(Value::as_array).ok_or_else(|| {
+                safe_error(
+                    "restricted_qualification_requirements_invalid",
+                    "The restricted review omitted required operation steps.",
+                )
+            })?;
+            let planned_step_ids = planned_steps
+                .iter()
+                .filter_map(|step| step.get("id").and_then(Value::as_str))
+                .collect::<std::collections::BTreeSet<_>>();
+            if required_operation_step_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != required_operation_step_ids.len()
+                || required_operation_step_ids
+                    .iter()
+                    .any(|step_id| !planned_step_ids.contains(step_id.as_str()))
+            {
+                return Err(safe_error(
+                    "restricted_qualification_requirements_invalid",
+                    "The restricted review omitted required operation steps.",
+                ));
+            }
+            Some(crate::handles::RestrictedExecutionReview {
+                review_authority_id,
+                runtime_generation,
+                step_requirements: crate::handles::RestrictedQualificationStepRequirements {
+                    plan_digest: digest.clone(),
+                    required_operation_step_ids,
+                },
+            })
+        } else {
+            None
+        };
     let review = result
         .get("review")
         .filter(|value| value.is_object())

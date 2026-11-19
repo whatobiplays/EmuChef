@@ -1218,6 +1218,35 @@ function restrictedExecutionBundle(
     execution: {
       simulated: false,
       status: "succeeded",
+      recipes: [
+        {
+          recipeId: "app.retroarch.provision",
+          status: "succeeded",
+          steps: [
+            {
+              stepId: "step.retroarch.provision",
+              recipeId: "app.retroarch.provision",
+              status: "succeeded",
+            },
+          ],
+        },
+        {
+          recipeId: "feature.copy_bios",
+          status: "succeeded",
+          steps: [
+            {
+              stepId: "step.copy.bios",
+              recipeId: "feature.copy_bios",
+              status: "succeeded",
+            },
+            {
+              stepId: "step.optional.bios",
+              recipeId: "feature.copy_bios",
+              status: "skipped",
+            },
+          ],
+        },
+      ],
     },
     qualification: {
       claim: "restricted_unprivileged",
@@ -1404,6 +1433,17 @@ test("restricted reports bind build, target, profile, and reviewed plan", () => 
   }
 });
 
+test("restricted reports reject executed outcomes without successful recipe steps", () => {
+  const bundle = restrictedExecutionBundle((report) => {
+    report.execution.recipes[1].steps = [];
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /executed|step|operation/i,
+  );
+});
+
 test("restricted reports require one terminal outcome for every required operation", () => {
   const invalidReports = [
     [
@@ -1434,6 +1474,12 @@ test("restricted reports require one terminal outcome for every required operati
         report.qualification.operationOutcomes[0].outcome = "pending";
       },
     ],
+[
+"blocked outcome cannot pass",
+(report) => {
+report.qualification.operationOutcomes[0].outcome = "blocked";
+},
+],
   ];
 
   for (const [label, updateReport] of invalidReports) {
