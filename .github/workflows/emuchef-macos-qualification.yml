@@ -104,4 +104,6 @@ jobs:
         env:
           EMUCHEF_RESTRICTED_EXECUTION_BUILD: "1"
       - name: Smoke-test restricted host sidecar handshake
-        run: node apps/emuchef-app/scripts/restricted-sidecar-handshake-smoke.mjs
+        run: |
+          ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/30.0.16248370" \
+            node apps/emuchef-app/scripts/restricted-sidecar-handshake-smoke.mjs

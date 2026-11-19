@@ -2900,25 +2900,51 @@ mod tests {
     ))]
     #[test]
     fn packaged_android_helper_materializes_outside_the_cargo_build_tree() {
-        let helper = stage_android_copy_commit_helper("arm64-v8a")
-            .expect("packaged Android helper should materialize for adb push");
-        let bytes = std::fs::read(helper.path()).expect("materialized helper should be readable");
-        let build_output = std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64"));
-
-        assert_eq!(
-            &bytes[..4],
-            b"\x7fELF",
-            "helper payload should be an Android ELF"
-        );
-        assert_ne!(
-            helper.path(),
-            build_output,
-            "ADB must push the packaged payload staged at runtime, not Cargo OUT_DIR"
-        );
-        assert!(
-            !helper.path().starts_with(build_output.parent().unwrap()),
-            "runtime helper payload must not depend on the Cargo build tree"
-        );
+        for (abi, expected_machine, build_output) in [
+            (
+                "arm64-v8a",
+                183_u16,
+                std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_AARCH64")),
+            ),
+            (
+                "x86_64",
+                62_u16,
+                std::path::Path::new(env!("EMU_CHEF_COPY_COMMIT_HELPER_X86_64")),
+            ),
+        ] {
+            let helper = stage_android_copy_commit_helper(abi)
+                .expect("packaged Android helper should materialize for adb push");
+            let bytes =
+                std::fs::read(helper.path()).expect("materialized helper should be readable");
+            assert!(
+                bytes.len() >= 20,
+                "helper payload should contain an ELF header"
+            );
+            assert_eq!(
+                &bytes[..4],
+                b"\x7fELF",
+                "helper payload should be Android ELF"
+            );
+            assert_eq!(
+                u16::from_le_bytes([bytes[18], bytes[19]]),
+                expected_machine,
+                "helper payload should match the requested Android ABI"
+            );
+            assert_eq!(
+                bytes,
+                std::fs::read(build_output).expect("compiled helper output should be readable"),
+                "materialized helper should preserve the compiled Cargo output"
+            );
+            assert_ne!(
+                helper.path(),
+                build_output,
+                "ADB must push packaged payload staged at runtime, not Cargo OUT_DIR"
+            );
+            assert!(
+                !helper.path().starts_with(build_output.parent().unwrap()),
+                "runtime helper payload must not depend on Cargo build tree"
+            );
+        }
     }
 
     #[cfg(unix)]

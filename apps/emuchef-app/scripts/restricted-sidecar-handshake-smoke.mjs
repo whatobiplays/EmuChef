@@ -12,7 +12,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -20,22 +19,29 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { targetExecutableExtension } from "../../../scripts/sidecar-target-contract.mjs";
 import { buildMaterialIdentity } from "../../../tools/device-qualification.mjs";
-import { externalBinArtifactName } from "./sidecar-packaging.mjs";
+import { BINARY_BASENAME, externalBinArtifactName } from "./sidecar-packaging.mjs";
 
 const APP_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPOSITORY_ROOT = path.resolve(APP_DIRECTORY, "../..");
 const PROCESS_TIMEOUT_MS = 10_000;
 
-function runChecked(command, args) {
+function runChecked(
+  command,
+  args,
+  { env = process.env, timeoutMs = PROCESS_TIMEOUT_MS } = {},
+) {
   const result = spawnSync(command, args, {
     cwd: REPOSITORY_ROOT,
     encoding: "utf8",
-    timeout: PROCESS_TIMEOUT_MS,
+    env,
+    timeout: timeoutMs,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`${command} failed (${result.status}): ${result.stderr.trim()}`);
+    const output = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+    throw new Error(`${command} failed (${result.status}): ${output}`);
   }
   return result.stdout.trim();
 }
@@ -94,41 +100,38 @@ function hello(id, runtimeGeneration) {
   };
 }
 
-/** Confirms the sidecar embeds both Android helpers from a backend debug build. */
-function assertEmbeddedAndroidHelpers(binaryBytes) {
-  const debugBuildDirectory = path.join(
-    REPOSITORY_ROOT,
-    "crates",
-    "emuchef-rust-backend",
-    "target",
-    "debug",
-    "build",
+/** Verifies both Android helper ABIs in a restricted backend build. */
+function assertRestrictedHelperAbis(sourceIdentity) {
+  const testOutput = runChecked(
+    "cargo",
+    [
+      "test",
+      "--locked",
+      "--color",
+      "never",
+      "--manifest-path",
+      path.join(REPOSITORY_ROOT, "crates/emuchef-rust-backend/Cargo.toml"),
+      "--no-default-features",
+      "--lib",
+      "--features",
+      "real-execution",
+      "executor::adb::tests::packaged_android_helper_materializes_outside_the_cargo_build_tree",
+      "--",
+      "--exact",
+    ],
+    {
+      env: {
+        ...process.env,
+        EMU_CHEF_RESTRICTED_EXECUTION_BUILD_IDENTITY:
+          JSON.stringify(sourceIdentity),
+      },
+      timeoutMs: 300_000,
+    },
   );
-  const buildOutputDirectories = readdirSync(debugBuildDirectory, {
-    withFileTypes: true,
-  })
-    .filter(
-      (entry) =>
-        entry.isDirectory() &&
-        entry.name.startsWith("emuchef-rust-backend-"),
-    )
-    .map((entry) => path.join(debugBuildDirectory, entry.name, "out"));
-
-  const matchedBuildOutput = buildOutputDirectories.some((outputDirectory) =>
-    ["aarch64", "x86_64"].every((architecture) => {
-      const helperPath = path.join(
-        outputDirectory,
-        `copy-commit-helper-${architecture}`,
-      );
-      if (!existsSync(helperPath) || !statSync(helperPath).isFile()) return false;
-      const helperBytes = readFileSync(helperPath);
-      return helperBytes.length > 0 && binaryBytes.indexOf(helperBytes) !== -1;
-    }),
-  );
-
-  assert.ok(
-    matchedBuildOutput,
-    "restricted sidecar does not embed both Android helpers from a backend debug build",
+  assert.match(
+    testOutput,
+    /test result: ok\. 1 passed; 0 failed;/,
+    "restricted Cargo helper ABI test did not run exactly once and pass",
   );
 }
 
@@ -150,7 +153,20 @@ function main() {
 
   const binaryBytes = readFileSync(binaryPath);
   const binaryDigest = createHash("sha256").update(binaryBytes).digest("hex");
-  assertEmbeddedAndroidHelpers(binaryBytes);
+  const cargoExecutablePath = path.join(
+    REPOSITORY_ROOT,
+    "crates/emuchef-rust-backend/target/debug",
+    `${BINARY_BASENAME}${targetExecutableExtension(target)}`,
+  );
+  assert.ok(
+    existsSync(cargoExecutablePath),
+    `Cargo debug executable is missing: ${cargoExecutablePath}`,
+  );
+  assert.ok(
+    binaryBytes.equals(readFileSync(cargoExecutablePath)),
+    "copied sidecar differs from Cargo's debug executable",
+  );
+  assertRestrictedHelperAbis(sourceIdentity);
 
   const tempDirectory = mkdtempSync(
     path.join(os.tmpdir(), "emuchef-restricted-sidecar-smoke-"),
