@@ -3631,6 +3631,45 @@ fn konkr_provisioning_reports_unavailable_required_capabilities() {
     }
 }
 
+#[test]
+fn konkre_provisioning_blocks_required_private_copy_without_app_data_write() {
+    let mut input = repo_device_plan_planner_input_with_bindings("konkr.pocket_advance.base", &[]);
+    input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
+    input.device_context.android_api_level = Some(35);
+    input.runtime_capabilities.adb_available = true;
+    input.runtime_capabilities.apk_install = true;
+    input.runtime_capabilities.shared_storage_write = true;
+    input.runtime_capabilities.app_launch = true;
+    input.runtime_capabilities.shell_command = true;
+
+    assert_eq!(
+        input.selected_recipe_refs,
+        vec!["app.retroarch.provision".to_string()]
+    );
+    assert!(
+        input.user_configuration_bindings.is_empty(),
+        "RetroArch configuration should not be selected or bound"
+    );
+    assert!(!input.runtime_capabilities.app_data_write);
+
+    let result = planning_result_value(input);
+    assert_eq!(result["status"], "error", "{result:#}");
+    assert!(result["execution_plan"].is_null(), "{result:#}");
+
+    let errors = result["errors"]
+        .as_array()
+        .expect("planner errors should be an array");
+    let error = errors
+        .iter()
+        .find(|error| {
+            error["code"] == "required_step_capability_unavailable"
+                && error["details"]["recipe_ref"] == "app.retroarch.provision"
+                && error["details"]["step_id"] == "copy_assets"
+        })
+        .unwrap_or_else(|| panic!("missing required app-private copy diagnostic: {errors:#?}"));
+    assert_eq!(error["details"]["capability"], "app_data_write");
+}
+
 pub(crate) fn unrooted_ayaneo_provisioning_input(device_plan_ref: &str) -> PlannerInput {
     let mut input = repo_device_plan_planner_input_with_bindings(device_plan_ref, &[]);
     input.selected_recipe_refs = vec!["app.retroarch.provision".to_string()];
@@ -3887,6 +3926,106 @@ fn required_rom_copy_fails_when_shared_storage_is_unavailable() {
             && error["details"]["step_id"] == "copy_rom_library"
             && error["details"]["capability"] == "shared_storage_write"
     }));
+}
+
+#[test]
+fn konkre_rom_only_selection_retains_required_copy_with_reviewed_internal_storage() {
+    use crate::execution_session::{ExecutionMode, ExecutionSessionManager, SidecarRuntimeConfig};
+    use crate::executor::copy_commit::CopyCommitOperation;
+    use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
+
+    let temporary = TempDir::new().expect("host-only ROM source should be created");
+    let source = temporary.path().join("roms");
+    fs::create_dir_all(&source).expect("host-only ROM source directory should exist");
+    fs::write(source.join("game.rom"), b"host-only ROM fixture")
+        .expect("host-only ROM source file should exist");
+
+    let mut input = repo_device_plan_planner_input_with_bindings(
+        "konkr.pocket_advance.base",
+        &[
+            (
+                "feature.copy_roms/source",
+                json!(source.to_string_lossy().to_string()),
+            ),
+            ("feature.copy_roms/destination", json!("internal-roms")),
+        ],
+    );
+    input.selected_recipe_refs = vec!["feature.copy_roms".to_string()];
+    input.runtime_capabilities.shared_storage_write = true;
+
+    let planning = crate::planner::plan_execution(input);
+    assert_eq!(
+        planning.status,
+        PlanningStatus::Success,
+        "ROM-only selection should plan through the authored KONKR Device Plan: {:?}",
+        planning.errors
+    );
+    let plan = planning
+        .execution_plan
+        .expect("enabled ROM-only selection should retain its execution plan");
+    assert_eq!(
+        plan.source.selected_recipe_refs,
+        vec!["feature.copy_roms".to_string()]
+    );
+    assert_eq!(plan.steps.len(), 1, "{plan:#?}");
+    assert_eq!(plan.steps[0].id, "feature.copy_roms/copy_rom_library");
+    assert_eq!(
+        plan.steps[0].constraints.capabilities,
+        vec!["shared_storage_write".to_string()]
+    );
+
+    let storage_target = StorageTargetBinding {
+        id: "internal-roms".to_string(),
+        device_plan: "konkr.pocket_advance.base".to_string(),
+        session_epoch: 1,
+        name: "Internal ROMs".to_string(),
+        relative_path: "ROMs".to_string(),
+        volume_handle: "a".repeat(32),
+        volume_kind: StorageTargetVolumeKind::InternalShared,
+        mount_root: "/storage/emulated/0".to_string(),
+        volume_identity: "b".repeat(32),
+        volume_continuity: "c".repeat(32),
+        observation_token: "d".repeat(32),
+    };
+    let manager = ExecutionSessionManager::new(SidecarRuntimeConfig {
+        runtime_root: temporary.path().join("runtime"),
+        cache_root: temporary.path().join("cache"),
+        adb_path: "adb".to_string(),
+    });
+    let reviewed_plan = manager
+        .prepare_review_plan_with_storage_targets(
+            plan,
+            ExecutionMode::DryRun,
+            None,
+            vec![storage_target.clone()],
+        )
+        .expect("dry-run review should use the fake device adapter");
+
+    assert_eq!(reviewed_plan.steps.len(), 1, "{reviewed_plan:#?}");
+    assert_eq!(
+        reviewed_plan.copy_commit_snapshots.len(),
+        1,
+        "{reviewed_plan:#?}"
+    );
+    let reviewed_snapshot = &reviewed_plan.copy_commit_snapshots[0];
+    assert_eq!(
+        reviewed_snapshot.step_id,
+        "feature.copy_roms/copy_rom_library"
+    );
+    assert_eq!(
+        reviewed_snapshot.operation,
+        CopyCommitOperation::AddUpdate,
+        "Merge policy should prepare add/update review semantics"
+    );
+    let reviewed_binding = reviewed_snapshot
+        .setup_location_binding
+        .as_ref()
+        .expect("reviewed copy snapshot should retain its trusted storage binding");
+    assert_eq!(reviewed_binding, &storage_target);
+    assert_eq!(
+        reviewed_binding.volume_kind,
+        StorageTargetVolumeKind::InternalShared
+    );
 }
 
 #[test]

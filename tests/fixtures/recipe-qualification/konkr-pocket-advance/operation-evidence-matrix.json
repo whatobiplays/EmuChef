@@ -301,5 +301,83 @@
       "deviceEvidenceStatus": "not_captured",
       "physicalStatus": "not_run"
     }
+  ],
+  "qualificationScenarios": [
+    {
+      "id": "internal_storage_rom_merge",
+      "devicePlanRef": "konkr.pocket_advance.base",
+      "selectedRecipeRefs": ["feature.copy_roms"],
+      "preinstalledAppPrerequisite": {
+        "requiredBeforeRomCopy": true,
+        "appRef": "retroarch",
+        "packageName": "com.retroarch.aarch64",
+        "pinnedApkEvidenceRequired": true,
+        "installedPackageMustMatchPinnedApk": true,
+        "captureStatus": "not_captured"
+      },
+      "operationIdentity": {
+        "operationId": "rom_copy",
+        "recipeRef": "feature.copy_roms",
+        "stepId": "copy_rom_library"
+      },
+      "copyPolicy": "merge",
+      "requiredPostconditions": [
+        "setup_location_and_volume_identity_match_review",
+        "rom_copy_matches_selected_policy_and_reviewed_result"
+      ],
+      "storageBinding": {
+        "setupLocationId": "internal-roms",
+        "volumeKind": "internal_shared",
+        "relativePath": "ROMs",
+        "reviewRequired": true,
+        "requiredFields": [
+          "setup_location_id",
+          "device_plan",
+          "session_epoch",
+          "name",
+          "relative_path",
+          "volume_handle",
+          "volume_kind",
+          "mount_root",
+          "volume_identity",
+          "volume_continuity",
+          "observation_token"
+        ],
+        "captureStatus": "not_captured"
+      },
+      "destinationBeforeContentManifest": {
+        "requiredFields": ["relative_path", "sha256"],
+        "captureStatus": "not_captured"
+      },
+      "sourceContentManifest": {
+        "requiredFields": ["relative_path", "sha256"],
+        "captureStatus": "not_captured"
+      },
+      "destinationAfterContentManifest": {
+        "requiredFields": ["relative_path", "sha256"],
+        "captureStatus": "not_captured",
+        "mustIncludeSourceEntries": true,
+        "preserveDestinationOnlyEntries": true
+      },
+      "sentinelPreservation": {
+        "relativePath": "qualification-sentinel.keep",
+        "required": true,
+        "mustExistBefore": true,
+        "mustBeAbsentFromSource": true,
+        "mustExistAfter": true,
+        "comparedFields": ["relative_path", "sha256"],
+        "captureStatus": "not_captured"
+      },
+      "emulatorSideUsability": {
+        "requiredChecks": [
+          "content_directory_matches_reviewed_binding",
+          "rom_appears_in_emulator_library",
+          "rom_launches_successfully"
+        ],
+        "captureStatus": "not_captured"
+      },
+      "deviceEvidenceStatus": "not_captured",
+      "physicalStatus": "not_run"
+    }
   ]
 }
