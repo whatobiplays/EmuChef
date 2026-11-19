@@ -1,1 +1,73 @@
-{"schemaVersion":1,"status":"succeeded"}
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": null
+  },
+  "catalog": null,
+  "plan": {
+    "planId": "plan.xaniteog-install",
+    "planDigest": "7d36875c1f4abfa0c8582583541f0ebdef17ef9973b325624836428aa6bd40b2"
+  },
+  "execution": {
+    "simulated": false,
+    "verificationScope": "real_device",
+    "status": "succeeded",
+    "startedAt": "2026-08-22T00:00:00Z",
+    "finishedAt": "2026-08-22T00:00:00Z",
+    "completion": {
+      "classification": "success",
+      "counts": {
+        "total": 1,
+        "completed": 1,
+        "skipped": 0,
+        "blocked": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "pending": 0
+      },
+      "warningCount": 0,
+      "features": [
+        {
+          "name": "Qualification workflow",
+          "status": "succeeded",
+          "counts": {
+            "completed": 1
+          }
+        }
+      ],
+      "partialChangesPossible": false
+    },
+    "recipes": [
+      {
+        "name": "Workflow operation 1",
+        "description": null,
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "Complete operation",
+            "note": null,
+            "status": "succeeded",
+            "message": null
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "errors": [],
+    "target": {
+      "label": "AYANEO Synthetic Pocket S2",
+      "manufacturer": "AYANEO",
+      "model": "Synthetic Pocket S2",
+      "androidApiLevel": 35,
+      "androidVersion": "15"
+    },
+    "resolvedReleases": []
+  }
+}

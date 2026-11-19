@@ -1,1 +1,95 @@
-{"schemaVersion":1,"status":"succeeded"}
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": null
+  },
+  "catalog": null,
+  "plan": {
+    "planId": "plan.retroarch-plus-bios",
+    "planDigest": "ab86aa32c50765bac268c0bcdc8d8ee7e83878e308fc9e88231ec2f60bd532ba"
+  },
+  "execution": {
+    "simulated": false,
+    "verificationScope": "real_device",
+    "status": "failed",
+    "startedAt": "2026-08-21T00:00:00Z",
+    "finishedAt": "2026-08-21T00:01:00Z",
+    "completion": {
+      "classification": "failed",
+      "counts": {
+        "total": 2,
+        "completed": 0,
+        "skipped": 0,
+        "blocked": 0,
+        "failed": 2,
+        "cancelled": 0,
+        "pending": 0
+      },
+      "warningCount": 0,
+      "features": [
+        {
+          "name": "Qualification workflow",
+          "status": "failed",
+          "counts": {
+            "failed": 2
+          }
+        }
+      ],
+      "partialChangesPossible": true
+    },
+    "recipes": [
+      {
+        "name": "Workflow operation 1",
+        "description": null,
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Complete operation",
+            "note": null,
+            "status": "failed",
+            "message": null
+          }
+        ]
+      },
+      {
+        "name": "Workflow operation 2",
+        "description": null,
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Complete operation",
+            "note": null,
+            "status": "failed",
+            "message": null
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "errors": [
+      {
+        "message": "A synthetic workflow operation failed.",
+        "remediation": {
+          "kind": "view_report",
+          "title": "Review the execution report",
+          "message": "Inspect the recorded failure before continuing."
+        }
+      }
+    ],
+    "target": {
+      "label": "AYANEO Synthetic Pocket S2",
+      "manufacturer": "AYANEO",
+      "model": "Synthetic Pocket S2",
+      "androidApiLevel": 35,
+      "androidVersion": "15"
+    },
+    "resolvedReleases": []
+  }
+}

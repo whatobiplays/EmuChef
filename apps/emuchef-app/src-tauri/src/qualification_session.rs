@@ -99,6 +99,7 @@ pub(crate) enum QualificationInvalidation {
     ExecutionCancelled,
     ExecutionUnavailable,
     ExecutionEvidenceInvalidated,
+    ExecutionClaimUnavailable,
     LifecycleTransitionMissed,
     ObservationFailed,
     IncompatibleSessionVersion,
@@ -155,6 +156,9 @@ impl QualificationInvalidation {
             }
             Self::ExecutionEvidenceInvalidated => {
                 "The completed run could not be tied to trustworthy device evidence."
+            }
+            Self::ExecutionClaimUnavailable => {
+                "The completed run could not be tied to a complete qualification claim."
             }
             Self::LifecycleTransitionMissed => {
                 "A required qualification transition was missed or arrived out of order."
@@ -584,6 +588,20 @@ impl QualificationSession {
             id: "test.recipe".to_string(),
             sha256: "a".repeat(64),
         }]);
+        session
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_registered_target(
+        checkpoint_ids: &[&str],
+        production_recipes: &[&str],
+        target_id: &str,
+        profile_id: &str,
+    ) -> Self {
+        let mut session = Self::for_test_with_recipes(checkpoint_ids, production_recipes);
+        session.target.target_id = target_id.to_string();
+        session.target.profile_id = profile_id.to_string();
+        session.target_id = target_id.to_string();
         session
     }
 
@@ -1305,60 +1323,72 @@ pub(crate) fn restricted_qualification_report_for_terminal_in_transition(
     runtime: &Value,
     reviewed_runtime_generation: Option<u64>,
     observed_terminal_status: &str,
-) -> Result<Option<Value>, String> {
+) -> Result<RestrictedQualificationReport, String> {
     if !is_terminal_execution_status(observed_terminal_status)
         || report.get("status").and_then(Value::as_str) != Some(observed_terminal_status)
     {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     }
     if !state.sidecar.restricted_execution_enabled() {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     }
     let current_runtime_generation = state
         .sidecar
         .try_generation()
         .map_err(|_| persistence_error())?;
     if reviewed_runtime_generation != Some(current_runtime_generation) {
-        return Err(persistence_error());
+        return Ok(RestrictedQualificationReport::Invalid);
     }
     let Some(provider) = state.qualification_repository.get() else {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     };
     let mut store = lock_session_store(state);
     if ensure_recovered(state, provider, &mut store).is_err() {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     }
     let Some(candidate_handle) = store.active_candidate.clone() else {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     };
     if store.is_poisoned(&candidate_handle)
         || store.bound_execution_handle() != Some(execution_handle)
         || store.bound_review_handle() != Some(review_handle)
         || store.associated_device_handle() != Some(device_handle)
     {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     }
     let Ok(session) = load_active_session(state, provider, &mut store, &candidate_handle) else {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     };
     if session.bound_execution_handle() != Some(execution_handle)
         || session.bound_review_handle.as_deref() != Some(review_handle)
         || !session.execution_admitted()
         || !session.recordable()
     {
-        return Ok(None);
+        return Ok(RestrictedQualificationReport::NotApplicable);
     }
-    let reviewed_step_requirements = reviewed_step_requirements.ok_or_else(persistence_error)?;
-    restricted_qualification_claim_for_session(
-        &session,
-        plan,
-        reviewed_step_requirements,
-        report,
-        runtime,
-        reviewed_runtime_generation,
-        observed_terminal_status,
+    let Some(reviewed_step_requirements) = reviewed_step_requirements else {
+        return Ok(RestrictedQualificationReport::Invalid);
+    };
+    Ok(
+        match restricted_qualification_claim_for_session(
+            &session,
+            plan,
+            reviewed_step_requirements,
+            report,
+            runtime,
+            reviewed_runtime_generation,
+            observed_terminal_status,
+        ) {
+            Ok(claim) => RestrictedQualificationReport::Available(claim),
+            Err(_) => RestrictedQualificationReport::Invalid,
+        },
     )
-    .map(Some)
+}
+
+pub(crate) enum RestrictedQualificationReport {
+    NotApplicable,
+    Available(Value),
+    Invalid,
 }
 
 /// Project one exact reviewed restricted run into the public evidence
@@ -1987,6 +2017,9 @@ pub(crate) enum QualificationLifecycleObservation {
     ReviewCreated(Box<ReviewObservation>),
     RealExecutionAdmitted(Box<ExecutionAdmissionObservation>),
     RealExecutionTerminal(Box<TerminalExecutionObservation>),
+    /// A product terminal report was retained, but its restricted claim could
+    /// not be tied to complete, reviewed recipe and step identities.
+    RealExecutionTerminalWithInvalidClaim(Box<TerminalExecutionObservation>),
     RealExecutionLost {
         execution_handle: String,
     },
@@ -3088,19 +3121,24 @@ fn attach_retained_terminal_report_for_recovery(
     let report = provider
         .load_session_report(session.candidate_handle())?
         .ok_or_else(persistence_error)?;
-    let report_status_matches = terminal_report_bytes_match_status(&report, status);
-    let bytes_are_committed = session
-        .terminal_report_commitment
-        .as_ref()
-        .is_some_and(|commitment| commitment.matches(&report));
-    let report_trust_matches = match recovery_kind {
-        TerminalReportRecoveryKind::CurrentSession => bytes_are_committed,
-        TerminalReportRecoveryKind::IncompatibleAudit => {
-            session.terminal_report_commitment.is_none()
+    match recovery_kind {
+        TerminalReportRecoveryKind::CurrentSession => {
+            let bytes_are_committed = session
+                .terminal_report_commitment
+                .as_ref()
+                .is_some_and(|commitment| commitment.matches(&report));
+            if !bytes_are_committed || !terminal_report_bytes_match_status(&report, status) {
+                return Err(persistence_error());
+            }
         }
-    };
-    if !report_status_matches || !report_trust_matches {
-        return Err(persistence_error());
+        TerminalReportRecoveryKind::IncompatibleAudit => {
+            if session.terminal_report_commitment.is_some() {
+                return Err(persistence_error());
+            }
+            // Older session formats cannot prove that their report bytes met
+            // the current execution-report contract. Preserve them in the
+            // invalid audit candidate without treating their status as proof.
+        }
     }
     session.set_terminal_report(Some(report));
     Ok(())
@@ -3483,6 +3521,10 @@ fn observe_recovered_in_transition(
         QualificationLifecycleObservation::RealExecutionTerminal(terminal) => {
             session.classify_terminal(terminal);
         }
+        QualificationLifecycleObservation::RealExecutionTerminalWithInvalidClaim(terminal) => {
+            session.classify_terminal(terminal);
+            session.invalidate(QualificationInvalidation::ExecutionClaimUnavailable);
+        }
         QualificationLifecycleObservation::RealExecutionLost { execution_handle } => {
             if session
                 .bound_execution_handle()
@@ -3741,13 +3783,7 @@ fn terminal_report_matches_status(session: &QualificationSession) -> bool {
 }
 
 fn terminal_report_bytes_match_status(report_bytes: &[u8], expected_status: &str) -> bool {
-    let Ok(report) = serde_json::from_slice::<Value>(report_bytes) else {
-        return false;
-    };
-    report
-        .pointer("/execution/status")
-        .or_else(|| report.get("status"))
-        .and_then(Value::as_str)
+    crate::qualification_repository::validated_execution_report_v2_status(report_bytes).as_deref()
         == Some(expected_status)
 }
 
@@ -4625,6 +4661,77 @@ mod tests {
         })
     }
 
+    #[test]
+    fn retained_terminal_report_requires_the_v2_execution_envelope() {
+        const RUST_PRODUCED_FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        assert!(terminal_report_bytes_match_status(
+            RUST_PRODUCED_FIXTURE,
+            "succeeded"
+        ));
+
+        let report = json!({
+            "schema": "emuchef.execution-report",
+            "schemaVersion": 2,
+            "app": { "name": "EmuChef", "version": "0.1.0" },
+            "runtime": { "status": "ready", "protocolVersion": 1, "catalogVersion": null },
+            "catalog": null,
+            "plan": { "planId": null, "planDigest": null },
+            "execution": { "status": "succeeded" }
+        });
+        let bytes = serde_json::to_vec(&report).unwrap();
+
+        assert!(!terminal_report_bytes_match_status(&bytes, "succeeded"));
+        assert!(!terminal_report_bytes_match_status(
+            br#"{"schema":"emuchef.execution-report","schemaVersion":1,"status":"succeeded"}"#,
+            "succeeded"
+        ));
+        assert!(!terminal_report_bytes_match_status(
+            br#"{"schema":"emuchef.execution-report","schemaVersion":2,"status":"succeeded"}"#,
+            "succeeded"
+        ));
+
+        let mut incomplete = serde_json::from_slice::<Value>(RUST_PRODUCED_FIXTURE).unwrap();
+        incomplete["execution"]["completion"]
+            .as_object_mut()
+            .unwrap()
+            .remove("counts");
+        assert!(!terminal_report_bytes_match_status(
+            &serde_json::to_vec(&incomplete).unwrap(),
+            "succeeded"
+        ));
+
+        let mut invalid_digest = serde_json::from_slice::<Value>(RUST_PRODUCED_FIXTURE).unwrap();
+        invalid_digest["catalog"]["contentDigest"]["value"] = json!("catalog");
+        assert!(!terminal_report_bytes_match_status(
+            &serde_json::to_vec(&invalid_digest).unwrap(),
+            "succeeded"
+        ));
+
+        let mut mismatched_scope = serde_json::from_slice::<Value>(RUST_PRODUCED_FIXTURE).unwrap();
+        mismatched_scope["execution"]["verificationScope"] = json!("simulation_only");
+        assert!(!terminal_report_bytes_match_status(
+            &serde_json::to_vec(&mismatched_scope).unwrap(),
+            "succeeded"
+        ));
+
+        let mut malformed_step = serde_json::from_slice::<Value>(RUST_PRODUCED_FIXTURE).unwrap();
+        malformed_step["execution"]["recipes"][0]["steps"][0]["extra"] = json!(true);
+        assert!(!terminal_report_bytes_match_status(
+            &serde_json::to_vec(&malformed_step).unwrap(),
+            "succeeded"
+        ));
+
+        let mut warning_mismatch = serde_json::from_slice::<Value>(RUST_PRODUCED_FIXTURE).unwrap();
+        warning_mismatch["execution"]["completion"]["warningCount"] = json!(1);
+        assert!(!terminal_report_bytes_match_status(
+            &serde_json::to_vec(&warning_mismatch).unwrap(),
+            "succeeded"
+        ));
+    }
+
     fn test_build() -> QualificationBuildIdentity {
         serde_json::from_value(build_json()).expect("test build should decode")
     }
@@ -4702,6 +4809,34 @@ mod tests {
             firmware_build: Some("test/build".to_string()),
             root_state: Some(RootQualificationState::Denied),
         }
+    }
+
+    fn terminal_v2_ordinary_report_for_test() -> Vec<u8> {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        let mut report = serde_json::from_slice::<Value>(FIXTURE)
+            .expect("Rust-produced fixture should be valid JSON");
+        report.as_object_mut().unwrap().remove("qualification");
+        for recipe in report["execution"]["recipes"].as_array_mut().unwrap() {
+            let recipe = recipe.as_object_mut().unwrap();
+            recipe.remove("recipeId");
+            for step in recipe["steps"].as_array_mut().unwrap() {
+                let step = step.as_object_mut().unwrap();
+                step.remove("recipeId");
+                step.remove("stepId");
+            }
+        }
+        serde_json::to_vec(&report).expect("ordinary v2 report should serialize")
+    }
+
+    fn terminal_v2_failed_report_for_test() -> Vec<u8> {
+        let mut report = serde_json::from_slice::<Value>(&terminal_v2_ordinary_report_for_test())
+            .expect("ordinary v2 report should be valid JSON");
+        report["execution"]["status"] = json!("failed");
+        report["execution"]["completion"]["classification"] = json!("failed");
+        serde_json::to_vec(&report).expect("failed v2 report should serialize")
     }
 
     /// A device observation that established only identity facts. It matches
@@ -7406,7 +7541,7 @@ mod tests {
             candidate,
             device_handle,
             session_epoch,
-            b"{\"status\":\"succeeded\"}",
+            &terminal_v2_ordinary_report_for_test(),
         )
     }
 
@@ -8128,7 +8263,7 @@ mod tests {
                         status: Some("succeeded".to_string()),
                         observed_at: CAPTURED_AT.to_string(),
                         report_available: true,
-                        report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                        report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                         authority_invalidated: false,
                     },
                 )),
@@ -8223,7 +8358,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -8276,7 +8411,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -8311,8 +8446,8 @@ mod tests {
 
     #[test]
     fn authority_invalidated_terminal_retains_report_in_invalid_candidate() {
-        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
         const TERMINAL_AT: &str = "2026-10-02T19:27:12Z";
+        let report = terminal_v2_ordinary_report_for_test();
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -8333,7 +8468,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: TERMINAL_AT.to_string(),
                     report_available: true,
-                    report_bytes: Some(REPORT.to_vec()),
+                    report_bytes: Some(report.clone()),
                     authority_invalidated: true,
                 },
             )),
@@ -8354,14 +8489,14 @@ mod tests {
                     .join("execution-report.json")
             )
             .expect("the structurally valid product report must be retained"),
-            REPORT
+            report
         );
     }
 
     #[test]
     fn authority_invalidated_terminal_classification_retains_report_commitment() {
-        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
         const TERMINAL_AT: &str = "2026-10-02T19:27:12Z";
+        let report = terminal_v2_ordinary_report_for_test();
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -8383,7 +8518,7 @@ mod tests {
             status: Some("succeeded".to_string()),
             observed_at: TERMINAL_AT.to_string(),
             report_available: true,
-            report_bytes: Some(REPORT.to_vec()),
+            report_bytes: Some(report.clone()),
             authority_invalidated: true,
         });
 
@@ -8394,12 +8529,12 @@ mod tests {
         );
         assert_eq!(session.terminal_execution_status(), Some("succeeded"));
         assert_eq!(session.terminal_observed_at.as_deref(), Some(TERMINAL_AT));
-        assert_eq!(session.terminal_report_bytes(), Some(REPORT));
+        assert_eq!(session.terminal_report_bytes(), Some(report.as_slice()));
         assert_eq!(
             session.terminal_report_commitment,
             Some(TerminalReportCommitment {
-                byte_length: REPORT.len() as u64,
-                sha256: hex::encode(Sha256::digest(REPORT)),
+                byte_length: report.len() as u64,
+                sha256: hex::encode(Sha256::digest(&report)),
             })
         );
     }
@@ -8491,6 +8626,7 @@ mod tests {
 
     #[test]
     fn staging_cleanup_failure_after_publication_does_not_poison_valid_candidate() {
+        let report = terminal_v2_ordinary_report_for_test();
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -8521,7 +8657,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(report.clone()),
                     authority_invalidated: false,
                 },
             )),
@@ -8540,7 +8676,7 @@ mod tests {
                     .join("execution-report.json")
             )
             .expect("published execution report remains readable"),
-            b"{\"status\":\"succeeded\"}"
+            report
         );
         assert!(!repository
             .session_is_poisoned(&candidate)
@@ -8570,7 +8706,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: TERMINAL_AT.to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -8622,7 +8758,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-09-30T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -8685,7 +8821,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-09-30T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -8758,7 +8894,7 @@ mod tests {
                         status: Some("succeeded".to_string()),
                         observed_at: "2026-09-30T19:27:12Z".to_string(),
                         report_available: true,
-                        report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                        report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                         authority_invalidated: false,
                     },
                 )),
@@ -8895,7 +9031,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-09-30T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -8956,7 +9092,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -9257,7 +9393,7 @@ mod tests {
                         status: Some("succeeded".to_string()),
                         observed_at: "2026-09-30T19:27:12Z".to_string(),
                         report_available: true,
-                        report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                        report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                         authority_invalidated: false,
                     },
                 )),
@@ -9278,9 +9414,10 @@ mod tests {
 
     #[test]
     fn terminal_report_recovery_integrity_failures_poison_and_cannot_resurrect() {
-        const REPORT: &[u8] = b"{\"status\":\"succeeded\",\"a\":1}";
-        const SAME_STATUS_DIFFERENT_BYTES: &[u8] = b"{\"a\":1,\"status\":\"succeeded\"}";
-        assert_eq!(REPORT.len(), SAME_STATUS_DIFFERENT_BYTES.len());
+        let report = terminal_v2_ordinary_report_for_test();
+        let mut different_report_value = serde_json::from_slice::<Value>(&report).unwrap();
+        different_report_value["catalog"]["version"] = json!("2");
+        let same_status_different_bytes = serde_json::to_vec(&different_report_value).unwrap();
 
         for corruption in [
             "unreadable",
@@ -9312,7 +9449,7 @@ mod tests {
                     &candidate,
                     &device_handle,
                     epoch,
-                    REPORT,
+                    &report,
                 );
             }
 
@@ -9323,11 +9460,27 @@ mod tests {
                 }
                 "missing" => std::fs::remove_file(&report_path).unwrap(),
                 "same-status-different-bytes" => {
-                    std::fs::write(&report_path, SAME_STATUS_DIFFERENT_BYTES).unwrap();
+                    std::fs::write(&report_path, &same_status_different_bytes).unwrap();
                 }
                 "malformed" => std::fs::write(&report_path, b"{invalid").unwrap(),
                 "status-mismatch" => {
-                    std::fs::write(&report_path, b"{\"status\":\"failed\"}").unwrap();
+                    let status_mismatch = terminal_v2_failed_report_for_test();
+                    std::fs::write(&report_path, &status_mismatch).unwrap();
+                    let mut persisted: Value =
+                        serde_json::from_slice(&std::fs::read(&session_path).unwrap()).unwrap();
+                    let commitment = persisted
+                        .get_mut("terminalReportCommitment")
+                        .and_then(Value::as_object_mut)
+                        .expect("terminal session must persist its report commitment");
+                    commitment.insert(
+                        "byteLength".to_string(),
+                        Value::from(status_mismatch.len() as u64),
+                    );
+                    commitment.insert(
+                        "sha256".to_string(),
+                        Value::from(hex::encode(Sha256::digest(&status_mismatch))),
+                    );
+                    std::fs::write(&session_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
                 }
                 "length-mismatch" | "digest-mismatch" => {
                     let mut persisted: Value =
@@ -9367,7 +9520,7 @@ mod tests {
             if report_path.is_dir() {
                 std::fs::remove_dir_all(&report_path).unwrap();
             }
-            std::fs::write(&report_path, REPORT).unwrap();
+            std::fs::write(&report_path, &report).unwrap();
             let (_second_app_temp, second_app) = clean_restart(&temp);
             assert!(
                 session_status(&second_app.state::<AppState>())
@@ -9514,7 +9667,8 @@ mod tests {
     }
 
     #[test]
-    fn version_four_terminal_report_failures_poison_without_audit_artifact() {
+    fn version_four_terminal_report_missing_bytes_poison_and_status_mismatch_is_preserved_as_audit()
+    {
         for failure in ["missing", "status-mismatch"] {
             let temp = tempfile::tempdir().unwrap();
             let repository = test_repository(&temp);
@@ -9543,21 +9697,36 @@ mod tests {
             let state = app.state::<AppState>();
             assert!(session_status(&state).unwrap().is_none());
             let repository = state.qualification_repository.get().unwrap();
-            assert!(
-                repository.session_is_poisoned(&candidate).unwrap(),
-                "{failure}"
-            );
-            assert!(!candidate_directory.join("session-audit-only").exists());
-            assert!(!candidate_directory.join("execution-report.json").exists());
-            assert_eq!(
-                repository
-                    .load_candidate(&candidate)
-                    .unwrap()
-                    .payload
-                    .get("runValidity"),
-                None,
-                "{failure} must not publish an unsupported audit claim"
-            );
+            match failure {
+                "missing" => {
+                    assert!(repository.session_is_poisoned(&candidate).unwrap());
+                    assert!(!candidate_directory.join("session-audit-only").exists());
+                    assert!(!candidate_directory.join("execution-report.json").exists());
+                    assert_eq!(
+                        repository
+                            .load_candidate(&candidate)
+                            .unwrap()
+                            .payload
+                            .get("runValidity"),
+                        None,
+                        "a missing legacy report must not publish an unsupported audit claim"
+                    );
+                }
+                "status-mismatch" => {
+                    assert!(!repository.session_is_poisoned(&candidate).unwrap());
+                    assert!(candidate_directory.join("session-audit-only").is_file());
+                    let stored = repository.load_candidate(&candidate).unwrap();
+                    assert_eq!(stored.payload["runValidity"], "invalid");
+                    assert_eq!(stored.payload["qualificationOutcome"], "not_observed");
+                    assert!(!stored.promotable);
+                    assert_eq!(
+                        std::fs::read(candidate_directory.join("execution-report.json")).unwrap(),
+                        br#"{"status":"failed"}"#,
+                        "an incompatible legacy report is preserved without trusting its status"
+                    );
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -9615,7 +9784,7 @@ mod tests {
                         status: Some("succeeded".to_string()),
                         observed_at: "2026-09-30T19:27:12Z".to_string(),
                         report_available: true,
-                        report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                        report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                         authority_invalidated: false,
                     },
                 )),
@@ -11835,7 +12004,7 @@ mod tests {
 
     #[test]
     fn invalid_recovery_preserves_the_retained_terminal_report() {
-        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        let report = terminal_v2_ordinary_report_for_test();
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -11881,7 +12050,7 @@ mod tests {
                     .join("execution-report.json")
             )
             .expect("the retained product report must survive invalid recovery"),
-            REPORT
+            report
         );
         let artifacts = stored.payload["artifacts"].as_array().cloned().unwrap();
         let artifact = artifacts
@@ -11890,13 +12059,13 @@ mod tests {
             .expect("the invalid audit candidate must declare the retained report");
         assert_eq!(
             artifact["sha256"].as_str(),
-            Some(hex::encode(Sha256::digest(REPORT)).as_str())
+            Some(hex::encode(Sha256::digest(&report)).as_str())
         );
     }
 
     #[test]
     fn unproven_shutdown_recovery_preserves_the_retained_terminal_report() {
-        const REPORT: &[u8] = b"{\"status\":\"succeeded\"}";
+        let report = terminal_v2_ordinary_report_for_test();
         let temp = tempfile::tempdir().unwrap();
         let repository = test_repository(&temp);
         let candidate = create_run_candidate(&repository, CAPTURED_AT);
@@ -11928,7 +12097,7 @@ mod tests {
                     .join("execution-report.json")
             )
             .expect("unproven-shutdown recovery must preserve the retained report"),
-            REPORT
+            report
         );
     }
 
@@ -12048,7 +12217,7 @@ mod tests {
                         status: Some("succeeded".to_string()),
                         observed_at: "2026-10-02T19:27:12Z".to_string(),
                         report_available: true,
-                        report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                        report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                         authority_invalidated: false,
                     },
                 )),
@@ -12140,7 +12309,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -13074,7 +13243,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -13257,7 +13426,7 @@ mod tests {
                     status: Some("failed".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"failed\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_failed_report_for_test()),
                     authority_invalidated: false,
                 },
             )),
@@ -13422,7 +13591,7 @@ mod tests {
                     status: Some("succeeded".to_string()),
                     observed_at: "2026-10-02T19:27:12Z".to_string(),
                     report_available: true,
-                    report_bytes: Some(b"{\"status\":\"succeeded\"}".to_vec()),
+                    report_bytes: Some(terminal_v2_ordinary_report_for_test()),
                     authority_invalidated: false,
                 },
             )),

@@ -97,7 +97,7 @@ fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
             "sourceKind": "bundled",
             "sourceId": "catalog",
             "version": "1",
-            "contentDigest": { "algorithm": "sha256", "value": "catalog" }
+            "contentDigest": { "algorithm": "sha256", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
         }),
         plan_digest: canonical_json_digest(&plan).unwrap_or_default(),
         device_handle: "device-test".to_string(),
@@ -2842,6 +2842,52 @@ fn retain_terminal_real_execution_with_lease_revoker(
     observed_at: &str,
     revoke_lease: impl FnOnce(&SetupLocationExecutionLease) -> Result<(), String>,
 ) -> Result<Option<RealExecutionMonitorEvent>, String> {
+    retain_terminal_real_execution_with_claim_builder(
+        state,
+        mapping,
+        report,
+        observed_status,
+        observed_at,
+        revoke_lease,
+        |report_runtime| {
+            crate::qualification_session::restricted_qualification_report_for_terminal_in_transition(
+                state,
+                &mapping.public_handle,
+                &mapping.review_handle,
+                &mapping.review.device_handle,
+                mapping.review.response.get("plan").unwrap_or(&Value::Null),
+                mapping
+                    .review
+                    .restricted_execution
+                    .as_ref()
+                    .map(|authority| &authority.step_requirements),
+                report,
+                report_runtime,
+                mapping
+                    .review
+                    .restricted_execution
+                    .as_ref()
+                    .map(|authority| authority.runtime_generation),
+                observed_status,
+            )
+        },
+    )
+}
+
+fn retain_terminal_real_execution_with_claim_builder(
+    state: &AppState,
+    mapping: &ExecutionMapping,
+    report: &Value,
+    observed_status: &str,
+    observed_at: &str,
+    revoke_lease: impl FnOnce(&SetupLocationExecutionLease) -> Result<(), String>,
+    build_claim: impl FnOnce(
+        &Value,
+    ) -> Result<
+        crate::qualification_session::RestrictedQualificationReport,
+        String,
+    >,
+) -> Result<Option<RealExecutionMonitorEvent>, String> {
     // Reject a response whose captured mapping no longer owns the product
     // execution before consulting report metadata or touching device/root
     // authority. Recheck below after report construction because ownership can
@@ -2883,33 +2929,26 @@ fn retain_terminal_real_execution_with_lease_revoker(
     if !executions.owns_active_mapping(mapping) {
         return Ok(None);
     }
-    let restricted_qualification =
-        crate::qualification_session::restricted_qualification_report_for_terminal_in_transition(
-            state,
-            &mapping.public_handle,
-            &mapping.review_handle,
-            &mapping.review.device_handle,
-            mapping.review.response.get("plan").unwrap_or(&Value::Null),
-            mapping
-                .review
-                .restricted_execution
-                .as_ref()
-                .map(|authority| &authority.step_requirements),
-            report,
-            &report_runtime,
-            mapping
-                .review
-                .restricted_execution
-                .as_ref()
-                .map(|authority| authority.runtime_generation),
-            observed_status,
-        )?;
-    let report_bytes = production_execution_report_bytes_for_with_qualification(
+    let (restricted_qualification, claim_invalidated) = match build_claim(&report_runtime)? {
+        crate::qualification_session::RestrictedQualificationReport::NotApplicable => (None, false),
+        crate::qualification_session::RestrictedQualificationReport::Available(claim) => {
+            (Some(claim), false)
+        }
+        crate::qualification_session::RestrictedQualificationReport::Invalid => (None, true),
+    };
+    let serialized_report = production_execution_report_bytes_for_with_qualification(
         mapping,
         report,
         report_runtime.clone(),
         restricted_qualification.clone(),
     )?;
+    let qualification_claim_invalidated =
+        claim_invalidated || serialized_report.qualification_claim_invalidated;
+    let restricted_qualification = if qualification_claim_invalidated {
+        None
+    } else {
+        restricted_qualification
+    };
     if identity_failed {
         if let Some(lease) = executions.setup_location_lease() {
             revoke_lease(&lease)?;
@@ -2946,15 +2985,18 @@ fn retain_terminal_real_execution_with_lease_revoker(
         status: Some(observed_status.to_string()),
         observed_at: observed_at.to_string(),
         report_available: true,
-        report_bytes: Some(report_bytes),
+        report_bytes: Some(serialized_report.bytes),
         authority_invalidated: identity_failed || root_failed,
     };
-    crate::qualification_session::observe_in_transition(
-        state,
+    let lifecycle_observation = if qualification_claim_invalidated {
+        crate::qualification_session::QualificationLifecycleObservation::
+            RealExecutionTerminalWithInvalidClaim(Box::new(observation.clone()))
+    } else {
         crate::qualification_session::QualificationLifecycleObservation::RealExecutionTerminal(
             Box::new(observation.clone()),
-        ),
-    );
+        )
+    };
+    crate::qualification_session::observe_in_transition(state, lifecycle_observation);
     drop(executions);
     if transition.release_and_retry().is_err() {
         eprintln!(
@@ -3642,6 +3684,12 @@ pub(crate) fn production_execution_report_bytes(
         stored.runtime,
         stored.qualification,
     )
+    .map(|report| report.bytes)
+}
+
+struct SerializedExecutionReport {
+    bytes: Vec<u8>,
+    qualification_claim_invalidated: bool,
 }
 
 fn production_execution_report_bytes_for_with_qualification(
@@ -3649,7 +3697,7 @@ fn production_execution_report_bytes_for_with_qualification(
     report: &Value,
     runtime: Value,
     qualification: Option<Value>,
-) -> Result<Vec<u8>, String> {
+) -> Result<SerializedExecutionReport, String> {
     if !is_terminal_status(report.get("status").and_then(Value::as_str)) {
         return Err(safe_error(
             "report_not_terminal",
@@ -3660,13 +3708,13 @@ fn production_execution_report_bytes_for_with_qualification(
         ExecutionKind::Simulated => project_snapshot(mapping, report),
         ExecutionKind::Real => project_real_snapshot(mapping, report),
     };
-    let document = execution_report_document_with_qualification(
+    let (document, qualification_claim_invalidated) = execution_report_document_with_qualification(
         mapping,
         report,
         &public,
         runtime,
         qualification,
-    );
+    )?;
     let mut serialized = serde_json::to_string_pretty(&document).map_err(|_| {
         safe_error(
             "report_serialization_failed",
@@ -3674,7 +3722,10 @@ fn production_execution_report_bytes_for_with_qualification(
         )
     })?;
     serialized.push('\n');
-    Ok(serialized.into_bytes())
+    Ok(SerializedExecutionReport {
+        bytes: serialized.into_bytes(),
+        qualification_claim_invalidated,
+    })
 }
 
 #[tauri::command]
@@ -3743,6 +3794,8 @@ fn execution_report_document(
     runtime: Value,
 ) -> Value {
     execution_report_document_with_qualification(mapping, report, public, runtime, None)
+        .map(|(document, _)| document)
+        .expect("ordinary report projection should be serializable")
 }
 
 fn execution_report_document_with_qualification(
@@ -3751,18 +3804,23 @@ fn execution_report_document_with_qualification(
     public: &Value,
     runtime: Value,
     qualification: Option<Value>,
-) -> Value {
+) -> Result<(Value, bool), String> {
     let mut document = json!({
         "schema": "emuchef.execution-report",
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "app": {
             "name": "EmuChef",
             "version": env!("CARGO_PKG_VERSION"),
         },
         "runtime": runtime,
-        "catalog": mapping.review.catalog_identity,
+        "catalog": execution_report_catalog_identity(&mapping.review.catalog_identity),
         "plan": {
-            "planId": report.get("planId"),
+            "planId": mapping
+                .review
+                .response
+                .pointer("/plan/id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty()),
             "planDigest": mapping.review.plan_digest,
         },
         "execution": {
@@ -3779,8 +3837,22 @@ fn execution_report_document_with_qualification(
             "resolvedReleases": project_resolved_releases(report.get("resolvedReleases")),
         },
     });
+    let mut qualification_claim_invalidated = false;
     if let Some(qualification) = qualification {
-        document["qualification"] = qualification;
+        if attach_restricted_report_identifiers(
+            mapping,
+            report,
+            &mut document["execution"]["recipes"],
+        )
+        .is_ok()
+        {
+            document["qualification"] = qualification;
+        } else {
+            // A failed identity join invalidates only the qualification claim.
+            // The sanitized execution remains useful as an ordinary audit
+            // report and must not hold product terminal retention open.
+            qualification_claim_invalidated = true;
+        }
     }
     let exact_serial = mapping
         .review
@@ -3789,7 +3861,113 @@ fn execution_report_document_with_qualification(
         .and_then(Value::as_str)
         .unwrap_or_default();
     sanitize_real_projection(&mut document, exact_serial);
-    document
+    Ok((document, qualification_claim_invalidated))
+}
+
+/// Add report-specific cache metadata without changing the catalog DTO used by
+/// product and UI projections.
+fn execution_report_catalog_identity(identity: &Value) -> Value {
+    let Value::Object(identity) = identity else {
+        return identity.clone();
+    };
+    let mut report_identity = identity.clone();
+    report_identity
+        .entry("cacheKey".to_string())
+        .or_insert(Value::Null);
+    Value::Object(report_identity)
+}
+
+/// Add report-only IDs only after joining projected results back to the exact
+/// reviewed plan and Rust execution results. The live UI DTO remains ID-free.
+fn attach_restricted_report_identifiers(
+    mapping: &ExecutionMapping,
+    report: &Value,
+    projected_recipes: &mut Value,
+) -> Result<(), String> {
+    let plan = mapping
+        .review
+        .response
+        .pointer("/plan")
+        .ok_or_else(report_serialization_error)?;
+    let planned_recipes = plan
+        .get("recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(report_serialization_error)?;
+    let planned_steps = plan
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(report_serialization_error)?;
+    let report_recipes = report
+        .get("recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(report_serialization_error)?;
+    let mut identified_recipes = projected_recipes.clone();
+    let identified_recipes_array = identified_recipes
+        .as_array_mut()
+        .ok_or_else(report_serialization_error)?;
+    if identified_recipes_array.len() != planned_recipes.len() {
+        return Err(report_serialization_error());
+    }
+
+    for (planned_recipe, projected_recipe) in planned_recipes
+        .iter()
+        .zip(identified_recipes_array.iter_mut())
+    {
+        let recipe_id = planned_recipe
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(report_serialization_error)?;
+        let matching_recipes = report_recipes
+            .iter()
+            .filter(|candidate| {
+                candidate.get("recipeId").and_then(Value::as_str) == Some(recipe_id)
+            })
+            .collect::<Vec<_>>();
+        let [report_recipe] = matching_recipes.as_slice() else {
+            return Err(report_serialization_error());
+        };
+        projected_recipe["recipeId"] = Value::String(recipe_id.to_string());
+
+        let result_steps = report_recipe
+            .get("steps")
+            .and_then(Value::as_array)
+            .ok_or_else(report_serialization_error)?;
+        let projected_steps = projected_recipe
+            .get_mut("steps")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(report_serialization_error)?;
+        if projected_steps.len() != result_steps.len() {
+            return Err(report_serialization_error());
+        }
+        for (result_step, projected_step) in result_steps.iter().zip(projected_steps.iter_mut()) {
+            let step_id = result_step
+                .get("stepId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(report_serialization_error)?;
+            let belongs_to_recipe =
+                result_step.get("recipeId").and_then(Value::as_str) == Some(recipe_id);
+            let is_reviewed_step = planned_steps.iter().any(|step| {
+                step.get("id").and_then(Value::as_str) == Some(step_id)
+                    && step.get("recipe_ref").and_then(Value::as_str) == Some(recipe_id)
+            });
+            if !belongs_to_recipe || !is_reviewed_step {
+                return Err(report_serialization_error());
+            }
+            projected_step["recipeId"] = Value::String(recipe_id.to_string());
+            projected_step["stepId"] = Value::String(step_id.to_string());
+        }
+    }
+    *projected_recipes = identified_recipes;
+    Ok(())
+}
+
+fn report_serialization_error() -> String {
+    safe_error(
+        "report_serialization_failed",
+        "The sanitized execution report could not be serialized.",
+    )
 }
 
 fn launch_unavailable() -> String {
@@ -6039,7 +6217,7 @@ pub(crate) mod tests {
             target: json!({ "serial": "sensitive-serial", "manufacturer": "AYANEO", "model": "Pocket S", "androidApiLevel": 33 }),
             catalog_identity: json!({
                 "sourceKind": "bundled", "sourceId": "catalog", "version": "1",
-                "contentDigest": { "algorithm": "sha256", "value": "catalog" }
+                "contentDigest": { "algorithm": "sha256", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
             }),
             plan_digest: canonical_json_digest(&plan).unwrap(),
             device_handle: "device_one".to_string(),
@@ -7964,8 +8142,13 @@ pub(crate) mod tests {
         ] {
             assert!(!serialized.contains(forbidden), "leaked {forbidden}");
         }
-        assert_eq!(first["schemaVersion"], 1);
+        assert_eq!(first["schemaVersion"], 2);
         assert_eq!(first["execution"]["verificationScope"], "real_device");
+        assert!(first["execution"]["recipes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|recipe| recipe.get("recipeId").is_none()));
     }
 
     #[test]
@@ -7983,6 +8166,11 @@ pub(crate) mod tests {
         let public = project_real_snapshot(&mapping, &report);
         let expected_document =
             execution_report_document(&mapping, &report, &public, runtime.clone());
+        assert_eq!(expected_document["plan"]["planId"], "plan.one");
+        assert_eq!(
+            expected_document["plan"]["planDigest"],
+            mapping.review.plan_digest
+        );
         let mut expected_bytes = serde_json::to_string_pretty(&expected_document).unwrap();
         expected_bytes.push('\n');
 
@@ -8006,9 +8194,11 @@ pub(crate) mod tests {
 
     #[test]
     fn restricted_qualification_report_is_retained_and_matches_validator_contract() {
-        let session = crate::qualification_session::QualificationSession::for_test_with_recipes(
+        let session = crate::qualification_session::QualificationSession::for_test_with_registered_target(
             &[],
             &["required.first", "required.second"],
+            "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa",
+            "ayaneo.pocket_air_mini",
         );
         let plan = json!({
             "kind": "execution_plan",
@@ -8064,6 +8254,8 @@ pub(crate) mod tests {
         });
         let runtime = json!({
             "status": "ready",
+            "protocolVersion": 1,
+            "catalogVersion": "1",
             "executionRestriction": {
                 "enabled": true,
                 "buildIdentity": session.build_identity(),
@@ -8088,6 +8280,7 @@ pub(crate) mod tests {
         let mut reviewed = review();
         reviewed.response["plan"] = plan.clone();
         reviewed.plan_digest = plan_digest.clone();
+        reviewed.catalog_identity["contentDigest"]["value"] = Value::String("a".repeat(64));
         let mut store = ExecutionHandleStore::default();
         store.reserve_start(ExecutionKind::Real).unwrap();
         let mapping = store.bind_started(
@@ -8106,7 +8299,13 @@ pub(crate) mod tests {
 
         let bytes = production_execution_report_bytes(&store, &mapping.public_handle)
             .expect("the normal report export should retain the restricted claim");
+        const RUST_PRODUCED_FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        assert_eq!(bytes, RUST_PRODUCED_FIXTURE);
         let document = serde_json::from_slice::<Value>(&bytes).unwrap();
+        assert_eq!(document["schemaVersion"], 2);
         let qualification = document["qualification"]
             .as_object()
             .expect("report should contain the validator-facing qualification object");
@@ -8156,8 +8355,11 @@ pub(crate) mod tests {
             qualification["buildIdentity"],
             json!(session.build_identity())
         );
-        assert_eq!(qualification["deviceTargetId"], "target-test");
-        assert_eq!(qualification["deviceProfileId"], "profile.test");
+        assert_eq!(
+            qualification["deviceTargetId"],
+            "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa"
+        );
+        assert_eq!(qualification["deviceProfileId"], "ayaneo.pocket_air_mini");
         assert_eq!(qualification["reviewedPlanId"], "plan.restricted");
         assert_eq!(qualification["reviewedPlanDigest"], plan_digest);
         assert_eq!(
@@ -8175,6 +8377,39 @@ pub(crate) mod tests {
                 { "operationId": "required.second", "outcome": "executed" }
             ])
         );
+        assert_eq!(
+            document["execution"]["recipes"][0]["recipeId"],
+            "required.first"
+        );
+        assert_eq!(
+            document["execution"]["recipes"][0]["steps"][0]["recipeId"],
+            "required.first"
+        );
+        assert_eq!(
+            document["execution"]["recipes"][0]["steps"][0]["stepId"],
+            "step.first"
+        );
+
+        let mut incomplete_report = terminal_report.clone();
+        incomplete_report["recipes"][0]["steps"][0]["stepId"] =
+            Value::String("step.unmatched".to_string());
+        let incomplete_bytes = production_execution_report_bytes_for_with_qualification(
+            &mapping,
+            &incomplete_report,
+            runtime.clone(),
+            Some(Value::Object(qualification.clone())),
+        )
+        .expect("a bad qualification claim must fall back to the ordinary audit report")
+        .bytes;
+        let incomplete_document = serde_json::from_slice::<Value>(&incomplete_bytes).unwrap();
+        assert_eq!(incomplete_document["schemaVersion"], 2);
+        assert_eq!(incomplete_document["execution"]["status"], "succeeded");
+        assert!(incomplete_document.get("qualification").is_none());
+        assert!(incomplete_document["execution"]["recipes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|recipe| recipe.get("recipeId").is_none()));
 
         let failed_report = json!({
             "planId": "plan.restricted",
@@ -11590,6 +11825,104 @@ pub(crate) mod tests {
         assert!(crate::qualification_session::session_status(&state)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn incomplete_restricted_report_ids_invalidate_qualification_after_product_terminal_retention()
+    {
+        let (_repository_root, _app_root, app, execution_handle, candidate) =
+            begin_monitor_qualification_attempt();
+        let state = app.state::<AppState>();
+        let mapping = state
+            .executions
+            .lock()
+            .unwrap()
+            .mapping(
+                ExecutionKind::Real,
+                &execution_handle,
+                REAL_EXECUTION_UNAVAILABLE,
+            )
+            .unwrap();
+        let report = json!({
+            "planId": "plan.one",
+            "status": "succeeded",
+            "startedAt": "2026-08-23T12:00:00Z",
+            "finishedAt": "2026-08-23T12:00:01Z",
+            "recipes": [{
+                "recipeId": "recipe.unmatched",
+                "status": "succeeded",
+                "steps": []
+            }],
+            "warnings": [],
+            "errors": []
+        });
+
+        let result = retain_terminal_real_execution_with_claim_builder(
+            &state,
+            &mapping,
+            &report,
+            "succeeded",
+            "2026-08-23T12:00:01Z",
+            |_| Ok(()),
+            |_| {
+                Ok(
+                    crate::qualification_session::RestrictedQualificationReport::Available(
+                        json!({ "claim": "test-only" }),
+                    ),
+                )
+            },
+        )
+        .expect("claim ID failure must not strand product terminal retention");
+        let Some(RealExecutionMonitorEvent::Terminal { observation }) = result else {
+            panic!("the terminal product result must be retained");
+        };
+        assert!(state
+            .executions
+            .lock()
+            .unwrap()
+            .terminal_retained(ExecutionKind::Real, &execution_handle));
+
+        let report_bytes = observation
+            .report_bytes
+            .as_deref()
+            .expect("the ordinary terminal audit report must remain available");
+        let document = serde_json::from_slice::<Value>(report_bytes).unwrap();
+        assert_eq!(document["schemaVersion"], 2);
+        assert_eq!(document["execution"]["status"], "succeeded");
+        assert!(document.get("qualification").is_none());
+        assert!(document["execution"]["recipes"][0]
+            .get("recipeId")
+            .is_none());
+
+        let stored = state
+            .qualification_repository
+            .get()
+            .unwrap()
+            .load_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            stored.payload.get("runValidity").and_then(Value::as_str),
+            Some("invalid")
+        );
+        let artifact = &stored.payload["artifacts"][0];
+        assert_eq!(artifact["path"], "execution-report.json");
+        assert_eq!(
+            artifact["sha256"],
+            hex::encode(Sha256::digest(report_bytes))
+        );
+        assert_eq!(
+            std::fs::read(
+                state
+                    .qualification_repository
+                    .get()
+                    .unwrap()
+                    .candidate_root()
+                    .join(&candidate)
+                    .join("execution-report.json")
+            )
+            .unwrap(),
+            report_bytes
+        );
     }
 
     #[test]

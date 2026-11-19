@@ -1,0 +1,161 @@
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": "1",
+    "executionRestriction": {
+      "enabled": true,
+      "buildIdentity": {
+        "appVersion": "0.1.0",
+        "gitCommit": "1111111111111111111111111111111111111111",
+        "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "realExecutionEnabled": true,
+        "qualificationContract": 1
+      },
+      "runtimeGeneration": 7,
+      "strategy": "adb_shell",
+      "rootShell": false,
+      "appDataWrite": false
+    }
+  },
+  "catalog": {
+    "sourceKind": "bundled",
+    "sourceId": "catalog",
+    "version": "1",
+    "contentDigest": {
+      "algorithm": "sha256",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "cacheKey": null
+  },
+  "plan": {
+    "planId": "plan.restricted",
+    "planDigest": "03a2dd4c936833994377613adf1e203e2a8e8b838615f10e8bea61f2bf7e5f46"
+  },
+  "execution": {
+    "simulated": false,
+    "verificationScope": "real_device",
+    "status": "succeeded",
+    "startedAt": null,
+    "finishedAt": null,
+    "completion": {
+      "classification": "success",
+      "counts": {
+        "blocked": 0,
+        "cancelled": 0,
+        "completed": 2,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "total": 2
+      },
+      "warningCount": 0,
+      "features": [
+        {
+          "name": "Setup feature",
+          "status": "succeeded",
+          "counts": {
+            "completed": 1
+          }
+        },
+        {
+          "name": "Setup feature",
+          "status": "succeeded",
+          "counts": {
+            "completed": 1
+          }
+        }
+      ],
+      "partialChangesPossible": false
+    },
+    "recipes": [
+      {
+        "name": "Setup feature",
+        "description": null,
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "Setup action",
+            "note": null,
+            "status": "succeeded",
+            "message": null,
+            "recipeId": "required.first",
+            "stepId": "step.first"
+          }
+        ],
+        "recipeId": "required.first"
+      },
+      {
+        "name": "Setup feature",
+        "description": null,
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "Setup action",
+            "note": null,
+            "status": "succeeded",
+            "message": null,
+            "recipeId": "required.second",
+            "stepId": "step.second"
+          }
+        ],
+        "recipeId": "required.second"
+      }
+    ],
+    "warnings": [],
+    "errors": [],
+    "target": {
+      "label": "Connected Android device",
+      "manufacturer": "AYANEO",
+      "model": "Pocket S",
+      "androidApiLevel": 33
+    },
+    "resolvedReleases": []
+  },
+  "qualification": {
+    "claim": "restricted_unprivileged",
+    "attemptId": "qualification-candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "executionMode": "real",
+    "strategy": "adb_unprivileged",
+    "restriction": "privileged_execution_disabled",
+    "observedRootState": "non_root",
+    "effectiveCapabilities": [
+      "adb_available",
+      "apk_install",
+      "shared_storage_write",
+      "app_launch",
+      "shell_command"
+    ],
+    "buildIdentity": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
+    "deviceTargetId": "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa",
+    "deviceProfileId": "ayaneo.pocket_air_mini",
+    "reviewedPlanId": "plan.restricted",
+    "reviewedPlanDigest": "03a2dd4c936833994377613adf1e203e2a8e8b838615f10e8bea61f2bf7e5f46",
+    "requiredOperationIds": [
+      "required.first",
+      "required.second"
+    ],
+    "operationOutcomes": [
+      {
+        "operationId": "required.first",
+        "outcome": "executed"
+      },
+      {
+        "operationId": "required.second",
+        "outcome": "executed"
+      }
+    ]
+  }
+}

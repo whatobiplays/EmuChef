@@ -1,1 +1,86 @@
-{"schemaVersion":1,"status":"succeeded"}
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": null
+  },
+  "catalog": null,
+  "plan": {
+    "planId": "plan.retroarch-plus-bios",
+    "planDigest": "5662dadc77de77d5cb567920f22af5fd76da946ca6f1b726be49f6e9c5d249fa"
+  },
+  "execution": {
+    "simulated": false,
+    "verificationScope": "real_device",
+    "status": "succeeded",
+    "startedAt": "2026-08-21T00:02:00Z",
+    "finishedAt": "2026-08-21T00:03:00Z",
+    "completion": {
+      "classification": "success",
+      "counts": {
+        "total": 2,
+        "completed": 2,
+        "skipped": 0,
+        "blocked": 0,
+        "failed": 0,
+        "cancelled": 0,
+        "pending": 0
+      },
+      "warningCount": 0,
+      "features": [
+        {
+          "name": "Qualification workflow",
+          "status": "succeeded",
+          "counts": {
+            "completed": 2
+          }
+        }
+      ],
+      "partialChangesPossible": false
+    },
+    "recipes": [
+      {
+        "name": "Workflow operation 1",
+        "description": null,
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "Complete operation",
+            "note": null,
+            "status": "succeeded",
+            "message": null
+          }
+        ]
+      },
+      {
+        "name": "Workflow operation 2",
+        "description": null,
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "Complete operation",
+            "note": null,
+            "status": "succeeded",
+            "message": null
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "errors": [],
+    "target": {
+      "label": "AYANEO Synthetic Pocket S2",
+      "manufacturer": "AYANEO",
+      "model": "Synthetic Pocket S2",
+      "androidApiLevel": 35,
+      "androidVersion": "15"
+    },
+    "resolvedReleases": []
+  }
+}
