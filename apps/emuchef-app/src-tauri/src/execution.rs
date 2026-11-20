@@ -9040,6 +9040,121 @@ pub(crate) mod tests {
         );
     }
 
+    /// Checks that Node validator fixtures match bytes from the retained report export path.
+    #[test]
+    fn ordinary_report_fixtures_match_the_production_serializer() {
+        fn production_bytes(kind: ExecutionKind, report: Value) -> Vec<u8> {
+            let mut store = ExecutionHandleStore::default();
+            store.reserve_start(kind).unwrap();
+            let mapping = store.bind_started(
+                kind,
+                "sidecar-private-id".into(),
+                "review-private-id".into(),
+                review(),
+            );
+            let runtime = json!({
+                "status": "ready",
+                "protocolVersion": 1,
+                "catalogVersion": "1"
+            });
+            assert!(store.mark_terminal_with_report(kind, &mapping.public_handle, report, runtime,));
+            production_execution_report_bytes(&store, &mapping.public_handle).unwrap()
+        }
+
+        let real_success = json!({
+            "status": "succeeded_with_warnings",
+            "startedAt": null,
+            "finishedAt": null,
+            "planId": "private-report-plan-id",
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Install app",
+                "status": "succeeded_with_warnings",
+                "steps": [{ "name": "Install app", "status": "succeeded" }]
+            }],
+            "warnings": [{
+                "code": "copy_staging_cleanup_pending",
+                "message": "private-warning-message"
+            }],
+            "errors": [],
+            "resolvedReleases": [{
+                "provider": "github",
+                "kind": "apk",
+                "timestampSource": "published_at",
+                "calculatedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "cacheHit": true,
+                "recipeArtifactId": "app.apk",
+                "appId": "com.example.app",
+                "artifactId": "app.apk",
+                "releaseTag": "v1.2.3",
+                "assetName": "app.apk",
+                "publishedAt": "2026-11-19T12:34:56Z",
+                "createdAt": null,
+                "size": 123,
+                "redactedFinalUrl": "https://operator:private-password@downloads.example.test/releases/app.apk?token=private-token#private-fragment"
+            }]
+        });
+        let real_failure = json!({
+            "status": "failed",
+            "startedAt": null,
+            "finishedAt": null,
+            "planId": "private-report-plan-id",
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Install app",
+                "status": "failed",
+                "steps": [{ "name": "Install app", "status": "failed" }]
+            }],
+            "warnings": [],
+            "errors": [{
+                "code": "device_disconnected",
+                "message": "private-failure-message sensitive-serial"
+            }],
+            "resolvedReleases": []
+        });
+        let simulated = json!({
+            "status": "succeeded",
+            "startedAt": null,
+            "finishedAt": null,
+            "planId": "private-report-plan-id",
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Install app",
+                "status": "succeeded",
+                "steps": [{ "name": "Install app", "status": "succeeded" }]
+            }],
+            "warnings": [],
+            "errors": [],
+            "resolvedReleases": []
+        });
+
+        const REAL_SUCCESS_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-ordinary-real-success.json"
+    ));
+        const REAL_FAILURE_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-ordinary-real-failure.json"
+    ));
+        const SIMULATED_FIXTURE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-simulated.json"
+    ));
+
+        assert_eq!(
+            production_bytes(ExecutionKind::Real, real_success),
+            REAL_SUCCESS_FIXTURE
+        );
+        assert_eq!(
+            production_bytes(ExecutionKind::Real, real_failure),
+            REAL_FAILURE_FIXTURE
+        );
+        assert_eq!(
+            production_bytes(ExecutionKind::Simulated, simulated),
+            SIMULATED_FIXTURE
+        );
+    }
+
     #[test]
     fn target_comparison_matches_phase_zero_normalization_only() {
         let target = json!({

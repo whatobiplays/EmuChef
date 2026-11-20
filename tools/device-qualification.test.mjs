@@ -1476,6 +1476,97 @@ test("the Rust-produced report fixture validates from its stored bytes", () => {
   assert.equal(report.execution.status, "succeeded");
 });
 
+test("ordinary Rust report exports validate from their serialized bytes", () => {
+  const fixtureRoot = path.join(
+    REPO_ROOT,
+    "docs/testing/device-qualification/fixtures",
+  );
+  const successBytes = readFileSync(
+    path.join(fixtureRoot, "execution-report-v2-ordinary-real-success.json"),
+  );
+  const failureBytes = readFileSync(
+    path.join(fixtureRoot, "execution-report-v2-ordinary-real-failure.json"),
+  );
+  const simulatedBytes = readFileSync(
+    path.join(fixtureRoot, "execution-report-v2-simulated.json"),
+  );
+
+  const success = validateExecutionReport(successBytes);
+  assert.equal(success.qualification, undefined);
+  assert.equal(success.plan.planId, "plan.one");
+  assert.equal(success.execution.status, "succeeded_with_warnings");
+  assert.equal(success.execution.warnings.length, 1);
+  assert.equal(success.execution.completion.warningCount, 1);
+  assert.equal(
+    success.execution.resolvedReleases[0].redactedFinalUrl,
+    "https://downloads.example.test/releases/app.apk",
+  );
+  assert.doesNotMatch(
+    successBytes.toString("utf8"),
+    /sensitive-serial|private-warning-message|private-password|token=private-token|private-fragment/,
+  );
+
+  const failure = validateExecutionReport(failureBytes);
+  assert.equal(failure.qualification, undefined);
+  assert.equal(failure.plan.planId, "plan.one");
+  assert.equal(failure.execution.status, "failed");
+  assert.equal(failure.execution.errors.length, 1);
+  assert.doesNotMatch(
+    failureBytes.toString("utf8"),
+    /private-failure-message|sensitive-serial/,
+  );
+
+  const simulated = validateExecutionReport(simulatedBytes);
+  assert.equal(simulated.execution.simulated, true);
+  assert.equal(simulated.execution.verificationScope, "simulation_only");
+  assert.equal(simulated.execution.target, null);
+});
+
+test("the Node validator rejects mutations of ordinary Rust report exports", () => {
+  const fixtureRoot = path.join(
+    REPO_ROOT,
+    "docs/testing/device-qualification/fixtures",
+  );
+  const readReport = (name) =>
+    JSON.parse(readFileSync(path.join(fixtureRoot, name), "utf8"));
+  const reportBytes = (report) => Buffer.from(JSON.stringify(report), "utf8");
+
+  const warningCountMismatch = readReport(
+    "execution-report-v2-ordinary-real-success.json",
+  );
+  warningCountMismatch.execution.completion.warningCount = 0;
+  assert.throws(
+    () => validateExecutionReport(reportBytes(warningCountMismatch)),
+    /warningCount/,
+  );
+
+  const failureClassificationMismatch = readReport(
+    "execution-report-v2-ordinary-real-failure.json",
+  );
+  failureClassificationMismatch.execution.completion.classification = "success";
+  assert.throws(
+    () => validateExecutionReport(reportBytes(failureClassificationMismatch)),
+    /classification/,
+  );
+
+  const simulatedTarget = readReport("execution-report-v2-simulated.json");
+  simulatedTarget.execution.target = { label: "Connected Android device" };
+  assert.throws(
+    () => validateExecutionReport(reportBytes(simulatedTarget)),
+    /simulated execution report target must be null/,
+  );
+
+  const unredactedUrl = readReport(
+    "execution-report-v2-ordinary-real-success.json",
+  );
+  unredactedUrl.execution.resolvedReleases[0].redactedFinalUrl +=
+    "?token=private-token";
+  assert.throws(
+    () => validateExecutionReport(reportBytes(unredactedUrl)),
+    /redactedFinalUrl/,
+  );
+});
+
 test("the Rust-produced report fixture rejects missing required v2 fields", () => {
   const report = JSON.parse(
     readFileSync(

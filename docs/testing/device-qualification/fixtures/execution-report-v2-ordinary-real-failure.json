@@ -1,0 +1,90 @@
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": "1"
+  },
+  "catalog": {
+    "sourceKind": "bundled",
+    "sourceId": "catalog",
+    "version": "1",
+    "contentDigest": {
+      "algorithm": "sha256",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "cacheKey": null
+  },
+  "plan": {
+    "planId": "plan.one",
+    "planDigest": "d3baedbfbe6fce1811a799ce96a0a61501c660fbe96b2b66c6926801b507f2bc"
+  },
+  "execution": {
+    "simulated": false,
+    "verificationScope": "real_device",
+    "status": "failed",
+    "startedAt": null,
+    "finishedAt": null,
+    "completion": {
+      "classification": "failed",
+      "counts": {
+        "blocked": 0,
+        "cancelled": 0,
+        "completed": 0,
+        "failed": 1,
+        "pending": 0,
+        "skipped": 0,
+        "total": 1
+      },
+      "warningCount": 0,
+      "features": [
+        {
+          "name": "Install app",
+          "status": "failed",
+          "counts": {
+            "failed": 1
+          }
+        }
+      ],
+      "partialChangesPossible": true
+    },
+    "recipes": [
+      {
+        "name": "Install app",
+        "description": "Safe description",
+        "status": "failed",
+        "steps": [
+          {
+            "name": "Install app",
+            "note": null,
+            "status": "failed",
+            "message": "This action did not complete."
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "errors": [
+      {
+        "message": "The intended reviewed device disconnected or could not be found.",
+        "remediation": {
+          "kind": "reconnect_device",
+          "title": "Reconnect and requalify",
+          "message": "Reconnect or authorize the intended reviewed device, then complete fresh qualification and generate and review a fresh plan before another real run. Reconnecting does not resume the old execution."
+        }
+      }
+    ],
+    "target": {
+      "label": "Connected Android device",
+      "manufacturer": "AYANEO",
+      "model": "Pocket S",
+      "androidApiLevel": 33
+    },
+    "resolvedReleases": []
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": "1"
+  },
+  "catalog": {
+    "sourceKind": "bundled",
+    "sourceId": "catalog",
+    "version": "1",
+    "contentDigest": {
+      "algorithm": "sha256",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "cacheKey": null
+  },
+  "plan": {
+    "planId": "plan.one",
+    "planDigest": "d3baedbfbe6fce1811a799ce96a0a61501c660fbe96b2b66c6926801b507f2bc"
+  },
+  "execution": {
+    "simulated": true,
+    "verificationScope": "simulation_only",
+    "status": "succeeded",
+    "startedAt": null,
+    "finishedAt": null,
+    "completion": {
+      "classification": "success",
+      "counts": {
+        "blocked": 0,
+        "cancelled": 0,
+        "completed": 1,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "total": 1
+      },
+      "warningCount": 0,
+      "features": [
+        {
+          "name": "Install app",
+          "status": "succeeded",
+          "counts": {
+            "completed": 1
+          }
+        }
+      ],
+      "partialChangesPossible": false
+    },
+    "recipes": [
+      {
+        "name": "Install app",
+        "description": "Safe description",
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "Install app",
+            "note": null,
+            "status": "succeeded",
+            "message": null
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "errors": [],
+    "target": null,
+    "resolvedReleases": []
+  }
+}
