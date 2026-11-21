@@ -1,9 +1,10 @@
 //! Fixed-root persistence and bounded access to the canonical qualification tool.
 //!
-//! Candidate files are deliberately treated as non-authoritative handoff data.
-//! Rust owns only the local storage boundary and the small amount of integrity
-//! checking needed to recover that data safely. The Node tool remains the
-//! authority for candidate semantics, canonical digests, and repository state.
+//! Candidate files are untrusted handoff data. The checked-in execution-report
+//! schema defines the report structure Rust validates during recovery and
+//! candidate promotion. Rust also checks terminal status and candidate-to-report
+//! identity before trusting a retained record. Node owns canonical evidence
+//! semantics, digests, and repository state.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -929,11 +930,49 @@ impl QualificationRepository {
         }
         let report_path = directory.join(EXECUTION_REPORT_FILE);
         let declared_report_sha256 = candidate_report_sha256(&envelope.payload)?;
-        load_report_bytes(
+        let report_bytes = load_report_bytes(
             &report_path,
             envelope.report.as_ref(),
             declared_report_sha256.as_deref(),
         )?;
+        let trusted_target_profile = registered_target_profile_id(
+            &self.repo_root,
+            envelope
+                .payload
+                .get("deviceTargetId")
+                .and_then(Value::as_str),
+        );
+        let report_status = report_bytes
+            .as_deref()
+            .and_then(validated_execution_report_v2_status);
+        let report_has_plan_identity = report_bytes
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+            .is_some_and(|report| report_has_plan_identity(&report));
+        let report_claim_matches_candidate = report_bytes.as_deref().is_none_or(|bytes| {
+            execution_report_claim_matches_candidate(
+                bytes,
+                &envelope.payload,
+                trusted_target_profile.as_deref(),
+            )
+        });
+        let report_is_invalid = report_bytes.is_some() && report_status.is_none();
+        let valid_run_report_is_ineligible = envelope.kind == CandidateKind::QualificationRun
+            && envelope.payload.get("runValidity").and_then(Value::as_str) == Some("valid")
+            && !report_bytes.as_deref().is_some_and(|bytes| {
+                valid_real_plan_bound_execution_report(bytes)
+                    && report_has_complete_restricted_operation_coverage(bytes)
+            });
+        let passing_rom_library_sync = is_passing_rom_library_sync_candidate(&envelope.payload);
+        let rom_library_target_matches_fingerprint = !passing_rom_library_sync
+            || candidate_profile_matches_registered_target(
+                &envelope.payload,
+                trusted_target_profile.as_deref(),
+            );
+        let passing_konkr_rom_library_sync = is_passing_konkr_rom_library_sync_candidate(
+            &envelope.payload,
+            trusted_target_profile.as_deref(),
+        );
         let poisoned = match fs::symlink_metadata(directory.join(SESSION_POISON_FILE)) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
             Ok(_) => return Err("qualification poison marker is not a regular file".to_string()),
@@ -967,6 +1006,58 @@ impl QualificationRepository {
                 false,
                 Some(
                     "qualification run candidate has not reached terminal finalization".to_string(),
+                ),
+            )
+        } else if envelope.kind == CandidateKind::QualificationRun && report_is_invalid {
+            (
+                false,
+                Some(
+                    "qualification execution report does not satisfy schema version 2".to_string(),
+                ),
+            )
+        } else if envelope.kind == CandidateKind::QualificationRun
+            && report_bytes.is_some()
+            && !report_has_plan_identity
+        {
+            (
+                false,
+                Some(
+                    "qualification execution report does not contain reviewed plan identity"
+                        .to_string(),
+                ),
+            )
+        } else if envelope.kind == CandidateKind::QualificationRun
+            && !report_claim_matches_candidate
+        {
+            (
+                false,
+                Some(
+                    "qualification report identity does not match the retained candidate target"
+                        .to_string(),
+                ),
+            )
+        } else if valid_run_report_is_ineligible {
+            (
+                false,
+                Some(
+                    "valid qualification evidence requires a real plan-bound report with complete restricted operation coverage"
+                        .to_string(),
+                ),
+            )
+        } else if !rom_library_target_matches_fingerprint {
+            (
+                false,
+                Some(
+                    "passing ROM-library-sync candidate does not match a unique registered target"
+                        .to_string(),
+                ),
+            )
+        } else if passing_konkr_rom_library_sync {
+            (
+                false,
+                Some(
+                    "passing KONKR ROM-library-sync evidence is not recordable under the current policy"
+                        .to_string(),
                 ),
             )
         } else {
@@ -1800,7 +1891,7 @@ fn load_report_bytes(
     report_path: &Path,
     metadata: Option<&QualificationReportMetadata>,
     declared_sha256: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<Vec<u8>>, String> {
     match metadata {
         Some(metadata) => {
             if metadata.path != EXECUTION_REPORT_FILE
@@ -1817,7 +1908,7 @@ fn load_report_bytes(
                     "qualification execution report bytes do not match metadata".to_string()
                 );
             }
-            Ok(())
+            Ok(Some(bytes))
         }
         None => match fs::symlink_metadata(report_path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1826,10 +1917,305 @@ fn load_report_bytes(
             Ok(_) => {
                 Err("qualification execution report is not declared by the candidate".to_string())
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err("qualification execution report could not be inspected".to_string()),
         },
     }
+}
+
+/// Returns the terminal status for a report that passes the checked-in v2 schema and native bindings.
+pub(crate) fn validated_execution_report_v2_status(report_bytes: &[u8]) -> Option<String> {
+    let report = serde_json::from_slice::<Value>(report_bytes).ok()?;
+    let validator = execution_report_v2_schema_validator()?;
+    if !validator.is_valid(&report)
+        || !valid_redacted_report_urls(&report)
+        || !valid_restricted_report_recipe_step_ids(&report)
+    {
+        return None;
+    }
+
+    if let Some(qualification) = report.get("qualification") {
+        let plan = report.get("plan")?;
+        if report["app"]["version"] != qualification["buildIdentity"]["appVersion"]
+            || plan["planId"] != qualification["reviewedPlanId"]
+            || plan["planDigest"] != qualification["reviewedPlanDigest"]
+        {
+            return None;
+        }
+    }
+
+    validated_report_execution_status(&report).map(str::to_string)
+}
+
+fn execution_report_v2_schema_validator() -> Option<&'static jsonschema::Validator> {
+    static VALIDATOR: OnceLock<Option<jsonschema::Validator>> = OnceLock::new();
+    VALIDATOR
+        .get_or_init(|| {
+            let schema = serde_json::from_str::<Value>(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../docs/testing/device-qualification/execution-report.schema.json"
+            )))
+            .ok()?;
+            jsonschema::draft202012::options()
+                .should_validate_formats(true)
+                .offline()
+                .build(&schema)
+                .ok()
+        })
+        .as_ref()
+}
+
+fn valid_redacted_report_urls(report: &Value) -> bool {
+    let Some(releases) = report
+        .pointer("/execution/resolvedReleases")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    releases.iter().all(|release| {
+        let Some(value) = release.get("redactedFinalUrl") else {
+            return false;
+        };
+        if value.is_null() {
+            return true;
+        }
+        let Some(raw_url) = value.as_str() else {
+            return false;
+        };
+        let Ok(url) = tauri::Url::parse(raw_url) else {
+            return false;
+        };
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none_or(str::is_empty)
+            && url.fragment().is_none_or(str::is_empty)
+    })
+}
+
+fn valid_restricted_report_recipe_step_ids(report: &Value) -> bool {
+    if report.get("qualification").is_none() {
+        return true;
+    }
+    let Some(recipes) = report
+        .pointer("/execution/recipes")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let mut recipe_ids = std::collections::HashSet::new();
+    let mut step_ids = std::collections::HashSet::new();
+    for recipe in recipes {
+        let Some(recipe_id) = recipe.get("recipeId").and_then(Value::as_str) else {
+            return false;
+        };
+        if !recipe_ids.insert(recipe_id) {
+            return false;
+        }
+        let Some(steps) = recipe.get("steps").and_then(Value::as_array) else {
+            return false;
+        };
+        for step in steps {
+            let Some(step_recipe_id) = step.get("recipeId").and_then(Value::as_str) else {
+                return false;
+            };
+            let Some(step_id) = step.get("stepId").and_then(Value::as_str) else {
+                return false;
+            };
+            if step_recipe_id != recipe_id || !step_ids.insert((step_recipe_id, step_id)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn validated_report_execution_status(report: &Value) -> Option<&str> {
+    let execution = report.get("execution")?;
+    let simulated = execution.get("simulated")?.as_bool()?;
+    let expected_scope = if simulated {
+        "simulation_only"
+    } else {
+        "real_device"
+    };
+    if execution.get("verificationScope").and_then(Value::as_str) != Some(expected_scope) {
+        return None;
+    }
+    match (simulated, execution.get("target")?) {
+        (true, Value::Null) | (false, Value::Object(_)) => {}
+        _ => return None,
+    }
+
+    let status = execution.get("status")?.as_str()?;
+    if execution
+        .pointer("/completion/classification")
+        .and_then(Value::as_str)
+        != Some(expected_report_classification(status)?)
+    {
+        return None;
+    }
+    let warning_count = execution
+        .pointer("/completion/warningCount")
+        .and_then(Value::as_u64)?;
+    let warning_length = u64::try_from(execution.get("warnings")?.as_array()?.len()).ok()?;
+    (warning_count == warning_length).then_some(status)
+}
+
+fn expected_report_classification(status: &str) -> Option<&'static str> {
+    match status {
+        "succeeded" => Some("success"),
+        "succeeded_with_warnings" => Some("success_with_warnings"),
+        "failed" => Some("failed"),
+        "cancelled" => Some("cancelled"),
+        _ => None,
+    }
+}
+
+fn nonempty_string(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+}
+
+fn report_has_plan_identity(report: &Value) -> bool {
+    nonempty_string(report.pointer("/plan/planId"))
+        && report
+            .pointer("/plan/planDigest")
+            .and_then(Value::as_str)
+            .is_some_and(is_sha256_hex)
+}
+
+fn valid_real_plan_bound_execution_report(report_bytes: &[u8]) -> bool {
+    if validated_execution_report_v2_status(report_bytes).is_none() {
+        return false;
+    }
+    let Ok(report) = serde_json::from_slice::<Value>(report_bytes) else {
+        return false;
+    };
+    report
+        .pointer("/execution/simulated")
+        .and_then(Value::as_bool)
+        == Some(false)
+        && report
+            .pointer("/execution/verificationScope")
+            .and_then(Value::as_str)
+            == Some("real_device")
+        && report_has_plan_identity(&report)
+}
+
+fn report_has_complete_restricted_operation_coverage(report_bytes: &[u8]) -> bool {
+    let Ok(report) = serde_json::from_slice::<Value>(report_bytes) else {
+        return false;
+    };
+    let Some(qualification) = report.get("qualification") else {
+        return true;
+    };
+    let Some(required_operations) = qualification
+        .get("requiredOperationIds")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let Some(operation_outcomes) = qualification
+        .get("operationOutcomes")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let required_ids = required_operations
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let outcome_ids = operation_outcomes
+        .iter()
+        .filter_map(|outcome| outcome.get("operationId").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
+
+    !required_ids.is_empty()
+        && required_ids.len() == required_operations.len()
+        && outcome_ids.len() == operation_outcomes.len()
+        && outcome_ids == required_ids
+}
+
+fn execution_report_claim_matches_candidate(
+    report_bytes: &[u8],
+    candidate: &Value,
+    trusted_target_profile: Option<&str>,
+) -> bool {
+    let Ok(report) = serde_json::from_slice::<Value>(report_bytes) else {
+        return false;
+    };
+    let Some(qualification) = report.get("qualification") else {
+        return true;
+    };
+    let Some(trusted_target_profile) = trusted_target_profile else {
+        return false;
+    };
+    qualification.get("deviceTargetId") == candidate.get("deviceTargetId")
+        && qualification.get("deviceProfileId").and_then(Value::as_str)
+            == Some(trusted_target_profile)
+        && candidate
+            .get("fingerprint")
+            .and_then(|fingerprint| fingerprint.get("deviceProfile"))
+            .and_then(Value::as_str)
+            == Some(trusted_target_profile)
+}
+
+fn registered_target_profile_id(repo_root: &Path, target_id: Option<&str>) -> Option<String> {
+    let target_id = target_id?;
+    let path = repo_root.join("docs/testing/device-qualification/device-targets.json");
+    let bytes = read_regular_file(&path, "registered device targets").ok()?;
+    let registry = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let targets = registry.get("targets")?.as_array()?;
+    let mut matching = targets
+        .iter()
+        .filter(|target| target.get("id").and_then(Value::as_str) == Some(target_id));
+    let target = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    target
+        .get("profileId")?
+        .get("value")?
+        .as_str()
+        .filter(|profile| !profile.is_empty())
+        .map(str::to_string)
+}
+
+fn candidate_profile_matches_registered_target(
+    candidate: &Value,
+    trusted_target_profile: Option<&str>,
+) -> bool {
+    trusted_target_profile.is_some_and(|profile| {
+        candidate
+            .get("fingerprint")
+            .and_then(|fingerprint| fingerprint.get("deviceProfile"))
+            .and_then(Value::as_str)
+            == Some(profile)
+    })
+}
+
+fn is_passing_rom_library_sync_candidate(candidate: &Value) -> bool {
+    candidate.get("workflowId").and_then(Value::as_str) == Some("rom-library-sync")
+        && candidate.get("runValidity").and_then(Value::as_str) == Some("valid")
+        && candidate
+            .get("qualificationOutcome")
+            .and_then(Value::as_str)
+            == Some("passed")
+}
+
+fn is_passing_konkr_rom_library_sync_candidate(
+    candidate: &Value,
+    trusted_target_profile: Option<&str>,
+) -> bool {
+    let profile = candidate
+        .get("fingerprint")
+        .and_then(|fingerprint| fingerprint.get("deviceProfile"))
+        .and_then(Value::as_str);
+    is_passing_rom_library_sync_candidate(candidate)
+        && trusted_target_profile == Some("konkr.pocket_advance")
+        && profile == Some("konkr.pocket_advance")
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -2086,6 +2472,370 @@ mod tests {
             Box::new(runner),
             build_identity(),
         )
+    }
+
+    fn write_registered_targets_for_test(temp: &TempDir, targets: &[(&str, &str)]) {
+        let directory = temp.path().join("docs/testing/device-qualification");
+        std::fs::create_dir_all(&directory).expect("target registry directory should be created");
+        let targets = targets
+            .iter()
+            .map(|(id, profile)| {
+                json!({
+                    "id": id,
+                    "profileId": { "value": profile }
+                })
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            directory.join("device-targets.json"),
+            serde_json::to_vec(&json!({ "schemaVersion": 2, "targets": targets }))
+                .expect("target registry should serialize"),
+        )
+        .expect("target registry should be written");
+    }
+
+    fn rust_execution_report_fixture_for_target(target_id: &str, profile_id: &str) -> Vec<u8> {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        let mut report = serde_json::from_slice::<Value>(FIXTURE)
+            .expect("Rust-produced fixture should be valid JSON");
+        report["qualification"]["deviceTargetId"] = Value::String(target_id.to_string());
+        report["qualification"]["deviceProfileId"] = Value::String(profile_id.to_string());
+        serde_json::to_vec(&report).expect("report fixture should serialize")
+    }
+
+    fn rust_ordinary_execution_report_fixture_for_target() -> Vec<u8> {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        let mut report = serde_json::from_slice::<Value>(FIXTURE)
+            .expect("Rust-produced fixture should be valid JSON");
+        report.as_object_mut().unwrap().remove("qualification");
+        for recipe in report["execution"]["recipes"].as_array_mut().unwrap() {
+            let recipe = recipe.as_object_mut().unwrap();
+            recipe.remove("recipeId");
+            for step in recipe["steps"].as_array_mut().unwrap() {
+                let step = step.as_object_mut().unwrap();
+                step.remove("recipeId");
+                step.remove("stepId");
+            }
+        }
+        serde_json::to_vec(&report).expect("ordinary report fixture should serialize")
+    }
+
+    #[test]
+    fn native_v2_validation_matches_nested_schema_and_consistency_rules() {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        let fixture = serde_json::from_slice::<Value>(FIXTURE)
+            .expect("Rust-produced fixture should be valid JSON");
+        assert_eq!(
+            validated_execution_report_v2_status(FIXTURE).as_deref(),
+            Some("succeeded")
+        );
+        assert_eq!(
+            validated_execution_report_v2_status(
+                &rust_ordinary_execution_report_fixture_for_target()
+            )
+            .as_deref(),
+            Some("succeeded")
+        );
+
+        macro_rules! reject_mutation {
+            ($label:literal, $mutation:expr) => {{
+                let mut report = fixture.clone();
+                ($mutation)(&mut report);
+                let bytes = serde_json::to_vec(&report).expect("mutated report should serialize");
+                assert!(
+                    validated_execution_report_v2_status(&bytes).is_none(),
+                    concat!("native validator accepted ", $label)
+                );
+            }};
+        }
+
+        reject_mutation!("simulation/scope mismatch", |report: &mut Value| {
+            report["execution"]["verificationScope"] = json!("simulation_only");
+        });
+        reject_mutation!("real report without a target", |report: &mut Value| {
+            report["execution"]["target"] = Value::Null;
+        });
+        reject_mutation!("simulated report with a target", |report: &mut Value| {
+            report["execution"]["simulated"] = json!(true);
+            report["execution"]["verificationScope"] = json!("simulation_only");
+        });
+        reject_mutation!("recipe with an unknown field", |report: &mut Value| {
+            report["execution"]["recipes"][0]["extra"] = json!(true);
+        });
+        reject_mutation!("step bound to a different recipe", |report: &mut Value| {
+            report["execution"]["recipes"][0]["steps"][0]["recipeId"] = json!("required.second");
+        });
+        reject_mutation!("invalid issue remediation", |report: &mut Value| {
+            report["execution"]["warnings"] = json!([{
+                "message": "Warning",
+                "remediation": {
+                    "kind": "execute_shell",
+                    "title": "Review",
+                    "message": "Review the warning"
+                }
+            }]);
+        });
+        reject_mutation!("malformed target", |report: &mut Value| {
+            report["execution"]["target"]["label"] = json!(null);
+        });
+        reject_mutation!("malformed resolved release", |report: &mut Value| {
+            report["execution"]["resolvedReleases"] = json!([{"provider": "github"}]);
+        });
+        reject_mutation!(
+            "completion classification mismatch",
+            |report: &mut Value| {
+                report["execution"]["completion"]["classification"] = json!("failed");
+            }
+        );
+        reject_mutation!("warning count mismatch", |report: &mut Value| {
+            report["execution"]["completion"]["warningCount"] = json!(1);
+        });
+        reject_mutation!("unsafe JSON integer", |report: &mut Value| {
+            report["execution"]["completion"]["counts"]["total"] = json!(9_007_199_254_740_992_u64);
+        });
+        reject_mutation!("invalid timestamp", |report: &mut Value| {
+            report["execution"]["startedAt"] = json!("yesterday");
+        });
+        reject_mutation!("release URL with credentials", |report: &mut Value| {
+            report["execution"]["resolvedReleases"] = json!([{
+                "recipeArtifactId": "retroarch.apk",
+                "provider": "github",
+                "appId": "org.example.app",
+                "artifactId": "apk",
+                "kind": "apk",
+                "releaseTag": "v1",
+                "assetName": "app.apk",
+                "publishedAt": null,
+                "createdAt": null,
+                "timestampSource": "created_at",
+                "size": null,
+                "calculatedSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "cacheHit": false,
+                "redactedFinalUrl": "https://user:secret@example.test/app.apk"
+            }]);
+        });
+        reject_mutation!("release URL with a query", |report: &mut Value| {
+            report["execution"]["resolvedReleases"] = json!([{
+                "recipeArtifactId": "retroarch.apk",
+                "provider": "github",
+                "appId": "org.example.app",
+                "artifactId": "apk",
+                "kind": "apk",
+                "releaseTag": "v1",
+                "assetName": "app.apk",
+                "publishedAt": null,
+                "createdAt": null,
+                "timestampSource": "created_at",
+                "size": null,
+                "calculatedSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "cacheHit": false,
+                "redactedFinalUrl": "https://example.test/app.apk?token=secret"
+            }]);
+        });
+    }
+
+    #[test]
+    fn restricted_claim_outcome_coverage_is_a_promotion_rule_not_schema_shape() {
+        const TARGET_ID: &str =
+            "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        write_registered_targets_for_test(&temp, &[(TARGET_ID, "ayaneo.pocket_air_mini")]);
+
+        let incomplete_outcomes = [
+            json!([]),
+            json!([
+                { "operationId": "required.first", "outcome": "executed" },
+                { "operationId": "required.first", "outcome": "executed" }
+            ]),
+            json!([{ "operationId": "required.first", "outcome": "executed" }]),
+        ];
+        for operation_outcomes in incomplete_outcomes {
+            let mut report = serde_json::from_slice::<Value>(
+                &rust_execution_report_fixture_for_target(TARGET_ID, "ayaneo.pocket_air_mini"),
+            )
+            .expect("restricted report fixture should be valid JSON");
+            report["qualification"]["operationOutcomes"] = operation_outcomes;
+            let report_bytes = serde_json::to_vec(&report).expect("report should serialize");
+
+            assert_eq!(
+                validated_execution_report_v2_status(&report_bytes).as_deref(),
+                Some("succeeded"),
+                "operation coverage is a native promotion rule, not a schema shape rule"
+            );
+
+            let candidate = repository
+                .create_candidate(
+                    CandidateKind::QualificationRun,
+                    &report_backed_candidate(
+                        "retroarch-plus-bios",
+                        TARGET_ID,
+                        "ayaneo.pocket_air_mini",
+                        &report_bytes,
+                    ),
+                    Some(&report_bytes),
+                )
+                .expect("incomplete restricted report should remain retained for inspection");
+            let stored = repository
+                .load_candidate(&candidate)
+                .expect("candidate should remain inspectable");
+
+            assert!(
+                !stored.promotable,
+                "a valid run needs every claimed operation outcome"
+            );
+            assert!(repository.record_run(&candidate).is_err());
+        }
+        assert!(
+            calls.calls().is_empty(),
+            "incomplete claims must not reach Node"
+        );
+    }
+
+    #[test]
+    fn simulated_report_is_valid_audit_data_but_not_promotable_canonical_evidence() {
+        const TARGET_ID: &str =
+            "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let mut report =
+            serde_json::from_slice::<Value>(&rust_ordinary_execution_report_fixture_for_target())
+                .expect("ordinary fixture should be valid JSON");
+        report["execution"]["simulated"] = json!(true);
+        report["execution"]["verificationScope"] = json!("simulation_only");
+        report["execution"]["target"] = Value::Null;
+        let report_bytes = serde_json::to_vec(&report).expect("simulated report should serialize");
+        assert_eq!(
+            validated_execution_report_v2_status(&report_bytes).as_deref(),
+            Some("succeeded")
+        );
+
+        let candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "retroarch-plus-bios",
+                    TARGET_ID,
+                    "ayaneo.pocket_air_mini",
+                    &report_bytes,
+                ),
+                Some(&report_bytes),
+            )
+            .expect("simulated report should remain retained for audit");
+        assert!(
+            !repository
+                .load_candidate(&candidate)
+                .expect("simulated candidate should remain inspectable")
+                .promotable
+        );
+        assert!(repository.record_run(&candidate).is_err());
+        assert!(
+            calls.calls().is_empty(),
+            "simulated evidence must not reach Node"
+        );
+
+        let mut audit_payload = report_backed_candidate(
+            "retroarch-plus-bios",
+            TARGET_ID,
+            "ayaneo.pocket_air_mini",
+            &report_bytes,
+        );
+        audit_payload["runValidity"] = json!("invalid");
+        audit_payload["qualificationOutcome"] = json!("not_observed");
+        let audit_candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &audit_payload,
+                Some(&report_bytes),
+            )
+            .expect("simulated report should be retained for invalid audit recording");
+        assert!(
+            repository
+                .load_candidate(&audit_candidate)
+                .expect("invalid audit candidate should load")
+                .promotable
+        );
+        calls.set_response(json!({
+            "operation": "record_run",
+            "candidateHandle": audit_candidate,
+            "candidateKind": "qualification_run",
+            "payload": { "runId": "simulated-invalid-audit" },
+        }));
+        repository
+            .record_run(&audit_candidate)
+            .expect("report-bearing invalid not_observed audit remains recordable");
+        assert_eq!(calls.calls().len(), 1);
+    }
+
+    #[test]
+    fn malformed_v2_report_cannot_reach_native_record_runner() {
+        const TARGET_ID: &str =
+            "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let mut report =
+            serde_json::from_slice::<Value>(&rust_ordinary_execution_report_fixture_for_target())
+                .expect("ordinary fixture should be valid JSON");
+        report["execution"]["recipes"][0]["steps"][0]["extra"] = json!(true);
+        let report_bytes = serde_json::to_vec(&report).expect("malformed report should serialize");
+        let candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "retroarch-plus-bios",
+                    TARGET_ID,
+                    "ayaneo.pocket_air_mini",
+                    &report_bytes,
+                ),
+                Some(&report_bytes),
+            )
+            .expect("malformed report should remain retained for inspection");
+
+        let stored = repository
+            .load_candidate(&candidate)
+            .expect("candidate should remain inspectable");
+        assert!(!stored.promotable);
+        assert!(repository.record_run(&candidate).is_err());
+        assert!(
+            calls.calls().is_empty(),
+            "malformed evidence must not reach Node"
+        );
+    }
+
+    fn report_backed_candidate(
+        workflow_id: &str,
+        target_id: &str,
+        profile_id: &str,
+        report_bytes: &[u8],
+    ) -> Value {
+        json!({
+            "capturedAt": "2026-08-23T12:00:00Z",
+            "build": build_identity_json(),
+            "workflowId": workflow_id,
+            "deviceTargetId": target_id,
+            "fingerprint": { "deviceProfile": profile_id },
+            "runValidity": "valid",
+            "qualificationOutcome": "passed",
+            "artifacts": [{
+                "path": "execution-report.json",
+                "sha256": hex::encode(Sha256::digest(report_bytes))
+            }]
+        })
     }
 
     impl QualificationToolRunner for FakeQualificationToolRunner {
@@ -2468,6 +3218,194 @@ mod tests {
             .record_run(&handle)
             .expect("terminal invalid candidates remain recordable");
         assert_eq!(calls.calls()[0].1, vec!["--record-run".to_string(), handle]);
+    }
+
+    #[test]
+    fn restricted_report_binding_uses_registered_target_and_konkr_veto_is_scoped() {
+        const AYANEO_TARGET_ID: &str =
+            "device-target-sha256:7db2d1094b12e20600c2c9bf920c41bef07700b2131f9648fe2fa1f7e9cebafa";
+        const KONKR_TARGET_ID: &str =
+            "device-target-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        write_registered_targets_for_test(
+            &temp,
+            &[
+                (AYANEO_TARGET_ID, "ayaneo.pocket_air_mini"),
+                (KONKR_TARGET_ID, "konkr.pocket_advance"),
+            ],
+        );
+
+        let ayaneo_report =
+            rust_execution_report_fixture_for_target(AYANEO_TARGET_ID, "ayaneo.pocket_air_mini");
+        let ayaneo_candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "rom-library-sync",
+                    AYANEO_TARGET_ID,
+                    "ayaneo.pocket_air_mini",
+                    &ayaneo_report,
+                ),
+                Some(&ayaneo_report),
+            )
+            .expect("registered non-KONKR report should be stored");
+        assert!(
+            repository
+                .load_candidate(&ayaneo_candidate)
+                .expect("registered non-KONKR candidate should load")
+                .promotable
+        );
+
+        let konkre_report =
+            rust_execution_report_fixture_for_target(KONKR_TARGET_ID, "konkr.pocket_advance");
+        let konkre_candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "rom-library-sync",
+                    KONKR_TARGET_ID,
+                    "konkr.pocket_advance",
+                    &konkre_report,
+                ),
+                Some(&konkre_report),
+            )
+            .expect("KONKR candidate should be stored for policy validation");
+        let error = repository
+            .record_run(&konkre_candidate)
+            .expect_err("passing KONKR ROM-library-sync evidence must be vetoed");
+        assert!(error.contains("KONKR ROM-library-sync"));
+        assert!(calls.calls().is_empty(), "the veto must run before Node");
+
+        let mismatched_report =
+            rust_execution_report_fixture_for_target(KONKR_TARGET_ID, "ayaneo.pocket_air_mini");
+        let mismatched_candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "rom-library-sync",
+                    KONKR_TARGET_ID,
+                    "ayaneo.pocket_air_mini",
+                    &mismatched_report,
+                ),
+                Some(&mismatched_report),
+            )
+            .expect("mismatched candidate should be retained for inspection");
+        let stored = repository
+            .load_candidate(&mismatched_candidate)
+            .expect("mismatched candidate should remain inspectable");
+        assert!(!stored.promotable);
+        assert!(stored
+            .non_promotable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("identity")));
+        assert!(calls.calls().is_empty(), "the mismatch must not reach Node");
+
+        let non_rom_candidate = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "retroarch-plus-bios",
+                    KONKR_TARGET_ID,
+                    "konkr.pocket_advance",
+                    &konkre_report,
+                ),
+                Some(&konkre_report),
+            )
+            .expect("KONKR non-ROM candidate should be stored");
+        assert!(
+            repository
+                .load_candidate(&non_rom_candidate)
+                .expect("KONKR non-ROM candidate should remain promotable")
+                .promotable
+        );
+
+        let ordinary_report = rust_ordinary_execution_report_fixture_for_target();
+        let mismatched_ordinary = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "rom-library-sync",
+                    KONKR_TARGET_ID,
+                    "ayaneo.pocket_air_mini",
+                    &ordinary_report,
+                ),
+                Some(&ordinary_report),
+            )
+            .expect("ordinary report with mismatched target should remain inspectable");
+        let error = repository
+            .record_run(&mismatched_ordinary)
+            .expect_err("ordinary evidence must not bypass trusted target binding");
+        assert!(error.contains("unique registered target"));
+        assert!(
+            calls.calls().is_empty(),
+            "mismatched ordinary evidence must not reach Node"
+        );
+
+        let ordinary_konkr = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "rom-library-sync",
+                    KONKR_TARGET_ID,
+                    "konkr.pocket_advance",
+                    &ordinary_report,
+                ),
+                Some(&ordinary_report),
+            )
+            .expect("ordinary KONKR report should remain inspectable");
+        let error = repository
+            .record_run(&ordinary_konkr)
+            .expect_err("the no-claim path must still apply the KONKR veto");
+        assert!(error.contains("KONKR ROM-library-sync"));
+        assert!(
+            calls.calls().is_empty(),
+            "KONKR ordinary evidence must not reach Node"
+        );
+
+        let ordinary_ayaneo = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "rom-library-sync",
+                    AYANEO_TARGET_ID,
+                    "ayaneo.pocket_air_mini",
+                    &ordinary_report,
+                ),
+                Some(&ordinary_report),
+            )
+            .expect("ordinary AYANEO report should remain recordable");
+        calls.set_response(json!({
+            "operation": "record_run",
+            "candidateHandle": ordinary_ayaneo,
+            "candidateKind": "qualification_run",
+            "payload": { "runId": "ordinary-allowed" },
+        }));
+        repository
+            .record_run(&ordinary_ayaneo)
+            .expect("a matching registered non-KONKR ROM-sync target remains recordable");
+        assert_eq!(calls.calls().len(), 1);
+
+        let ordinary_konkr_non_rom = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &report_backed_candidate(
+                    "retroarch-plus-bios",
+                    KONKR_TARGET_ID,
+                    "konkr.pocket_advance",
+                    &ordinary_report,
+                ),
+                Some(&ordinary_report),
+            )
+            .expect("ordinary KONKR non-ROM report should remain recordable");
+        assert!(
+            repository
+                .load_candidate(&ordinary_konkr_non_rom)
+                .expect("ordinary KONKR non-ROM candidate should load")
+                .promotable
+        );
     }
 
     #[test]

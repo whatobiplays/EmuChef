@@ -10,10 +10,10 @@ Generated from `docs/testing/device-qualification/` definitions and immutable ph
 
 | Workflow | State | Current evidence | Reason / limitation |
 |---|---|---|---|
-| retroarch-plus-bios | qualified | qualification-run-sha256:41c5416c2d52c3f246c6e2f68ddd987a088f3b70f656689101b364322fd99fb4 (2026-08-20T00:00:00Z) | — |
-| obtainium-install | stale | qualification-run-sha256:3c0c3f963c4b3610eca24da81a7984b214884c9654ccbdce4fb397481f580410 (2026-08-19T00:00:00Z) | no current compatible evidence; historical valid evidence exists |
-| xaniteog-install | qualified | qualification-run-sha256:c7c297fa674427c9e32c91f5aeb319c03d3951734235d38a4b83f4c42f15f1aa (2026-08-18T00:00:00Z) | — |
-| rom-library-sync | failed | qualification-run-sha256:9390a13d43659237d02f4edd9ab549e5c18186e5fcf9c2d450d39a04a3bc2f30 (2026-08-21T00:00:00Z) | execution-report failed |
+| retroarch-plus-bios | qualified | qualification-run-sha256:e837facf8f5318c3c15807d4ba4b85f81688e1aa1ac523c69cab31df305d6bb8 (2026-08-20T00:00:00Z) | — |
+| obtainium-install | stale | qualification-run-sha256:8ac2a6e276fbf70fb873c352be42a0760cb9ff24c755006972253cac05a37e06 (2026-08-19T00:00:00Z) | no current compatible evidence; historical valid evidence exists |
+| xaniteog-install | qualified | qualification-run-sha256:a494fc37cc1d625d402b82e489554dfe09a3a2125dbcbb9f261b783eb73dad42 (2026-08-18T00:00:00Z) | — |
+| rom-library-sync | failed | qualification-run-sha256:ce4f9a3f51ea393da0148a92e4b560fbbd1fd6959ce356b20383e505c69b66a4 (2026-08-21T00:00:00Z) | execution-report failed |
 
 ## device-target-sha256:2565a33f08b4d19600d5a7cf3039fa1c250bb93384e2087fae3fd2d56512faec
 

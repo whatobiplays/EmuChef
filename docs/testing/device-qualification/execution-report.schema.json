@@ -1,0 +1,1016 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://emuchef.dev/schemas/execution-report-v2.json",
+  "title": "EmuChef execution report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "app",
+    "runtime",
+    "catalog",
+    "plan",
+    "execution"
+  ],
+  "properties": {
+    "schema": {
+      "const": "emuchef.execution-report"
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "app": {
+      "$ref": "#/$defs/app"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "catalog": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/catalog"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "plan": {
+      "$ref": "#/$defs/plan"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "qualification": {
+      "$ref": "#/$defs/qualification"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "qualification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "execution": {
+            "$ref": "#/$defs/restrictedExecution"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "execution": {
+            "$ref": "#/$defs/ordinaryExecution"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "runtime": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "starting"
+            },
+            "executionRestriction": {
+              "$ref": "#/$defs/executionRestriction"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "protocolVersion",
+            "catalogVersion"
+          ],
+          "properties": {
+            "status": {
+              "const": "ready"
+            },
+            "protocolVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "catalogVersion": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "executionRestriction": {
+              "$ref": "#/$defs/executionRestriction"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "error"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unsupported",
+                "failed"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/runtimeError"
+            },
+            "executionRestriction": {
+              "$ref": "#/$defs/executionRestriction"
+            }
+          }
+        }
+      ]
+    },
+    "runtimeError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "actions"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "executionRestriction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "buildIdentity",
+        "runtimeGeneration",
+        "strategy",
+        "rootShell",
+        "appDataWrite"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "buildIdentity": {
+          "$ref": "#/$defs/buildIdentity"
+        },
+        "runtimeGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "strategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootShell": {
+          "type": "boolean"
+        },
+        "appDataWrite": {
+          "type": "boolean"
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceKind",
+        "sourceId",
+        "version",
+        "cacheKey",
+        "contentDigest"
+      ],
+      "properties": {
+        "sourceKind": {
+          "enum": [
+            "bundled",
+            "local_directory",
+            "cached_remote"
+          ]
+        },
+        "sourceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "cacheKey": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "contentDigest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "algorithm",
+                "value"
+              ],
+              "properties": {
+                "algorithm": {
+                  "const": "sha256"
+                },
+                "value": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "planDigest"
+      ],
+      "properties": {
+        "planId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "planDigest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      }
+    },
+    "buildIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "appVersion",
+        "gitCommit",
+        "materialBuildDigest",
+        "realExecutionEnabled",
+        "qualificationContract"
+      ],
+      "properties": {
+        "appVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gitCommit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "materialBuildDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "realExecutionEnabled": {
+          "type": "boolean"
+        },
+        "qualificationContract": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "simulated",
+        "verificationScope",
+        "status",
+        "startedAt",
+        "finishedAt",
+        "completion",
+        "recipes",
+        "warnings",
+        "errors",
+        "target",
+        "resolvedReleases"
+      ],
+      "properties": {
+        "simulated": {
+          "type": "boolean"
+        },
+        "verificationScope": {
+          "enum": [
+            "simulation_only",
+            "real_device"
+          ]
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "succeeded_with_warnings",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "completion": {
+          "$ref": "#/$defs/completion"
+        },
+        "recipes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/recipe"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/issue"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/issue"
+          }
+        },
+        "target": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/target"
+            }
+          ]
+        },
+        "resolvedReleases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resolvedRelease"
+          }
+        }
+      }
+    },
+    "ordinaryExecution": {
+      "$ref": "#/$defs/execution",
+      "properties": {
+        "recipes": {
+          "items": {
+            "not": {
+              "required": [
+                "recipeId"
+              ]
+            },
+            "properties": {
+              "steps": {
+                "items": {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "recipeId"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "stepId"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "restrictedExecution": {
+      "$ref": "#/$defs/execution",
+      "properties": {
+        "recipes": {
+          "items": {
+            "required": [
+              "recipeId"
+            ],
+            "properties": {
+              "steps": {
+                "items": {
+                  "required": [
+                    "recipeId",
+                    "stepId"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification",
+        "counts",
+        "warningCount",
+        "features",
+        "partialChangesPossible"
+      ],
+      "properties": {
+        "classification": {
+          "enum": [
+            "in_progress",
+            "success",
+            "success_with_warnings",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "counts": {
+          "$ref": "#/$defs/counts"
+        },
+        "warningCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/featureCompletion"
+          }
+        },
+        "partialChangesPossible": {
+          "type": "boolean"
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "completed",
+        "skipped",
+        "blocked",
+        "failed",
+        "cancelled",
+        "pending"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cancelled": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "featureCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "completed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cancelled": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "featureCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status",
+        "counts"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "succeeded_with_warnings",
+            "failed",
+            "blocked",
+            "cancelled"
+          ]
+        },
+        "counts": {
+          "$ref": "#/$defs/featureCounts"
+        }
+      }
+    },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "status",
+        "steps"
+      ],
+      "properties": {
+        "recipeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "succeeded_with_warnings",
+            "failed",
+            "blocked",
+            "cancelled"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "note",
+        "status",
+        "message"
+      ],
+      "properties": {
+        "recipeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "skipped",
+            "failed",
+            "blocked",
+            "cancelled"
+          ]
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message",
+        "remediation"
+      ],
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "remediation": {
+          "$ref": "#/$defs/remediation"
+        }
+      }
+    },
+    "remediation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "title",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "reconnect_device",
+            "requalify_root",
+            "repair_platform_tools",
+            "review_inputs",
+            "generate_fresh_plan",
+            "view_report"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manufacturer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "androidApiLevel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "androidVersion": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "resolvedRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipeArtifactId",
+        "provider",
+        "appId",
+        "artifactId",
+        "kind",
+        "releaseTag",
+        "assetName",
+        "publishedAt",
+        "createdAt",
+        "timestampSource",
+        "size",
+        "calculatedSha256",
+        "cacheHit",
+        "redactedFinalUrl"
+      ],
+      "properties": {
+        "recipeArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "enum": [
+            "github",
+            "gitlab",
+            "forgejo"
+          ]
+        },
+        "appId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "apk",
+            "file"
+          ]
+        },
+        "releaseTag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "assetName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publishedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "timestampSource": {
+          "enum": [
+            "published_at",
+            "released_at",
+            "created_at"
+          ]
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "calculatedSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cacheHit": {
+          "type": "boolean"
+        },
+        "redactedFinalUrl": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim",
+        "attemptId",
+        "executionMode",
+        "strategy",
+        "restriction",
+        "observedRootState",
+        "effectiveCapabilities",
+        "buildIdentity",
+        "deviceTargetId",
+        "deviceProfileId",
+        "reviewedPlanId",
+        "reviewedPlanDigest",
+        "requiredOperationIds",
+        "operationOutcomes"
+      ],
+      "properties": {
+        "claim": {
+          "const": "restricted_unprivileged"
+        },
+        "attemptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executionMode": {
+          "const": "real"
+        },
+        "strategy": {
+          "const": "adb_unprivileged"
+        },
+        "restriction": {
+          "const": "privileged_execution_disabled"
+        },
+        "observedRootState": {
+          "enum": [
+            "non_root",
+            "rooted"
+          ]
+        },
+        "effectiveCapabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "buildIdentity": {
+          "$ref": "#/$defs/buildIdentity"
+        },
+        "deviceTargetId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceProfileId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewedPlanId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewedPlanDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "requiredOperationIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "operationOutcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/operationOutcome"
+          }
+        }
+      }
+    },
+    "operationOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "outcome"
+      ],
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": [
+            "executed",
+            "skipped",
+            "blocked",
+            "failed",
+            "cancelled"
+          ]
+        }
+      }
+    }
+  }
+}

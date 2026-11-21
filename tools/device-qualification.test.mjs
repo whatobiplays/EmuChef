@@ -20,6 +20,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  assertSupportedExecutionReportSchema,
+} from "./device-qualification-execution-report.mjs";
+import {
   EVIDENCE_RECORD_FIELDS,
   FINGERPRINT_FIELDS,
   RUN_VALIDITIES,
@@ -41,6 +44,7 @@ import {
   evidenceRecordDigest,
   buildMaterialIdentity,
   loadEvidenceDirectory,
+  loadValidatedEvidenceRecords,
   loadEvidenceBundle,
   loadDeviceTargets,
   loadWorkflowCatalog,
@@ -54,6 +58,7 @@ import {
   validateEvidenceBundle,
   validateEvidenceRecord,
   validateEvidenceSchemaContract,
+  validateExecutionReport,
   validateDeviceTargets,
   validateWorkflowCatalog,
 } from "./device-qualification.mjs";
@@ -102,7 +107,7 @@ function activeQualificationFiles() {
   const files = [
     ...listFiles("tools").filter(
       (relativePath) =>
-        path.basename(relativePath) === "device-qualification.mjs",
+        /^device-qualification(?:-[a-z0-9-]+)?\.mjs$/.test(path.basename(relativePath)),
     ),
     ...listFiles("docs/testing/device-qualification"),
     ...listFiles("tests/fixtures/device-qualification"),
@@ -183,6 +188,193 @@ function recordFor(relative) {
 
 function sealRecord(record) {
   return sealEvidenceRecord(record);
+}
+
+function bindReportBytes(sourceBundle, reportBytes) {
+  const record = structuredClone(sourceBundle.record);
+  record.artifacts[0].sha256 = createHash("sha256")
+    .update(reportBytes)
+    .digest("hex");
+  return { record: sealRecord(record), reportBytes };
+}
+
+function ordinaryExecutionReportV2(bundle) {
+  return {
+    schema: "emuchef.execution-report",
+    schemaVersion: 2,
+    app: {
+      name: "EmuChef",
+      version: bundle.record.fingerprint.emuchefBuild.appVersion,
+    },
+    runtime: {
+      status: "ready",
+      protocolVersion: 1,
+      catalogVersion: null,
+    },
+    catalog: null,
+    plan: {
+      planId: "plan.device-qualification-test",
+      planDigest: "a".repeat(64),
+    },
+    execution: {
+      simulated: false,
+      verificationScope: "real_device",
+      status: "succeeded",
+      startedAt: "2026-08-21T02:00:00Z",
+      finishedAt: "2026-08-21T02:01:00Z",
+      completion: {
+        classification: "success",
+        counts: {
+          total: 3,
+          completed: 2,
+          skipped: 1,
+          blocked: 0,
+          failed: 0,
+          cancelled: 0,
+          pending: 0,
+        },
+        warningCount: 0,
+        features: [
+          {
+            name: "RetroArch provisioning",
+            status: "succeeded",
+            counts: { completed: 1 },
+          },
+          {
+            name: "Copy BIOS",
+            status: "succeeded",
+            counts: { completed: 1, skipped: 1 },
+          },
+        ],
+        partialChangesPossible: false,
+      },
+      recipes: [
+        {
+          name: "RetroArch provisioning",
+          description: null,
+          status: "succeeded",
+          steps: [
+            {
+              name: "Install RetroArch",
+              note: null,
+              status: "succeeded",
+              message: null,
+            },
+          ],
+        },
+        {
+          name: "Copy BIOS",
+          description: null,
+          status: "succeeded",
+          steps: [
+            {
+              name: "Copy BIOS files",
+              note: null,
+              status: "succeeded",
+              message: null,
+            },
+            {
+              name: "Optional BIOS check",
+              note: null,
+              status: "skipped",
+              message: null,
+            },
+          ],
+        },
+      ],
+      warnings: [],
+      errors: [],
+      target: { label: "Connected Android device" },
+      resolvedReleases: [],
+    },
+  };
+}
+
+function ordinaryExecutionBundle(updateReport = () => {}) {
+  const sourceBundle = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const report = ordinaryExecutionReportV2(sourceBundle);
+  updateReport(report);
+  const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
+  return bindReportBytes(sourceBundle, reportBytes);
+}
+
+function romLibrarySyncBundle({
+  profileId = "ayaneo.pocket_s2",
+  workflowId = "rom-library-sync",
+  updateReport = () => {},
+} = {}) {
+  const context = syntheticContext();
+  const target = structuredClone(
+    context.targets.find((candidate) => candidate.profileId.value === "ayaneo.pocket_s2"),
+  );
+  target.profileId.value = profileId;
+  if (profileId === "konkr.pocket_advance") {
+    target.manufacturer.value = "ARBOR";
+    target.model.value = "GT78-VN";
+  }
+  target.id = deviceTargetId(target);
+  context.targets = [target];
+
+  const sourceBundle = loadEvidenceBundle(
+    path.join(FIXTURES, "projection/evidence/failed-newer"),
+  );
+  const record = structuredClone(sourceBundle.record);
+  const workflow = context.workflowCatalog.workflows.find(
+    (candidate) => candidate.id === workflowId,
+  );
+  record.workflowId = workflow.id;
+  record.workflowVersion = workflow.version;
+  record.fingerprint.workflowVersion = workflow.version;
+  record.fingerprint.deviceProfile = target.profileId.value;
+  for (const [fingerprintField, targetField] of [
+    ["androidApi", "androidApi"],
+    ["firmwareBuild", "firmwareBuild"],
+    ["abiSocClass", "abiSocClass"],
+    ["rootState", "rootState"],
+    ["connectionType", "connectionType"],
+  ]) {
+    record.fingerprint[fingerprintField] = target[targetField].value;
+  }
+  record.fingerprint.authoredContent = workflow.productionRecipes.map((id) => ({
+    id,
+    sha256: AUTHORED_DIGESTS[id],
+  }));
+  record.deviceTarget.id = target.id;
+  for (const field of [
+    "profileId",
+    "manufacturer",
+    "model",
+    "androidVersion",
+    "androidApi",
+    "abiSocClass",
+    "rootState",
+    "connectionType",
+    "firmwareBuild",
+  ]) {
+    record.deviceTarget[field] = structuredClone(target[field]);
+  }
+  record.runValidity = "valid";
+  record.qualificationOutcome = "passed";
+  record.automatedObservations = [
+    {
+      id: "execution-report",
+      outcome: "passed",
+      observedAt: record.capturedAt,
+    },
+  ];
+  record.humanCheckpoints = [];
+  record.targetWideFailure = null;
+  record.limitations = [];
+
+  const report = ordinaryExecutionReportV2({ record });
+  updateReport(report);
+  const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
+  return {
+    bundle: bindReportBytes({ record: sealRecord(record) }, reportBytes),
+    context,
+  };
 }
 
 function checkpointGatedRecord() {
@@ -291,7 +483,11 @@ function projectionState(context, targetId, workflowId) {
 }
 
 const REPORT_BYTES = Buffer.from(
-  '{"schemaVersion":1,"status":"succeeded"}\n',
+  `${JSON.stringify(
+    ordinaryExecutionReportV2({
+      record: { fingerprint: { emuchefBuild: CURRENT_BUILD } },
+    }),
+  )}\n`,
   "utf8",
 );
 
@@ -332,6 +528,10 @@ function createTempQualificationRepo({ deviceTargetsSource } = {}) {
   copyTrackedFile(
     repoRoot,
     "docs/testing/device-qualification/evidence-schema.json",
+  );
+  copyTrackedFile(
+    repoRoot,
+    "docs/testing/device-qualification/execution-report.schema.json",
   );
   copyTrackedFile(
     repoRoot,
@@ -905,6 +1105,10 @@ test("material build digest changes for product inputs but ignores qualification
       path: "crates/emuchef-rust-backend/src/planner.rs",
       sha256: "b".repeat(64),
     },
+    {
+      path: "docs/testing/device-qualification/execution-report.schema.json",
+      sha256: "c".repeat(64),
+    },
   ];
   const original = materialBuildDigestFromEntries(base);
   const changedProduct = materialBuildDigestFromEntries([
@@ -912,6 +1116,12 @@ test("material build digest changes for product inputs but ignores qualification
     { path: base[1].path, sha256: "c".repeat(64) },
   ]);
   assert.notEqual(changedProduct, original);
+
+  const changedReportSchema = materialBuildDigestFromEntries([
+    ...base.slice(0, 2),
+    { path: base[2].path, sha256: "d".repeat(64) },
+  ]);
+  assert.notEqual(changedReportSchema, original);
 
   const withEvidence = materialBuildDigestFromEntries([
     ...base,
@@ -958,8 +1168,12 @@ test("material identity refreshes for changed inputs and rejects dirty state", (
       path.join(REPO_ROOT, "tools/device-qualification.mjs"),
       toolDestination,
     );
+    cpSync(
+      path.join(REPO_ROOT, "tools/device-qualification-execution-report.mjs"),
+      path.join(repoRoot, "tools/device-qualification-execution-report.mjs"),
+    );
     const toolPath = realpathSync(toolDestination);
-    execFileSync("git", ["add", "tools/device-qualification.mjs"], {
+    execFileSync("git", ["add", "tools/device-qualification.mjs", "tools/device-qualification-execution-report.mjs"], {
       cwd: repoRoot,
       stdio: "pipe",
     });
@@ -1162,6 +1376,264 @@ test("the evidence schema matches the validator contract", () => {
   assert.doesNotThrow(() => validateEvidenceSchemaContract(schema));
 });
 
+test("the execution report schema defines a strict v2 envelope", () => {
+  const schema = JSON.parse(
+    readFileSync(
+      path.join(
+        REPO_ROOT,
+        "docs/testing/device-qualification/execution-report.schema.json",
+      ),
+      "utf8",
+    ),
+  );
+  const required = [
+    "schema",
+    "schemaVersion",
+    "app",
+    "runtime",
+    "catalog",
+    "plan",
+    "execution",
+  ];
+  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.schema.const, "emuchef.execution-report");
+  assert.equal(schema.properties.schemaVersion.const, 2);
+  assert.deepEqual(schema.required, required);
+  assert.deepEqual(Object.keys(schema.properties).sort(), [
+    ...required,
+    "qualification",
+  ].sort());
+
+  const checkObjectSchemas = (value, label = "schema") => {
+    if (value === null || typeof value !== "object") return;
+    const declaredTypes = Array.isArray(value.type) ? value.type : [value.type];
+    if (declaredTypes.includes("integer")) {
+      assert.equal(
+        value.maximum,
+        Number.MAX_SAFE_INTEGER,
+        `${label} integers must fit in a JavaScript safe integer`,
+      );
+    }
+    if (value.type === "object") {
+      assert.equal(value.additionalProperties, false, `${label} must reject unknown fields`);
+      const required = value.required ?? [];
+      assert.ok(Array.isArray(required), `${label} required fields must be an array`);
+      assert.equal(
+        new Set(required).size,
+        required.length,
+        `${label} must not repeat required fields`,
+      );
+      for (const field of required) {
+        assert.ok(
+          Object.hasOwn(value.properties ?? {}, field),
+          `${label} required field ${field} must have a property schema`,
+        );
+      }
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (Array.isArray(child)) {
+        child.forEach((item, index) => checkObjectSchemas(item, `${label}.${key}[${index}]`));
+      } else if (child !== null && typeof child === "object") {
+        checkObjectSchemas(child, `${label}.${key}`);
+      }
+    }
+  };
+  checkObjectSchemas(schema);
+});
+
+test("the execution report parser rejects schema keywords outside its supported subset", () => {
+  const schema = JSON.parse(
+    readFileSync(
+      path.join(
+        REPO_ROOT,
+        "docs/testing/device-qualification/execution-report.schema.json",
+      ),
+      "utf8",
+    ),
+  );
+  schema.$defs.runtimeError.properties.actions.contains = {
+    const: "recovery action",
+  };
+
+  assert.throws(
+    () => assertSupportedExecutionReportSchema(schema),
+    /unsupported execution report schema keyword contains/i,
+  );
+});
+
+test("the Rust-produced report fixture validates from its stored bytes", () => {
+  const reportBytes = readFileSync(
+    path.join(
+      REPO_ROOT,
+      "docs/testing/device-qualification/fixtures/execution-report-v2-real.json",
+    ),
+  );
+  const report = validateExecutionReport(reportBytes);
+
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.qualification.claim, "restricted_unprivileged");
+  assert.equal(report.execution.status, "succeeded");
+});
+
+test("ordinary Rust report exports validate from their serialized bytes", () => {
+  const fixtureRoot = path.join(
+    REPO_ROOT,
+    "docs/testing/device-qualification/fixtures",
+  );
+  const successBytes = readFileSync(
+    path.join(fixtureRoot, "execution-report-v2-ordinary-real-success.json"),
+  );
+  const failureBytes = readFileSync(
+    path.join(fixtureRoot, "execution-report-v2-ordinary-real-failure.json"),
+  );
+  const simulatedBytes = readFileSync(
+    path.join(fixtureRoot, "execution-report-v2-simulated.json"),
+  );
+
+  const success = validateExecutionReport(successBytes);
+  assert.equal(success.qualification, undefined);
+  assert.equal(success.plan.planId, "plan.one");
+  assert.equal(success.execution.status, "succeeded_with_warnings");
+  assert.equal(success.execution.warnings.length, 1);
+  assert.equal(success.execution.completion.warningCount, 1);
+  assert.equal(
+    success.execution.resolvedReleases[0].redactedFinalUrl,
+    "https://downloads.example.test/releases/app.apk",
+  );
+  assert.doesNotMatch(
+    successBytes.toString("utf8"),
+    /sensitive-serial|private-warning-message|private-password|token=private-token|private-fragment/,
+  );
+
+  const failure = validateExecutionReport(failureBytes);
+  assert.equal(failure.qualification, undefined);
+  assert.equal(failure.plan.planId, "plan.one");
+  assert.equal(failure.execution.status, "failed");
+  assert.equal(failure.execution.errors.length, 1);
+  assert.doesNotMatch(
+    failureBytes.toString("utf8"),
+    /private-failure-message|sensitive-serial/,
+  );
+
+  const simulated = validateExecutionReport(simulatedBytes);
+  assert.equal(simulated.execution.simulated, true);
+  assert.equal(simulated.execution.verificationScope, "simulation_only");
+  assert.equal(simulated.execution.target, null);
+});
+
+test("the Node validator rejects mutations of ordinary Rust report exports", () => {
+  const fixtureRoot = path.join(
+    REPO_ROOT,
+    "docs/testing/device-qualification/fixtures",
+  );
+  const readReport = (name) =>
+    JSON.parse(readFileSync(path.join(fixtureRoot, name), "utf8"));
+  const reportBytes = (report) => Buffer.from(JSON.stringify(report), "utf8");
+
+  const warningCountMismatch = readReport(
+    "execution-report-v2-ordinary-real-success.json",
+  );
+  warningCountMismatch.execution.completion.warningCount = 0;
+  assert.throws(
+    () => validateExecutionReport(reportBytes(warningCountMismatch)),
+    /warningCount/,
+  );
+
+  const failureClassificationMismatch = readReport(
+    "execution-report-v2-ordinary-real-failure.json",
+  );
+  failureClassificationMismatch.execution.completion.classification = "success";
+  assert.throws(
+    () => validateExecutionReport(reportBytes(failureClassificationMismatch)),
+    /classification/,
+  );
+
+  const simulatedTarget = readReport("execution-report-v2-simulated.json");
+  simulatedTarget.execution.target = { label: "Connected Android device" };
+  assert.throws(
+    () => validateExecutionReport(reportBytes(simulatedTarget)),
+    /simulated execution report target must be null/,
+  );
+
+  const unredactedUrl = readReport(
+    "execution-report-v2-ordinary-real-success.json",
+  );
+  unredactedUrl.execution.resolvedReleases[0].redactedFinalUrl +=
+    "?token=private-token";
+  assert.throws(
+    () => validateExecutionReport(reportBytes(unredactedUrl)),
+    /redactedFinalUrl/,
+  );
+});
+
+test("the Rust-produced report fixture rejects missing required v2 fields", () => {
+  const report = JSON.parse(
+    readFileSync(
+      path.join(
+        REPO_ROOT,
+        "docs/testing/device-qualification/fixtures/execution-report-v2-real.json",
+      ),
+      "utf8",
+    ),
+  );
+  delete report.execution.completion.counts;
+
+  assert.throws(
+    () => validateExecutionReport(Buffer.from(JSON.stringify(report), "utf8")),
+    /execution report completion fields must be exactly/i,
+  );
+});
+
+test("execution report catalog digests use lowercase SHA-256 values", () => {
+  const report = JSON.parse(
+    readFileSync(
+      path.join(
+        REPO_ROOT,
+        "docs/testing/device-qualification/fixtures/execution-report-v2-real.json",
+      ),
+      "utf8",
+    ),
+  );
+  report.catalog.contentDigest.value = "catalog";
+
+  assert.throws(
+    () => validateExecutionReport(Buffer.from(JSON.stringify(report), "utf8")),
+    /execution report catalog contentDigest value does not match its schema pattern/i,
+  );
+});
+
+test("execution report runtime error actions must be non-empty strings", () => {
+  const bundle = ordinaryExecutionBundle();
+  const report = JSON.parse(bundle.reportBytes.toString("utf8"));
+  report.runtime = {
+    status: "unsupported",
+    error: {
+      code: "unsupported-runtime",
+      message: "This runtime is unsupported.",
+      actions: [""],
+    },
+  };
+
+  assert.throws(
+    () => validateExecutionReport(Buffer.from(JSON.stringify(report), "utf8")),
+    /execution report runtime error actions must be an array of non-empty strings/i,
+  );
+});
+
+test("execution report timestamps reject invalid calendar and clock values", () => {
+  const bundle = ordinaryExecutionBundle();
+  const report = JSON.parse(bundle.reportBytes.toString("utf8"));
+
+  for (const value of ["2026-02-31T00:00:00Z", "2026-01-01T24:00:00Z"]) {
+    report.execution.startedAt = value;
+    assert.throws(
+      () => validateExecutionReport(Buffer.from(JSON.stringify(report), "utf8")),
+      /execution report execution startedAt must be an RFC3339 timestamp/i,
+    );
+  }
+});
+
 test("valid evidence requires one digest-bound production execution report", () => {
   const bundle = loadEvidenceBundle(
     path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
@@ -1170,6 +1642,147 @@ test("valid evidence requires one digest-bound production execution report", () 
   assert.equal(bundle.record.artifacts.length, 1);
   assert.equal(bundle.record.artifacts[0].id, "execution-report");
   assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("ordinary execution report v2 validates without a restricted claim", () => {
+  const bundle = ordinaryExecutionBundle();
+  const report = JSON.parse(bundle.reportBytes.toString("utf8"));
+
+  assert.equal(report.qualification, undefined);
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("simulated ordinary v2 reports are schema-valid but ineligible as valid evidence", () => {
+  const bundle = ordinaryExecutionBundle((report) => {
+    report.execution.simulated = true;
+    report.execution.verificationScope = "simulation_only";
+    report.execution.target = null;
+  });
+
+  assert.doesNotThrow(() => validateExecutionReport(bundle.reportBytes));
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /valid canonical execution report requires simulated=false and real_device/i,
+  );
+});
+
+test("simulated ordinary v2 reports remain valid in audit evidence", () => {
+  const sourceBundle = ordinaryExecutionBundle((report) => {
+    report.execution.simulated = true;
+    report.execution.verificationScope = "simulation_only";
+    report.execution.target = null;
+  });
+  const record = structuredClone(sourceBundle.record);
+  record.runValidity = "invalid";
+  record.qualificationOutcome = "not_observed";
+  record.automatedObservations = [];
+  const bundle = bindReportBytes(
+    { record: sealRecord(record) },
+    sourceBundle.reportBytes,
+  );
+
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("ordinary execution report v2 rejects unknown nested fields", () => {
+  const bundle = ordinaryExecutionBundle((report) => {
+    report.execution.completion.unknown = true;
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /execution report completion fields must be exactly/i,
+  );
+});
+
+test("execution report counts must be safe integers", () => {
+  const bundle = ordinaryExecutionBundle((report) => {
+    report.execution.completion.counts.total = Number.MAX_SAFE_INTEGER + 1;
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /must be a non-negative integer/i,
+  );
+});
+
+test("ordinary execution report v2 rejects report-only recipe identities", () => {
+  const bundle = ordinaryExecutionBundle((report) => {
+    report.execution.recipes[0].recipeId = "app.retroarch.provision";
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /ordinary execution report must omit recipe and step IDs/i,
+  );
+});
+
+test("canonical execution reports require a reviewed plan identity", () => {
+  const bundle = ordinaryExecutionBundle((report) => {
+    report.plan.planId = null;
+    report.plan.planDigest = null;
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /canonical execution report requires plan identity/i,
+  );
+});
+
+test("canonical execution status must match the recorded observation and outcome", () => {
+  const bundle = ordinaryExecutionBundle((report) => {
+    report.execution.status = "failed";
+    report.execution.completion.classification = "failed";
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /execution report status does not match/i,
+  );
+});
+
+test("a target-wide failure can fail qualification after successful execution", () => {
+  const sourceBundle = ordinaryExecutionBundle();
+  const record = structuredClone(sourceBundle.record);
+  record.qualificationOutcome = "failed";
+  record.targetWideFailure = "safety_invariant_failed";
+  record.limitations = ["safety_invariant_failed"];
+  const bundle = bindReportBytes(
+    { record: sealRecord(record) },
+    sourceBundle.reportBytes,
+  );
+
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("canonical passing ROM sync evidence is vetoed for the trusted KONKR profile", () => {
+  const { bundle, context } = romLibrarySyncBundle({
+    profileId: "konkr.pocket_advance",
+    updateReport(report) {
+      report.execution.target.label = "AYANEO Pocket S2";
+    },
+  });
+
+  assert.equal(bundle.record.deviceTarget.profileId.value, "konkr.pocket_advance");
+  assert.throws(
+    () => validateEvidenceBundle(bundle, context),
+    /canonical rom-library-sync evidence is not promotable for konkr\.pocket_advance/i,
+  );
+});
+
+test("the ROM sync veto allows unrelated trusted profiles and KONKR workflows", () => {
+  const unrelatedProfile = romLibrarySyncBundle();
+  assert.doesNotThrow(() =>
+    validateEvidenceBundle(unrelatedProfile.bundle, unrelatedProfile.context),
+  );
+
+  const unrelatedWorkflow = romLibrarySyncBundle({
+    profileId: "konkr.pocket_advance",
+    workflowId: "obtainium-install",
+  });
+  assert.doesNotThrow(() =>
+    validateEvidenceBundle(unrelatedWorkflow.bundle, unrelatedWorkflow.context),
+  );
 });
 
 test("invalid audit evidence may omit report only when it is not referenced", () => {
@@ -1196,69 +1809,281 @@ test("changing a bound report invalidates the bundle", () => {
   );
 });
 
+test("an active negative fixture preserves a mismatched report digest", () => {
+  const bundle = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-invalid/bad-digest"),
+  );
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /execution report digest does not match/i,
+  );
+});
+
+test("canonical evidence rejects legacy execution report schema v1", () => {
+  const source = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const reportBytes = Buffer.from(
+    '{"schema":"emuchef.execution-report","schemaVersion":1,"execution":{"status":"succeeded"}}\n',
+    "utf8",
+  );
+
+  assert.throws(
+    () =>
+      validateEvidenceBundle(
+        bindReportBytes(source, reportBytes),
+        syntheticContext(),
+      ),
+    /execution report schemaVersion must be 2/i,
+  );
+});
+
+test("inventory excludes digest-bound v1 history while retaining v2 records", () => {
+  const context = syntheticContext();
+  const currentBundle = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const historicalReportBytes = Buffer.from(
+    '{"schema":"emuchef.execution-report","schemaVersion":1,"legacyPayload":true}\n',
+    "utf8",
+  );
+  const historicalRecord = structuredClone(currentBundle.record);
+  historicalRecord.capturedAt = "2026-08-22T02:00:00Z";
+  historicalRecord.artifacts[0].sha256 = createHash("sha256")
+    .update(historicalReportBytes)
+    .digest("hex");
+  const historicalBundle = {
+    record: sealRecord(historicalRecord),
+    reportBytes: historicalReportBytes,
+  };
+  const evidenceDir = mkdtempSync(path.join(tmpdir(), "device-qualification-inventory-"));
+  const writeBundle = (name, bundle) => {
+    const bundleDir = path.join(evidenceDir, name);
+    mkdirSync(bundleDir);
+    writeFileSync(
+      path.join(bundleDir, "evidence.json"),
+      `${JSON.stringify(bundle.record)}\n`,
+      "utf8",
+    );
+    writeFileSync(path.join(bundleDir, "execution-report.json"), bundle.reportBytes);
+  };
+
+  try {
+    writeBundle("historical-v1", historicalBundle);
+    writeBundle("current-v2", currentBundle);
+    const records = loadValidatedEvidenceRecords(evidenceDir, {
+      fixtureMode: false,
+      workflowCatalog: context.workflowCatalog,
+      targets: context.targets,
+    });
+
+    assert.deepEqual(records.map((record) => record.runId), [currentBundle.record.runId]);
+    assert.throws(
+      () => validateEvidenceBundle(historicalBundle, context),
+      /execution report schemaVersion must be 2/i,
+    );
+  } finally {
+    removeTempTree(evidenceDir);
+  }
+});
+
+test("inventory does not skip malformed, unbound, or forged v1 history", () => {
+  const context = syntheticContext();
+  const sourceBundle = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const evidenceDir = mkdtempSync(path.join(tmpdir(), "device-qualification-inventory-"));
+  const writeBundle = (name, bundle) => {
+    const bundleDir = path.join(evidenceDir, name);
+    mkdirSync(bundleDir);
+    writeFileSync(
+      path.join(bundleDir, "evidence.json"),
+      `${JSON.stringify(bundle.record)}\n`,
+      "utf8",
+    );
+    writeFileSync(path.join(bundleDir, "execution-report.json"), bundle.reportBytes);
+  };
+  const inventory = () =>
+    loadValidatedEvidenceRecords(evidenceDir, {
+      fixtureMode: false,
+      workflowCatalog: context.workflowCatalog,
+      targets: context.targets,
+    });
+
+  try {
+    const malformedBytes = Buffer.from("{", "utf8");
+    const malformedRecord = structuredClone(sourceBundle.record);
+    malformedRecord.capturedAt = "2026-08-22T02:00:00Z";
+    malformedRecord.artifacts[0].sha256 = createHash("sha256")
+      .update(malformedBytes)
+      .digest("hex");
+    writeBundle("malformed", {
+      record: sealRecord(malformedRecord),
+      reportBytes: malformedBytes,
+    });
+    assert.throws(inventory, /execution report JSON is invalid/i);
+
+    rmSync(evidenceDir, { recursive: true, force: true });
+    mkdirSync(evidenceDir, { recursive: true });
+    const digestMismatchBytes = Buffer.from(
+      '{"schema":"emuchef.execution-report","schemaVersion":1}\n',
+      "utf8",
+    );
+    writeBundle("digest-mismatch", {
+      record: sourceBundle.record,
+      reportBytes: digestMismatchBytes,
+    });
+    assert.throws(inventory, /execution report digest does not match/i);
+
+    rmSync(evidenceDir, { recursive: true, force: true });
+    mkdirSync(evidenceDir, { recursive: true });
+    const legacyBytes = Buffer.from(
+      '{"schema":"emuchef.execution-report","schemaVersion":1}\n',
+      "utf8",
+    );
+    const forgedRecord = structuredClone(sourceBundle.record);
+    forgedRecord.capturedAt = "2026-08-22T02:00:00Z";
+    forgedRecord.artifacts[0].sha256 = createHash("sha256")
+      .update(legacyBytes)
+      .digest("hex");
+    const forgedBundle = { record: sealRecord(forgedRecord), reportBytes: legacyBytes };
+    forgedBundle.record.runId = `qualification-run-sha256:${"f".repeat(64)}`;
+    forgedBundle.record.recordDigest = evidenceRecordDigest(forgedBundle.record);
+    writeBundle("forged", forgedBundle);
+    assert.throws(inventory, /runId does not match canonical qualification run identity/i);
+
+    rmSync(evidenceDir, { recursive: true, force: true });
+    mkdirSync(evidenceDir, { recursive: true });
+    const duplicateHistorical = structuredClone(forgedBundle);
+    duplicateHistorical.record = structuredClone(sourceBundle.record);
+    duplicateHistorical.record.capturedAt = "2026-08-22T02:00:00Z";
+    duplicateHistorical.record.artifacts[0].sha256 = createHash("sha256")
+      .update(legacyBytes)
+      .digest("hex");
+    duplicateHistorical.record = sealRecord(duplicateHistorical.record);
+    duplicateHistorical.reportBytes = legacyBytes;
+    const duplicateCurrent = structuredClone(sourceBundle);
+    duplicateCurrent.record.runId = duplicateHistorical.record.runId;
+    duplicateCurrent.record.recordDigest = evidenceRecordDigest(duplicateCurrent.record);
+    writeBundle("a-historical", duplicateHistorical);
+    writeBundle("b-current", duplicateCurrent);
+    assert.throws(inventory, /duplicate run identity/i);
+  } finally {
+    removeTempTree(evidenceDir);
+  }
+});
+
+test("canonical evidence rejects malformed execution report JSON", () => {
+  const source = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const reportBytes = Buffer.from("{\n", "utf8");
+
+  assert.throws(
+    () =>
+      validateEvidenceBundle(
+        bindReportBytes(source, reportBytes),
+        syntheticContext(),
+      ),
+    /execution report JSON is invalid/i,
+  );
+});
+
+test("canonical evidence rejects incomplete execution report v2 envelopes", () => {
+  const source = loadEvidenceBundle(
+    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+  );
+  const reportBytes = Buffer.from(
+    '{"schema":"emuchef.execution-report","schemaVersion":2}\n',
+    "utf8",
+  );
+
+  assert.throws(
+    () =>
+      validateEvidenceBundle(
+        bindReportBytes(source, reportBytes),
+        syntheticContext(),
+      ),
+    /execution report fields must be exactly/i,
+  );
+});
+
 function restrictedExecutionBundle(
   updateReport = () => {},
   updateRecord = () => {},
 ) {
-  const bundle = loadEvidenceBundle(
+  const sourceBundle = loadEvidenceBundle(
     path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
   );
   const reviewedPlanId = "konkr-restricted-test";
   const reviewedPlanDigest = "a".repeat(64);
-  const report = {
-    schema: "emuchef.execution-report",
-    schemaVersion: 1,
-    app: {
-      version: bundle.record.fingerprint.emuchefBuild.appVersion,
-    },
-    plan: {
-      planId: reviewedPlanId,
-      planDigest: reviewedPlanDigest,
-    },
-    execution: {
-      simulated: false,
+  const report = ordinaryExecutionReportV2(sourceBundle);
+  report.plan = {
+    planId: reviewedPlanId,
+    planDigest: reviewedPlanDigest,
+  };
+  report.runtime.executionRestriction = {
+    enabled: true,
+    buildIdentity: structuredClone(sourceBundle.record.fingerprint.emuchefBuild),
+    runtimeGeneration: 1,
+    strategy: "adb_shell",
+    rootShell: false,
+    appDataWrite: false,
+  };
+  report.execution.recipes = [
+    {
+      recipeId: "app.retroarch.provision",
+      name: "RetroArch provisioning",
+      description: null,
       status: "succeeded",
-      recipes: [
+      steps: [
         {
           recipeId: "app.retroarch.provision",
+          stepId: "step.retroarch.provision",
+          name: "Install RetroArch",
+          note: null,
           status: "succeeded",
-          steps: [
-            {
-              stepId: "step.retroarch.provision",
-              recipeId: "app.retroarch.provision",
-              status: "succeeded",
-            },
-          ],
-        },
-        {
-          recipeId: "feature.copy_bios",
-          status: "succeeded",
-          steps: [
-            {
-              stepId: "step.copy.bios",
-              recipeId: "feature.copy_bios",
-              status: "succeeded",
-            },
-            {
-              stepId: "step.optional.bios",
-              recipeId: "feature.copy_bios",
-              status: "skipped",
-            },
-          ],
+          message: null,
         },
       ],
     },
-    qualification: {
+    {
+      recipeId: "feature.copy_bios",
+      name: "Copy BIOS",
+      description: null,
+      status: "succeeded",
+      steps: [
+        {
+          recipeId: "feature.copy_bios",
+          stepId: "step.copy.bios",
+          name: "Copy BIOS files",
+          note: null,
+          status: "succeeded",
+          message: null,
+        },
+        {
+          recipeId: "feature.copy_bios",
+          stepId: "step.optional.bios",
+          name: "Optional BIOS check",
+          note: null,
+          status: "skipped",
+          message: null,
+        },
+      ],
+    },
+  ];
+  report.qualification = {
       claim: "restricted_unprivileged",
       attemptId: "qualification-attempt-0001",
       executionMode: "real",
       strategy: "adb_unprivileged",
       restriction: "privileged_execution_disabled",
-      observedRootState: bundle.record.fingerprint.rootState,
+      observedRootState: sourceBundle.record.fingerprint.rootState,
       effectiveCapabilities: ["app_install"],
-      buildIdentity: structuredClone(bundle.record.fingerprint.emuchefBuild),
-      deviceTargetId: bundle.record.deviceTarget.id,
-      deviceProfileId: bundle.record.fingerprint.deviceProfile,
+      buildIdentity: structuredClone(sourceBundle.record.fingerprint.emuchefBuild),
+      deviceTargetId: sourceBundle.record.deviceTarget.id,
+      deviceProfileId: sourceBundle.record.fingerprint.deviceProfile,
       reviewedPlanId,
       reviewedPlanDigest,
       requiredOperationIds: [
@@ -1269,16 +2094,13 @@ function restrictedExecutionBundle(
         { operationId: "app.retroarch.provision", outcome: "executed" },
         { operationId: "feature.copy_bios", outcome: "executed" },
       ],
-    },
   };
   updateReport(report);
   const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
-  const record = structuredClone(bundle.record);
-  record.artifacts[0].sha256 = createHash("sha256")
-    .update(reportBytes)
-    .digest("hex");
+  const record = structuredClone(sourceBundle.record);
   updateRecord(record);
-  return { record: sealEvidenceRecord(record), reportBytes };
+  const bound = bindReportBytes({ ...sourceBundle, record: sealRecord(record) }, reportBytes);
+  return bound;
 }
 
 test("a restricted claim requires a digest-bound real unprivileged ADB attempt", () => {
@@ -1286,10 +2108,61 @@ test("a restricted claim requires a digest-bound real unprivileged ADB attempt",
   assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
 });
 
-test("historical execution reports remain readable without a restricted claim", () => {
-  const bundle = loadEvidenceBundle(
-    path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"),
+test("a restricted claim requires its verified runtime restriction", () => {
+  const invalidReports = [
+    ["missing handshake", (report) => delete report.runtime.executionRestriction],
+    [
+      "disabled restriction",
+      (report) => {
+        report.runtime.executionRestriction.enabled = false;
+      },
+    ],
+    [
+      "different strategy",
+      (report) => {
+        report.runtime.executionRestriction.strategy = "direct_root";
+      },
+    ],
+    [
+      "root shell enabled",
+      (report) => {
+        report.runtime.executionRestriction.rootShell = true;
+      },
+    ],
+    [
+      "app data write enabled",
+      (report) => {
+        report.runtime.executionRestriction.appDataWrite = true;
+      },
+    ],
+  ];
+
+  for (const [label, updateReport] of invalidReports) {
+    assert.throws(
+      () =>
+        validateEvidenceBundle(
+          restrictedExecutionBundle(updateReport),
+          syntheticContext(),
+        ),
+      /restricted qualification requires the verified runtime restriction/i,
+      label,
+    );
+  }
+});
+
+test("restricted runtime identity must match the qualification claim", () => {
+  const bundle = restrictedExecutionBundle((report) => {
+    report.runtime.executionRestriction.buildIdentity.appVersion = "0.2.0";
+  });
+
+  assert.throws(
+    () => validateEvidenceBundle(bundle, syntheticContext()),
+    /restricted qualification runtime build identity does not match its claim/i,
   );
+});
+
+test("ordinary execution reports remain valid without a restricted claim", () => {
+  const bundle = ordinaryExecutionBundle();
   const report = JSON.parse(bundle.reportBytes.toString("utf8"));
 
   assert.equal(report.qualification, undefined);
@@ -1371,7 +2244,7 @@ test("restricted reports reject missing labels, simulation, and privileged strat
     const bundle = restrictedExecutionBundle(updateReport);
     assert.throws(
       () => validateEvidenceBundle(bundle, syntheticContext()),
-      /restricted|qualification|strategy|simulat|capabilit/i,
+      /execution report schema|restricted|qualification|strategy|simulat|capabilit/i,
       label,
     );
   }
@@ -1507,17 +2380,19 @@ test("restricted reports cannot omit a required workflow recipe and its outcome"
 test("a restricted report status cannot change without matching its valid qualification outcome", () => {
   const bundle = restrictedExecutionBundle((report) => {
     report.execution.status = "failed";
+    report.execution.completion.classification = "failed";
   });
 
   assert.throws(
     () => validateEvidenceBundle(bundle, syntheticContext()),
-    /execution status|qualification outcome|execution-report observation/i,
+    /execution report status|qualification outcome|execution-report observation/i,
   );
 });
 
 test("restricted execution status follows native passed and failed outcome semantics", () => {
   const warningBundle = restrictedExecutionBundle((report) => {
     report.execution.status = "succeeded_with_warnings";
+    report.execution.completion.classification = "success_with_warnings";
   });
   assert.doesNotThrow(() =>
     validateEvidenceBundle(warningBundle, syntheticContext()),
@@ -1526,6 +2401,7 @@ test("restricted execution status follows native passed and failed outcome seman
   const failedExecutionBundle = restrictedExecutionBundle(
     (report) => {
       report.execution.status = "failed";
+      report.execution.completion.classification = "failed";
     },
     (record) => {
       record.qualificationOutcome = "failed";

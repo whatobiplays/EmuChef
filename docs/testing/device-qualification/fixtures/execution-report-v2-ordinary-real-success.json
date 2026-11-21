@@ -1,0 +1,107 @@
+{
+  "schema": "emuchef.execution-report",
+  "schemaVersion": 2,
+  "app": {
+    "name": "EmuChef",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "status": "ready",
+    "protocolVersion": 1,
+    "catalogVersion": "1"
+  },
+  "catalog": {
+    "sourceKind": "bundled",
+    "sourceId": "catalog",
+    "version": "1",
+    "contentDigest": {
+      "algorithm": "sha256",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "cacheKey": null
+  },
+  "plan": {
+    "planId": "plan.one",
+    "planDigest": "d3baedbfbe6fce1811a799ce96a0a61501c660fbe96b2b66c6926801b507f2bc"
+  },
+  "execution": {
+    "simulated": false,
+    "verificationScope": "real_device",
+    "status": "succeeded_with_warnings",
+    "startedAt": null,
+    "finishedAt": null,
+    "completion": {
+      "classification": "success_with_warnings",
+      "counts": {
+        "blocked": 0,
+        "cancelled": 0,
+        "completed": 1,
+        "failed": 0,
+        "pending": 0,
+        "skipped": 0,
+        "total": 1
+      },
+      "warningCount": 1,
+      "features": [
+        {
+          "name": "Install app",
+          "status": "succeeded_with_warnings",
+          "counts": {
+            "completed": 1
+          }
+        }
+      ],
+      "partialChangesPossible": false
+    },
+    "recipes": [
+      {
+        "name": "Install app",
+        "description": "Safe description",
+        "status": "succeeded_with_warnings",
+        "steps": [
+          {
+            "name": "Install app",
+            "note": null,
+            "status": "succeeded",
+            "message": null
+          }
+        ]
+      }
+    ],
+    "warnings": [
+      {
+        "message": "The copy completed successfully, but temporary staging cleanup is still pending.",
+        "remediation": {
+          "kind": "view_report",
+          "title": "Review temporary storage",
+          "message": "The copy completed. Temporary staging cleanup is pending. Check available device storage and contact support if the warning persists."
+        }
+      }
+    ],
+    "errors": [],
+    "target": {
+      "label": "Connected Android device",
+      "manufacturer": "AYANEO",
+      "model": "Pocket S",
+      "androidApiLevel": 33
+    },
+    "resolvedReleases": [
+      {
+        "recipeArtifactId": "app.apk",
+        "provider": "github",
+        "appId": "com.example.app",
+        "artifactId": "app.apk",
+        "kind": "apk",
+        "releaseTag": "v1.2.3",
+        "assetName": "app.apk",
+        "publishedAt": "2026-11-19T12:34:56Z",
+        "createdAt": null,
+        "timestampSource": "published_at",
+        "size": 123,
+        "calculatedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cacheHit": true,
+        "redactedFinalUrl": "https://downloads.example.test/releases/app.apk"
+      }
+    ]
+  }
+}

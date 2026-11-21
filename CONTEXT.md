@@ -2512,14 +2512,56 @@ both files in a private temporary directory, synchronizes them, and publishes
 the complete directory with create-new collision behavior. Restart recovery,
 read, discard, and promotion reject symlinked root components, candidate
 directories, candidate files, and report files; no candidate path can escape
-the fixed root. Rust checks only this local envelope, file, and build-binding
-integrity and does not reimplement Node semantic validation. The Rust boundary
-accepts only the fixed `--describe`, `--register-target <handle>`, and
-`--record-run <handle>` operations. Promotion is refused before Node is
-invoked when build identity is missing or stale, and operation results use a
-strict Rust-owned envelope around an opaque canonical payload. React receives
-no repository path, candidate path, executable path, or arbitrary process
-arguments.
+the fixed root. Rust checks local envelope, file, and build-binding integrity.
+It also requires version-2 report bytes for current-session recovery, binds a
+restricted report claim to its reviewed plan and registered target profile,
+and applies the scoped KONKR ROM-library-sync recording veto. Rust validates
+the strict version-2 report structure before recovery or native promotion; the
+Node tool applies the same report contract and remains the authority for
+canonical candidate semantics. The Rust boundary accepts only the fixed
+`--describe`, `--register-target <handle>`, and `--record-run <handle>`
+operations. Promotion is refused before Node is invoked when build identity is
+missing or stale, and operation results use a strict Rust-owned envelope
+around an opaque canonical payload. React receives no repository path,
+candidate path, executable path, or arbitrary process arguments.
+
+`docs/testing/device-qualification/execution-report.schema.json` defines the
+global version-2 execution-report contract. Rust exports ordinary reports
+without a `qualification` object or report-only recipe and step IDs. A
+restricted qualification claim is included only when the reviewed plan IDs
+join the raw terminal report; an incomplete join leaves the sanitized ordinary
+report available and invalidates qualification capture while preserving the
+product terminal result. The shared
+`docs/testing/device-qualification/fixtures/execution-report-v2-real.json`
+fixture is emitted by the Rust report writer and validated by both the native
+recovery gate and the Node report parser.
+
+The native validator compiles this schema once with Draft 2020-12 format
+checks enabled and external reference resolution disabled. Report integers do
+not exceed JavaScript's safe-integer limit of 9,007,199,254,740,991. A
+`redactedFinalUrl`, when present, must be an HTTPS URL without credentials,
+query, or fragment.
+
+Simulated version-2 reports remain valid standalone exports. A valid
+qualification-run candidate must include a non-simulated `real_device` report
+with a nonempty plan ID and lowercase SHA-256 plan digest. Invalid
+`not_observed` audit candidates may include a simulated report when that report
+has plan identity; they may omit the report only when capture was unavailable.
+
+Version-1 and malformed version-2 reports are unsupported as qualification
+proof. Current-session recovery requires the retained version-2 report to
+match its byte commitment and terminal status. Recovery of an incompatible
+older session preserves its report bytes in invalid audit evidence without
+trusting the report status. A passing `rom-library-sync` candidate must resolve
+to one registered target and match that target's profile in its fingerprint.
+A trusted `konkr.pocket_advance` passing result cannot be recorded. Other
+registered profiles, workflows, and reportless `invalid`/`not_observed` audit
+candidates retain their existing recording rules.
+
+Existing evidence bundles with checksum- and identity-valid version-1 reports
+remain byte-for-byte unchanged, but they are excluded from current-state
+projection. Direct recording rejects version-1 reports. Duplicate run IDs
+across historical and current records invalidate the inventory.
 
 Qualification-run candidates created when a session starts are provisional and
 remain non-promotable until terminal finalization writes a supported

@@ -9,6 +9,9 @@
  * state, derived support tiers, and the generated qualification matrix.
  * It is pure tooling and never replaces production planner or executor
  * authority. No function in this module performs a physical-device run.
+ * The standalone CLI has no JSON Schema package dependency. The adjacent
+ * execution-report module reads the checked-in schema, while this tool checks
+ * the record and cross-record bindings that the schema cannot express.
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -28,6 +31,8 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { validateExecutionReportForInventory } from "./device-qualification-execution-report.mjs";
+export { validateExecutionReport } from "./device-qualification-execution-report.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const QUALIFICATION_ROOT = path.join(
@@ -35,7 +40,6 @@ const QUALIFICATION_ROOT = path.join(
   "docs/testing/device-qualification",
 );
 const EVIDENCE_ROOT = path.join(QUALIFICATION_ROOT, "evidence");
-
 const WORKFLOW_FIELDS = [
   "id",
   "version",
@@ -133,6 +137,7 @@ const MATERIAL_EXACT_FILES = new Set([
   "apps/emuchef-app/src-tauri/Cargo.toml",
   "apps/emuchef-app/src-tauri/Cargo.lock",
   "apps/emuchef-app/src-tauri/tauri.conf.json",
+  "docs/testing/device-qualification/execution-report.schema.json",
 ]);
 const MATERIAL_EXCLUDED = [
   "apps/emuchef-app/src/DeviceQualificationOverlay.tsx",
@@ -247,30 +252,6 @@ const EXECUTION_REPORT_ARTIFACT = {
   kind: "production_execution_report",
   path: "execution-report.json",
 };
-const RESTRICTED_QUALIFICATION_FIELDS = [
-  "claim",
-  "attemptId",
-  "executionMode",
-  "strategy",
-  "restriction",
-  "observedRootState",
-  "effectiveCapabilities",
-  "buildIdentity",
-  "deviceTargetId",
-  "deviceProfileId",
-  "reviewedPlanId",
-  "reviewedPlanDigest",
-  "requiredOperationIds",
-  "operationOutcomes",
-];
-const RESTRICTED_OPERATION_OUTCOME_FIELDS = ["operationId", "outcome"];
-const RESTRICTED_OPERATION_OUTCOMES = new Set([
-  "executed",
-  "skipped",
-  "blocked",
-  "failed",
-  "cancelled",
-]);
 const CANDIDATE_ENVELOPE_FIELDS = [
   "candidateHandle",
   "kind",
@@ -334,8 +315,14 @@ function assertStringArray(value, label) {
 }
 
 function assertPositiveInteger(value, label) {
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     fail(`${label} must be a positive integer`);
+  }
+}
+
+function assertNonNegativeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    fail(`${label} must be a non-negative integer`);
   }
 }
 
@@ -1150,105 +1137,91 @@ export function validateEvidenceRecord(record, context) {
   return true;
 }
 
-// A qualification object marks a restricted claim.
-// Validate its bindings after the report hash matches.
-// Reports without this object keep the historical validation path.
-function validateRestrictedQualificationReport(reportBytes, record, workflow) {
-  let report;
-  try {
-    report = JSON.parse(reportBytes.toString("utf8"));
-  } catch {
-    return;
-  }
+function validateCanonicalExecutionReportBinding(report, record) {
   if (
-    report === null ||
-    typeof report !== "object" ||
-    Array.isArray(report) ||
-    !Object.hasOwn(report, "qualification")
+    typeof report.plan.planId !== "string" ||
+    typeof report.plan.planDigest !== "string" ||
+    !SHA256_PATTERN.test(report.plan.planDigest)
   ) {
-    return;
+    fail("canonical execution report requires plan identity");
   }
 
-  assertObject(report.qualification, "execution report qualification");
-  const qualification = report.qualification;
-  assertExactKeys(
-    qualification,
-    RESTRICTED_QUALIFICATION_FIELDS,
-    "execution report qualification",
-  );
+  if (record.runValidity !== "valid") return;
+
   if (
-    report.schema !== "emuchef.execution-report" ||
-    report.schemaVersion !== 1
+    report.execution.simulated !== false ||
+    report.execution.verificationScope !== "real_device"
   ) {
-    fail("restricted qualification requires execution report schema version 1");
+    fail(
+      "valid canonical execution report requires simulated=false and real_device verification",
+    );
   }
-  if (qualification.claim !== "restricted_unprivileged") {
-    fail("execution report qualification claim is not restricted_unprivileged");
+
+  const status = report.execution.status;
+  const observationOutcome =
+    status === "succeeded" || status === "succeeded_with_warnings"
+      ? "passed"
+      : "failed";
+  const executionReportObservation = record.automatedObservations.find(
+    (observation) => observation.id === EXECUTION_REPORT_ARTIFACT.id,
+  );
+  if (executionReportObservation?.outcome !== observationOutcome) {
+    fail("execution report status does not match its recorded observation");
   }
-  assertString(qualification.attemptId, "restricted qualification attemptId");
-  if (qualification.executionMode !== "real") {
-    fail("restricted qualification executionMode must be real");
+
+  const expectedQualificationOutcome =
+    status === "failed" ||
+    status === "cancelled" ||
+    record.targetWideFailure !== null ||
+    record.humanCheckpoints.some((checkpoint) => checkpoint.outcome === "fail")
+      ? "failed"
+      : "passed";
+  if (record.qualificationOutcome !== expectedQualificationOutcome) {
+    fail("execution report status and checkpoints do not match qualificationOutcome");
   }
-  assertObject(report.execution, "restricted qualification execution");
+}
+
+function validateScopedQualificationVeto(record, workflow) {
+  if (
+    record.runValidity === "valid" &&
+    record.qualificationOutcome === "passed" &&
+    workflow.id === "rom-library-sync" &&
+    record.deviceTarget.profileId.value === "konkr.pocket_advance"
+  ) {
+    fail("canonical rom-library-sync evidence is not promotable for konkr.pocket_advance");
+  }
+}
+
+function validateRestrictedQualificationReport(report, record, workflow) {
+  if (!Object.hasOwn(report, "qualification")) return;
+
+  const qualification = report.qualification;
   if (report.execution.simulated !== false) {
     fail("restricted qualification execution must not be simulated");
-  }
-  if (!Array.isArray(report.execution.recipes)) {
-    fail("restricted qualification execution must include Recipe results");
-  }
-  if (record.runValidity === "valid") {
-    const status = report.execution.status;
-    let observationOutcome;
-    if (status === "succeeded" || status === "succeeded_with_warnings") {
-      observationOutcome = "passed";
-    } else if (status === "failed") {
-      observationOutcome = "failed";
-    } else {
-      fail("valid restricted execution status is unsupported");
-    }
-    const executionReportObservation = record.automatedObservations.find(
-      (observation) => observation.id === EXECUTION_REPORT_ARTIFACT.id,
-    );
-    if (executionReportObservation?.outcome !== observationOutcome) {
-      fail("restricted execution status does not match its execution-report observation");
-    }
-    const expectedQualificationOutcome =
-      status === "failed" ||
-      record.humanCheckpoints.some((checkpoint) => checkpoint.outcome === "fail")
-        ? "failed"
-        : "passed";
-    if (record.qualificationOutcome !== expectedQualificationOutcome) {
-      fail("restricted execution status and checkpoints do not match qualificationOutcome");
-    }
-  }
-  if (qualification.strategy !== "adb_unprivileged") {
-    fail("restricted qualification strategy must be adb_unprivileged");
-  }
-  if (qualification.restriction !== "privileged_execution_disabled") {
-    fail("restricted qualification restriction label is invalid");
   }
   if (qualification.observedRootState !== record.deviceTarget.rootState.value) {
     fail("restricted qualification observedRootState does not match the evidence target");
   }
-  if (!Array.isArray(qualification.effectiveCapabilities)) {
-    fail("restricted qualification effectiveCapabilities must be an array");
-  }
-  const capabilities = new Set();
-  for (const capability of qualification.effectiveCapabilities) {
-    assertString(capability, "restricted qualification capability");
-    if (capabilities.has(capability)) {
-      fail(`duplicate restricted qualification capability ${capability}`);
-    }
-    capabilities.add(capability);
-  }
+  const capabilities = new Set(qualification.effectiveCapabilities);
   if (capabilities.has("root_shell") || capabilities.has("app_data_write")) {
     fail("restricted qualification includes a privileged effective capability");
   }
 
-  validateBuildIdentity(
-    qualification.buildIdentity,
-    "restricted qualification buildIdentity",
-  );
+  const runtimeRestriction = report.runtime.executionRestriction;
+  if (
+    report.runtime.status !== "ready" ||
+    runtimeRestriction === undefined ||
+    runtimeRestriction.enabled !== true ||
+    runtimeRestriction.strategy !== "adb_shell" ||
+    runtimeRestriction.rootShell !== false ||
+    runtimeRestriction.appDataWrite !== false
+  ) {
+    fail("restricted qualification requires the verified runtime restriction");
+  }
+
+  if (!equalJson(runtimeRestriction.buildIdentity, qualification.buildIdentity)) {
+    fail("restricted qualification runtime build identity does not match its claim");
+  }
   if (!qualification.buildIdentity.realExecutionEnabled) {
     fail("restricted qualification build must enable real execution");
   }
@@ -1260,53 +1233,25 @@ function validateRestrictedQualificationReport(reportBytes, record, workflow) {
       fail(`restricted qualification buildIdentity ${field} does not match the evidence record`);
     }
   }
-  assertObject(report.app, "restricted qualification app");
-  assertString(report.app.version, "execution report app version");
   if (report.app.version !== qualification.buildIdentity.appVersion) {
     fail("restricted qualification app version does not match its build identity");
   }
-  assertString(qualification.deviceTargetId, "restricted qualification deviceTargetId");
   if (qualification.deviceTargetId !== record.deviceTarget.id) {
     fail("restricted qualification deviceTargetId does not match the evidence record");
   }
-  assertString(
-    qualification.deviceProfileId,
-    "restricted qualification deviceProfileId",
-  );
   if (qualification.deviceProfileId !== record.fingerprint.deviceProfile) {
     fail("restricted qualification deviceProfileId does not match the evidence record");
   }
 
-  assertObject(report.plan, "restricted qualification plan");
-  assertString(report.plan.planId, "execution report planId");
-  assertString(report.plan.planDigest, "execution report planDigest");
-  if (!SHA256_PATTERN.test(report.plan.planDigest)) {
-    fail("execution report planDigest must be a SHA-256 digest");
-  }
-  assertString(qualification.reviewedPlanId, "restricted qualification reviewedPlanId");
   if (qualification.reviewedPlanId !== report.plan.planId) {
     fail("restricted qualification reviewedPlanId does not match the report plan");
   }
-  if (
-    typeof qualification.reviewedPlanDigest !== "string" ||
-    !SHA256_PATTERN.test(qualification.reviewedPlanDigest) ||
-    qualification.reviewedPlanDigest !== report.plan.planDigest
-  ) {
+  if (qualification.reviewedPlanDigest !== report.plan.planDigest) {
     fail("restricted qualification reviewedPlanDigest does not match the report plan");
   }
 
   const requiredOperationIds = qualification.requiredOperationIds;
-  if (!Array.isArray(requiredOperationIds) || requiredOperationIds.length === 0) {
-    fail("restricted qualification requiredOperationIds must be a non-empty array");
-  }
-  const requiredIds = new Set();
-  for (const operationId of requiredOperationIds) {
-    assertString(operationId, "restricted qualification required operation id");
-    if (requiredIds.has(operationId)) {
-      fail(`duplicate restricted qualification required operation ${operationId}`);
-    }
-    requiredIds.add(operationId);
-  }
+  const requiredIds = new Set(requiredOperationIds);
   if (
     JSON.stringify(requiredOperationIds) !==
     JSON.stringify(workflow.productionRecipes)
@@ -1315,25 +1260,13 @@ function validateRestrictedQualificationReport(reportBytes, record, workflow) {
       "restricted qualification requiredOperationIds do not match the workflow productionRecipes",
     );
   }
-  if (!Array.isArray(qualification.operationOutcomes)) {
-    fail("restricted qualification operationOutcomes must be an array");
-  }
   const outcomeIds = new Set();
   for (const outcome of qualification.operationOutcomes) {
-    assertExactKeys(
-      outcome,
-      RESTRICTED_OPERATION_OUTCOME_FIELDS,
-      "restricted qualification operation outcome",
-    );
-    assertString(outcome.operationId, "restricted qualification operationId");
     if (!requiredIds.has(outcome.operationId)) {
       fail(`unexpected restricted qualification operation ${outcome.operationId}`);
     }
     if (outcomeIds.has(outcome.operationId)) {
       fail(`duplicate restricted qualification outcome ${outcome.operationId}`);
-    }
-    if (!RESTRICTED_OPERATION_OUTCOMES.has(outcome.outcome)) {
-      fail(`restricted qualification operation outcome ${outcome.outcome} is not terminal`);
     }
     if (outcome.outcome === "executed") {
       const matchingRecipes = report.execution.recipes.filter(
@@ -1370,7 +1303,11 @@ function validateRestrictedQualificationReport(reportBytes, record, workflow) {
   }
 }
 
-export function validateEvidenceBundle(bundle, context) {
+function validateEvidenceBundleInternal(
+  bundle,
+  context,
+  { allowHistoricalV1 = false } = {},
+) {
   assertObject(bundle, "evidence bundle");
   const { record, reportBytes } = bundle;
   validateEvidenceRecord(record, context);
@@ -1401,7 +1338,18 @@ export function validateEvidenceBundle(bundle, context) {
   const workflow = context.workflowCatalog.workflows.find(
     (candidate) => candidate.id === record.workflowId,
   );
-  validateRestrictedQualificationReport(reportBytes, record, workflow);
+  const report = validateExecutionReportForInventory(reportBytes, {
+    allowHistoricalV1,
+  });
+  if (report === null) return false;
+  validateScopedQualificationVeto(record, workflow);
+  validateCanonicalExecutionReportBinding(report, record);
+  validateRestrictedQualificationReport(report, record, workflow);
+  return true;
+}
+
+export function validateEvidenceBundle(bundle, context) {
+  validateEvidenceBundleInternal(bundle, context);
   return true;
 }
 
@@ -2162,15 +2110,27 @@ function loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode }) {
   return bundles;
 }
 
-function loadValidatedEvidenceRecords(
+/**
+ * Return validated v2 records for the current eligibility projection.
+ *
+ * Canonical v1 reports remain historical after their record identity and
+ * artifact digest pass validation.
+ */
+export function loadValidatedEvidenceRecords(
   evidenceDir,
   { fixtureMode, workflowCatalog, targets },
 ) {
   const bundles = loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode });
+  const records = [];
   for (const bundle of bundles) {
-    validateEvidenceBundle(bundle, { workflowCatalog, targets });
+    const isCurrent = validateEvidenceBundleInternal(
+      bundle,
+      { workflowCatalog, targets },
+      { allowHistoricalV1: fixtureMode === false },
+    );
+    if (isCurrent) records.push(bundle.record);
   }
-  return bundles.map((bundle) => bundle.record);
+  return records;
 }
 
 export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
