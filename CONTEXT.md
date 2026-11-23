@@ -3295,7 +3295,19 @@ destination sentinel must be absent from S and unchanged in B and A.
 Rust preserves the supplied bytes and binds their length and digest in the
 candidate envelope. Rust and Node independently validate the artifact before
 promotion. The digest protects stored bytes. Capture authenticity remains
-unverified. The production RetroArch pin manifest has no
+unverified.
+
+Candidate schema version 1 is used for target-registration candidates and
+qualification runs without a session binding. Version 2 is reserved for
+qualification runs with a `sessionId`. Rust omits `romMergeEvidence` when no
+artifact is attached. Node treats a missing field or legacy `null` as absent
+and rejects an evidence file that has no candidate metadata.
+
+Historical bundles retain the APK identity recorded at qualification time. A
+later repository pin change does not block reading an archived bundle, but only
+evidence that matches the current pin enters the validated set for current
+qualification. New promotions also require the current pin. The production
+RetroArch pin manifest has no
 approved fixed package source, version, or digest, so KONKR ROM Merge promotion
 remains blocked until a separately reviewed pin is available. A passing copy
 workflow keeps KONKR support at `limited` until separate physical evidence

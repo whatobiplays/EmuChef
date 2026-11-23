@@ -128,7 +128,7 @@ struct CandidateFileEnvelope {
     build: Option<QualificationBuildIdentity>,
     payload: Value,
     report: Option<QualificationReportMetadata>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     rom_merge_evidence: Option<RomMergeEvidenceMetadata>,
 }
 
@@ -700,7 +700,7 @@ impl QualificationRepository {
                 Ok(()) => {
                     candidate.insert(
                         "candidateSchemaVersion".to_string(),
-                        Value::from(CANDIDATE_SCHEMA_VERSION),
+                        Value::from(candidate_schema_version(&kind, &candidate_value)),
                     );
                     candidate.insert("candidateId".to_string(), Value::from(handle.clone()));
                     candidate.insert("kind".to_string(), Value::from(kind.as_str()));
@@ -999,9 +999,10 @@ impl QualificationRepository {
             .as_object()
             .cloned()
             .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
+        let candidate_value = Value::Object(candidate.clone());
         candidate.insert(
             "candidateSchemaVersion".to_string(),
-            Value::from(CANDIDATE_SCHEMA_VERSION),
+            Value::from(candidate_schema_version(&kind, &candidate_value)),
         );
         candidate.insert("candidateId".to_string(), Value::from(candidate_handle));
         candidate.insert("kind".to_string(), Value::from(kind.as_str()));
@@ -1764,6 +1765,16 @@ fn candidate_build_identity(
         Some(build) => serde_json::from_value(build.clone())
             .map(Some)
             .map_err(|_| "qualification candidate build identity is invalid".to_string()),
+    }
+}
+
+fn candidate_schema_version(kind: &CandidateKind, candidate: &Value) -> u64 {
+    match kind {
+        CandidateKind::TargetRegistration => 1,
+        CandidateKind::QualificationRun if candidate.get("sessionId").is_some() => {
+            CANDIDATE_SCHEMA_VERSION
+        }
+        CandidateKind::QualificationRun => 1,
     }
 }
 
@@ -3367,6 +3378,134 @@ mod tests {
             Box::new(runner),
             build_identity(),
         )
+    }
+
+    #[test]
+    fn candidate_schema_versions_follow_kind_and_session_binding() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+
+        let target_handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("target candidate should be stored");
+        let target_envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&target_handle)
+                    .join(CANDIDATE_FILE),
+            )
+            .expect("target candidate should be readable"),
+        )
+        .expect("target candidate should be valid JSON");
+        assert_eq!(target_envelope["payload"]["candidateSchemaVersion"], 1);
+        assert!(target_envelope.get("romMergeEvidence").is_none());
+        repository
+            .load_candidate(&target_handle)
+            .expect("Rust should continue loading v1 target candidates");
+
+        let ordinary_handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("ordinary run candidate should be stored");
+        let ordinary_envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&ordinary_handle)
+                    .join(CANDIDATE_FILE),
+            )
+            .expect("ordinary run candidate should be readable"),
+        )
+        .expect("ordinary run candidate should be valid JSON");
+        assert_eq!(ordinary_envelope["payload"]["candidateSchemaVersion"], 1);
+        assert!(ordinary_envelope.get("romMergeEvidence").is_none());
+        repository
+            .load_candidate(&ordinary_handle)
+            .expect("Rust should continue loading v1 ordinary run candidates");
+
+        let session_handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "build": build_identity_json(),
+                    "sessionId": format!("qualification-session-{}", "a".repeat(32)),
+                }),
+                None,
+            )
+            .expect("session-bound run candidate should be stored");
+        let session_envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&session_handle)
+                    .join(CANDIDATE_FILE),
+            )
+            .expect("session candidate should be readable"),
+        )
+        .expect("session candidate should be valid JSON");
+        assert_eq!(session_envelope["payload"]["candidateSchemaVersion"], 2);
+    }
+
+    #[test]
+    #[ignore = "invoked by the Node candidate interoperability regression"]
+    fn rust_candidate_interop_fixture() {
+        let input_path = std::env::var_os("EMUCHEF_CANDIDATE_INTEROP_INPUT")
+            .expect("Node interoperability test must provide input");
+        let output_path = std::env::var_os("EMUCHEF_CANDIDATE_INTEROP_OUTPUT")
+            .expect("Node interoperability test must provide output");
+        let input: Value = serde_json::from_slice(
+            &std::fs::read(input_path).expect("interop input should be readable"),
+        )
+        .expect("interop input should be valid JSON");
+        let entries = input
+            .as_array()
+            .expect("interop input should contain candidate entries");
+        let mut handles = serde_json::Map::new();
+
+        for entry in entries {
+            let key = entry["key"]
+                .as_str()
+                .expect("interop entry should have a key");
+            let repo_root = PathBuf::from(
+                entry["repoRoot"]
+                    .as_str()
+                    .expect("interop entry should have a repository root"),
+            );
+            let kind = match entry["kind"].as_str() {
+                Some("target_registration") => CandidateKind::TargetRegistration,
+                Some("qualification_run") => CandidateKind::QualificationRun,
+                _ => panic!("interop entry candidate kind is invalid"),
+            };
+            let report_bytes = entry["reportPath"]
+                .as_str()
+                .map(std::fs::read)
+                .transpose()
+                .expect("interop report should be readable");
+            let repository = QualificationRepository::new_for_test_with_embedded_build(
+                repo_root,
+                Box::new(FakeQualificationToolRunner::default()),
+                build_identity(),
+            );
+            let handle = repository
+                .create_candidate(kind, &entry["payload"], report_bytes.as_deref())
+                .expect("Rust should serialize the interop candidate");
+            handles.insert(key.to_string(), Value::String(handle));
+        }
+
+        std::fs::write(
+            output_path,
+            serde_json::to_vec(&Value::Object(handles)).expect("interop result should serialize"),
+        )
+        .expect("interop result should be writable");
     }
 
     fn write_registered_targets_for_test(temp: &TempDir, targets: &[(&str, &str)]) {

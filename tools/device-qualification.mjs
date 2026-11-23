@@ -1556,6 +1556,7 @@ function validateRomMergeEvidenceBytes({
   context,
   candidate,
   repoRoot,
+  allowHistoricalPin = false,
 }) {
   if (!(bytes instanceof Buffer)) {
     fail("ROM Merge evidence artifact requires retained rom-merge-evidence.json bytes");
@@ -1743,15 +1744,37 @@ function validateRomMergeEvidenceBytes({
     ],
     "ROM Merge RetroArch evidence",
   );
-  const pin = loadRomMergeApkPin(repoRoot);
+  const recordedPin = evidence.retroArch;
   if (
-    evidence.retroArch.packageId !== pin.packageId ||
-    evidence.retroArch.pinnedSource !== pin.source ||
-    evidence.retroArch.pinnedVersion !== pin.version ||
-    evidence.retroArch.installedVersion !== pin.version ||
-    evidence.retroArch.installedApkSha256 !== pin.sha256 ||
-    evidence.retroArch.pinnedArtifactSha256 !== pin.sha256
+    recordedPin.packageId !== "com.retroarch.aarch64" ||
+    typeof recordedPin.pinnedSource !== "string" ||
+    !recordedPin.pinnedSource.startsWith("https://") ||
+    typeof recordedPin.pinnedVersion !== "string" ||
+    recordedPin.pinnedVersion.length === 0 ||
+    typeof recordedPin.installedVersion !== "string" ||
+    recordedPin.installedVersion !== recordedPin.pinnedVersion ||
+    typeof recordedPin.pinnedArtifactSha256 !== "string" ||
+    !SHA256_PATTERN.test(recordedPin.pinnedArtifactSha256) ||
+    typeof recordedPin.installedApkSha256 !== "string" ||
+    recordedPin.installedApkSha256 !== recordedPin.pinnedArtifactSha256
   ) {
+    fail("ROM Merge RetroArch evidence has an inconsistent recorded APK identity");
+  }
+  let matchesCurrentPin = false;
+  try {
+    const pin = loadRomMergeApkPin(repoRoot);
+    matchesCurrentPin =
+      evidence.retroArch.packageId === pin.packageId &&
+      evidence.retroArch.pinnedSource === pin.source &&
+      evidence.retroArch.pinnedVersion === pin.version &&
+      evidence.retroArch.installedVersion === pin.version &&
+      evidence.retroArch.installedApkSha256 === pin.sha256 &&
+      evidence.retroArch.pinnedArtifactSha256 === pin.sha256;
+  } catch (error) {
+    if (!allowHistoricalPin) throw error;
+    // A current pin that cannot be loaded affects eligibility, not archive integrity.
+  }
+  if (!matchesCurrentPin && !allowHistoricalPin) {
     fail("ROM Merge RetroArch evidence does not match the repository-approved APK pin");
   }
 
@@ -1760,13 +1783,18 @@ function validateRomMergeEvidenceBytes({
       fail(`ROM Merge evidence ${field} must be false`);
     }
   }
-  return true;
+  return matchesCurrentPin;
 }
 
 function validateEvidenceBundleInternal(
   bundle,
   context,
-  { allowHistoricalV1 = false, repoRoot = REPO_ROOT, candidate } = {},
+  {
+    allowHistoricalV1 = false,
+    allowHistoricalRomMergePin = false,
+    repoRoot = REPO_ROOT,
+    candidate,
+  } = {},
 ) {
   assertObject(bundle, "evidence bundle");
   const {
@@ -1828,8 +1856,9 @@ function validateEvidenceBundleInternal(
   validateScopedQualificationVeto(record, workflow);
   validateCanonicalExecutionReportBinding(report, record);
   validateRestrictedQualificationReport(report, record, workflow);
+  let matchesCurrentRomMergePin = true;
   if (romMergeEvidenceArtifact !== null) {
-    validateRomMergeEvidenceBytes({
+    matchesCurrentRomMergePin = validateRomMergeEvidenceBytes({
       bytes: romMergeEvidenceBytes,
       artifact: romMergeEvidenceArtifact,
       reportBytes,
@@ -1839,13 +1868,26 @@ function validateEvidenceBundleInternal(
       context,
       candidate: candidate ?? bundle.candidate,
       repoRoot,
+      allowHistoricalPin: allowHistoricalRomMergePin,
     });
   }
-  return true;
+  return matchesCurrentRomMergePin;
 }
 
-export function validateEvidenceBundle(bundle, context, options = {}) {
-  validateEvidenceBundleInternal(bundle, context, options);
+/**
+ * Validate evidence for current qualification use against the approved APK pin.
+ * Historical archive inspection follows a separate path that preserves old records.
+ */
+export function validateEvidenceBundle(
+  bundle,
+  context,
+  { allowHistoricalV1 = false, repoRoot = REPO_ROOT, candidate } = {},
+) {
+  validateEvidenceBundleInternal(bundle, context, {
+    allowHistoricalV1,
+    repoRoot,
+    candidate,
+  });
   return true;
 }
 
@@ -2389,10 +2431,8 @@ function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
     "ROM Merge evidence",
     { required: false },
   );
-  const romMergeEvidenceDeclared = Object.hasOwn(envelope, "romMergeEvidence");
-  const romMergeEvidenceMetadata = romMergeEvidenceDeclared
-    ? envelope.romMergeEvidence
-    : null;
+  const romMergeEvidenceMetadata = envelope.romMergeEvidence ?? null;
+  const romMergeEvidenceDeclared = romMergeEvidenceMetadata !== null;
   let romMergeEvidenceBytes = null;
   if (!romMergeEvidenceDeclared) {
     if (romMergeEvidenceExists) {
@@ -2759,13 +2799,21 @@ export function loadValidatedEvidenceRecords(
     const isCurrent = validateEvidenceBundleInternal(
       bundle,
       { workflowCatalog, targets },
-      { allowHistoricalV1: fixtureMode === false, repoRoot },
+      {
+        allowHistoricalV1: fixtureMode === false,
+        allowHistoricalRomMergePin: fixtureMode === false,
+        repoRoot,
+      },
     );
     if (isCurrent) records.push(bundle.record);
   }
   return records;
 }
 
+/**
+ * Load archived evidence for inspection, including records bound to an older APK pin.
+ * Use loadValidatedEvidenceRecords to select records eligible for current qualification.
+ */
 export function loadEvidenceDirectory(
   evidenceDir,
   {
@@ -2797,6 +2845,7 @@ export function loadEvidenceDirectory(
   for (const bundle of bundles) {
     validateEvidenceBundleInternal(bundle, context, {
       allowHistoricalV1: fixtureMode === false,
+      allowHistoricalRomMergePin: fixtureMode === false,
       repoRoot,
     });
   }

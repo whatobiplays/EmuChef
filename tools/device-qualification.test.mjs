@@ -1126,8 +1126,9 @@ function candidateRomMergeArtifacts(
   repoRoot,
   candidateId,
   pin = ROM_MERGE_TEST_PIN,
+  { configureRepo = true } = {},
 ) {
-  configureKonkrQualificationRepo(repoRoot, pin);
+  if (configureRepo) configureKonkrQualificationRepo(repoRoot, pin);
   const candidate = candidateForKonkrRepo(repoRoot, candidateId);
   const report = romMergeExecutionReport(candidate);
   const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
@@ -1139,7 +1140,7 @@ function candidateRomMergeArtifacts(
       sha256: createHash("sha256").update(reportBytes).digest("hex"),
     },
   ];
-  const evidence = romMergeEvidenceFor(candidate, report, reportBytes);
+  const evidence = romMergeEvidenceFor(candidate, report, reportBytes, pin);
   return {
     candidate,
     report,
@@ -2831,6 +2832,169 @@ test("a retroarch run cannot validate as valid when its required human checkpoin
       ),
     /missing required human checkpoint/i,
   );
+});
+
+test("Rust-produced target and report-only candidates pass Node recorders", () => {
+  const targetRepo = createTempQualificationRepo();
+  const runRepo = createTempQualificationRepo();
+  const interopRoot = mkdtempSync(path.join(tmpdir(), "candidate-interop-"));
+  try {
+    const targetCandidate = targetRegistrationCandidateForRepo(targetRepo);
+    const runCandidate = runCandidateForRepo(runRepo);
+    const reportPath = path.join(interopRoot, "execution-report.json");
+    const inputPath = path.join(interopRoot, "input.json");
+    const outputPath = path.join(interopRoot, "output.json");
+    writeFileSync(reportPath, REPORT_BYTES);
+    writeFileSync(
+      inputPath,
+      JSON.stringify([
+        {
+          key: "targetRegistration",
+          kind: "target_registration",
+          repoRoot: targetRepo,
+          payload: targetCandidate,
+        },
+        {
+          key: "reportOnlyRun",
+          kind: "qualification_run",
+          repoRoot: runRepo,
+          payload: runCandidate,
+          reportPath,
+        },
+      ]),
+    );
+
+    execFileSync(
+      process.env.CARGO ?? "cargo",
+      [
+        "test",
+        "--manifest-path",
+        path.join(REPO_ROOT, "apps/emuchef-app/src-tauri/Cargo.toml"),
+        "qualification_repository::tests::rust_candidate_interop_fixture",
+        "--",
+        "--ignored",
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          EMUCHEF_CANDIDATE_INTEROP_INPUT: inputPath,
+          EMUCHEF_CANDIDATE_INTEROP_OUTPUT: outputPath,
+        },
+        stdio: "pipe",
+      },
+    );
+
+    const handles = JSON.parse(readFileSync(outputPath, "utf8"));
+    const recorderFailures = [];
+    const targetEnvelopePath = path.join(
+      targetRepo,
+      ".emuchef_runtime/qualification-candidates",
+      handles.targetRegistration,
+      "candidate.json",
+    );
+    const targetEnvelope = JSON.parse(readFileSync(targetEnvelopePath, "utf8"));
+    let registeredTarget;
+    try {
+      registeredTarget = registerQualificationTargetCandidate(
+        handles.targetRegistration,
+        { repoRoot: targetRepo },
+      );
+    } catch (error) {
+      recorderFailures.push(`target registration: ${error.message}`);
+    }
+
+    const runEnvelopePath = path.join(
+      runRepo,
+      ".emuchef_runtime/qualification-candidates",
+      handles.reportOnlyRun,
+      "candidate.json",
+    );
+    const runEnvelope = JSON.parse(readFileSync(runEnvelopePath, "utf8"));
+    let record;
+    try {
+      record = recordQualificationRunCandidate(handles.reportOnlyRun, {
+        repoRoot: runRepo,
+      });
+    } catch (error) {
+      recorderFailures.push(`report-only recording: ${error.message}`);
+    }
+    assert.deepEqual(recorderFailures, []);
+    assert.equal(targetEnvelope.payload.candidateSchemaVersion, 1);
+    assert.equal(Object.hasOwn(targetEnvelope, "romMergeEvidence"), false);
+    assert.equal(runEnvelope.payload.candidateSchemaVersion, 1);
+    assert.equal(Object.hasOwn(runEnvelope, "romMergeEvidence"), false);
+    assert.equal(registeredTarget.id, deviceTargetId(targetCandidate.target));
+    assert.equal(record.qualificationOutcome, "passed");
+    assert.deepEqual(
+      record.artifacts.map(({ id }) => id),
+      ["execution-report"],
+    );
+  } finally {
+    removeTempTree(targetRepo);
+    removeTempTree(runRepo);
+    removeTempTree(interopRoot);
+  }
+});
+
+test("report-only recording accepts a legacy null ROM Merge metadata field", () => {
+  const repoRoot = createTempQualificationRepo();
+  const candidate = runCandidateForRepo(repoRoot, {
+    candidateId: "qualification-candidate-11112222333344445555666677778888",
+  });
+  try {
+    writeCandidateFixture(repoRoot, candidate, REPORT_BYTES);
+    const candidatePath = path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+      candidate.candidateId,
+      "candidate.json",
+    );
+    const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+    envelope.romMergeEvidence = null;
+    writeFileSync(candidatePath, `${JSON.stringify(envelope, null, 2)}\n`);
+
+    const record = recordQualificationRunCandidate(candidate.candidateId, {
+      repoRoot,
+    });
+    assert.deepEqual(
+      record.artifacts.map(({ id }) => id),
+      ["execution-report"],
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("a null ROM Merge metadata field does not authorize an unreferenced artifact file", () => {
+  const repoRoot = createTempQualificationRepo();
+  const candidate = runCandidateForRepo(repoRoot, {
+    candidateId: "qualification-candidate-9999aaaabbbbccccddddeeeeffff0000",
+  });
+  try {
+    writeCandidateFixture(repoRoot, candidate, REPORT_BYTES);
+    const candidateDirectory = path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+      candidate.candidateId,
+    );
+    const candidatePath = path.join(candidateDirectory, "candidate.json");
+    const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+    envelope.romMergeEvidence = null;
+    writeFileSync(candidatePath, `${JSON.stringify(envelope, null, 2)}\n`);
+    writeFileSync(
+      path.join(candidateDirectory, ROM_MERGE_EVIDENCE_PATH),
+      "unreferenced evidence\n",
+    );
+
+    assert.throws(
+      () =>
+        recordQualificationRunCandidate(candidate.candidateId, { repoRoot }),
+      /ROM Merge evidence file is not declared by candidate metadata/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
 });
 
 test("recording the same target or run twice rejects the second write without mutating canonical bytes", () => {
@@ -4700,6 +4864,149 @@ test("KONKR ROM Merge candidate bytes reach the canonical bundle unchanged", () 
       }).map((item) => item.runId),
       [record.runId],
     );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("archived ROM Merge evidence stays readable but stops qualifying after an APK pin change", () => {
+  const repoRoot = createTempQualificationRepo();
+  const evidenceRoot = path.join(
+    repoRoot,
+    "docs/testing/device-qualification/evidence",
+  );
+  const pinA = ROM_MERGE_TEST_PIN;
+  const pinB = {
+    schemaVersion: 1,
+    retroarch: {
+      ...ROM_MERGE_TEST_PIN.retroarch,
+      source: "https://example.invalid/retroarch-b.apk",
+      version: "1.20.0",
+      sha256: "d".repeat(64),
+    },
+  };
+  try {
+    const candidateAId =
+      "qualification-candidate-aaaaaaaa11111111bbbbbbbb22222222";
+    const candidateA = candidateRomMergeArtifacts(
+      repoRoot,
+      candidateAId,
+      pinA,
+    );
+    writeCandidateFixture(
+      repoRoot,
+      candidateA.candidate,
+      candidateA.reportBytes,
+      candidateA.romMergeEvidenceBytes,
+    );
+    const recordA = recordQualificationRunCandidate(candidateAId, { repoRoot });
+    const historicalBundlePath = path.join(evidenceRoot, recordA.runId);
+
+    const pinPath = path.join(repoRoot, ROM_MERGE_PIN_PATH);
+    writeRomMergePin(repoRoot, pinB);
+    commitRepoChanges(repoRoot, "approve the next RetroArch APK pin");
+
+    const historicalBundle = loadEvidenceBundle(historicalBundlePath);
+    assert.ok(historicalBundle.romMergeEvidenceBytes instanceof Buffer);
+    const workflowCatalog = loadWorkflowCatalog(
+      path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"),
+    );
+    const targets = loadDeviceTargets(
+      path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+      { authoredProfilesDir: path.join(repoRoot, "authored/device_profiles") },
+    ).targets;
+    const context = { workflowCatalog, targets };
+    assert.deepEqual(
+      loadEvidenceDirectory(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }).map(({ runId }) => runId),
+      [recordA.runId],
+    );
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }),
+      [],
+    );
+    assert.throws(
+      () =>
+        validateEvidenceBundle(historicalBundle, context, { repoRoot }),
+      /repository-approved APK pin/i,
+    );
+
+    assert.throws(
+      () =>
+        validateEvidenceBundle(historicalBundle, context, {
+          repoRoot,
+          allowHistoricalRomMergePin: true,
+        }),
+      /repository-approved APK pin/i,
+    );
+
+    const candidateBId =
+      "qualification-candidate-cccccccc33333333dddddddd44444444";
+    const candidateB = candidateRomMergeArtifacts(
+      repoRoot,
+      candidateBId,
+      pinB,
+      { configureRepo: false },
+    );
+    writeCandidateFixture(
+      repoRoot,
+      candidateB.candidate,
+      candidateB.reportBytes,
+      candidateB.romMergeEvidenceBytes,
+    );
+    const recordB = recordQualificationRunCandidate(candidateBId, { repoRoot });
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }).map(({ runId }) => runId),
+      [recordB.runId],
+    );
+    assert.ok(existsSync(pinPath));
+
+  const assertHistoricalEvidenceRemainsReadable = () => {
+    assert.deepEqual(
+      loadEvidenceDirectory(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      })
+        .map(({ runId }) => runId)
+        .sort(),
+      [recordA.runId, recordB.runId].sort(),
+    );
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }),
+      [],
+    );
+  };
+
+  writeRomMergePin(repoRoot, { schemaVersion: 1, retroarch: null });
+  commitRepoChanges(repoRoot, "disable current RetroArch APK pin");
+  assertHistoricalEvidenceRemainsReadable();
+
+  rmSync(pinPath);
+  assertHistoricalEvidenceRemainsReadable();
+
+  writeFileSync(pinPath, "{invalid json\n", "utf8");
+  assertHistoricalEvidenceRemainsReadable();
   } finally {
     removeTempTree(repoRoot);
   }
