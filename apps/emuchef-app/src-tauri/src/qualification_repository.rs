@@ -2,9 +2,10 @@
 //!
 //! Candidate files are untrusted handoff data. The checked-in execution-report
 //! schema defines the report structure Rust validates during recovery and
-//! candidate promotion. Rust also checks terminal status and candidate-to-report
-//! identity before trusting a retained record. Node owns canonical evidence
-//! semantics, digests, and repository state.
+//! candidate promotion. Rust checks terminal status, candidate-to-report
+//! identity, and ROM Merge artifact bindings before exposing a candidate as
+//! promotable. Node independently validates canonical evidence semantics and
+//! owns the evidence matrix.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -31,19 +32,31 @@ use crate::qualification_session::{PersistedQualificationSession, QualificationS
 /// Prefix shared by every opaque candidate handle.
 pub(crate) const CANDIDATE_HANDLE_PREFIX: &str = "qualification-candidate-";
 const CANDIDATE_HANDLE_HEX_LENGTH: usize = 32;
-const CANDIDATE_SCHEMA_VERSION: u64 = 1;
+const CANDIDATE_SCHEMA_VERSION: u64 = 2;
 const CANDIDATE_DIRECTORY: &str = ".emuchef_runtime/qualification-candidates";
 const QUALIFICATION_TOOL: &str = "tools/device-qualification.mjs";
 const CANDIDATE_FILE: &str = "candidate.json";
 const CANDIDATE_PUBLICATION_FILE: &str = ".qualification-candidate-publication.json";
 const CANDIDATE_PUBLICATION_STAGING_DIR: &str = ".qualification-candidate-publication";
 const CANDIDATE_PUBLICATION_STAGING_PREFIX: &str = ".qualification-candidate-publication-tmp-";
-const CANDIDATE_PUBLICATION_SCHEMA_VERSION: u64 = 1;
+const CANDIDATE_PUBLICATION_SCHEMA_VERSION: u64 = 2;
 const SESSION_FILE: &str = "session.json";
 const SESSION_POISON_FILE: &str = "session-poison.json";
 const SESSION_AUDIT_ONLY_FILE: &str = "session-audit-only";
 const SESSION_AUDIT_ONLY_STAGING_PREFIX: &str = ".qualification-session-audit-only-tmp-";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
+const ROM_MERGE_EVIDENCE_FILE: &str = "rom-merge-evidence.json";
+const ROM_MERGE_APK_PIN_FILE: &str = "docs/testing/device-qualification/rom-merge-apk-pin.json";
+const MAX_ROM_MERGE_EVIDENCE_BYTES: usize = 1024 * 1024;
+/// Effective capability names the current restricted session can report.
+const ROM_MERGE_UNPRIVILEGED_CAPABILITIES: [&str; 6] = [
+    "adb_available",
+    "apk_install",
+    "shared_storage_write",
+    "app_launch",
+    "shell_command",
+    "package_remove_for_user",
+];
 const SESSION_REPORT_FILE: &str = "session-terminal-report.json";
 const CANDIDATE_STAGING_PREFIX: &str = ".qualification-candidate-tmp-";
 const SESSION_STAGING_PREFIX: &str = ".qualification-session-tmp-";
@@ -83,6 +96,8 @@ pub struct QualificationCandidateSummary {
     pub(crate) run_validity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) qualification_outcome: Option<String>,
+    pub(crate) rom_merge_evidence_required: bool,
+    pub(crate) rom_merge_evidence_attached: bool,
 }
 
 /// Metadata for the one optional report file owned by a candidate directory.
@@ -92,6 +107,15 @@ pub(crate) struct QualificationReportMetadata {
     pub(crate) path: String,
     pub(crate) byte_length: u64,
     pub(crate) sha256: String,
+}
+
+/// Rust-owned metadata for the bounded ROM Merge attachment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RomMergeEvidenceMetadata {
+    path: String,
+    byte_length: u64,
+    sha256: String,
 }
 
 /// The Rust-owned envelope stored around a Node-owned candidate payload.
@@ -104,16 +128,116 @@ struct CandidateFileEnvelope {
     build: Option<QualificationBuildIdentity>,
     payload: Value,
     report: Option<QualificationReportMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rom_merge_evidence: Option<RomMergeEvidenceMetadata>,
 }
 
-/// Durable intent to finish replacing a candidate and its optional report as
-/// one recoverable publication. Staged files remain available until both
-/// final paths have been synced.
+/// Durable intent to publish the candidate, report, and optional ROM Merge
+/// artifact as one recoverable update. Staged files remain until every final
+/// path has been synced.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CandidatePublicationTransaction {
     schema_version: u64,
     report_present: bool,
+    #[serde(default)]
+    rom_merge_evidence_present: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeManifestEntry {
+    relative_path: String,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeSourceSnapshot {
+    source_identity: String,
+    entries: Vec<RomMergeManifestEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeDestinationSnapshot {
+    path: String,
+    setup_location: String,
+    volume_identity: String,
+    before: Vec<RomMergeManifestEntry>,
+    after: Vec<RomMergeManifestEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeTerminalOperation {
+    recipe_id: String,
+    step_id: String,
+    outcome: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeSentinel {
+    relative_path: String,
+    expected_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeRetroArchIdentity {
+    package_id: String,
+    installed_version: String,
+    pinned_source: String,
+    pinned_version: String,
+    installed_apk_sha256: String,
+    pinned_artifact_sha256: String,
+}
+
+/// Strict, candidate-bound evidence for the reviewed ROM Merge operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeEvidence {
+    schema_version: u64,
+    candidate_handle: String,
+    session_id: String,
+    execution_report_sha256: String,
+    device_target_id: String,
+    device_profile_id: String,
+    android_api: u64,
+    firmware_build: String,
+    abi_soc_class: String,
+    connection_type: String,
+    observed_root_state: String,
+    build_identity: QualificationBuildIdentity,
+    reviewed_plan_id: String,
+    reviewed_plan_digest: String,
+    terminal_operation: RomMergeTerminalOperation,
+    copy_policy: String,
+    strategy_digest: String,
+    source_snapshot: RomMergeSourceSnapshot,
+    destination: RomMergeDestinationSnapshot,
+    sentinel: RomMergeSentinel,
+    retro_arch: RomMergeRetroArchIdentity,
+    root_authority_used: bool,
+    oem_compiler_used: bool,
+    oem_stage_used: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeApkPinManifest {
+    schema_version: u64,
+    retroarch: Option<RomMergeApkPin>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RomMergeApkPin {
+    package_id: String,
+    source: String,
+    version: String,
+    sha256: String,
 }
 
 /// A candidate loaded from the fixed runtime directory.
@@ -126,6 +250,7 @@ pub struct StoredQualificationCandidate {
     pub(crate) build: Option<QualificationBuildIdentity>,
     pub(crate) payload: Value,
     pub(crate) report: Option<QualificationReportMetadata>,
+    pub(crate) rom_merge_evidence: Option<RomMergeEvidenceMetadata>,
     pub(crate) promotable: bool,
     pub(crate) non_promotable_reason: Option<String>,
 }
@@ -560,6 +685,7 @@ impl QualificationRepository {
             .cloned()
             .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
         let candidate_value = Value::Object(candidate.clone());
+        let schema_version = candidate_schema_version(&kind, &candidate_value)?;
         let captured_at = optional_string_field(&candidate_value, "capturedAt")?;
         let build = candidate_build_identity(&candidate_value)?;
         let report = report_metadata_for_candidate(&candidate_value, report_bytes)?;
@@ -575,7 +701,7 @@ impl QualificationRepository {
                 Ok(()) => {
                     candidate.insert(
                         "candidateSchemaVersion".to_string(),
-                        Value::from(CANDIDATE_SCHEMA_VERSION),
+                        Value::from(schema_version),
                     );
                     candidate.insert("candidateId".to_string(), Value::from(handle.clone()));
                     candidate.insert("kind".to_string(), Value::from(kind.as_str()));
@@ -587,6 +713,7 @@ impl QualificationRepository {
                         build: build.clone(),
                         payload: Value::Object(candidate.clone()),
                         report: report.clone(),
+                        rom_merge_evidence: None,
                     };
                     let mut bytes = serde_json::to_vec_pretty(&envelope).map_err(|_| {
                         "qualification candidate could not be serialized".to_string()
@@ -873,9 +1000,11 @@ impl QualificationRepository {
             .as_object()
             .cloned()
             .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
+        let candidate_value = Value::Object(candidate.clone());
+        let schema_version = candidate_schema_version(&kind, &candidate_value)?;
         candidate.insert(
             "candidateSchemaVersion".to_string(),
-            Value::from(CANDIDATE_SCHEMA_VERSION),
+            Value::from(schema_version),
         );
         candidate.insert("candidateId".to_string(), Value::from(candidate_handle));
         candidate.insert("kind".to_string(), Value::from(kind.as_str()));
@@ -883,6 +1012,8 @@ impl QualificationRepository {
         let captured_at = optional_string_field(&candidate, "capturedAt")?;
         let build = candidate_build_identity(&candidate)?;
         let report = report_metadata_for_candidate(&candidate, report_bytes)?;
+        let rom_merge_evidence_bytes =
+            load_rom_merge_evidence_bytes(&directory, existing.rom_merge_evidence.as_ref())?;
         let envelope = CandidateFileEnvelope {
             candidate_handle: candidate_handle.to_string(),
             kind,
@@ -890,11 +1021,17 @@ impl QualificationRepository {
             build,
             payload: candidate,
             report,
+            rom_merge_evidence: existing.rom_merge_evidence.clone(),
         };
         let mut bytes = serde_json::to_vec_pretty(&envelope)
             .map_err(|_| "qualification candidate could not be serialized".to_string())?;
         bytes.push(b'\n');
-        stage_candidate_publication(&directory, &bytes, report_bytes)?;
+        stage_candidate_publication(
+            &directory,
+            &bytes,
+            report_bytes,
+            rom_merge_evidence_bytes.as_deref(),
+        )?;
         #[cfg(test)]
         let fail_after_envelope = self
             .fail_after_candidate_envelope_publication
@@ -935,6 +1072,15 @@ impl QualificationRepository {
             envelope.report.as_ref(),
             declared_report_sha256.as_deref(),
         )?;
+        let rom_merge_evidence_bytes =
+            load_rom_merge_evidence_bytes(&directory, envelope.rom_merge_evidence.as_ref())?;
+        let rom_merge_evidence = rom_merge_evidence_bytes
+            .as_deref()
+            .map(|bytes| {
+                serde_json::from_slice::<RomMergeEvidence>(bytes)
+                    .map_err(|_| "ROM Merge evidence is malformed".to_string())
+            })
+            .transpose()?;
         let trusted_target_profile = registered_target_profile_id(
             &self.repo_root,
             envelope
@@ -973,6 +1119,31 @@ impl QualificationRepository {
             &envelope.payload,
             trusted_target_profile.as_deref(),
         );
+        if rom_merge_evidence.is_some() && !passing_konkr_rom_library_sync {
+            return Err(
+                "ROM Merge evidence is only supported for a passing KONKR ROM Merge candidate"
+                    .to_string(),
+            );
+        }
+        let rom_merge_evidence_error = if passing_konkr_rom_library_sync {
+            match (rom_merge_evidence.as_ref(), report_bytes.as_deref()) {
+                (Some(evidence), Some(report_bytes)) => validate_rom_merge_evidence(
+                    &envelope.payload,
+                    report_bytes,
+                    evidence,
+                    &self.repo_root,
+                )
+                .err(),
+                (Some(_), None) => {
+                    Some("ROM Merge evidence requires a retained execution report".to_string())
+                }
+                (None, _) => {
+                    Some("ROM Merge evidence is required for a passing KONKR candidate".to_string())
+                }
+            }
+        } else {
+            None
+        };
         let poisoned = match fs::symlink_metadata(directory.join(SESSION_POISON_FILE)) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => true,
             Ok(_) => return Err("qualification poison marker is not a regular file".to_string()),
@@ -1052,14 +1223,8 @@ impl QualificationRepository {
                         .to_string(),
                 ),
             )
-        } else if passing_konkr_rom_library_sync {
-            (
-                false,
-                Some(
-                    "passing KONKR ROM-library-sync evidence is not recordable under the current policy"
-                        .to_string(),
-                ),
-            )
+        } else if let Some(reason) = rom_merge_evidence_error {
+            (false, Some(reason))
         } else {
             self.candidate_promotion_status(envelope.build.as_ref())
         };
@@ -1071,6 +1236,7 @@ impl QualificationRepository {
             build: envelope.build,
             payload: envelope.payload,
             report: envelope.report,
+            rom_merge_evidence: envelope.rom_merge_evidence,
             promotable,
             non_promotable_reason,
         })
@@ -1179,6 +1345,91 @@ impl QualificationRepository {
             handle,
             CandidateKind::QualificationRun,
         )
+    }
+
+    /// Attaches one validated ROM Merge artifact to its immutable attempt.
+    pub fn attach_rom_merge_evidence(
+        &self,
+        handle: &str,
+        evidence_bytes: &[u8],
+    ) -> Result<QualificationCandidateSummary, String> {
+        let _operation = self.lock_operation()?;
+        if evidence_bytes.is_empty() || evidence_bytes.len() > MAX_ROM_MERGE_EVIDENCE_BYTES {
+            return Err("ROM Merge evidence size is outside the supported bound".to_string());
+        }
+        let directory = self.candidate_directory_unlocked(handle)?;
+        validate_candidate_files(&directory)?;
+        let stored = self.load_candidate_unlocked(handle)?;
+        if stored.kind != CandidateKind::QualificationRun {
+            return Err("ROM Merge evidence requires a qualification-run candidate".to_string());
+        }
+        let trusted_target_profile = registered_target_profile_id(
+            &self.repo_root,
+            stored.payload.get("deviceTargetId").and_then(Value::as_str),
+        );
+        if !is_passing_konkr_rom_library_sync_candidate(
+            &stored.payload,
+            trusted_target_profile.as_deref(),
+        ) {
+            return Err(
+                "ROM Merge evidence requires a passing KONKR ROM Merge candidate".to_string(),
+            );
+        }
+        if stored.rom_merge_evidence.is_some() {
+            return Err("ROM Merge evidence is already attached to this candidate".to_string());
+        }
+
+        let candidate_bytes =
+            read_regular_file(&directory.join(CANDIDATE_FILE), "qualification candidate")?;
+        let mut envelope = decode_candidate_envelope(&candidate_bytes)?;
+        if envelope.rom_merge_evidence.is_some() {
+            return Err("ROM Merge evidence is already attached to this candidate".to_string());
+        }
+        let report_metadata = envelope
+            .report
+            .as_ref()
+            .ok_or_else(|| "ROM Merge evidence requires a retained execution report".to_string())?;
+        let report_bytes = read_regular_file(
+            &directory.join(EXECUTION_REPORT_FILE),
+            "qualification execution report",
+        )?;
+        load_report_bytes(
+            &directory.join(EXECUTION_REPORT_FILE),
+            Some(report_metadata),
+            Some(&report_metadata.sha256),
+        )?;
+        let evidence: RomMergeEvidence = serde_json::from_slice(evidence_bytes)
+            .map_err(|_| "ROM Merge evidence is malformed".to_string())?;
+        validate_rom_merge_evidence(&envelope.payload, &report_bytes, &evidence, &self.repo_root)?;
+        envelope.rom_merge_evidence = Some(RomMergeEvidenceMetadata {
+            path: ROM_MERGE_EVIDENCE_FILE.to_string(),
+            byte_length: evidence_bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(evidence_bytes)),
+        });
+        let mut updated_candidate_bytes = serde_json::to_vec_pretty(&envelope)
+            .map_err(|_| "qualification candidate could not be serialized".to_string())?;
+        updated_candidate_bytes.push(b'\n');
+        stage_candidate_publication(
+            &directory,
+            &updated_candidate_bytes,
+            Some(&report_bytes),
+            Some(evidence_bytes),
+        )?;
+        #[cfg(test)]
+        let fail_after_envelope = self
+            .fail_after_candidate_envelope_publication
+            .swap(false, Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fail_after_envelope = false;
+        #[cfg(test)]
+        let fail_staging_cleanup = self
+            .fail_candidate_publication_staging_cleanup
+            .swap(false, Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fail_staging_cleanup = false;
+        publish_candidate_publication(&directory, fail_after_envelope, fail_staging_cleanup)?;
+        self.load_candidate_unlocked(handle)
+            .map(|candidate| candidate.summary())
     }
 
     fn require_kind_unlocked(&self, handle: &str, expected: CandidateKind) -> Result<(), String> {
@@ -1324,6 +1575,11 @@ impl StoredQualificationCandidate {
                 .get("qualificationOutcome")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
+            rom_merge_evidence_required: is_passing_konkr_rom_library_sync_candidate(
+                &self.payload,
+                Some("konkr.pocket_advance"),
+            ),
+            rom_merge_evidence_attached: self.rom_merge_evidence.is_some(),
         }
     }
 }
@@ -1514,6 +1770,23 @@ fn candidate_build_identity(
     }
 }
 
+/// Selects schema v2 only when a run carries a valid qualification session handle.
+fn candidate_schema_version(kind: &CandidateKind, candidate: &Value) -> Result<u64, String> {
+    match kind {
+        CandidateKind::TargetRegistration => Ok(1),
+        CandidateKind::QualificationRun => {
+            let Some(session_id) = candidate.get("sessionId") else {
+                return Ok(1);
+            };
+            let session_id = session_id
+                .as_str()
+                .ok_or_else(|| "qualification session handle is invalid".to_string())?;
+            crate::qualification_session::validate_session_handle(session_id)?;
+            Ok(CANDIDATE_SCHEMA_VERSION)
+        }
+    }
+}
+
 fn candidate_report_sha256(candidate: &Value) -> Result<Option<String>, String> {
     let Some(artifacts) = candidate.get("artifacts") else {
         return Ok(None);
@@ -1594,7 +1867,7 @@ fn decode_candidate_envelope(bytes: &[u8]) -> Result<CandidateFileEnvelope, Stri
     let object = value
         .as_object()
         .ok_or_else(|| "qualification candidate envelope must be a JSON object".to_string())?;
-    const ENVELOPE_FIELDS: [&str; 6] = [
+    const LEGACY_ENVELOPE_FIELDS: [&str; 6] = [
         "candidateHandle",
         "kind",
         "capturedAt",
@@ -1602,11 +1875,24 @@ fn decode_candidate_envelope(bytes: &[u8]) -> Result<CandidateFileEnvelope, Stri
         "payload",
         "report",
     ];
-    if object.len() != ENVELOPE_FIELDS.len()
-        || ENVELOPE_FIELDS
+    const ENVELOPE_FIELDS: [&str; 7] = [
+        "candidateHandle",
+        "kind",
+        "capturedAt",
+        "build",
+        "payload",
+        "report",
+        "romMergeEvidence",
+    ];
+    let legacy_shape = object.len() == LEGACY_ENVELOPE_FIELDS.len()
+        && LEGACY_ENVELOPE_FIELDS
             .iter()
-            .any(|field| !object.contains_key(*field))
-    {
+            .all(|field| object.contains_key(*field));
+    let current_shape = object.len() == ENVELOPE_FIELDS.len()
+        && ENVELOPE_FIELDS
+            .iter()
+            .all(|field| object.contains_key(*field));
+    if !legacy_shape && !current_shape {
         return Err("qualification candidate envelope has the wrong shape".to_string());
     }
     serde_json::from_value(value)
@@ -1655,6 +1941,11 @@ fn validate_candidate_files(directory: &Path) -> Result<(), String> {
         "qualification execution report",
     )?;
     validate_regular_file_path(
+        &directory.join(ROM_MERGE_EVIDENCE_FILE),
+        false,
+        "ROM Merge evidence",
+    )?;
+    validate_regular_file_path(
         &directory.join(SESSION_AUDIT_ONLY_FILE),
         false,
         "qualification audit-only marker",
@@ -1662,12 +1953,13 @@ fn validate_candidate_files(directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Stage a complete candidate/report pair before recording durable publication
-/// intent. A reader can replay the staged pair if the process exits mid-update.
+/// Stage the complete candidate/report/artifact set before recording durable
+/// publication intent. A reader can replay the staged files after interruption.
 fn stage_candidate_publication(
     directory: &Path,
     candidate_bytes: &[u8],
     report_bytes: Option<&[u8]>,
+    rom_merge_evidence_bytes: Option<&[u8]>,
 ) -> Result<(), String> {
     remove_candidate_publication_staging(directory)?;
     let staging = directory.join(CANDIDATE_PUBLICATION_STAGING_DIR);
@@ -1679,12 +1971,16 @@ fn stage_candidate_publication(
         if let Some(report_bytes) = report_bytes {
             write_synced_new_file(&staging.join(EXECUTION_REPORT_FILE), report_bytes)?;
         }
+        if let Some(evidence_bytes) = rom_merge_evidence_bytes {
+            write_synced_new_file(&staging.join(ROM_MERGE_EVIDENCE_FILE), evidence_bytes)?;
+        }
         sync_directory(&staging)?;
         sync_directory(directory)?;
 
         let transaction = CandidatePublicationTransaction {
             schema_version: CANDIDATE_PUBLICATION_SCHEMA_VERSION,
             report_present: report_bytes.is_some(),
+            rom_merge_evidence_present: rom_merge_evidence_bytes.is_some(),
         };
         let mut transaction_bytes = serde_json::to_vec_pretty(&transaction).map_err(|_| {
             "qualification candidate publication could not be serialized".to_string()
@@ -1709,8 +2005,9 @@ fn stage_candidate_publication(
     result
 }
 
-/// Replay a durable candidate update. Rewriting a partially published file is
-/// safe because the complete synced pair remains staged until commit finishes.
+/// Replay a durable candidate update. The complete synced file set remains
+/// staged until publication commits, so partially written destinations can be
+/// replaced safely during recovery.
 fn publish_candidate_publication(
     directory: &Path,
     fail_after_candidate_envelope: bool,
@@ -1722,7 +2019,11 @@ fn publish_candidate_publication(
     let transaction: CandidatePublicationTransaction =
         serde_json::from_slice(&transaction_bytes)
             .map_err(|_| "qualification publication transaction is invalid".to_string())?;
-    if transaction.schema_version != CANDIDATE_PUBLICATION_SCHEMA_VERSION {
+    if !matches!(
+        transaction.schema_version,
+        1 | CANDIDATE_PUBLICATION_SCHEMA_VERSION
+    ) || (transaction.schema_version == 1 && transaction.rom_merge_evidence_present)
+    {
         return Err("qualification publication transaction version is unsupported".to_string());
     }
 
@@ -1754,6 +2055,19 @@ fn publish_candidate_publication(
             "qualification publication transaction report state is inconsistent".to_string(),
         );
     }
+    if transaction.rom_merge_evidence_present != envelope.rom_merge_evidence.is_some() {
+        return Err(
+            "qualification publication transaction ROM Merge evidence state is inconsistent"
+                .to_string(),
+        );
+    }
+    let staged_evidence = staging.join(ROM_MERGE_EVIDENCE_FILE);
+    if transaction.rom_merge_evidence_present {
+        let evidence_bytes =
+            read_rom_merge_evidence_bytes(&staged_evidence, envelope.rom_merge_evidence.as_ref())?;
+        let _: RomMergeEvidence = serde_json::from_slice(&evidence_bytes)
+            .map_err(|_| "staged ROM Merge evidence is malformed".to_string())?;
+    }
 
     write_synced_replaced_file(
         directory,
@@ -1779,6 +2093,17 @@ fn publish_candidate_publication(
             EXECUTION_REPORT_FILE,
             "qualification execution report",
         )?;
+    }
+    if transaction.rom_merge_evidence_present {
+        let evidence_bytes = read_regular_file(&staged_evidence, "staged ROM Merge evidence")?;
+        write_synced_replaced_file(
+            directory,
+            ROM_MERGE_EVIDENCE_FILE,
+            CANDIDATE_STAGING_PREFIX,
+            &evidence_bytes,
+        )?;
+    } else {
+        remove_optional_regular_file(directory, ROM_MERGE_EVIDENCE_FILE, "ROM Merge evidence")?;
     }
     sync_directory(directory)?;
     remove_optional_regular_file(
@@ -2183,6 +2508,66 @@ fn registered_target_profile_id(repo_root: &Path, target_id: Option<&str>) -> Op
         .map(str::to_string)
 }
 
+/// Loads registered target facts and verifies their canonical identity hash.
+fn load_registered_rom_merge_target(repo_root: &Path, target_id: &str) -> Result<Value, String> {
+    const TARGET_IDENTITY_FIELDS: [&str; 9] = [
+        "profileId",
+        "manufacturer",
+        "model",
+        "androidVersion",
+        "androidApi",
+        "abiSocClass",
+        "rootState",
+        "connectionType",
+        "firmwareBuild",
+    ];
+    let path = repo_root.join("docs/testing/device-qualification/device-targets.json");
+    let bytes = read_regular_file(&path, "registered device targets")?;
+    let registry: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "registered device targets are malformed".to_string())?;
+    let targets = registry
+        .get("targets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "registered device targets are malformed".to_string())?;
+    let mut matching = targets
+        .iter()
+        .filter(|target| target.get("id").and_then(Value::as_str) == Some(target_id));
+    let target = matching
+        .next()
+        .ok_or_else(|| "ROM Merge target is not registered".to_string())?;
+    if matching.next().is_some() {
+        return Err("ROM Merge target registration is ambiguous".to_string());
+    }
+    let mut identity = serde_json::Map::new();
+    for field in TARGET_IDENTITY_FIELDS {
+        let value = target
+            .get(field)
+            .and_then(|fact| fact.get("value"))
+            .cloned()
+            .ok_or_else(|| "ROM Merge registered target identity is incomplete".to_string())?;
+        if field == "androidApi" {
+            if value.as_u64().is_none_or(|api| api == 0) {
+                return Err("ROM Merge registered target API is invalid".to_string());
+            }
+        } else if value.as_str().is_none_or(str::is_empty) {
+            return Err("ROM Merge registered target identity is invalid".to_string());
+        }
+        identity.insert(field.to_string(), value);
+    }
+    let expected_id = format!(
+        "device-target-{}",
+        canonical_sha256(&Value::Object(identity))?
+    );
+    if expected_id != target_id {
+        return Err("ROM Merge registered target id does not match its identity".to_string());
+    }
+    Ok(target.clone())
+}
+
+fn registered_target_fact<'a>(target: &'a Value, field: &str) -> Option<&'a Value> {
+    target.get(field)?.get("value")
+}
+
 fn candidate_profile_matches_registered_target(
     candidate: &Value,
     trusted_target_profile: Option<&str>,
@@ -2216,6 +2601,536 @@ fn is_passing_konkr_rom_library_sync_candidate(
     is_passing_rom_library_sync_candidate(candidate)
         && trusted_target_profile == Some("konkr.pocket_advance")
         && profile == Some("konkr.pocket_advance")
+}
+
+fn load_rom_merge_evidence_bytes(
+    directory: &Path,
+    metadata: Option<&RomMergeEvidenceMetadata>,
+) -> Result<Option<Vec<u8>>, String> {
+    let path = directory.join(ROM_MERGE_EVIDENCE_FILE);
+    let Some(metadata) = metadata else {
+        return match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Ok(_) => Err("unbound ROM Merge evidence file is not allowed".to_string()),
+            Err(_) => Err("ROM Merge evidence could not be inspected".to_string()),
+        };
+    };
+    let bytes = read_rom_merge_evidence_bytes(&path, Some(metadata))?;
+    Ok(Some(bytes))
+}
+
+fn read_rom_merge_evidence_bytes(
+    path: &Path,
+    metadata: Option<&RomMergeEvidenceMetadata>,
+) -> Result<Vec<u8>, String> {
+    let metadata = metadata.ok_or_else(|| "ROM Merge evidence metadata is missing".to_string())?;
+    if metadata.path != ROM_MERGE_EVIDENCE_FILE
+        || metadata.byte_length == 0
+        || metadata.byte_length as usize > MAX_ROM_MERGE_EVIDENCE_BYTES
+        || !is_sha256_hex(&metadata.sha256)
+    {
+        return Err("ROM Merge evidence metadata is invalid".to_string());
+    }
+    let file_metadata = fs::symlink_metadata(path)
+        .map_err(|_| "ROM Merge evidence could not be inspected".to_string())?;
+    if file_metadata.file_type().is_symlink()
+        || !file_metadata.is_file()
+        || file_metadata.len() > MAX_ROM_MERGE_EVIDENCE_BYTES as u64
+    {
+        return Err("ROM Merge evidence file is not a bounded regular file".to_string());
+    }
+    let bytes = read_regular_file(path, "ROM Merge evidence")?;
+    if bytes.len() as u64 != metadata.byte_length
+        || hex::encode(Sha256::digest(&bytes)) != metadata.sha256
+    {
+        return Err("ROM Merge evidence bytes do not match their Rust-owned digest".to_string());
+    }
+    Ok(bytes)
+}
+
+fn load_rom_merge_apk_pin(repo_root: &Path) -> Result<Option<RomMergeApkPin>, String> {
+    let path = repo_root.join(ROM_MERGE_APK_PIN_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("RetroArch APK pin manifest could not be inspected".to_string()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("RetroArch APK pin manifest is not a regular file".to_string());
+    }
+    let bytes = read_regular_file(&path, "RetroArch APK pin manifest")?;
+    let manifest: RomMergeApkPinManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| "RetroArch APK pin manifest is malformed".to_string())?;
+    if manifest.schema_version != 1 {
+        return Err("RetroArch APK pin manifest version is unsupported".to_string());
+    }
+    let Some(pin) = manifest.retroarch else {
+        return Ok(None);
+    };
+    if pin.package_id != "com.retroarch.aarch64"
+        || !pin.source.starts_with("https://")
+        || pin.version.trim().is_empty()
+        || !is_sha256_hex(&pin.sha256)
+    {
+        return Err("RetroArch APK pin does not identify a fixed reviewed artifact".to_string());
+    }
+    Ok(Some(pin))
+}
+
+/// Validates candidate-bound ROM Merge evidence against its report and target.
+fn validate_rom_merge_evidence(
+    candidate: &Value,
+    report_bytes: &[u8],
+    evidence: &RomMergeEvidence,
+    repo_root: &Path,
+) -> Result<(), String> {
+    if evidence.schema_version != 1 {
+        return Err("ROM Merge evidence schema version is unsupported".to_string());
+    }
+    if candidate
+        .get("candidateSchemaVersion")
+        .and_then(Value::as_u64)
+        != Some(CANDIDATE_SCHEMA_VERSION)
+    {
+        return Err("ROM Merge evidence requires candidate schema version 2".to_string());
+    }
+    let report_sha256 = hex::encode(Sha256::digest(report_bytes));
+    if !is_sha256_hex(&evidence.execution_report_sha256)
+        || evidence.execution_report_sha256 != report_sha256
+    {
+        return Err("ROM Merge evidence does not bind the retained execution report".to_string());
+    }
+    let report: Value = serde_json::from_slice(report_bytes)
+        .map_err(|_| "ROM Merge evidence execution report is malformed".to_string())?;
+    let report_status = report.pointer("/execution/status").and_then(Value::as_str);
+    let candidate_report_outcome = candidate
+        .get("automatedObservations")
+        .and_then(Value::as_array)
+        .and_then(|observations| {
+            observations.iter().find(|observation| {
+                observation.get("id").and_then(Value::as_str) == Some("execution-report")
+            })
+        })
+        .and_then(|observation| observation.get("outcome"))
+        .and_then(Value::as_str);
+    if !matches!(report_status, Some("succeeded" | "succeeded_with_warnings"))
+        || candidate
+            .get("qualificationOutcome")
+            .and_then(Value::as_str)
+            != Some("passed")
+        || candidate_report_outcome != Some("passed")
+    {
+        return Err(
+            "ROM Merge report execution status does not match the passing candidate outcome"
+                .to_string(),
+        );
+    }
+    let qualification = report
+        .get("qualification")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ROM Merge evidence requires a restricted execution report".to_string())?;
+    let report_plan = report
+        .get("plan")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ROM Merge evidence report plan is missing".to_string())?;
+    let report_attempt = qualification.get("attemptId").and_then(Value::as_str);
+    let candidate_handle = candidate.get("candidateId").and_then(Value::as_str);
+    if report_attempt.is_none()
+        || report_attempt != candidate_handle
+        || evidence.candidate_handle != candidate_handle.unwrap_or_default()
+    {
+        return Err("ROM Merge evidence candidate and report attempt do not match".to_string());
+    }
+    let session_id = candidate.get("sessionId").and_then(Value::as_str);
+    if session_id.is_none()
+        || session_id.is_some_and(str::is_empty)
+        || !session_id.is_some_and(is_qualification_session_handle)
+        || evidence.session_id != session_id.unwrap_or_default()
+    {
+        return Err(
+            "ROM Merge evidence session does not match the qualification candidate".to_string(),
+        );
+    }
+    let fingerprint = candidate
+        .get("fingerprint")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ROM Merge evidence candidate fingerprint is missing".to_string())?;
+    let target_id = candidate.get("deviceTargetId").and_then(Value::as_str);
+    let profile_id = fingerprint.get("deviceProfile").and_then(Value::as_str);
+    let firmware_build = fingerprint.get("firmwareBuild").and_then(Value::as_str);
+    let abi_soc_class = fingerprint.get("abiSocClass").and_then(Value::as_str);
+    let connection_type = fingerprint.get("connectionType").and_then(Value::as_str);
+    let observed_root_state = fingerprint.get("rootState").and_then(Value::as_str);
+    let android_api = fingerprint.get("androidApi").and_then(Value::as_u64);
+    let registered_target =
+        load_registered_rom_merge_target(repo_root, evidence.device_target_id.as_str())?;
+    if target_id != Some(evidence.device_target_id.as_str())
+        || profile_id != Some("konkr.pocket_advance")
+        || profile_id != Some(evidence.device_profile_id.as_str())
+        || android_api != Some(evidence.android_api)
+        || firmware_build != Some(evidence.firmware_build.as_str())
+        || abi_soc_class != Some(evidence.abi_soc_class.as_str())
+        || connection_type != Some(evidence.connection_type.as_str())
+        || observed_root_state != Some(evidence.observed_root_state.as_str())
+        || registered_target_fact(&registered_target, "profileId").and_then(Value::as_str)
+            != profile_id
+        || registered_target_fact(&registered_target, "androidApi").and_then(Value::as_u64)
+            != android_api
+        || registered_target_fact(&registered_target, "firmwareBuild").and_then(Value::as_str)
+            != firmware_build
+        || registered_target_fact(&registered_target, "abiSocClass").and_then(Value::as_str)
+            != abi_soc_class
+        || registered_target_fact(&registered_target, "connectionType").and_then(Value::as_str)
+            != connection_type
+        || registered_target_fact(&registered_target, "rootState").and_then(Value::as_str)
+            != observed_root_state
+        || qualification.get("deviceTargetId").and_then(Value::as_str) != target_id
+        || qualification.get("deviceProfileId").and_then(Value::as_str) != profile_id
+        || qualification
+            .get("observedRootState")
+            .and_then(Value::as_str)
+            != observed_root_state
+    {
+        return Err(
+            "ROM Merge evidence target identity does not match the candidate and report"
+                .to_string(),
+        );
+    }
+    let candidate_build = candidate
+        .get("build")
+        .ok_or_else(|| "ROM Merge evidence candidate build identity is missing".to_string())?;
+    let report_build = qualification
+        .get("buildIdentity")
+        .ok_or_else(|| "ROM Merge evidence report build identity is missing".to_string())?;
+    let artifact_build = serde_json::to_value(&evidence.build_identity)
+        .map_err(|_| "ROM Merge evidence build identity is invalid".to_string())?;
+    let runtime_build = report
+        .pointer("/runtime/executionRestriction/buildIdentity")
+        .ok_or_else(|| "ROM Merge runtime restriction build identity is missing".to_string())?;
+    if candidate_build != report_build
+        || report_build != &artifact_build
+        || report_build != runtime_build
+    {
+        return Err(
+            "ROM Merge evidence build identity does not match the report and candidate".to_string(),
+        );
+    }
+    let plan_id = report_plan.get("planId").and_then(Value::as_str);
+    let plan_digest = report_plan.get("planDigest").and_then(Value::as_str);
+    if plan_id != Some(evidence.reviewed_plan_id.as_str())
+        || plan_digest != Some(evidence.reviewed_plan_digest.as_str())
+        || !is_sha256_hex(&evidence.reviewed_plan_digest)
+        || qualification.get("reviewedPlanId").and_then(Value::as_str) != plan_id
+        || qualification
+            .get("reviewedPlanDigest")
+            .and_then(Value::as_str)
+            != plan_digest
+    {
+        return Err(
+            "ROM Merge evidence reviewed plan does not match the execution report".to_string(),
+        );
+    }
+    validate_rom_merge_terminal_operation(&report, evidence)?;
+    validate_rom_merge_strategy(&report, evidence)?;
+    validate_rom_merge_manifests(evidence)?;
+    validate_rom_merge_authority(&report, evidence)?;
+    let pin = load_rom_merge_apk_pin(repo_root)?
+        .ok_or_else(|| "authoritative fixed RetroArch APK pin is unavailable".to_string())?;
+    if evidence.retro_arch.package_id != pin.package_id
+        || evidence.retro_arch.pinned_source != pin.source
+        || evidence.retro_arch.pinned_version != pin.version
+        || evidence.retro_arch.installed_version != pin.version
+        || evidence.retro_arch.installed_apk_sha256 != pin.sha256
+        || evidence.retro_arch.pinned_artifact_sha256 != pin.sha256
+    {
+        return Err(
+            "ROM Merge evidence RetroArch package does not match the repository APK pin"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_rom_merge_terminal_operation(
+    report: &Value,
+    evidence: &RomMergeEvidence,
+) -> Result<(), String> {
+    const RECIPE_ID: &str = "feature.copy_roms";
+    const STEP_ID: &str = "feature.copy_roms/copy_rom_library";
+    if evidence.terminal_operation.recipe_id != RECIPE_ID
+        || evidence.terminal_operation.step_id != STEP_ID
+        || evidence.terminal_operation.outcome != "succeeded"
+        || evidence.copy_policy != "merge"
+    {
+        return Err("ROM Merge evidence terminal operation or copy policy is invalid".to_string());
+    }
+    let qualification = report
+        .get("qualification")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ROM Merge execution report qualification is missing".to_string())?;
+    let required = qualification
+        .get("requiredOperationIds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ROM Merge report required operations are missing".to_string())?;
+    let outcomes = qualification
+        .get("operationOutcomes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ROM Merge report operation outcomes are missing".to_string())?;
+    let required_ids = required
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "ROM Merge report operation id is invalid".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if required_ids.is_empty() || required_ids.iter().filter(|id| **id == RECIPE_ID).count() != 1 {
+        return Err("ROM Merge report does not require the reviewed copy operation".to_string());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for outcome in outcomes {
+        let id = outcome
+            .get("operationId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "ROM Merge report operation outcome is malformed".to_string())?;
+        if !required_ids.contains(&id) || !seen.insert(id) {
+            return Err(
+                "ROM Merge report operation outcomes are duplicate or unexpected".to_string(),
+            );
+        }
+        if outcome.get("outcome").and_then(Value::as_str) != Some("executed") {
+            return Err(
+                "ROM Merge report contains a skipped or unsuccessful required operation"
+                    .to_string(),
+            );
+        }
+    }
+    if seen.len() != required_ids.len() {
+        return Err("ROM Merge report is missing a required operation outcome".to_string());
+    }
+    let recipes = report
+        .pointer("/execution/recipes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ROM Merge report recipe results are missing".to_string())?;
+    let matching = recipes
+        .iter()
+        .filter(|recipe| recipe.get("recipeId").and_then(Value::as_str) == Some(RECIPE_ID))
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err("ROM Merge report must contain one terminal copy recipe result".to_string());
+    }
+    let recipe = matching[0];
+    if !matches!(
+        recipe.get("status").and_then(Value::as_str),
+        Some("succeeded" | "succeeded_with_warnings")
+    ) {
+        return Err("ROM Merge copy recipe did not succeed".to_string());
+    }
+    let steps = recipe
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ROM Merge copy recipe step results are missing".to_string())?;
+    let matching_steps = steps
+        .iter()
+        .filter(|step| step.get("stepId").and_then(Value::as_str) == Some(STEP_ID))
+        .collect::<Vec<_>>();
+    if matching_steps.len() != 1
+        || matching_steps[0].get("recipeId").and_then(Value::as_str) != Some(RECIPE_ID)
+        || matching_steps[0].get("status").and_then(Value::as_str) != Some("succeeded")
+    {
+        return Err(
+            "ROM Merge report lacks the exact successful copy_rom_library step".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_rom_merge_strategy(report: &Value, evidence: &RomMergeEvidence) -> Result<(), String> {
+    let qualification = report
+        .get("qualification")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ROM Merge report qualification is missing".to_string())?;
+    let runtime_restriction = report
+        .pointer("/runtime/executionRestriction")
+        .ok_or_else(|| "ROM Merge report execution restriction is missing".to_string())?;
+    let capabilities = qualification
+        .get("effectiveCapabilities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ROM Merge report effective capabilities are missing".to_string())?;
+    let capability_names = capabilities
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "ROM Merge report effective capability is invalid".to_string())?;
+    if capability_names
+        .iter()
+        .any(|capability| !ROM_MERGE_UNPRIVILEGED_CAPABILITIES.contains(capability))
+    {
+        return Err("ROM Merge report contains an unsupported effective capability".to_string());
+    }
+    let strategy = qualification
+        .get("strategy")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ROM Merge report strategy is missing".to_string())?;
+    let restriction = qualification
+        .get("restriction")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ROM Merge report restriction is missing".to_string())?;
+    if strategy != "adb_unprivileged" || restriction != "privileged_execution_disabled" {
+        return Err("ROM Merge report strategy or restriction is unsupported".to_string());
+    }
+    if runtime_restriction.get("enabled").and_then(Value::as_bool) != Some(true)
+        || runtime_restriction.get("strategy").and_then(Value::as_str) != Some("adb_shell")
+        || runtime_restriction
+            .get("rootShell")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || runtime_restriction
+            .get("appDataWrite")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "ROM Merge report does not establish the restricted execution strategy".to_string(),
+        );
+    }
+    let digest_payload = serde_json::json!({
+        "domain": "emuchef.rom-merge.strategy",
+        "version": 1,
+        "strategy": strategy,
+        "restriction": restriction,
+        "runtimeRestriction": runtime_restriction,
+        "effectiveCapabilities": capabilities,
+    });
+    let digest = canonical_sha256(&digest_payload)?;
+    if evidence.strategy_digest != digest {
+        return Err(
+            "ROM Merge evidence strategy digest does not match the execution report".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_rom_merge_manifests(evidence: &RomMergeEvidence) -> Result<(), String> {
+    if evidence.source_snapshot.source_identity.trim().is_empty()
+        || evidence.destination.path.trim().is_empty()
+        || evidence.destination.setup_location.trim().is_empty()
+        || evidence.destination.volume_identity.trim().is_empty()
+    {
+        return Err("ROM Merge source or destination binding is incomplete".to_string());
+    }
+    let source = rom_merge_manifest_map(&evidence.source_snapshot.entries, "source", false)?;
+    let before = rom_merge_manifest_map(&evidence.destination.before, "destination-before", true)?;
+    let after = rom_merge_manifest_map(&evidence.destination.after, "destination-after", true)?;
+    for (path, digest) in &source {
+        if after.get(path) != Some(digest) {
+            return Err(format!(
+                "ROM Merge source path {path} is missing or changed after copying"
+            ));
+        }
+    }
+    for (path, digest) in &before {
+        if !source.contains_key(path) && after.get(path) != Some(digest) {
+            return Err(format!(
+                "ROM Merge destination-only path {path} was not preserved"
+            ));
+        }
+    }
+    if after
+        .keys()
+        .any(|path| !source.contains_key(path) && !before.contains_key(path))
+    {
+        return Err("ROM Merge destination-after contains an unexpected path".to_string());
+    }
+    if evidence.sentinel.relative_path != "qualification-sentinel.keep"
+        || !is_sha256_hex(&evidence.sentinel.expected_sha256)
+        || source.contains_key(&evidence.sentinel.relative_path)
+        || before.get(&evidence.sentinel.relative_path) != Some(&evidence.sentinel.expected_sha256)
+        || after.get(&evidence.sentinel.relative_path) != Some(&evidence.sentinel.expected_sha256)
+    {
+        return Err(
+            "ROM Merge destination sentinel is missing, changed, or present in the source"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn rom_merge_manifest_map(
+    entries: &[RomMergeManifestEntry],
+    label: &str,
+    allow_empty: bool,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    if !allow_empty && entries.is_empty() {
+        return Err("ROM Merge source manifest must not be empty".to_string());
+    }
+    let mut result = std::collections::BTreeMap::new();
+    for entry in entries {
+        let normalized = !entry.relative_path.is_empty()
+            && !entry.relative_path.starts_with('/')
+            && !entry.relative_path.contains('\\')
+            && !entry.relative_path.contains('\0')
+            && entry
+                .relative_path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        if !normalized || !is_sha256_hex(&entry.sha256) {
+            return Err(format!(
+                "ROM Merge {label} manifest contains an invalid path or digest"
+            ));
+        }
+        if result
+            .insert(entry.relative_path.clone(), entry.sha256.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "ROM Merge {label} manifest contains a duplicate path"
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn validate_rom_merge_authority(report: &Value, evidence: &RomMergeEvidence) -> Result<(), String> {
+    if evidence.root_authority_used || evidence.oem_compiler_used || evidence.oem_stage_used {
+        return Err("ROM Merge evidence claims unsupported root or OEM authority".to_string());
+    }
+    let observed_root_state = report
+        .pointer("/qualification/observedRootState")
+        .and_then(Value::as_str);
+    if observed_root_state != Some(evidence.observed_root_state.as_str()) {
+        return Err("ROM Merge observed root state is missing".to_string());
+    }
+    Ok(())
+}
+
+fn canonical_sha256(value: &Value) -> Result<String, String> {
+    fn canonicalize(value: &Value) -> Value {
+        match value {
+            Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
+            Value::Object(object) => {
+                let mut keys = object.keys().collect::<Vec<_>>();
+                keys.sort();
+                let mut sorted = serde_json::Map::new();
+                for key in keys {
+                    sorted.insert(key.clone(), canonicalize(&object[key]));
+                }
+                Value::Object(sorted)
+            }
+            _ => value.clone(),
+        }
+    }
+    let bytes = serde_json::to_vec(&canonicalize(value))
+        .map_err(|_| "ROM Merge strategy digest could not be serialized".to_string())?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn is_qualification_session_handle(value: &str) -> bool {
+    value
+        .strip_prefix("qualification-session-")
+        .is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -2474,6 +3389,151 @@ mod tests {
         )
     }
 
+    #[test]
+    fn candidate_schema_versions_follow_kind_and_session_binding() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+
+        let target_handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("target candidate should be stored");
+        let target_envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&target_handle)
+                    .join(CANDIDATE_FILE),
+            )
+            .expect("target candidate should be readable"),
+        )
+        .expect("target candidate should be valid JSON");
+        assert_eq!(target_envelope["payload"]["candidateSchemaVersion"], 1);
+        assert!(target_envelope.get("romMergeEvidence").is_none());
+        repository
+            .load_candidate(&target_handle)
+            .expect("Rust should continue loading v1 target candidates");
+
+        let ordinary_handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("ordinary run candidate should be stored");
+        let ordinary_envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&ordinary_handle)
+                    .join(CANDIDATE_FILE),
+            )
+            .expect("ordinary run candidate should be readable"),
+        )
+        .expect("ordinary run candidate should be valid JSON");
+        assert_eq!(ordinary_envelope["payload"]["candidateSchemaVersion"], 1);
+        assert!(ordinary_envelope.get("romMergeEvidence").is_none());
+        repository
+            .load_candidate(&ordinary_handle)
+            .expect("Rust should continue loading v1 ordinary run candidates");
+
+        let session_handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "build": build_identity_json(),
+                    "sessionId": format!("qualification-session-{}", "a".repeat(32)),
+                }),
+                None,
+            )
+            .expect("session-bound run candidate should be stored");
+        let session_envelope: Value = serde_json::from_slice(
+            &std::fs::read(
+                repository
+                    .candidate_root()
+                    .join(&session_handle)
+                    .join(CANDIDATE_FILE),
+            )
+            .expect("session candidate should be readable"),
+        )
+        .expect("session candidate should be valid JSON");
+        assert_eq!(session_envelope["payload"]["candidateSchemaVersion"], 2);
+
+        for invalid_session_id in [
+            Value::Null,
+            json!(42),
+            json!("qualification-session-not-a-valid-id"),
+        ] {
+            let invalid_candidate = json!({
+                "build": build_identity_json(),
+                "sessionId": invalid_session_id,
+            });
+            assert!(
+                repository
+                    .create_candidate(CandidateKind::QualificationRun, &invalid_candidate, None,)
+                    .is_err(),
+                "invalid session id should not be persisted: {invalid_candidate}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "invoked by the Node candidate interoperability regression"]
+    fn rust_candidate_interop_fixture() {
+        let input_path = std::env::var_os("EMUCHEF_CANDIDATE_INTEROP_INPUT")
+            .expect("Node interoperability test must provide input");
+        let output_path = std::env::var_os("EMUCHEF_CANDIDATE_INTEROP_OUTPUT")
+            .expect("Node interoperability test must provide output");
+        let input: Value = serde_json::from_slice(
+            &std::fs::read(input_path).expect("interop input should be readable"),
+        )
+        .expect("interop input should be valid JSON");
+        let entries = input
+            .as_array()
+            .expect("interop input should contain candidate entries");
+        let mut handles = serde_json::Map::new();
+
+        for entry in entries {
+            let key = entry["key"]
+                .as_str()
+                .expect("interop entry should have a key");
+            let repo_root = PathBuf::from(
+                entry["repoRoot"]
+                    .as_str()
+                    .expect("interop entry should have a repository root"),
+            );
+            let kind = match entry["kind"].as_str() {
+                Some("target_registration") => CandidateKind::TargetRegistration,
+                Some("qualification_run") => CandidateKind::QualificationRun,
+                _ => panic!("interop entry candidate kind is invalid"),
+            };
+            let report_bytes = entry["reportPath"]
+                .as_str()
+                .map(std::fs::read)
+                .transpose()
+                .expect("interop report should be readable");
+            let repository = QualificationRepository::new_for_test_with_embedded_build(
+                repo_root,
+                Box::new(FakeQualificationToolRunner::default()),
+                build_identity(),
+            );
+            let handle = repository
+                .create_candidate(kind, &entry["payload"], report_bytes.as_deref())
+                .expect("Rust should serialize the interop candidate");
+            handles.insert(key.to_string(), Value::String(handle));
+        }
+
+        std::fs::write(
+            output_path,
+            serde_json::to_vec(&Value::Object(handles)).expect("interop result should serialize"),
+        )
+        .expect("interop result should be writable");
+    }
+
     fn write_registered_targets_for_test(temp: &TempDir, targets: &[(&str, &str)]) {
         let directory = temp.path().join("docs/testing/device-qualification");
         std::fs::create_dir_all(&directory).expect("target registry directory should be created");
@@ -2489,6 +3549,39 @@ mod tests {
         std::fs::write(
             directory.join("device-targets.json"),
             serde_json::to_vec(&json!({ "schemaVersion": 2, "targets": targets }))
+                .expect("target registry should serialize"),
+        )
+        .expect("target registry should be written");
+    }
+
+    fn write_registered_konkr_target_for_test(temp: &TempDir) {
+        const TARGET_ID: &str =
+            "device-target-sha256:ee1d7cbe10b21866fb39ab6aff94d43f29c76ab3f10d083d7e304b6022e82bf9";
+        let directory = temp.path().join("docs/testing/device-qualification");
+        std::fs::create_dir_all(&directory).expect("target registry directory should be created");
+        let target = json!({
+            "id": TARGET_ID,
+            "profileId": { "value": "konkr.pocket_advance", "source": "production_observation" },
+            "manufacturer": { "value": "KONKR", "source": "production_observation" },
+            "model": { "value": "Pocket Advance", "source": "production_observation" },
+            "androidVersion": { "value": "15", "source": "production_observation" },
+            "androidApi": { "value": 35, "source": "production_observation" },
+            "abiSocClass": { "value": "arm64", "source": "production_observation" },
+            "rootState": { "value": "non_root", "source": "explicit_root_check" },
+            "connectionType": { "value": "usb3", "source": "operator_attestation" },
+            "firmwareBuild": { "value": "konkr-test-build", "source": "production_observation" },
+            "capabilities": [
+                "adb_available",
+                "apk_install",
+                "shared_storage_write",
+                "app_launch",
+                "shell_command",
+                "package_remove_for_user"
+            ]
+        });
+        std::fs::write(
+            directory.join("device-targets.json"),
+            serde_json::to_vec(&json!({ "schemaVersion": 2, "targets": [target] }))
                 .expect("target registry should serialize"),
         )
         .expect("target registry should be written");
@@ -2836,6 +3929,502 @@ mod tests {
                 "sha256": hex::encode(Sha256::digest(report_bytes))
             }]
         })
+    }
+
+    fn rom_merge_candidate_payload(target_id: &str, session_id: &str) -> Value {
+        json!({
+            "candidateSchemaVersion": 2,
+            "kind": "qualification_run",
+            "capturedAt": "2026-08-23T12:00:00Z",
+            "sessionId": session_id,
+            "build": build_identity_json(),
+            "workflowId": "rom-library-sync",
+            "workflowVersion": 1,
+            "deviceTargetId": target_id,
+            "fingerprint": {
+                "deviceProfile": "konkr.pocket_advance",
+                "androidApi": 35,
+                "firmwareBuild": "konkr-test-build",
+                "abiSocClass": "arm64",
+                "rootState": "non_root",
+                "connectionType": "usb3"
+            },
+            "runValidity": "valid",
+            "qualificationOutcome": "passed",
+            "automatedObservations": [{
+                "id": "execution-report",
+                "outcome": "passed",
+                "observedAt": "2026-08-23T12:00:00Z"
+            }],
+            "humanCheckpoints": [],
+            "targetWideFailure": null,
+            "limitations": [],
+            "artifacts": []
+        })
+    }
+
+    fn rom_merge_report_for_candidate(target_id: &str, candidate_handle: &str) -> Vec<u8> {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docs/testing/device-qualification/fixtures/execution-report-v2-real.json"
+        ));
+        const PLAN_ID: &str = "konkr.pocket_advance.base";
+        const PLAN_DIGEST: &str =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let mut report = serde_json::from_slice::<Value>(FIXTURE)
+            .expect("execution report fixture should be valid");
+        report["qualification"]["attemptId"] = json!(candidate_handle);
+        report["qualification"]["deviceTargetId"] = json!(target_id);
+        report["qualification"]["deviceProfileId"] = json!("konkr.pocket_advance");
+        report["qualification"]["reviewedPlanId"] = json!(PLAN_ID);
+        report["qualification"]["reviewedPlanDigest"] = json!(PLAN_DIGEST);
+        report["qualification"]["requiredOperationIds"] = json!(["feature.copy_roms"]);
+        report["qualification"]["operationOutcomes"] = json!([{
+            "operationId": "feature.copy_roms",
+            "outcome": "executed"
+        }]);
+        report["plan"]["planId"] = json!(PLAN_ID);
+        report["plan"]["planDigest"] = json!(PLAN_DIGEST);
+        let mut recipe = report["execution"]["recipes"][0].clone();
+        recipe["recipeId"] = json!("feature.copy_roms");
+        recipe["status"] = json!("succeeded");
+        let mut step = recipe["steps"][0].clone();
+        step["recipeId"] = json!("feature.copy_roms");
+        step["stepId"] = json!("feature.copy_roms/copy_rom_library");
+        step["status"] = json!("succeeded");
+        recipe["steps"] = json!([step]);
+        report["execution"]["recipes"] = json!([recipe]);
+        serde_json::to_vec(&report).expect("ROM Merge report should serialize")
+    }
+
+    fn rom_merge_evidence_for_candidate(
+        candidate_handle: &str,
+        session_id: &str,
+        target_id: &str,
+        candidate_build: &Value,
+        report_bytes: &[u8],
+    ) -> Vec<u8> {
+        const SENTINEL_SHA: &str =
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        const APK_SHA: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let report: Value = serde_json::from_slice(report_bytes).unwrap();
+        let qualification = &report["qualification"];
+        let strategy_digest = canonical_sha256(&json!({
+            "domain": "emuchef.rom-merge.strategy",
+            "version": 1,
+            "strategy": qualification["strategy"],
+            "restriction": qualification["restriction"],
+            "runtimeRestriction": report["runtime"]["executionRestriction"],
+            "effectiveCapabilities": qualification["effectiveCapabilities"]
+        }))
+        .unwrap();
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "candidateHandle": candidate_handle,
+            "sessionId": session_id,
+            "executionReportSha256": hex::encode(Sha256::digest(report_bytes)),
+            "deviceTargetId": target_id,
+            "deviceProfileId": "konkr.pocket_advance",
+            "androidApi": 35,
+            "firmwareBuild": "konkr-test-build",
+            "abiSocClass": "arm64",
+            "connectionType": "usb3",
+            "observedRootState": qualification["observedRootState"],
+            "buildIdentity": candidate_build,
+            "reviewedPlanId": qualification["reviewedPlanId"],
+            "reviewedPlanDigest": qualification["reviewedPlanDigest"],
+            "terminalOperation": {
+                "recipeId": "feature.copy_roms",
+                "stepId": "feature.copy_roms/copy_rom_library",
+                "outcome": "succeeded"
+            },
+            "copyPolicy": "merge",
+            "strategyDigest": strategy_digest,
+            "sourceSnapshot": {
+                "sourceIdentity": "reviewed-source-snapshot-1",
+                "entries": [{ "relativePath": "games/one.gba", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+            },
+            "destination": {
+                "path": "/storage/emulated/0/ROMs",
+                "setupLocation": "internal_shared_storage",
+                "volumeIdentity": "volume-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "before": [
+                    { "relativePath": "games/one.gba", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+                    { "relativePath": "existing/readme.txt", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+                    { "relativePath": "qualification-sentinel.keep", "sha256": SENTINEL_SHA }
+                ],
+                "after": [
+                    { "relativePath": "games/one.gba", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+                    { "relativePath": "existing/readme.txt", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+                    { "relativePath": "qualification-sentinel.keep", "sha256": SENTINEL_SHA }
+                ]
+            },
+            "sentinel": {
+                "relativePath": "qualification-sentinel.keep",
+                "expectedSha256": SENTINEL_SHA
+            },
+            "retroArch": {
+                "packageId": "com.retroarch.aarch64",
+                "installedVersion": "synthetic-1",
+                "pinnedSource": "https://example.invalid/retroarch.apk",
+                "pinnedVersion": "synthetic-1",
+                "installedApkSha256": APK_SHA,
+                "pinnedArtifactSha256": APK_SHA
+            },
+            "rootAuthorityUsed": false,
+            "oemCompilerUsed": false,
+            "oemStageUsed": false
+        }))
+        .unwrap()
+    }
+
+    fn write_rom_merge_apk_pin_for_test(temp: &TempDir) {
+        let path = temp.path().join(ROM_MERGE_APK_PIN_FILE);
+        std::fs::create_dir_all(path.parent().unwrap())
+            .expect("pin manifest directory should be created");
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "schemaVersion": 1,
+                "retroarch": {
+                    "packageId": "com.retroarch.aarch64",
+                    "source": "https://example.invalid/retroarch.apk",
+                    "version": "synthetic-1",
+                    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("synthetic pin manifest should be written");
+    }
+
+    fn finalized_rom_merge_candidate(
+        repository: &QualificationRepository,
+        target_id: &str,
+        session_id: &str,
+    ) -> (String, Vec<u8>, Vec<u8>) {
+        let mut candidate = rom_merge_candidate_payload(target_id, session_id);
+        let handle = repository
+            .create_candidate(CandidateKind::QualificationRun, &candidate, None)
+            .expect("provisional ROM Merge candidate should be stored");
+        let report_bytes = rom_merge_report_for_candidate(target_id, &handle);
+        candidate["artifacts"] = json!([{
+            "id": "execution-report",
+            "kind": "production_execution_report",
+            "path": "execution-report.json",
+            "sha256": hex::encode(Sha256::digest(&report_bytes))
+        }]);
+        repository
+            .finalize_candidate(
+                &handle,
+                CandidateKind::QualificationRun,
+                &candidate,
+                Some(&report_bytes),
+            )
+            .expect("ROM Merge candidate should retain its report");
+        let evidence_bytes = rom_merge_evidence_for_candidate(
+            &handle,
+            session_id,
+            target_id,
+            &candidate["build"],
+            &report_bytes,
+        );
+        (handle, report_bytes, evidence_bytes)
+    }
+
+    #[test]
+    fn valid_rom_merge_attachment_is_bound_retained_and_passes_the_rust_gate() {
+        const TARGET_ID: &str =
+            "device-target-sha256:ee1d7cbe10b21866fb39ab6aff94d43f29c76ab3f10d083d7e304b6022e82bf9";
+        const SESSION_ID: &str = "qualification-session-cccccccccccccccccccccccccccccccc";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        write_registered_konkr_target_for_test(&temp);
+        write_rom_merge_apk_pin_for_test(&temp);
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let (handle, report_bytes, evidence_bytes) =
+            finalized_rom_merge_candidate(&repository, TARGET_ID, SESSION_ID);
+        let before = repository
+            .load_candidate(&handle)
+            .expect("candidate without supplemental evidence should remain inspectable");
+        assert!(!before.promotable);
+        assert!(before
+            .non_promotable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("ROM Merge evidence is required")));
+
+        let attached = repository
+            .attach_rom_merge_evidence(&handle, &evidence_bytes)
+            .expect("complete evidence should attach");
+        assert!(attached.rom_merge_evidence_required);
+        assert!(attached.rom_merge_evidence_attached);
+        assert!(
+            attached.promotable,
+            "the test pin and complete evidence satisfy the Rust gate"
+        );
+        let directory = temp.path().join(CANDIDATE_DIRECTORY).join(&handle);
+        assert_eq!(
+            std::fs::read(directory.join(ROM_MERGE_EVIDENCE_FILE))
+                .expect("attached bytes should remain in the candidate"),
+            evidence_bytes,
+            "the producer must preserve the supplied bytes"
+        );
+        assert_eq!(
+            std::fs::read(directory.join(EXECUTION_REPORT_FILE))
+                .expect("report bytes should remain in the candidate"),
+            report_bytes,
+            "attachment must preserve the report bytes"
+        );
+
+        let finalized_payload = repository
+            .load_candidate(&handle)
+            .expect("attached candidate should remain readable")
+            .payload;
+        let finalized_again = repository
+            .finalize_candidate(
+                &handle,
+                CandidateKind::QualificationRun,
+                &finalized_payload,
+                Some(&report_bytes),
+            )
+            .expect("recovery finalization should preserve the attachment");
+        assert!(finalized_again.summary().rom_merge_evidence_attached);
+        assert!(finalized_again.promotable);
+
+        calls.set_response(json!({
+            "operation": "record_run",
+            "candidateHandle": handle.clone(),
+            "candidateKind": "qualification_run",
+            "payload": { "runId": "qualification-run-opaque" }
+        }));
+        repository
+            .record_run(&handle)
+            .expect("complete ROM Merge evidence should pass the Rust gate");
+        assert_eq!(calls.calls().len(), 1);
+        assert_eq!(
+            calls.calls()[0].1,
+            vec!["--record-run".to_string(), handle.clone()]
+        );
+        assert!(repository
+            .attach_rom_merge_evidence(&handle, &evidence_bytes)
+            .expect_err("duplicate attachments must be rejected")
+            .contains("already attached"));
+    }
+
+    #[test]
+    fn rom_merge_evidence_rejects_runtime_build_identity_mismatch() {
+        const TARGET_ID: &str =
+            "device-target-sha256:ee1d7cbe10b21866fb39ab6aff94d43f29c76ab3f10d083d7e304b6022e82bf9";
+        const SESSION_ID: &str = "qualification-session-cccccccccccccccccccccccccccccccc";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        write_registered_konkr_target_for_test(&temp);
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let (handle, report_bytes, _) =
+            finalized_rom_merge_candidate(&repository, TARGET_ID, SESSION_ID);
+        let candidate = repository
+            .load_candidate(&handle)
+            .expect("candidate should remain inspectable")
+            .payload;
+        let mut report: Value = serde_json::from_slice(&report_bytes).unwrap();
+        report["runtime"]["executionRestriction"]["buildIdentity"]["gitCommit"] =
+            json!("ffffffffffffffffffffffffffffffffffffffff");
+        let mismatched_report = serde_json::to_vec(&report).unwrap();
+        let evidence_bytes = rom_merge_evidence_for_candidate(
+            &handle,
+            SESSION_ID,
+            TARGET_ID,
+            &candidate["build"],
+            &mismatched_report,
+        );
+        let evidence: RomMergeEvidence = serde_json::from_slice(&evidence_bytes).unwrap();
+
+        assert!(validate_rom_merge_evidence(
+            &candidate,
+            &mismatched_report,
+            &evidence,
+            temp.path(),
+        )
+        .expect_err("runtime restriction must use the same build identity")
+        .contains("build identity"));
+    }
+
+    #[test]
+    fn rom_merge_evidence_binds_report_outcome_target_and_capabilities() {
+        const TARGET_ID: &str =
+            "device-target-sha256:ee1d7cbe10b21866fb39ab6aff94d43f29c76ab3f10d083d7e304b6022e82bf9";
+        const SESSION_ID: &str = "qualification-session-cccccccccccccccccccccccccccccccc";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        write_registered_konkr_target_for_test(&temp);
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let (handle, report_bytes, _) =
+            finalized_rom_merge_candidate(&repository, TARGET_ID, SESSION_ID);
+        let candidate = repository
+            .load_candidate(&handle)
+            .expect("candidate should remain inspectable")
+            .payload;
+
+        let mut failed_report: Value = serde_json::from_slice(&report_bytes).unwrap();
+        failed_report["execution"]["status"] = json!("failed");
+        let failed_report_bytes = serde_json::to_vec(&failed_report).unwrap();
+        let failed_evidence: RomMergeEvidence =
+            serde_json::from_slice(&rom_merge_evidence_for_candidate(
+                &handle,
+                SESSION_ID,
+                TARGET_ID,
+                &candidate["build"],
+                &failed_report_bytes,
+            ))
+            .unwrap();
+        assert!(validate_rom_merge_evidence(
+            &candidate,
+            &failed_report_bytes,
+            &failed_evidence,
+            temp.path(),
+        )
+        .expect_err("failed report must not qualify a passed candidate")
+        .contains("passing candidate outcome"));
+
+        let mut stale_candidate = candidate.clone();
+        stale_candidate["fingerprint"]["androidApi"] = json!(34);
+        let mut stale_evidence: Value = serde_json::from_slice(&rom_merge_evidence_for_candidate(
+            &handle,
+            SESSION_ID,
+            TARGET_ID,
+            &candidate["build"],
+            &report_bytes,
+        ))
+        .unwrap();
+        stale_evidence["androidApi"] = json!(34);
+        let stale_evidence: RomMergeEvidence = serde_json::from_value(stale_evidence).unwrap();
+        assert!(validate_rom_merge_evidence(
+            &stale_candidate,
+            &report_bytes,
+            &stale_evidence,
+            temp.path(),
+        )
+        .expect_err("candidate target facts must match the registered target")
+        .contains("target identity"));
+
+        let mut capability_report: Value = serde_json::from_slice(&report_bytes).unwrap();
+        capability_report["qualification"]["effectiveCapabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("future_privileged_capability"));
+        let capability_report_bytes = serde_json::to_vec(&capability_report).unwrap();
+        let capability_evidence: RomMergeEvidence =
+            serde_json::from_slice(&rom_merge_evidence_for_candidate(
+                &handle,
+                SESSION_ID,
+                TARGET_ID,
+                &candidate["build"],
+                &capability_report_bytes,
+            ))
+            .unwrap();
+        assert!(validate_rom_merge_evidence(
+            &candidate,
+            &capability_report_bytes,
+            &capability_evidence,
+            temp.path(),
+        )
+        .expect_err("unknown capabilities must fail closed")
+        .contains("unsupported effective capability"));
+    }
+
+    #[test]
+    fn rom_merge_attachment_rejects_missing_pin_malformed_bytes_and_replacement() {
+        const TARGET_ID: &str =
+            "device-target-sha256:ee1d7cbe10b21866fb39ab6aff94d43f29c76ab3f10d083d7e304b6022e82bf9";
+        const SESSION_ID: &str = "qualification-session-cccccccccccccccccccccccccccccccc";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        write_registered_konkr_target_for_test(&temp);
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let (handle, _, evidence_bytes) =
+            finalized_rom_merge_candidate(&repository, TARGET_ID, SESSION_ID);
+        let oversized_evidence = vec![b' '; MAX_ROM_MERGE_EVIDENCE_BYTES + 1];
+        assert!(repository
+            .attach_rom_merge_evidence(&handle, &oversized_evidence)
+            .expect_err("oversized evidence must be rejected")
+            .contains("size"));
+        assert!(repository
+            .attach_rom_merge_evidence(&handle, &evidence_bytes)
+            .expect_err("missing production pin must fail closed")
+            .contains("APK pin is unavailable"));
+        assert!(repository
+            .attach_rom_merge_evidence(&handle, b"{}")
+            .expect_err("malformed artifacts must be rejected")
+            .contains("malformed"));
+        assert!(
+            !repository
+                .load_candidate(&handle)
+                .expect("candidate should remain inspectable")
+                .summary()
+                .rom_merge_evidence_attached
+        );
+        assert!(repository.record_run(&handle).is_err());
+        assert!(
+            calls.calls().is_empty(),
+            "rejected evidence must not reach Node"
+        );
+
+        write_rom_merge_apk_pin_for_test(&temp);
+        repository
+            .attach_rom_merge_evidence(&handle, &evidence_bytes)
+            .expect("complete evidence should attach after adding the test pin");
+        let directory = temp.path().join(CANDIDATE_DIRECTORY).join(&handle);
+        let outside = temp.path().join("outside-rom-merge-evidence.json");
+        std::fs::write(&outside, &evidence_bytes).expect("outside bytes should be written");
+        std::fs::remove_file(directory.join(ROM_MERGE_EVIDENCE_FILE))
+            .expect("candidate artifact should be replaced for the symlink case");
+        std::os::unix::fs::symlink(&outside, directory.join(ROM_MERGE_EVIDENCE_FILE))
+            .expect("candidate artifact symlink should be created");
+        assert!(repository.load_candidate(&handle).is_err());
+        assert!(repository.record_run(&handle).is_err());
+        assert!(
+            calls.calls().is_empty(),
+            "replaced evidence must not reach Node"
+        );
+    }
+
+    #[test]
+    fn interrupted_rom_merge_publication_recovers_the_exact_three_file_set() {
+        const TARGET_ID: &str =
+            "device-target-sha256:ee1d7cbe10b21866fb39ab6aff94d43f29c76ab3f10d083d7e304b6022e82bf9";
+        const SESSION_ID: &str = "qualification-session-cccccccccccccccccccccccccccccccc";
+        let temp = TempDir::new().expect("temporary repository should be created");
+        write_registered_konkr_target_for_test(&temp);
+        write_rom_merge_apk_pin_for_test(&temp);
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let (handle, report_bytes, evidence_bytes) =
+            finalized_rom_merge_candidate(&repository, TARGET_ID, SESSION_ID);
+        repository
+            .fail_after_candidate_envelope_publication
+            .store(true, Ordering::SeqCst);
+        assert!(repository
+            .attach_rom_merge_evidence(&handle, &evidence_bytes)
+            .expect_err("injected interruption should leave recoverable intent")
+            .contains("injected interruption"));
+        let recovered = repository
+            .load_candidate(&handle)
+            .expect("the next read should recover the staged publication");
+        assert!(recovered.summary().rom_merge_evidence_attached);
+        assert!(recovered.promotable);
+        let directory = temp.path().join(CANDIDATE_DIRECTORY).join(&handle);
+        assert_eq!(
+            std::fs::read(directory.join(ROM_MERGE_EVIDENCE_FILE)).unwrap(),
+            evidence_bytes
+        );
+        assert_eq!(
+            std::fs::read(directory.join(EXECUTION_REPORT_FILE)).unwrap(),
+            report_bytes
+        );
+        assert!(directory.join(CANDIDATE_FILE).is_file());
+        assert!(!directory.join(CANDIDATE_PUBLICATION_FILE).exists());
     }
 
     impl QualificationToolRunner for FakeQualificationToolRunner {
@@ -3273,10 +4862,18 @@ mod tests {
                 Some(&konkre_report),
             )
             .expect("KONKR candidate should be stored for policy validation");
+        let stored = repository
+            .load_candidate(&konkre_candidate)
+            .expect("KONKR candidate should remain inspectable without merge evidence");
+        assert!(!stored.promotable);
+        assert!(stored
+            .non_promotable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("ROM Merge evidence is required")));
         let error = repository
             .record_run(&konkre_candidate)
             .expect_err("passing KONKR ROM-library-sync evidence must be vetoed");
-        assert!(error.contains("KONKR ROM-library-sync"));
+        assert!(error.contains("ROM Merge evidence is required"));
         assert!(calls.calls().is_empty(), "the veto must run before Node");
 
         let mismatched_report =
@@ -3359,7 +4956,7 @@ mod tests {
         let error = repository
             .record_run(&ordinary_konkr)
             .expect_err("the no-claim path must still apply the KONKR veto");
-        assert!(error.contains("KONKR ROM-library-sync"));
+        assert!(error.contains("ROM Merge evidence"));
         assert!(
             calls.calls().is_empty(),
             "KONKR ordinary evidence must not reach Node"

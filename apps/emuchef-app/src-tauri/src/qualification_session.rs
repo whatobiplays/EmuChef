@@ -1809,7 +1809,8 @@ fn is_terminal_execution_status(status: &str) -> bool {
     )
 }
 
-fn validate_session_handle(handle: &str) -> Result<(), String> {
+/// Validates the opaque format used for persisted qualification session handles.
+pub(crate) fn validate_session_handle(handle: &str) -> Result<(), String> {
     let suffix = handle
         .strip_prefix(SESSION_HANDLE_PREFIX)
         .ok_or_else(|| "qualification session handle is invalid".to_string())?;
@@ -2462,6 +2463,8 @@ pub(crate) fn current_timestamp() -> Result<String, String> {
 }
 
 /// Build the immutable terminal or invalid candidate payload for one session.
+/// The session handle remains in the payload so supplemental evidence can bind
+/// to the attempt that produced the retained execution report.
 fn run_candidate_payload(
     session: &QualificationSession,
     report_bytes: Option<&[u8]>,
@@ -2535,8 +2538,9 @@ fn run_candidate_payload(
         })
         .unwrap_or_default();
     Ok(json!({
-        "candidateSchemaVersion": 1,
+        "candidateSchemaVersion": 2,
         "candidateId": session.candidate_handle(),
+        "sessionId": session.session_handle,
         "kind": "qualification_run",
         "capturedAt": session.to_persisted().captured_at,
         "build": session.build_identity(),
@@ -4602,6 +4606,8 @@ fn candidate_summary_from_stored(
         target,
         run_validity: summary.run_validity,
         qualification_outcome: summary.qualification_outcome,
+        rom_merge_evidence_required: summary.rom_merge_evidence_required,
+        rom_merge_evidence_attached: summary.rom_merge_evidence_attached,
     })
 }
 

@@ -3279,3 +3279,36 @@ Host and fake-device evidence covers planning, authorization, backup handling, a
 RetroArch configuration Create and Replace remain separate from product-v2 configuration restore and execution-report schema v2. Private backup creation and its one-use waiver provide backup evidence for a reviewed write; they do not provide in-app restore, backup history, deletion controls, or automatic rollback.
 
 The qualification sidecar combines real-execution and android-copy-commit-helper. Ordinary debug and production profiles keep real execution disabled. Build provenance binds the source revision, material inputs, target, features, embedded ARM64 helper, and both sidecar digests. The Tauri qualification runner is development-only; release packaging does not support real execution. A build lock, state marker, and process lease pin sidecar artifacts. Archival and release hold the same lock while validating and removing those pins. The build, recovery, and physical-run procedure is in the qualification runbook at docs/qualification/retroarch-config-create/PREPARATION.md.
+## KONKR ROM Merge qualification evidence
+
+The `rom-library-sync` workflow remains version 1, and execution reports remain
+version 2. A passing KONKR candidate requires the retained report and a strict
+`rom-merge-evidence.json` attachment bound to the candidate session, target,
+build, profile, reviewed plan, and terminal copy step.
+
+The artifact records source snapshot S, destination-before B, and
+destination-after A as relative-path/SHA-256 manifests. S must be nonempty.
+Every S entry must appear unchanged in A; destination-only B entries must stay
+unchanged in A; and A cannot contain an entry absent from both S and B. The
+destination sentinel must be absent from S and unchanged in B and A.
+
+Rust preserves the supplied bytes and binds their length and digest in the
+candidate envelope. Rust and Node independently validate the artifact before
+promotion. The digest protects stored bytes. Capture authenticity remains
+unverified.
+
+Candidate schema version 1 is used for target-registration candidates and
+qualification runs without a session binding. Version 2 is reserved for
+qualification runs with a `sessionId`. Rust omits `romMergeEvidence` when no
+artifact is attached. Node treats a missing field or legacy `null` as absent
+and rejects an evidence file that has no candidate metadata.
+
+Historical bundles retain the APK identity recorded at qualification time. A
+later repository pin change does not block reading an archived bundle, but only
+evidence that matches the current pin enters the validated set for current
+qualification. New promotions also require the current pin. The production
+RetroArch pin manifest has no
+approved fixed package source, version, or digest, so KONKR ROM Merge promotion
+remains blocked until a separately reviewed pin is available. A passing copy
+workflow keeps KONKR support at `limited` until separate physical evidence
+shows RetroArch visibility and successful loading.

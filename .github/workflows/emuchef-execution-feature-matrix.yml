@@ -76,6 +76,11 @@ jobs:
         run: npm ci --prefix apps/emuchef-app
       - name: Test backend behavior and protocol contracts
         run: cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml
+      - name: Verify Rust candidate interoperability with Node recorders
+        run: >-
+          node --test
+          --test-name-pattern='Rust-produced target and report-only candidates pass Node recorders'
+          tools/device-qualification.test.mjs
       - name: Check frontend types
         run: npm --prefix apps/emuchef-app run typecheck
       - name: Lint frontend source and tests
@@ -111,6 +116,8 @@ jobs:
       - name: Run Phase 6D.6 result contract tests
         run: node --test tools/phase-6d6-result.test.mjs
       - name: Validate device qualification foundation
+        env:
+          EMUCHEF_SKIP_RUST_CANDIDATE_INTEROP: "1"
         run: |
           node --test tools/device-qualification.test.mjs
           node tools/device-qualification.mjs --check

@@ -105,6 +105,7 @@ function controller(
     recordCheckpoint: vi.fn().mockResolvedValue(undefined),
     abandonSession: vi.fn().mockResolvedValue(undefined),
     recordRun: vi.fn().mockResolvedValue(undefined),
+    attachRomMergeEvidence: vi.fn().mockResolvedValue(undefined),
     discardCandidate: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -470,4 +471,35 @@ test("the overlay renders the sanitized backend-authored error explanation", () 
     "Qualification definitions are unavailable. Rebuild the qualification application.",
   );
   expect(container.textContent).toContain("Qualification evidence was invalidated before it could be recorded.");
+});
+
+test("KONKR ROM Merge attachment sends the selected file bytes", async () => {
+  const user = userEvent.setup();
+  const candidate = {
+    candidateHandle: "qualification-candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    kind: "qualification_run" as const,
+    capturedAt: "2026-08-23T12:00:00Z",
+    promotable: false,
+    nonPromotableReason: "ROM Merge evidence is required",
+    runValidity: "valid" as const,
+    qualificationOutcome: "passed" as const,
+    romMergeEvidenceRequired: true,
+    romMergeEvidenceAttached: false,
+  };
+  const current = controller({ runCandidates: [candidate] });
+  render(<DeviceQualificationOverlay controller={current} />);
+
+  const fileBytes = "{\"schemaVersion\":1}\n";
+  const file = new File([fileBytes], "rom-merge-evidence.json", {
+    type: "application/json",
+  });
+  await user.upload(
+    screen.getByLabelText("Attach ROM Merge evidence JSON"),
+    file,
+  );
+
+  expect(current.attachRomMergeEvidence).toHaveBeenCalledWith(
+    candidate.candidateHandle,
+    Array.from(new TextEncoder().encode(fileBytes)),
+  );
 });

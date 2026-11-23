@@ -491,6 +491,23 @@ const REPORT_BYTES = Buffer.from(
   "utf8",
 );
 
+const ROM_MERGE_PIN_PATH =
+  "docs/testing/device-qualification/rom-merge-apk-pin.json";
+const ROM_MERGE_EVIDENCE_PATH = "rom-merge-evidence.json";
+const ROM_MERGE_EVIDENCE_ID = "rom-merge-evidence";
+const ROM_MERGE_EVIDENCE_KIND = "rom_merge_evidence";
+const ROM_MERGE_SENTINEL_PATH = "qualification-sentinel.keep";
+const ROM_MERGE_SENTINEL_SHA256 = "f".repeat(64);
+const ROM_MERGE_TEST_PIN = {
+  schemaVersion: 1,
+  retroarch: {
+    packageId: "com.retroarch.aarch64",
+    source: "https://example.invalid/retroarch.apk",
+    version: "1.19.1",
+    sha256: "e".repeat(64),
+  },
+};
+
 function copyTrackedFile(repoRoot, relativePath) {
   const destination = path.join(repoRoot, relativePath);
   mkdirSync(path.dirname(destination), { recursive: true });
@@ -753,7 +770,12 @@ function runCandidateForRepo(
   };
 }
 
-function writeCandidateFixture(repoRoot, candidate, reportBytes = null) {
+function writeCandidateFixture(
+  repoRoot,
+  candidate,
+  reportBytes = null,
+  romMergeEvidenceBytes = null,
+) {
   const directory = path.join(
     repoRoot,
     ".emuchef_runtime/qualification-candidates",
@@ -787,6 +809,344 @@ function writeCandidateFixture(repoRoot, candidate, reportBytes = null) {
   if (reportBytes !== null) {
     writeFileSync(path.join(directory, "execution-report.json"), reportBytes);
   }
+  if (romMergeEvidenceBytes !== null) {
+    const candidatePath = path.join(directory, "candidate.json");
+    const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+    envelope.romMergeEvidence = {
+      path: ROM_MERGE_EVIDENCE_PATH,
+      byteLength: romMergeEvidenceBytes.length,
+      sha256: createHash("sha256")
+        .update(romMergeEvidenceBytes)
+        .digest("hex"),
+    };
+    writeFileSync(candidatePath, `${JSON.stringify(envelope, null, 2)}\n`, "utf8");
+    writeFileSync(
+      path.join(directory, ROM_MERGE_EVIDENCE_PATH),
+      romMergeEvidenceBytes,
+    );
+  }
+}
+
+function writeRomMergePin(repoRoot, pin = ROM_MERGE_TEST_PIN) {
+  const pinPath = path.join(repoRoot, ROM_MERGE_PIN_PATH);
+  mkdirSync(path.dirname(pinPath), { recursive: true });
+  writeFileSync(pinPath, `${JSON.stringify(pin, null, 2)}\n`, "utf8");
+}
+
+function createRomMergePinRoot(pin = ROM_MERGE_TEST_PIN) {
+  const repoRoot = mkdtempSync(path.join(tmpdir(), "rom-merge-pin-"));
+  writeRomMergePin(repoRoot, pin);
+  return repoRoot;
+}
+
+function configureKonkrQualificationRepo(
+  repoRoot,
+  pin = ROM_MERGE_TEST_PIN,
+) {
+  writeRomMergePin(repoRoot, pin);
+  const targetsPath = path.join(
+    repoRoot,
+    "docs/testing/device-qualification/device-targets.json",
+  );
+  const registry = JSON.parse(readFileSync(targetsPath, "utf8"));
+  const target = structuredClone(registry.targets[0]);
+  target.profileId.value = "konkr.pocket_advance";
+  target.manufacturer.value = "ARBOR";
+  target.model.value = "GT78-VN";
+  target.id = deviceTargetId(target);
+  registry.targets = [target];
+  writeFileSync(targetsPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
+  commitRepoChanges(repoRoot, "prepare synthetic KONKR qualification target");
+  return target;
+}
+
+function candidateFromEvidenceRecord(record, candidateId, sessionId) {
+  return {
+    candidateSchemaVersion: 2,
+    candidateId,
+    sessionId,
+    kind: "qualification_run",
+    capturedAt: record.capturedAt,
+    build: structuredClone(record.fingerprint.emuchefBuild),
+    workflowId: record.workflowId,
+    workflowVersion: record.workflowVersion,
+    deviceTargetId: record.deviceTarget.id,
+    fingerprint: structuredClone(record.fingerprint),
+    runValidity: record.runValidity,
+    qualificationOutcome: record.qualificationOutcome,
+    automatedObservations: structuredClone(record.automatedObservations),
+    humanCheckpoints: structuredClone(record.humanCheckpoints),
+    targetWideFailure: record.targetWideFailure,
+    limitations: structuredClone(record.limitations),
+    artifacts: structuredClone(record.artifacts),
+  };
+}
+
+function candidateForKonkrRepo(repoRoot, candidateId) {
+  const workflowCatalog = loadWorkflowCatalog(
+    path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"),
+  );
+  const targets = loadDeviceTargets(
+    path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+    { authoredProfilesDir: path.join(repoRoot, "authored/device_profiles") },
+  ).targets;
+  const workflow = workflowCatalog.workflows.find(
+    (item) => item.id === "rom-library-sync",
+  );
+  const target = targets.find(
+    (item) => item.profileId.value === "konkr.pocket_advance",
+  );
+  const build = buildMaterialIdentity({ repoRoot, requireClean: false });
+  const fingerprint = buildCurrentFingerprint({
+    workflow,
+    target,
+    currentBuild: build,
+    runtimeContract: RUNTIME_CONTRACT,
+    authoredContentDigests: authoredDigestsForRepo(repoRoot, workflowCatalog),
+  });
+  return {
+    candidateSchemaVersion: 2,
+    candidateId,
+    sessionId: `qualification-session-${"c".repeat(32)}`,
+    kind: "qualification_run",
+    capturedAt: "2026-08-23T12:30:00Z",
+    build,
+    workflowId: workflow.id,
+    workflowVersion: workflow.version,
+    deviceTargetId: target.id,
+    fingerprint,
+    runValidity: "valid",
+    qualificationOutcome: "passed",
+    automatedObservations: workflow.automatedObservations.map((observation) => ({
+      id: observation.id,
+      outcome: "passed",
+      observedAt: "2026-08-23T12:31:00Z",
+    })),
+    humanCheckpoints: workflow.humanCheckpoints.map((checkpoint) => ({
+      checkpointId: checkpoint.id,
+      outcome: "pass",
+      observedAt: "2026-08-23T12:30:30Z",
+    })),
+    targetWideFailure: null,
+    limitations: [],
+    artifacts: [],
+  };
+}
+
+function romMergeExecutionReport(candidate) {
+  const report = ordinaryExecutionReportV2({
+    record: { fingerprint: { emuchefBuild: candidate.build } },
+  });
+  const reviewedPlanId = "plan.rom-merge-reviewed";
+  const reviewedPlanDigest = "a".repeat(64);
+  const buildIdentity = structuredClone(candidate.build);
+  report.plan = { planId: reviewedPlanId, planDigest: reviewedPlanDigest };
+  report.runtime.executionRestriction = {
+    enabled: true,
+    buildIdentity,
+    runtimeGeneration: 1,
+    strategy: "adb_shell",
+    rootShell: false,
+    appDataWrite: false,
+  };
+  report.execution.completion.counts = {
+    total: 1,
+    completed: 1,
+    skipped: 0,
+    blocked: 0,
+    failed: 0,
+    cancelled: 0,
+    pending: 0,
+  };
+  report.execution.completion.features = [
+    { name: "ROM Merge", status: "succeeded", counts: { completed: 1 } },
+  ];
+  report.execution.recipes = [
+    {
+      recipeId: "feature.copy_roms",
+      name: "Copy ROM library",
+      description: null,
+      status: "succeeded",
+      steps: [
+        {
+          recipeId: "feature.copy_roms",
+          stepId: "feature.copy_roms/copy_rom_library",
+          name: "Copy ROM library",
+          note: null,
+          status: "succeeded",
+          message: null,
+        },
+      ],
+    },
+  ];
+  report.qualification = {
+    claim: "restricted_unprivileged",
+    attemptId: candidate.candidateId,
+    executionMode: "real",
+    strategy: "adb_unprivileged",
+    restriction: "privileged_execution_disabled",
+    observedRootState: candidate.fingerprint.rootState,
+    effectiveCapabilities: ["shared_storage_write"],
+    buildIdentity,
+    deviceTargetId: candidate.deviceTargetId,
+    deviceProfileId: candidate.fingerprint.deviceProfile,
+    reviewedPlanId,
+    reviewedPlanDigest,
+    requiredOperationIds: ["feature.copy_roms"],
+    operationOutcomes: [
+      { operationId: "feature.copy_roms", outcome: "executed" },
+    ],
+  };
+  return report;
+}
+
+function romMergeEvidenceFor(
+  candidate,
+  report,
+  reportBytes,
+  pin = ROM_MERGE_TEST_PIN,
+) {
+  const sourceEntry = {
+    relativePath: "roms/game.rom",
+    sha256: "1".repeat(64),
+  };
+  const sentinelEntry = {
+    relativePath: ROM_MERGE_SENTINEL_PATH,
+    sha256: ROM_MERGE_SENTINEL_SHA256,
+  };
+  return {
+    schemaVersion: 1,
+    candidateHandle: candidate.candidateId,
+    sessionId: candidate.sessionId,
+    executionReportSha256: createHash("sha256").update(reportBytes).digest("hex"),
+    deviceTargetId: candidate.deviceTargetId,
+    deviceProfileId: candidate.fingerprint.deviceProfile,
+    androidApi: candidate.fingerprint.androidApi,
+    firmwareBuild: candidate.fingerprint.firmwareBuild,
+    abiSocClass: candidate.fingerprint.abiSocClass,
+    connectionType: candidate.fingerprint.connectionType,
+    observedRootState: candidate.fingerprint.rootState,
+    buildIdentity: structuredClone(candidate.build),
+    reviewedPlanId: report.qualification.reviewedPlanId,
+    reviewedPlanDigest: report.qualification.reviewedPlanDigest,
+    terminalOperation: {
+      recipeId: "feature.copy_roms",
+      stepId: "feature.copy_roms/copy_rom_library",
+      outcome: "succeeded",
+    },
+    copyPolicy: "merge",
+    strategyDigest: canonicalDigest({
+      domain: "emuchef.rom-merge.strategy",
+      version: 1,
+      strategy: report.qualification.strategy,
+      restriction: report.qualification.restriction,
+      runtimeRestriction: report.runtime.executionRestriction,
+      effectiveCapabilities: report.qualification.effectiveCapabilities,
+    }),
+    sourceSnapshot: {
+      sourceIdentity: "source-volume-identity-01",
+      entries: [sourceEntry],
+    },
+    destination: {
+      path: "/storage/emulated/0/ROMs",
+      setupLocation: "shared-storage",
+      volumeIdentity: "destination-volume-identity-01",
+      before: [structuredClone(sourceEntry), structuredClone(sentinelEntry)],
+      after: [structuredClone(sourceEntry), structuredClone(sentinelEntry)],
+    },
+    sentinel: {
+      relativePath: ROM_MERGE_SENTINEL_PATH,
+      expectedSha256: ROM_MERGE_SENTINEL_SHA256,
+    },
+    retroArch: {
+      packageId: pin.retroarch.packageId,
+      installedVersion: pin.retroarch.version,
+      pinnedSource: pin.retroarch.source,
+      pinnedVersion: pin.retroarch.version,
+      installedApkSha256: pin.retroarch.sha256,
+      pinnedArtifactSha256: pin.retroarch.sha256,
+    },
+    rootAuthorityUsed: false,
+    oemCompilerUsed: false,
+    oemStageUsed: false,
+  };
+}
+
+function romMergeEvidenceBundle({
+  candidateId = "qualification-candidate-1234567890abcdef1234567890abcdef",
+  sessionId = `qualification-session-${"d".repeat(32)}`,
+  updateReport = () => {},
+  updateEvidence = () => {},
+  pin = ROM_MERGE_TEST_PIN,
+} = {}) {
+  const { bundle: sourceBundle, context } = romLibrarySyncBundle({
+    profileId: "konkr.pocket_advance",
+  });
+  const candidate = candidateFromEvidenceRecord(
+    sourceBundle.record,
+    candidateId,
+    sessionId,
+  );
+  const report = romMergeExecutionReport(candidate);
+  updateReport(report);
+  const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
+  const boundReportBundle = bindReportBytes(sourceBundle, reportBytes);
+  candidate.artifacts = structuredClone(boundReportBundle.record.artifacts);
+  const evidence = romMergeEvidenceFor(candidate, report, reportBytes, pin);
+  updateEvidence(evidence);
+  const romMergeEvidenceBytes = Buffer.from(
+    `${JSON.stringify(evidence)}\n`,
+    "utf8",
+  );
+  const record = structuredClone(boundReportBundle.record);
+  record.artifacts.push({
+    id: ROM_MERGE_EVIDENCE_ID,
+    kind: ROM_MERGE_EVIDENCE_KIND,
+    path: ROM_MERGE_EVIDENCE_PATH,
+    sha256: createHash("sha256")
+      .update(romMergeEvidenceBytes)
+      .digest("hex"),
+  });
+  return {
+    bundle: {
+      record: sealRecord(record),
+      reportBytes,
+      romMergeEvidenceBytes,
+      candidate,
+    },
+    context,
+    candidate,
+    report,
+    evidence,
+    romMergeEvidenceBytes,
+  };
+}
+
+function candidateRomMergeArtifacts(
+  repoRoot,
+  candidateId,
+  pin = ROM_MERGE_TEST_PIN,
+  { configureRepo = true } = {},
+) {
+  if (configureRepo) configureKonkrQualificationRepo(repoRoot, pin);
+  const candidate = candidateForKonkrRepo(repoRoot, candidateId);
+  const report = romMergeExecutionReport(candidate);
+  const reportBytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
+  candidate.artifacts = [
+    {
+      id: "execution-report",
+      kind: "production_execution_report",
+      path: "execution-report.json",
+      sha256: createHash("sha256").update(reportBytes).digest("hex"),
+    },
+  ];
+  const evidence = romMergeEvidenceFor(candidate, report, reportBytes, pin);
+  return {
+    candidate,
+    report,
+    reportBytes,
+    romMergeEvidenceBytes: Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8"),
+  };
 }
 
 function installEvidenceBundle(
@@ -1755,7 +2115,7 @@ test("a target-wide failure can fail qualification after successful execution", 
   assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
 });
 
-test("canonical passing ROM sync evidence is vetoed for the trusted KONKR profile", () => {
+test("passing KONKR ROM sync requires supplemental ROM Merge evidence", () => {
   const { bundle, context } = romLibrarySyncBundle({
     profileId: "konkr.pocket_advance",
     updateReport(report) {
@@ -1766,7 +2126,7 @@ test("canonical passing ROM sync evidence is vetoed for the trusted KONKR profil
   assert.equal(bundle.record.deviceTarget.profileId.value, "konkr.pocket_advance");
   assert.throws(
     () => validateEvidenceBundle(bundle, context),
-    /canonical rom-library-sync evidence is not promotable for konkr\.pocket_advance/i,
+    /ROM Merge evidence is required for konkr\.pocket_advance/i,
   );
 });
 
@@ -2472,6 +2832,188 @@ test("a retroarch run cannot validate as valid when its required human checkpoin
       ),
     /missing required human checkpoint/i,
   );
+});
+
+test(
+  "Rust-produced target and report-only candidates pass Node recorders",
+  { skip: process.env.EMUCHEF_SKIP_RUST_CANDIDATE_INTEROP === "1" },
+  recordRustProducedCandidatesWithNode,
+);
+function recordRustProducedCandidatesWithNode() {
+  const targetRepo = createTempQualificationRepo();
+  const runRepo = createTempQualificationRepo();
+  const interopRoot = mkdtempSync(path.join(tmpdir(), "candidate-interop-"));
+  try {
+    const targetCandidate = targetRegistrationCandidateForRepo(targetRepo);
+    const runCandidate = runCandidateForRepo(runRepo);
+    const reportPath = path.join(interopRoot, "execution-report.json");
+    const inputPath = path.join(interopRoot, "input.json");
+    const outputPath = path.join(interopRoot, "output.json");
+    writeFileSync(reportPath, REPORT_BYTES);
+    writeFileSync(
+      inputPath,
+      JSON.stringify([
+        {
+          key: "targetRegistration",
+          kind: "target_registration",
+          repoRoot: targetRepo,
+          payload: targetCandidate,
+        },
+        {
+          key: "reportOnlyRun",
+          kind: "qualification_run",
+          repoRoot: runRepo,
+          payload: runCandidate,
+          reportPath,
+        },
+      ]),
+    );
+  const inheritedTauriConfig = process.env.TAURI_CONFIG
+    ? JSON.parse(process.env.TAURI_CONFIG)
+    : {};
+
+    execFileSync(
+      process.env.CARGO ?? "cargo",
+      [
+        "test",
+        "--manifest-path",
+        path.join(REPO_ROOT, "apps/emuchef-app/src-tauri/Cargo.toml"),
+        "qualification_repository::tests::rust_candidate_interop_fixture",
+        "--",
+        "--ignored",
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+        TAURI_CONFIG: JSON.stringify({
+          ...inheritedTauriConfig,
+        build: {
+          ...(inheritedTauriConfig.build ?? {}),
+          frontendDist: "https://example.invalid/",
+        },
+          bundle: {
+            ...(inheritedTauriConfig.bundle ?? {}),
+            externalBin: [],
+          },
+        }),
+          EMUCHEF_CANDIDATE_INTEROP_INPUT: inputPath,
+          EMUCHEF_CANDIDATE_INTEROP_OUTPUT: outputPath,
+        },
+        stdio: "pipe",
+      },
+    );
+
+    const handles = JSON.parse(readFileSync(outputPath, "utf8"));
+    const recorderFailures = [];
+    const targetEnvelopePath = path.join(
+      targetRepo,
+      ".emuchef_runtime/qualification-candidates",
+      handles.targetRegistration,
+      "candidate.json",
+    );
+    const targetEnvelope = JSON.parse(readFileSync(targetEnvelopePath, "utf8"));
+    let registeredTarget;
+    try {
+      registeredTarget = registerQualificationTargetCandidate(
+        handles.targetRegistration,
+        { repoRoot: targetRepo },
+      );
+    } catch (error) {
+      recorderFailures.push(`target registration: ${error.message}`);
+    }
+
+    const runEnvelopePath = path.join(
+      runRepo,
+      ".emuchef_runtime/qualification-candidates",
+      handles.reportOnlyRun,
+      "candidate.json",
+    );
+    const runEnvelope = JSON.parse(readFileSync(runEnvelopePath, "utf8"));
+    let record;
+    try {
+      record = recordQualificationRunCandidate(handles.reportOnlyRun, {
+        repoRoot: runRepo,
+      });
+    } catch (error) {
+      recorderFailures.push(`report-only recording: ${error.message}`);
+    }
+    assert.deepEqual(recorderFailures, []);
+    assert.equal(targetEnvelope.payload.candidateSchemaVersion, 1);
+    assert.equal(Object.hasOwn(targetEnvelope, "romMergeEvidence"), false);
+    assert.equal(runEnvelope.payload.candidateSchemaVersion, 1);
+    assert.equal(Object.hasOwn(runEnvelope, "romMergeEvidence"), false);
+    assert.equal(registeredTarget.id, deviceTargetId(targetCandidate.target));
+    assert.equal(record.qualificationOutcome, "passed");
+    assert.deepEqual(
+      record.artifacts.map(({ id }) => id),
+      ["execution-report"],
+    );
+  } finally {
+    removeTempTree(targetRepo);
+    removeTempTree(runRepo);
+    removeTempTree(interopRoot);
+  }
+}
+
+test("report-only recording accepts a legacy null ROM Merge metadata field", () => {
+  const repoRoot = createTempQualificationRepo();
+  const candidate = runCandidateForRepo(repoRoot, {
+    candidateId: "qualification-candidate-11112222333344445555666677778888",
+  });
+  try {
+    writeCandidateFixture(repoRoot, candidate, REPORT_BYTES);
+    const candidatePath = path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+      candidate.candidateId,
+      "candidate.json",
+    );
+    const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+    envelope.romMergeEvidence = null;
+    writeFileSync(candidatePath, `${JSON.stringify(envelope, null, 2)}\n`);
+
+    const record = recordQualificationRunCandidate(candidate.candidateId, {
+      repoRoot,
+    });
+    assert.deepEqual(
+      record.artifacts.map(({ id }) => id),
+      ["execution-report"],
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("a null ROM Merge metadata field does not authorize an unreferenced artifact file", () => {
+  const repoRoot = createTempQualificationRepo();
+  const candidate = runCandidateForRepo(repoRoot, {
+    candidateId: "qualification-candidate-9999aaaabbbbccccddddeeeeffff0000",
+  });
+  try {
+    writeCandidateFixture(repoRoot, candidate, REPORT_BYTES);
+    const candidateDirectory = path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+      candidate.candidateId,
+    );
+    const candidatePath = path.join(candidateDirectory, "candidate.json");
+    const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+    envelope.romMergeEvidence = null;
+    writeFileSync(candidatePath, `${JSON.stringify(envelope, null, 2)}\n`);
+    writeFileSync(
+      path.join(candidateDirectory, ROM_MERGE_EVIDENCE_PATH),
+      "unreferenced evidence\n",
+    );
+
+    assert.throws(
+      () =>
+        recordQualificationRunCandidate(candidate.candidateId, { repoRoot }),
+      /ROM Merge evidence file is not declared by candidate metadata/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
 });
 
 test("recording the same target or run twice rejects the second write without mutating canonical bytes", () => {
@@ -3962,4 +4504,821 @@ test("canonical qualification tooling uses domain-oriented output labels", () =>
   );
   assert.doesNotMatch(toolSource, /\bphase[\s_-]*6f\b/i);
   assert.doesNotMatch(toolSource, /\bslice[\s_-]*\d+[a-z0-9-]*\b/i);
+});
+
+test("ROM Merge evidence passes direct validation against the approved APK pin", () => {
+  const fixture = romMergeEvidenceBundle();
+  const repoRoot = createRomMergePinRoot();
+  try {
+    const canonicalBundle = { ...fixture.bundle };
+    delete canonicalBundle.candidate;
+    assert.doesNotThrow(() =>
+      validateEvidenceBundle(canonicalBundle, fixture.context, { repoRoot }),
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("the production RetroArch pin disables ROM Merge promotion while null", () => {
+  const pin = JSON.parse(
+    readFileSync(path.join(REPO_ROOT, ROM_MERGE_PIN_PATH), "utf8"),
+  );
+  assert.deepEqual(pin, { schemaVersion: 1, retroarch: null });
+
+  const fixture = romMergeEvidenceBundle();
+  const repoRoot = createRomMergePinRoot({
+    schemaVersion: 1,
+    retroarch: null,
+  });
+  try {
+    assert.throws(
+      () => validateEvidenceBundle(fixture.bundle, fixture.context, { repoRoot }),
+      /ROM Merge promotion is disabled.*pin is null/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("a missing RetroArch pin fails closed for KONKR ROM Merge evidence", () => {
+  const fixture = romMergeEvidenceBundle();
+  const repoRoot = mkdtempSync(path.join(tmpdir(), "rom-merge-missing-pin-"));
+  try {
+    assert.throws(
+      () => validateEvidenceBundle(fixture.bundle, fixture.context, { repoRoot }),
+      /ROM Merge APK pin file is missing/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("ROM Merge evidence rejects untrusted pin values and stale strategy bindings", () => {
+  const invalidCases = [
+    ["package id", (evidence) => (evidence.retroArch.packageId = "other.package")],
+    ["pinned source", (evidence) => (evidence.retroArch.pinnedSource = "other-source")],
+    ["pinned version", (evidence) => (evidence.retroArch.pinnedVersion = "other-version")],
+    ["installed version", (evidence) => (evidence.retroArch.installedVersion = "other-version")],
+    ["installed APK digest", (evidence) => (evidence.retroArch.installedApkSha256 = "0".repeat(64))],
+    ["pinned APK digest", (evidence) => (evidence.retroArch.pinnedArtifactSha256 = "0".repeat(64))],
+      ["strategy digest", (evidence) => (evidence.strategyDigest = "sha256:" + "0".repeat(64))],
+      ["report digest", (evidence) => (evidence.executionReportSha256 = "0".repeat(64))],
+    ["candidate handle", (evidence) => (evidence.candidateHandle = "qualification-candidate-00000000000000000000000000000000")],
+    ["session id", (evidence) => (evidence.sessionId = "another-session")],
+    ["observed root state", (evidence) => (evidence.observedRootState = "rooted")],
+    ["extra field", (evidence) => (evidence.unreviewed = true)],
+    ["missing field", (evidence) => delete evidence.sourceSnapshot.sourceIdentity],
+  ];
+  const repoRoot = createRomMergePinRoot();
+  try {
+    for (const [label, updateEvidence] of invalidCases) {
+      const fixture = romMergeEvidenceBundle({ updateEvidence });
+      assert.throws(
+        () => validateEvidenceBundle(fixture.bundle, fixture.context, { repoRoot }),
+        /ROM Merge evidence|sourceSnapshot|strategy|candidate|session|observedRootState|retroArch/i,
+        label,
+      );
+    }
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("ROM Merge evidence binds root state to both candidate and execution report", () => {
+  const mismatchedCandidate = romMergeEvidenceBundle({
+    updateEvidence(evidence) {
+      evidence.observedRootState = "invalid-root-state";
+    },
+  });
+  const repoRoot = createRomMergePinRoot();
+  try {
+    assert.throws(
+      () =>
+        validateEvidenceBundle(
+          mismatchedCandidate.bundle,
+          mismatchedCandidate.context,
+          { repoRoot },
+        ),
+      /observedRootState/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+
+  const mismatchedReport = romMergeEvidenceBundle({
+    updateReport(report) {
+      report.qualification.observedRootState = "invalid-root-state";
+    },
+  });
+  const secondRepoRoot = createRomMergePinRoot();
+  try {
+    assert.throws(
+      () =>
+        validateEvidenceBundle(
+          mismatchedReport.bundle,
+          mismatchedReport.context,
+          { repoRoot: secondRepoRoot },
+        ),
+      /observedRootState/i,
+    );
+  } finally {
+    removeTempTree(secondRepoRoot);
+  }
+});
+
+test("ROM Merge manifests enforce merge precedence, path, and sentinel rules", () => {
+  const invalidCases = [
+    ["empty source", (evidence) => (evidence.sourceSnapshot.entries = [])],
+    [
+      "source missing from after",
+      (evidence) => (evidence.destination.after = [evidence.destination.after[1]]),
+    ],
+    [
+      "source hash precedence",
+      (evidence) => (evidence.destination.after[0].sha256 = "2".repeat(64)),
+    ],
+    [
+      "delete existing destination entry",
+      (evidence) =>
+        evidence.destination.before.push({
+          relativePath: "keep/existing.rom",
+          sha256: "4".repeat(64),
+        }),
+    ],
+    [
+      "add unrelated destination entry",
+      (evidence) =>
+        evidence.destination.after.push({
+          relativePath: "unreviewed/extra.rom",
+          sha256: "3".repeat(64),
+        }),
+    ],
+    [
+      "change unrelated destination entry",
+      (evidence) => {
+        evidence.destination.before.push({
+          relativePath: "keep/existing.rom",
+          sha256: "4".repeat(64),
+        });
+        evidence.destination.after.push({
+          relativePath: "keep/existing.rom",
+          sha256: "5".repeat(64),
+        });
+      },
+    ],
+    [
+      "copy sentinel from source",
+      (evidence) =>
+        evidence.sourceSnapshot.entries.push({
+          relativePath: ROM_MERGE_SENTINEL_PATH,
+          sha256: ROM_MERGE_SENTINEL_SHA256,
+        }),
+    ],
+    [
+      "change sentinel after copy",
+      (evidence) => (evidence.destination.after[1].sha256 = "6".repeat(64)),
+    ],
+    [
+      "duplicate normalized path",
+      (evidence) => evidence.sourceSnapshot.entries.push(
+        structuredClone(evidence.sourceSnapshot.entries[0]),
+      ),
+    ],
+    [
+      "non-normalized relative path",
+      (evidence) => (evidence.sourceSnapshot.entries[0].relativePath = "roms/../game.rom"),
+    ],
+  ];
+  const repoRoot = createRomMergePinRoot();
+  try {
+    for (const [label, updateEvidence] of invalidCases) {
+      const fixture = romMergeEvidenceBundle({ updateEvidence });
+      assert.throws(
+        () => validateEvidenceBundle(fixture.bundle, fixture.context, { repoRoot }),
+        /ROM Merge evidence|source|destination|sentinel|path|manifest/i,
+        label,
+      );
+    }
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("ROM Merge evidence rejects authority flags and unsupported capabilities", () => {
+  const invalidEvidence = [
+    ["root authority", (evidence) => (evidence.rootAuthorityUsed = true)],
+    ["OEM compiler", (evidence) => (evidence.oemCompilerUsed = true)],
+    ["OEM staging", (evidence) => (evidence.oemStageUsed = true)],
+  ];
+  const repoRoot = createRomMergePinRoot();
+  try {
+    for (const [label, updateEvidence] of invalidEvidence) {
+      const fixture = romMergeEvidenceBundle({ updateEvidence });
+      assert.throws(
+        () => validateEvidenceBundle(fixture.bundle, fixture.context, { repoRoot }),
+        /authority|OEM|ROM Merge evidence/i,
+        label,
+      );
+    }
+
+    const privileged = romMergeEvidenceBundle({
+      updateReport(report) {
+        report.qualification.effectiveCapabilities = ["root_shell"];
+      },
+    });
+    assert.throws(
+      () => validateEvidenceBundle(privileged.bundle, privileged.context, { repoRoot }),
+      /privileged|capability/i,
+    );
+
+    const unsupported = romMergeEvidenceBundle({
+      updateReport(report) {
+        report.qualification.effectiveCapabilities = ["unsupported_capability"];
+      },
+    });
+    assert.throws(
+      () => validateEvidenceBundle(unsupported.bundle, unsupported.context, { repoRoot }),
+      /unsupported|capability/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("ROM Merge uses separate qualification and runtime strategy bindings", () => {
+  const valid = romMergeEvidenceBundle();
+  assert.equal(valid.report.qualification.strategy, "adb_unprivileged");
+  assert.equal(valid.report.runtime.executionRestriction.strategy, "adb_shell");
+  assert.equal(valid.report.qualification.restriction, "privileged_execution_disabled");
+
+  const repoRoot = createRomMergePinRoot();
+  try {
+    const wrongQualificationStrategy = romMergeEvidenceBundle({
+      updateReport(report) {
+        report.qualification.strategy = "adb_shell";
+      },
+    });
+    assert.throws(
+      () =>
+        validateEvidenceBundle(
+          wrongQualificationStrategy.bundle,
+          wrongQualificationStrategy.context,
+          { repoRoot },
+        ),
+      /qualification strategy/i,
+    );
+
+    const wrongRuntimeStrategy = romMergeEvidenceBundle({
+      updateReport(report) {
+        report.runtime.executionRestriction.strategy = "adb_unprivileged";
+      },
+    });
+    assert.throws(
+      () =>
+        validateEvidenceBundle(
+          wrongRuntimeStrategy.bundle,
+          wrongRuntimeStrategy.context,
+          { repoRoot },
+        ),
+      /verified runtime restriction/i,
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("ROM Merge evidence requires the successful terminal recipe step and executed operations", () => {
+  const invalidReports = [
+    ["failed terminal step", (report) => (report.execution.recipes[0].steps[0].status = "failed")],
+    ["skipped terminal step", (report) => (report.execution.recipes[0].steps[0].status = "skipped")],
+    ["cancelled terminal step", (report) => (report.execution.recipes[0].steps[0].status = "cancelled")],
+    ["wrong terminal step id", (report) => (report.execution.recipes[0].steps[0].stepId = "feature.copy_roms/other")],
+    ["missing terminal step", (report) => (report.execution.recipes[0].steps = [])],
+    ["missing operation outcome", (report) => (report.qualification.operationOutcomes = [])],
+    ["skipped operation outcome", (report) => (report.qualification.operationOutcomes[0].outcome = "skipped")],
+    ["cancelled operation outcome", (report) => (report.qualification.operationOutcomes[0].outcome = "cancelled")],
+    ["failed operation outcome", (report) => (report.qualification.operationOutcomes[0].outcome = "failed")],
+    [
+      "duplicate operation outcome",
+      (report) => report.qualification.operationOutcomes.push(
+        structuredClone(report.qualification.operationOutcomes[0]),
+      ),
+    ],
+  ];
+  const repoRoot = createRomMergePinRoot();
+  try {
+    for (const [label, updateReport] of invalidReports) {
+      const fixture = romMergeEvidenceBundle({ updateReport });
+      assert.throws(
+        () => validateEvidenceBundle(fixture.bundle, fixture.context, { repoRoot }),
+        /ROM Merge|terminal|step|operation|executed|restricted/i,
+        label,
+      );
+    }
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("KONKR ROM Merge candidate bytes reach the canonical bundle unchanged", () => {
+  const repoRoot = createTempQualificationRepo();
+  const candidateId = "qualification-candidate-1234567890abcdef1234567890abcdef";
+  try {
+    const fixture = candidateRomMergeArtifacts(repoRoot, candidateId);
+    writeCandidateFixture(
+      repoRoot,
+      fixture.candidate,
+      fixture.reportBytes,
+      fixture.romMergeEvidenceBytes,
+    );
+
+    const record = recordQualificationRunCandidate(candidateId, { repoRoot });
+    assert.equal(record.artifacts.length, 2);
+    assert.deepEqual(
+      record.artifacts.map(({ id, path: artifactPath }) => [id, artifactPath]),
+      [
+        ["execution-report", "execution-report.json"],
+        [ROM_MERGE_EVIDENCE_ID, ROM_MERGE_EVIDENCE_PATH],
+      ],
+    );
+
+    const evidenceRoot = path.join(
+      repoRoot,
+      "docs/testing/device-qualification/evidence",
+    );
+    const canonicalPath = path.join(evidenceRoot, record.runId);
+    const canonicalBundle = loadEvidenceBundle(canonicalPath);
+    assert.deepEqual(canonicalBundle.reportBytes, fixture.reportBytes);
+    assert.deepEqual(
+      canonicalBundle.romMergeEvidenceBytes,
+      fixture.romMergeEvidenceBytes,
+    );
+    const workflowCatalog = loadWorkflowCatalog(
+      path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"),
+    );
+    const targets = loadDeviceTargets(
+      path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+      { authoredProfilesDir: path.join(repoRoot, "authored/device_profiles") },
+    ).targets;
+    const context = { workflowCatalog, targets };
+    assert.doesNotThrow(() =>
+      validateEvidenceBundle(canonicalBundle, context, { repoRoot }),
+    );
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }).map((item) => item.runId),
+      [record.runId],
+    );
+    assert.deepEqual(
+      loadEvidenceDirectory(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }).map((item) => item.runId),
+      [record.runId],
+    );
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("archived ROM Merge evidence stays readable but stops qualifying after an APK pin change", () => {
+  const repoRoot = createTempQualificationRepo();
+  const evidenceRoot = path.join(
+    repoRoot,
+    "docs/testing/device-qualification/evidence",
+  );
+  const pinA = ROM_MERGE_TEST_PIN;
+  const pinB = {
+    schemaVersion: 1,
+    retroarch: {
+      ...ROM_MERGE_TEST_PIN.retroarch,
+      source: "https://example.invalid/retroarch-b.apk",
+      version: "1.20.0",
+      sha256: "d".repeat(64),
+    },
+  };
+  try {
+    const candidateAId =
+      "qualification-candidate-aaaaaaaa11111111bbbbbbbb22222222";
+    const candidateA = candidateRomMergeArtifacts(
+      repoRoot,
+      candidateAId,
+      pinA,
+    );
+    writeCandidateFixture(
+      repoRoot,
+      candidateA.candidate,
+      candidateA.reportBytes,
+      candidateA.romMergeEvidenceBytes,
+    );
+    const recordA = recordQualificationRunCandidate(candidateAId, { repoRoot });
+    const historicalBundlePath = path.join(evidenceRoot, recordA.runId);
+
+    const pinPath = path.join(repoRoot, ROM_MERGE_PIN_PATH);
+    writeRomMergePin(repoRoot, pinB);
+    commitRepoChanges(repoRoot, "approve the next RetroArch APK pin");
+
+    const historicalBundle = loadEvidenceBundle(historicalBundlePath);
+    assert.ok(historicalBundle.romMergeEvidenceBytes instanceof Buffer);
+    const workflowCatalog = loadWorkflowCatalog(
+      path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"),
+    );
+    const targets = loadDeviceTargets(
+      path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+      { authoredProfilesDir: path.join(repoRoot, "authored/device_profiles") },
+    ).targets;
+    const context = { workflowCatalog, targets };
+    assert.deepEqual(
+      loadEvidenceDirectory(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }).map(({ runId }) => runId),
+      [recordA.runId],
+    );
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }),
+      [],
+    );
+    assert.throws(
+      () =>
+        validateEvidenceBundle(historicalBundle, context, { repoRoot }),
+      /repository-approved APK pin/i,
+    );
+
+    assert.throws(
+      () =>
+        validateEvidenceBundle(historicalBundle, context, {
+          repoRoot,
+          allowHistoricalRomMergePin: true,
+        }),
+      /repository-approved APK pin/i,
+    );
+
+    const candidateBId =
+      "qualification-candidate-cccccccc33333333dddddddd44444444";
+    const candidateB = candidateRomMergeArtifacts(
+      repoRoot,
+      candidateBId,
+      pinB,
+      { configureRepo: false },
+    );
+    writeCandidateFixture(
+      repoRoot,
+      candidateB.candidate,
+      candidateB.reportBytes,
+      candidateB.romMergeEvidenceBytes,
+    );
+    const recordB = recordQualificationRunCandidate(candidateBId, { repoRoot });
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }).map(({ runId }) => runId),
+      [recordB.runId],
+    );
+    assert.ok(existsSync(pinPath));
+
+  const assertHistoricalEvidenceRemainsReadable = () => {
+    assert.deepEqual(
+      loadEvidenceDirectory(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      })
+        .map(({ runId }) => runId)
+        .sort(),
+      [recordA.runId, recordB.runId].sort(),
+    );
+    assert.deepEqual(
+      loadValidatedEvidenceRecords(evidenceRoot, {
+        fixtureMode: false,
+        workflowCatalog,
+        targets,
+        repoRoot,
+      }),
+      [],
+    );
+  };
+
+  writeRomMergePin(repoRoot, { schemaVersion: 1, retroarch: null });
+  commitRepoChanges(repoRoot, "disable current RetroArch APK pin");
+  assertHistoricalEvidenceRemainsReadable();
+
+  rmSync(pinPath);
+  assertHistoricalEvidenceRemainsReadable();
+
+  writeFileSync(pinPath, "{invalid json\n", "utf8");
+  assertHistoricalEvidenceRemainsReadable();
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("KONKR passing report without ROM Merge evidence fails before mutation", () => {
+  const repoRoot = createTempQualificationRepo();
+  const candidateId = "qualification-candidate-abcdefabcdefabcdefabcdefabcdefab";
+  try {
+    const fixture = candidateRomMergeArtifacts(repoRoot, candidateId);
+    writeCandidateFixture(repoRoot, fixture.candidate, fixture.reportBytes);
+    const evidenceRoot = path.join(
+      repoRoot,
+      "docs/testing/device-qualification/evidence",
+    );
+    const matrixPath = path.join(
+      repoRoot,
+      "docs/qualification/device-qualification-matrix.md",
+    );
+    const beforeEvidence = snapshotTree(evidenceRoot);
+    const beforeMatrix = readFileSync(matrixPath, "utf8");
+
+    assert.throws(
+      () => recordQualificationRunCandidate(candidateId, { repoRoot }),
+      /ROM Merge evidence is required for konkr\.pocket_advance/i,
+    );
+    assert.deepEqual(snapshotTree(evidenceRoot), beforeEvidence);
+    assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
+  } finally {
+    removeTempTree(repoRoot);
+  }
+});
+
+test("candidate ROM Merge files reject malformed, stale, replaced, duplicate, and symlinked data before mutation", () => {
+  const cases = [
+    {
+      label: "missing sidecar",
+      evidenceBytes: "valid",
+      update({ directory }) {
+        rmSync(path.join(directory, ROM_MERGE_EVIDENCE_PATH));
+      },
+    },
+    {
+      label: "stale byte length metadata",
+      evidenceBytes: "valid",
+      update({ directory }) {
+        const candidatePath = path.join(directory, "candidate.json");
+        const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+        envelope.romMergeEvidence.byteLength += 1;
+        writeFileSync(candidatePath, JSON.stringify(envelope), "utf8");
+      },
+    },
+    {
+      label: "stale digest metadata",
+      evidenceBytes: "valid",
+      update({ directory }) {
+        const candidatePath = path.join(directory, "candidate.json");
+        const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+        envelope.romMergeEvidence.sha256 = "0".repeat(64);
+        writeFileSync(candidatePath, JSON.stringify(envelope), "utf8");
+      },
+    },
+    {
+      label: "wrong fixed evidence path",
+      evidenceBytes: "valid",
+      update({ directory }) {
+        const candidatePath = path.join(directory, "candidate.json");
+        const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+        envelope.romMergeEvidence.path = "other-evidence.json";
+        writeFileSync(candidatePath, JSON.stringify(envelope), "utf8");
+      },
+    },
+    {
+      label: "malformed JSON bytes",
+      evidenceBytes: Buffer.from("{not-json}\n", "utf8"),
+    },
+{
+label: "evidence exceeds the supported size bound",
+evidenceBytes: Buffer.alloc(1024 * 1024 + 1, 0x20),
+},
+{
+label: "evidence is not valid UTF-8",
+evidenceBytes: Buffer.from([0xff, 0xfe]),
+},
+    {
+      label: "replaced bytes",
+      evidenceBytes: "valid",
+      update({ directory }) {
+        writeFileSync(
+          path.join(directory, ROM_MERGE_EVIDENCE_PATH),
+          "replacement bytes\n",
+          "utf8",
+        );
+      },
+    },
+    {
+      label: "symlinked evidence file",
+      evidenceBytes: "valid",
+      update({ repoRoot, directory }) {
+        const sidecarPath = path.join(directory, ROM_MERGE_EVIDENCE_PATH);
+        const replacementPath = path.join(repoRoot, "replacement-evidence.json");
+        writeFileSync(replacementPath, "replacement bytes\n", "utf8");
+        rmSync(sidecarPath);
+        symlinkSync(replacementPath, sidecarPath);
+      },
+    },
+    {
+      label: "unbound sidecar",
+      evidenceBytes: "orphan",
+      update({ repoRoot, directory, fixture }) {
+        rmSync(path.join(directory, ROM_MERGE_EVIDENCE_PATH), { force: true });
+        writeFileSync(
+          path.join(directory, ROM_MERGE_EVIDENCE_PATH),
+          fixture.romMergeEvidenceBytes,
+        );
+        const candidatePath = path.join(directory, "candidate.json");
+        const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+        delete envelope.romMergeEvidence;
+        writeFileSync(candidatePath, JSON.stringify(envelope), "utf8");
+      },
+    },
+    {
+      label: "duplicate artifact reference",
+      evidenceBytes: "valid",
+  update({ fixture, directory }) {
+    const duplicateReference = {
+          id: ROM_MERGE_EVIDENCE_ID,
+          kind: ROM_MERGE_EVIDENCE_KIND,
+          path: ROM_MERGE_EVIDENCE_PATH,
+          sha256: createHash("sha256")
+            .update(fixture.romMergeEvidenceBytes)
+            .digest("hex"),
+    };
+    fixture.candidate.artifacts.push(duplicateReference);
+    const candidatePath = path.join(directory, "candidate.json");
+    const envelope = JSON.parse(readFileSync(candidatePath, "utf8"));
+    envelope.payload.artifacts.push(duplicateReference);
+    writeFileSync(candidatePath, JSON.stringify(envelope), "utf8");
+      },
+    },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const repoRoot = createTempQualificationRepo();
+    const candidateId = `qualification-candidate-${(index + 1)
+      .toString(16)
+      .padStart(32, "0")}`;
+    try {
+      const fixture = candidateRomMergeArtifacts(repoRoot, candidateId);
+      let evidenceBytes = fixture.romMergeEvidenceBytes;
+      if (Buffer.isBuffer(item.evidenceBytes)) evidenceBytes = item.evidenceBytes;
+      writeCandidateFixture(
+        repoRoot,
+        fixture.candidate,
+        fixture.reportBytes,
+        item.evidenceBytes === "orphan" ? null : evidenceBytes,
+      );
+      const directory = path.join(
+        repoRoot,
+        ".emuchef_runtime/qualification-candidates",
+        candidateId,
+      );
+      item.update?.({ repoRoot, directory, fixture });
+      const evidenceRoot = path.join(
+        repoRoot,
+        "docs/testing/device-qualification/evidence",
+      );
+      const matrixPath = path.join(
+        repoRoot,
+        "docs/qualification/device-qualification-matrix.md",
+      );
+      const beforeEvidence = snapshotTree(evidenceRoot);
+      const beforeMatrix = readFileSync(matrixPath, "utf8");
+
+      assert.throws(
+        () => recordQualificationRunCandidate(candidateId, { repoRoot }),
+        /ROM Merge|rom-merge-evidence|artifact|candidate|JSON|symlink|sha256|byte length/i,
+        item.label,
+      );
+      assert.deepEqual(snapshotTree(evidenceRoot), beforeEvidence, item.label);
+      assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix, item.label);
+    } finally {
+      removeTempTree(repoRoot);
+    }
+  }
+});
+
+test("non-KONKR evidence remains compatible and cannot carry ROM Merge artifacts", () => {
+  const ordinary = ordinaryExecutionBundle();
+  assert.doesNotThrow(() => validateEvidenceBundle(ordinary, syntheticContext()));
+
+  const { bundle, context } = romLibrarySyncBundle({
+    profileId: "ayaneo.pocket_s2",
+  });
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, context));
+
+  const unsupported = {
+    record: structuredClone(ordinary.record),
+    reportBytes: ordinary.reportBytes,
+  };
+  unsupported.record.artifacts.push({
+    id: ROM_MERGE_EVIDENCE_ID,
+    kind: ROM_MERGE_EVIDENCE_KIND,
+    path: ROM_MERGE_EVIDENCE_PATH,
+    sha256: "0".repeat(64),
+  });
+  unsupported.record = sealRecord(unsupported.record);
+  unsupported.romMergeEvidenceBytes = Buffer.from("{}\n", "utf8");
+  assert.throws(
+    () => validateEvidenceBundle(unsupported, syntheticContext()),
+    /not supported for this workflow and device profile/i,
+  );
+});
+
+test("KONKR support tier is capped at limited while lower tiers remain intact", () => {
+  const qualified = [
+    {
+      workflowId: "rom-library-sync",
+      applicability: "required",
+      state: "qualified",
+      targetWideFailure: null,
+    },
+  ];
+  assert.equal(deriveDeviceSupportTier(qualified), "qualified");
+  assert.equal(
+    deriveDeviceSupportTier(qualified, "konkr.pocket_advance"),
+    "limited",
+  );
+
+  const partlyQualified = [
+    ...qualified,
+    {
+      workflowId: "retroarch-plus-bios",
+      applicability: "required",
+      state: "not_qualified",
+      targetWideFailure: null,
+    },
+  ];
+  assert.equal(deriveDeviceSupportTier(partlyQualified), "limited");
+  assert.equal(
+    deriveDeviceSupportTier(partlyQualified, "konkr.pocket_advance"),
+    "limited",
+  );
+  const unqualified = [
+    {
+      ...qualified[0],
+      state: "not_qualified",
+    },
+  ];
+  assert.equal(
+    deriveDeviceSupportTier(unqualified, "konkr.pocket_advance"),
+    "unqualified",
+  );
+});
+
+test("ROM Merge schema validation keeps artifact alternatives and the two-item limit", () => {
+  const schema = JSON.parse(
+    readFileSync(
+      path.join(REPO_ROOT, "docs/testing/device-qualification/evidence-schema.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(validateEvidenceSchemaContract(schema), true);
+
+  const missingLimit = structuredClone(schema);
+  delete missingLimit.properties.artifacts.maxItems;
+  assert.throws(
+    () => validateEvidenceSchemaContract(missingLimit),
+    /artifacts maxItems/i,
+  );
+
+  const alteredAlternative = structuredClone(schema);
+  alteredAlternative.$defs.evidenceArtifact.oneOf[1].properties.kind.const =
+    "unexpected_artifact";
+  assert.throws(
+    () => validateEvidenceSchemaContract(alteredAlternative),
+    /evidence schema artifact alternatives/i,
+  );
+});
+
+test("ROM Merge gate leaves workflow v1 and execution report v2 unchanged", () => {
+  const workflowCatalog = JSON.parse(
+    readFileSync(
+      path.join(REPO_ROOT, "docs/testing/device-qualification/workflow-catalog.json"),
+      "utf8",
+    ),
+  );
+  const executionReportSchema = JSON.parse(
+    readFileSync(
+      path.join(REPO_ROOT, "docs/testing/device-qualification/execution-report.schema.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(workflowCatalog.schemaVersion, 1);
+  assert.equal(executionReportSchema.properties.schemaVersion.const, 2);
 });
