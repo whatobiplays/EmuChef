@@ -5711,7 +5711,7 @@ fn invalid_app_target_is_reported_before_capability_pruning() {
 }
 
 #[test]
-fn config_create_write_grant_does_not_admit_other_steps_to_the_same_target() {
+fn config_write_grant_does_not_admit_other_steps_to_the_same_target() {
     let temp = TempDir::new().expect("config-create planner fixture should be created");
     let mut input = repo_plan_e2e_input_for_device_plan(
         "ayaneo.pocket_s_mini.base",
@@ -5719,7 +5719,7 @@ fn config_create_write_grant_does_not_admit_other_steps_to_the_same_target() {
         &[RepoPlanE2eBinding::RetroarchCfg],
     );
     input.runtime_capabilities.app_data_write = false;
-    input.config_create_destination = Some(
+    input.config_write_destination = Some(
         "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg".to_string(),
     );
     input.explicit_input_bindings.insert(
@@ -5953,7 +5953,7 @@ fn artifact_selection_input(
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
-        config_create_destination: None,
+        config_write_destination: None,
     }
 }
 
@@ -6002,7 +6002,7 @@ fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
-        config_create_destination: None,
+        config_write_destination: None,
     }
 }
 
@@ -6099,7 +6099,7 @@ fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
-        config_create_destination: None,
+        config_write_destination: None,
     }
 }
 
@@ -6174,7 +6174,7 @@ fn recipe_expansion_input(recipes: Vec<Recipe>, selected_recipe_refs: Vec<&str>)
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
-        config_create_destination: None,
+        config_write_destination: None,
     }
 }
 
@@ -6299,7 +6299,7 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
         runtime_capabilities: fixture_runtime_capabilities(),
         catalog_identity: None,
         target_device: None,
-        config_create_destination: None,
+        config_write_destination: None,
     }
 }
 

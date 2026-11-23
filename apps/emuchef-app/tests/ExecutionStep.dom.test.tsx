@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 
 import { ExecutionStep } from "../src/ExecutionStep";
@@ -68,6 +68,107 @@ describe("execution recovery actions", () => {
     expect(screen.getByText(/require a fresh plan and review before another run/i)).toBeTruthy();
     expect(screen.getByText(/are not retried in place/i)).toBeTruthy();
     expect(container.textContent).not.toContain("2026-07-20T12:00:00Z");
+  });
+
+  test("opens the private original-config backup from a real execution result", () => {
+    const onOpenConfigurationBackup = vi.fn();
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      recipes: [{
+        name: "RetroArch",
+        description: null,
+        status: "failed",
+        steps: [{
+          name: "Replace RetroArch config",
+          note: null,
+          status: "failed",
+          message: "The replacement stopped after the original was saved.",
+          configurationBackupOperationId: "backup-operation-1",
+        }],
+      }],
+    };
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 1,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onOpenConfigurationBackup={onOpenConfigurationBackup}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open private backup folder" }));
+
+    expect(onOpenConfigurationBackup).toHaveBeenCalledWith("backup-operation-1");
+  });
+
+  test("prepares a fresh review after a verified backup failure", () => {
+    const onPrepareBackupWaiverReview = vi.fn();
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      recipes: [{
+        name: "RetroArch",
+        description: null,
+        status: "failed",
+        steps: [{
+          name: "Replace RetroArch config",
+          note: null,
+          status: "failed",
+          message: "The private backup could not be verified; no replacement was started.",
+          configurationBackupFailureOperationId: "backup-failure-operation",
+        }],
+      }],
+    };
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 1,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareBackupWaiverReview={onPrepareBackupWaiverReview}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Review one-time backup waiver" }));
+
+    expect(onPrepareBackupWaiverReview).toHaveBeenCalledWith(
+      "execution-opaque",
+      "backup-failure-operation",
+    );
   });
 
   test("active execution shows backend-projected current work and safe-boundary cancellation", () => {

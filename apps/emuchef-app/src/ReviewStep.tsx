@@ -131,10 +131,12 @@ const simulationReview = !realReview;
                     )}
                     {action.configurationCreate && (
                       <section
-                        aria-label="Configuration creation"
-                        className="review-configuration-create"
+                        aria-label={`Configuration ${action.configurationCreate.operation === "create" ? "creation" : "replacement"}`}
+                        className="review-configuration-write"
                       >
-                        <h5>Configuration creation</h5>
+                        <h5>
+                          Configuration {action.configurationCreate.operation}
+                        </h5>
                         <dl>
                           <div>
                             <dt>Source</dt>
@@ -157,9 +159,13 @@ const simulationReview = !realReview;
                           <div>
                             <dt>Target state</dt>
                             <dd>
-                              {action.configurationCreate.confirmedAbsent
-                                ? "Confirmed absent · create only"
-                                : "Absence not confirmed · creation is blocked"}
+                              {action.configurationCreate.operation === "create"
+                                ? action.configurationCreate.confirmedAbsent
+                                  ? "Confirmed absent · create only"
+                                  : "Absence not confirmed · creation is blocked"
+                                : action.configurationCreate.confirmedExisting
+                                  ? "Existing configuration confirmed · replacement only"
+                                  : "Existing configuration not confirmed · replacement is blocked"}
                             </dd>
                           </div>
                           <div>
@@ -278,6 +284,55 @@ const simulationReview = !realReview;
           ))}
         </article>
       ))}
+      {review.configurationBackupWaiver && (
+        <section
+          aria-label="One-time backup waiver"
+          className="review-configuration-waiver"
+        >
+          <h3>One-time backup waiver</h3>
+          <p>
+            The previous Replace was blocked before writing the RetroArch config because its private backup could not be verified.
+            This review authorizes one replacement attempt without creating a backup.
+          </p>
+          <p>
+            The normal root, route, device-session, profile, and execution-admission checks still apply.
+            Native confirmation is required before this exact replacement can start.
+          </p>
+          <dl>
+            <div>
+              <dt>Failure operation</dt>
+              <dd><code>{review.configurationBackupWaiver.failureOperationId}</code></dd>
+            </div>
+            <div>
+              <dt>Failure report SHA-256</dt>
+              <dd><code>{review.configurationBackupWaiver.failureReportSha256}</code></dd>
+            </div>
+            <div>
+              <dt>Waiver SHA-256</dt>
+              <dd><code>{review.configurationBackupWaiver.waiverSha256}</code></dd>
+            </div>
+            <div>
+              <dt>Target</dt>
+              <dd>{review.configurationBackupWaiver.target}</dd>
+            </div>
+            <div>
+              <dt>Source SHA-256</dt>
+              <dd><code>{review.configurationBackupWaiver.sourceSha256}</code></dd>
+            </div>
+            <div>
+              <dt>Original-file precondition</dt>
+              <dd>
+                {review.configurationBackupWaiver.originalFilePrecondition.status}: {" "}
+                <code>{review.configurationBackupWaiver.originalFilePrecondition.sha256}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Backup mode</dt>
+              <dd>Waived once for this reviewed replacement</dd>
+            </div>
+          </dl>
+        </section>
+      )}
       {review.notices.map((notice, index) => (
         <section
           className="simulation-banner"

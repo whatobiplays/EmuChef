@@ -283,7 +283,7 @@ fn setup_location_reference_is_accepted_as_copy_files_destination() {
         },
         catalog_identity: None,
         target_device: None,
-        config_create_destination: None,
+        config_write_destination: None,
     };
     planner_input
         .explicit_input_bindings

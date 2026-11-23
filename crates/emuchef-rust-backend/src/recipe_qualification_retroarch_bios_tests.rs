@@ -24,6 +24,8 @@ const RETROARCH_RECIPE: &str = "app.retroarch.provision";
 const BIOS_RECIPE: &str = "feature.copy_bios";
 const RETROARCH_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
 const CONFIG_SOURCE_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg_source";
+const CONFIG_WRITE_OPERATION_INPUT_KEY: &str =
+    "app.retroarch.provision/retroarch_cfg_write_operation";
 const VIDEO_THREADED_INPUT_KEY: &str = "app.retroarch.provision/retroarch_video_threaded";
 const BIOS_INPUT_KEY: &str = "feature.copy_bios/bios_source_dir";
 const BIOS_DESTINATION: &str = "/storage/emulated/0/RetroArch/system";
@@ -111,6 +113,7 @@ fn load_contract() -> CombinedQualificationContract {
         vec![
             RETROARCH_INPUT_KEY,
             CONFIG_SOURCE_INPUT_KEY,
+            CONFIG_WRITE_OPERATION_INPUT_KEY,
             VIDEO_THREADED_INPUT_KEY
         ]
     );
@@ -167,9 +170,6 @@ fn plan_configuration_for(
         root_shell: true,
         app_data_write: true,
         root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
-        config_create_write_evidence: Some(
-            crate::runtime_configuration::test_config_create_write_evidence(),
-        ),
     });
     plan_configuration(ConfigurationContextRequest {
         catalog,
@@ -417,7 +417,7 @@ fn combined_default_plan_has_complete_membership_and_preserves_runtime_staging()
         assert!(runtime_capability_enabled(plan, capability));
     }
 
-    assert_eq!(result.resolved_inputs.len(), 4);
+    assert_eq!(result.resolved_inputs.len(), 5);
     let bios_binding = result
         .resolved_inputs
         .iter()
@@ -444,6 +444,15 @@ fn combined_default_plan_has_complete_membership_and_preserves_runtime_staging()
     assert_eq!(
         source_binding.value,
         Some(Value::String("none".to_string()))
+    );
+    let write_operation_binding = result
+        .resolved_inputs
+        .iter()
+        .find(|binding| binding.key == CONFIG_WRITE_OPERATION_INPUT_KEY)
+        .expect("RetroArch configuration operation should be resolved");
+    assert_eq!(
+        write_operation_binding.value,
+        Some(Value::String("create".to_string()))
     );
     let threaded_binding = result
         .resolved_inputs

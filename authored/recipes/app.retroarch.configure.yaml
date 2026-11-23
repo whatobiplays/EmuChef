@@ -35,6 +35,19 @@ inputs:
         label: Create from EmuChef setting
       - value: uploaded
         label: Use supplied file
+  retroarch_cfg_write_operation:
+    type: enum
+    role: generic
+    label: Configuration operation
+    description: Choose whether to create the configuration only when absent or replace the existing file.
+    required: false
+    multiple: false
+    default: create
+    options:
+      - value: create
+        label: Create only
+      - value: replace
+        label: Replace existing file
   retroarch_video_threaded:
     type: boolean
     role: generic

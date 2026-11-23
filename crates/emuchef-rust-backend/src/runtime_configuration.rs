@@ -49,18 +49,6 @@ pub(crate) struct RuntimeCapabilityAvailability {
     pub root_shell: bool,
     pub app_data_write: bool,
     pub root_shell_route: Option<crate::planner::RootShellRoute>,
-    pub(crate) config_create_write_evidence: Option<ConfigCreateWriteEvidence>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ConfigCreateWriteEvidence {
-    target_identity: Value,
-}
-
-impl ConfigCreateWriteEvidence {
-    fn authorizes_target(&self, target_identity: &Value) -> bool {
-        self.target_identity == *target_identity
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -78,27 +66,9 @@ impl From<RuntimeCapabilityAvailabilityRequest> for RuntimeCapabilityAvailabilit
             root_shell: request.root_shell,
             app_data_write: request.app_data_write,
             root_shell_route: request.root_shell_route,
-            config_create_write_evidence: None,
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) fn test_config_create_write_evidence() -> ConfigCreateWriteEvidence {
-    ConfigCreateWriteEvidence {
-        target_identity: json!({
-            "appId": "retroarch",
-            "packageId": "com.retroarch.aarch64",
-            "targetId": "config",
-            "target": {
-                "kind": "file",
-                "location": "external_app_data",
-                "path": "files/retroarch.cfg"
-            }
-        }),
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DeviceContextOverride {
@@ -203,11 +173,13 @@ pub(crate) enum RetroArchConfigurationSource {
         recipe_id: String,
         video_threaded: bool,
         binding_source: BindingSource,
+        operation: String,
     },
     Uploaded {
         recipe_id: String,
         path: String,
         binding_source: BindingSource,
+        operation: String,
     },
 }
 
@@ -242,6 +214,7 @@ impl EffectiveRetroArchConfigurationMode {
 struct EffectiveRetroArchConfigurationSelection {
     recipe_id: String,
     mode: EffectiveRetroArchConfigurationMode,
+    operation: String,
     video_threaded: Option<(bool, BindingSource)>,
     uploaded: Option<(String, BindingSource)>,
 }
@@ -256,6 +229,7 @@ struct FrozenRetroArchConfiguration {
     bytes: Vec<u8>,
     sha256: String,
     source_identity: Value,
+    operation: String,
 }
 
 impl std::fmt::Debug for FrozenRetroArchConfiguration {
@@ -265,6 +239,7 @@ impl std::fmt::Debug for FrozenRetroArchConfiguration {
             .field("bytes", &"[redacted]")
             .field("sha256", &self.sha256)
             .field("source_identity", &"[redacted]")
+            .field("operation", &self.operation)
             .finish()
     }
 }
@@ -275,16 +250,23 @@ impl std::fmt::Debug for RetroArchConfigurationSource {
             Self::Generated {
                 video_threaded,
                 binding_source,
+                operation,
                 ..
             } => formatter
                 .debug_struct("GeneratedRetroArchConfiguration")
                 .field("video_threaded", video_threaded)
                 .field("binding_source", binding_source)
+                .field("operation", operation)
                 .finish(),
-            Self::Uploaded { binding_source, .. } => formatter
+            Self::Uploaded {
+                binding_source,
+                operation,
+                ..
+            } => formatter
                 .debug_struct("UploadedRetroArchConfiguration")
                 .field("path", &"[redacted]")
                 .field("binding_source", binding_source)
+                .field("operation", operation)
                 .finish(),
         }
     }
@@ -331,7 +313,10 @@ fn resolve_retroarch_configuration_selection(
                 input.recipe_id == *recipe_id
                     && matches!(
                         input.input_id.as_str(),
-                        "retroarch_cfg_source" | "retroarch_video_threaded" | "retroarch_cfg"
+                        "retroarch_cfg_source"
+                            | "retroarch_cfg_write_operation"
+                            | "retroarch_video_threaded"
+                            | "retroarch_cfg"
                     )
             })
         })
@@ -345,8 +330,19 @@ fn resolve_retroarch_configuration_selection(
     };
 
     let mode = selected(inputs, recipe_id, "retroarch_cfg_source")?;
+    let operation_input = selected(inputs, recipe_id, "retroarch_cfg_write_operation")?;
     let setting = selected(inputs, recipe_id, "retroarch_video_threaded")?;
     let uploaded = selected(inputs, recipe_id, "retroarch_cfg")?;
+
+    let operation = operation_input
+        .and_then(|input| input.value.as_ref())
+        .filter(|value| !value.is_null())
+        .map(|value| value.as_str().ok_or("configuration_operation_invalid"))
+        .transpose()?
+        .unwrap_or("create");
+    if !matches!(operation, "create" | "replace") {
+        return Err("configuration_operation_invalid");
+    }
 
     let selected_mode = mode
         .and_then(|input| input.value.as_ref())
@@ -420,6 +416,7 @@ fn resolve_retroarch_configuration_selection(
     Ok(Some(EffectiveRetroArchConfigurationSelection {
         recipe_id: (*recipe_id).to_string(),
         mode: selected_mode,
+        operation: operation.to_string(),
         video_threaded,
         uploaded,
     }))
@@ -456,6 +453,7 @@ fn select_retroarch_configuration_source(
                 recipe_id: selection.recipe_id,
                 video_threaded,
                 binding_source,
+                operation: selection.operation,
             }))
         }
         EffectiveRetroArchConfigurationMode::Uploaded => {
@@ -465,6 +463,7 @@ fn select_retroarch_configuration_source(
                 recipe_id: selection.recipe_id,
                 path,
                 binding_source,
+                operation: selection.operation,
             }))
         }
     }
@@ -515,6 +514,7 @@ fn freeze_uploaded_retroarch_configuration(
     recipe_id: &str,
     path: &str,
     binding_source: BindingSource,
+    operation: String,
 ) -> Result<FrozenRetroArchConfiguration, &'static str> {
     let source_path = Path::new(path);
     let mut file =
@@ -564,6 +564,7 @@ fn freeze_uploaded_retroarch_configuration(
         }),
         bytes,
         sha256,
+        operation,
     })
 }
 
@@ -588,6 +589,7 @@ fn retroarch_target_identity(
     Ok(json!({
         "appId": app.id,
         "packageId": app.package_id,
+        "androidUserId": 0,
         "targetId": "config",
         "target": target,
     }))
@@ -598,6 +600,7 @@ fn freeze_generated_retroarch_configuration(
     recipe_id: &str,
     video_threaded: bool,
     binding_source: BindingSource,
+    operation: String,
 ) -> Result<FrozenRetroArchConfiguration, RuntimeConfigurationDiagnostic> {
     let app = retroarch_app_definition(prepared).map_err(|code| {
         configuration_diagnostic(
@@ -656,6 +659,7 @@ fn freeze_generated_retroarch_configuration(
         }),
         bytes,
         sha256,
+        operation,
     })
 }
 
@@ -689,17 +693,38 @@ fn create_configuration_planner_input_file(
 fn frozen_configuration_value(
     frozen: &FrozenRetroArchConfiguration,
     target_identity: Value,
+    configuration_backup_enabled: bool,
+    backup_waiver_digest: Option<&str>,
 ) -> Value {
     let byte_length = frozen.bytes.len();
+    let backup_mode = if frozen.operation == "replace" {
+        if backup_waiver_digest.is_some() {
+            "waived"
+        } else if configuration_backup_enabled {
+            "verified"
+        } else {
+            "disabled"
+        }
+    } else {
+        "disabled"
+    };
     json!({
         "type": "configuration_artifact",
         "schemaVersion": 1,
         "bytes": frozen.bytes,
         "byteLength": byte_length,
         "sha256": frozen.sha256,
+        "operation": frozen.operation,
         "sourceIdentity": frozen.source_identity,
         "targetIdentity": target_identity,
         "absencePrecondition": Value::Null,
+        "originalFilePrecondition": Value::Null,
+        "backupMode": backup_mode,
+        "backupWaiverDigest": if backup_mode == "waived" {
+            backup_waiver_digest
+        } else {
+            None
+        },
     })
 }
 
@@ -725,6 +750,11 @@ fn bind_frozen_configuration_to_plan(
     if seed_step.type_name != "copy_files" {
         return Err("configuration_create_step_invalid");
     }
+    let copy_policy = match artifact.get("operation").and_then(Value::as_str) {
+        Some("create") => "create_only",
+        Some("replace") => "replace",
+        _ => return Err("configuration_operation_invalid"),
+    };
     seed_step.params.insert(
         "source".to_string(),
         crate::planner::ExecutionParamValue::Literal { value: artifact },
@@ -732,7 +762,7 @@ fn bind_frozen_configuration_to_plan(
     seed_step.params.insert(
         "copy_policy".to_string(),
         crate::planner::ExecutionParamValue::Literal {
-            value: Value::String("create_only".to_string()),
+            value: Value::String(copy_policy.to_string()),
         },
     );
 
@@ -842,7 +872,6 @@ fn prepare_configuration_with_restriction(
             availability.root_shell = false;
             availability.app_data_write = false;
             availability.root_shell_route = None;
-            availability.config_create_write_evidence = None;
         }
     }
     let runtime_capabilities = device_plan_parts.as_ref().map(|parts| {
@@ -960,7 +989,7 @@ impl PreparedConfiguration {
             device_profile_ref: parts.device_profile_ref.clone(),
             device_context,
             runtime_capabilities: self.runtime_capabilities.clone(),
-            config_create_destination: None,
+            config_write_destination: None,
             catalog_identity: self.catalog.identity().cloned(),
             target_device: self.target_device.clone(),
             device_plan_presentation: Some(crate::planner::ExecutionDevicePlanSnapshot {
@@ -976,12 +1005,14 @@ impl PreparedConfiguration {
 pub(crate) fn plan_configuration(
     request: ConfigurationContextRequest,
 ) -> Result<PlanConfigurationResult, ConfigurationContextError> {
-    plan_configuration_with_restriction(request, false)
+    plan_configuration_with_restriction(request, false, true, None)
 }
 
 pub(crate) fn plan_configuration_with_restriction(
     request: ConfigurationContextRequest,
     restrict_privileged_execution: bool,
+    configuration_backup_enabled: bool,
+    backup_waiver_digest: Option<&str>,
 ) -> Result<PlanConfigurationResult, ConfigurationContextError> {
     let prepared = prepare_configuration_with_restriction(request, restrict_privileged_execution)?;
     let resolved_inputs = prepared.binding_resolution.resolved_inputs.clone();
@@ -1026,11 +1057,13 @@ pub(crate) fn plan_configuration_with_restriction(
             recipe_id,
             video_threaded,
             binding_source,
+            operation,
         }) => match freeze_generated_retroarch_configuration(
             &prepared,
             recipe_id,
             *video_threaded,
             *binding_source,
+            operation.clone(),
         ) {
             Ok(frozen) => Some(frozen),
             Err(diagnostic) => {
@@ -1052,7 +1085,13 @@ pub(crate) fn plan_configuration_with_restriction(
             recipe_id,
             path,
             binding_source,
-        }) => match freeze_uploaded_retroarch_configuration(recipe_id, path, *binding_source) {
+            operation,
+        }) => match freeze_uploaded_retroarch_configuration(
+            recipe_id,
+            path,
+            *binding_source,
+            operation.clone(),
+        ) {
             Ok(frozen) => Some(frozen),
             Err(code) => {
                 let mut diagnostics = prepared.diagnostics.clone();
@@ -1075,7 +1114,7 @@ pub(crate) fn plan_configuration_with_restriction(
         None => None,
     };
 
-    let retroarch_config_create_target = match retroarch_config_create_target_identity(
+    let retroarch_config_write_target = match retroarch_config_write_target_identity(
         &prepared,
         selected_configuration.as_ref(),
         frozen_configuration.as_ref(),
@@ -1099,17 +1138,14 @@ pub(crate) fn plan_configuration_with_restriction(
             });
         }
     };
-    let retroarch_config_create_selected = retroarch_config_create_target.is_some();
-    if retroarch_config_create_selected
-        && !config_create_write_evidence_available(
-            prepared.runtime_capability_availability.as_ref(),
-            retroarch_config_create_target.as_ref().unwrap(),
-        )
+    let retroarch_config_write_selected = retroarch_config_write_target.is_some();
+    if retroarch_config_write_selected
+        && !config_write_route_available(prepared.runtime_capability_availability.as_ref())
     {
         let mut diagnostics = prepared.diagnostics.clone();
         diagnostics.push(configuration_diagnostic(
-            "config_create_write_unverified",
-            "The selected RetroArch configuration target has no current write-probe evidence.",
+            "configuration_write_route_unavailable",
+            "The selected RetroArch configuration target requires a qualified root-shell route and app-data write capability.",
         ));
         return Ok(PlanConfigurationResult {
             plan: None,
@@ -1136,7 +1172,7 @@ pub(crate) fn plan_configuration_with_restriction(
             ..Default::default()
         });
     };
-    if let Some(target_identity) = retroarch_config_create_target.as_ref() {
+    if let Some(target_identity) = retroarch_config_write_target.as_ref() {
         let Some(package_id) = target_identity
             .get("packageId")
             .and_then(Value::as_str)
@@ -1179,7 +1215,7 @@ pub(crate) fn plan_configuration_with_restriction(
                 ..Default::default()
             });
         };
-        input.config_create_destination = Some(format!(
+        input.config_write_destination = Some(format!(
             "/storage/emulated/0/Android/data/{package_id}/{target_path}"
         ));
     }
@@ -1218,7 +1254,7 @@ pub(crate) fn plan_configuration_with_restriction(
     );
     let mut execution_plan = result.execution_plan;
     if let (Some(selected), Some(frozen)) = (&selected_configuration, &frozen_configuration) {
-        let Some(target_identity) = retroarch_config_create_target else {
+        let Some(target_identity) = retroarch_config_write_target else {
             diagnostics.push(configuration_diagnostic(
                 "retroarch_config_create_target_invalid",
                 "The selected configuration is missing its validated RetroArch App Target.",
@@ -1249,7 +1285,12 @@ pub(crate) fn plan_configuration_with_restriction(
         if let Err(code) = bind_frozen_configuration_to_plan(
             plan,
             selected.recipe_id(),
-            frozen_configuration_value(frozen, target_identity),
+            frozen_configuration_value(
+                frozen,
+                target_identity,
+                configuration_backup_enabled,
+                backup_waiver_digest,
+            ),
         ) {
             diagnostics.push(configuration_diagnostic(
                 code,
@@ -1312,33 +1353,26 @@ pub(crate) fn plan_configuration_with_restriction(
     })
 }
 
-const RETROARCH_CONFIG_CREATE_RECIPES: [&str; 2] =
+const RETROARCH_CONFIG_WRITE_RECIPES: [&str; 2] =
     ["app.retroarch.configure", "app.retroarch.provision"];
 
 #[cfg(test)]
-fn retroarch_config_create_selected(resolved_inputs: &[ResolvedInputBinding]) -> bool {
+fn retroarch_config_write_selected(resolved_inputs: &[ResolvedInputBinding]) -> bool {
     matches!(
         select_retroarch_configuration_source(resolved_inputs),
-        Ok(Some(selected)) if RETROARCH_CONFIG_CREATE_RECIPES.contains(&selected.recipe_id())
+        Ok(Some(selected)) if RETROARCH_CONFIG_WRITE_RECIPES.contains(&selected.recipe_id())
     )
 }
 
-fn config_create_write_evidence_available(
-    availability: Option<&RuntimeCapabilityAvailability>,
-    target_identity: &Value,
-) -> bool {
+fn config_write_route_available(availability: Option<&RuntimeCapabilityAvailability>) -> bool {
     availability.is_some_and(|availability| {
         availability.root_shell
             && availability.app_data_write
             && availability.root_shell_route.is_some()
-            && availability
-                .config_create_write_evidence
-                .as_ref()
-                .is_some_and(|evidence| evidence.authorizes_target(target_identity))
     })
 }
 
-fn retroarch_config_create_target_identity(
+fn retroarch_config_write_target_identity(
     prepared: &PreparedConfiguration,
     selected: Option<&RetroArchConfigurationSource>,
     frozen: Option<&FrozenRetroArchConfiguration>,
@@ -1351,7 +1385,7 @@ fn retroarch_config_create_target_identity(
         };
     };
     let recipe_id = selected.recipe_id();
-    if !RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe_id) {
+    if !RETROARCH_CONFIG_WRITE_RECIPES.contains(&recipe_id) {
         return Ok(None);
     }
     let expected_source_kind = match selected {
@@ -2085,7 +2119,6 @@ mod tests {
                 root_shell: false,
                 app_data_write: false,
                 root_shell_route: None,
-                config_create_write_evidence: None,
             }),
             false,
         );
@@ -2116,7 +2149,6 @@ mod tests {
                 root_shell: false,
                 app_data_write: false,
                 root_shell_route: None,
-                config_create_write_evidence: None,
             }),
         })
         .unwrap();
@@ -2134,7 +2166,6 @@ mod tests {
                 root_shell: true,
                 app_data_write: true,
                 root_shell_route: None,
-                config_create_write_evidence: None,
             }),
             false,
         );
@@ -2148,7 +2179,6 @@ mod tests {
                 root_shell: true,
                 app_data_write: true,
                 root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
-                config_create_write_evidence: None,
             }),
             false,
         );
@@ -2170,7 +2200,6 @@ mod tests {
             root_shell: true,
             app_data_write: true,
             root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
-            config_create_write_evidence: None,
         };
 
         let restricted =
@@ -2201,13 +2230,11 @@ mod tests {
             root_shell: true,
             app_data_write: true,
             root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
-            config_create_write_evidence: None,
         };
         let unrooted_observation = RuntimeCapabilityAvailability {
             root_shell: false,
             app_data_write: false,
             root_shell_route: None,
-            config_create_write_evidence: None,
         };
 
         let mut restricted_rooted_input = planner_input.clone();
@@ -2298,7 +2325,6 @@ mod tests {
             root_shell: true,
             app_data_write: true,
             root_shell_route: Some(crate::planner::RootShellRoute::SuZero),
-            config_create_write_evidence: None,
         };
         let unrestricted_capabilities = apply_runtime_capability_availability(
             planner_input.runtime_capabilities.clone(),
@@ -2339,5 +2365,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "runtime_configuration_retroarch_config_create_tests.rs"]
-mod config_create_tests;
+#[path = "runtime_configuration_retroarch_config_write_tests.rs"]
+mod config_write_tests;

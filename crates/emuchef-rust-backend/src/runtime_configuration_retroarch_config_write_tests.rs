@@ -1,10 +1,11 @@
 use super::{
-    describe_configuration, freeze_uploaded_retroarch_configuration, plan_configuration,
-    select_retroarch_configuration_source, ConfigurationContextRequest,
+    describe_configuration, freeze_uploaded_retroarch_configuration, frozen_configuration_value,
+    plan_configuration, select_retroarch_configuration_source, ConfigurationContextRequest,
+    FrozenRetroArchConfiguration,
 };
 use crate::catalog_source::CatalogSnapshot;
 use crate::executor::{
-    CopyCommitCreateFileOutcome, DeviceOperationError, ExecutorAdapters, ExecutorDevice,
+    CopyCommitConfigurationWriteOutcome, DeviceOperationError, ExecutorAdapters, ExecutorDevice,
     ExecutorRunner, FakeDryRunDevice, PermissionOperation,
 };
 use crate::model::OrderedMap;
@@ -14,6 +15,46 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+#[test]
+fn replace_backup_mode_follows_the_native_persisted_preference() {
+    let frozen = FrozenRetroArchConfiguration {
+        bytes: b"config".to_vec(),
+        sha256: crate::runtime_configuration::sha256_hex(b"config"),
+        source_identity: serde_json::json!({ "kind": "generated" }),
+        operation: "replace".to_string(),
+    };
+
+    let enabled = frozen_configuration_value(&frozen, serde_json::json!({}), true, None);
+    let disabled = frozen_configuration_value(&frozen, serde_json::json!({}), false, None);
+
+    assert_eq!(enabled["backupMode"], "verified");
+    assert_eq!(disabled["backupMode"], "disabled");
+}
+
+#[test]
+fn one_time_backup_waiver_is_bound_into_the_replace_artifact() {
+    let frozen = FrozenRetroArchConfiguration {
+        bytes: b"config".to_vec(),
+        sha256: crate::runtime_configuration::sha256_hex(b"config"),
+        source_identity: serde_json::json!({ "kind": "generated" }),
+        operation: "replace".to_string(),
+    };
+    let waiver_digest = "b".repeat(64);
+
+    let waived = frozen_configuration_value(
+        &frozen,
+        serde_json::json!({ "targetId": "config" }),
+        true,
+        Some(&waiver_digest),
+    );
+
+    assert_eq!(waived["backupMode"], "waived");
+    assert_eq!(waived["backupWaiverDigest"], waiver_digest);
+}
 
 fn binding(
     input_id: &str,
@@ -65,14 +106,12 @@ fn runtime_availability(
         root_shell,
         app_data_write,
         root_shell_route,
-        config_create_write_evidence: None,
     }
 }
 
 fn plan_request(explicit_bindings: OrderedMap<Value>) -> ConfigurationContextRequest {
     let authored_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
-    // Existing host-planning fixtures model controlled, current write evidence.
-    // Authorization regressions pass explicit evidence-free availability.
+    // Host-planning fixtures model a currently qualified root-shell route.
     ConfigurationContextRequest {
         catalog: CatalogSnapshot::legacy_local(&authored_root).unwrap(),
         configuration_root: None,
@@ -89,7 +128,6 @@ fn plan_request(explicit_bindings: OrderedMap<Value>) -> ConfigurationContextReq
             root_shell: true,
             app_data_write: true,
             root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
-            config_create_write_evidence: Some(super::test_config_create_write_evidence()),
         }),
     }
 }
@@ -112,13 +150,11 @@ fn config_create_plan_request(
     authored_root: &Path,
     recipe_id: &str,
     explicit_bindings: OrderedMap<Value>,
-    write_evidence: bool,
 ) -> ConfigurationContextRequest {
     let runtime_capability_availability = super::RuntimeCapabilityAvailability {
         root_shell: true,
         app_data_write: true,
         root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
-        config_create_write_evidence: write_evidence.then(super::test_config_create_write_evidence),
     };
     ConfigurationContextRequest {
         catalog: CatalogSnapshot::legacy_local(authored_root).unwrap(),
@@ -145,14 +181,13 @@ fn konkr_product_plan_supports_managed_configuration_only_override() {
         serde_json::json!("managed"),
     );
     let mut request =
-        config_create_plan_request(&authored_root, "app.retroarch.configure", bindings, true);
+        config_create_plan_request(&authored_root, "app.retroarch.configure", bindings);
     request.device_plan = Some("konkr.pocket_advance.base".to_string());
     // Runtime availability and write evidence are test fixtures, not profile defaults.
     request.runtime_capability_availability = Some(super::RuntimeCapabilityAvailability {
         root_shell: true,
         app_data_write: true,
         root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
-        config_create_write_evidence: Some(super::test_config_create_write_evidence()),
     });
 
     let response = plan_configuration(request).unwrap();
@@ -205,7 +240,7 @@ fn konkr_product_plan_supports_managed_configuration_only_override() {
 }
 
 #[test]
-fn caller_supplied_config_create_evidence_is_not_a_runtime_capability_field() {
+fn retired_probe_field_is_rejected_from_runtime_capability_request() {
     let parsed =
         serde_json::from_value::<super::RuntimeCapabilityAvailabilityRequest>(serde_json::json!({
             "rootShell": true,
@@ -216,122 +251,12 @@ fn caller_supplied_config_create_evidence_is_not_a_runtime_capability_field() {
 
     assert!(
         parsed.is_err(),
-        "a sidecar caller cannot author configuration-create write evidence in runtime capabilities"
+        "legacy probe claims are not accepted as runtime capabilities"
     );
 }
 
 #[test]
-fn configuration_create_requires_evidence_for_both_profiles_recipes_and_sources() {
-    let temp = tempfile::tempdir().unwrap();
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
-    let authored_root = temp.path().join("authored");
-    copy_authored_tree(&source_root, &authored_root);
-    let plan_path = authored_root.join("device_plans/ayaneo.konkr_pocket_fit.base.yaml");
-    let plan_yaml = std::fs::read_to_string(&plan_path).unwrap();
-    let pocket_fit_profile = "device_profile_ref: ayaneo.konkr_pocket_fit";
-    assert_eq!(plan_yaml.matches(pocket_fit_profile).count(), 1);
-    let profile_path = authored_root.join("device_profiles/konkr.pocket_advance.yaml");
-    let profile_yaml = std::fs::read_to_string(&profile_path).unwrap();
-    assert_eq!(profile_yaml.matches("apk_install: false").count(), 1);
-    assert_eq!(profile_yaml.matches("app_launch: false").count(), 1);
-    // Enable unrelated provisioning prerequisites in this temporary fixture
-    // so the regression isolates the app_data_write evidence policy.
-    std::fs::write(
-        profile_path,
-        profile_yaml
-            .replace("apk_install: false", "apk_install: true")
-            .replace("app_launch: false", "app_launch: true"),
-    )
-    .unwrap();
-
-    let uploaded_config = temp.path().join("uploaded-retroarch.cfg");
-    std::fs::write(&uploaded_config, b"video_threaded = false\n").unwrap();
-
-    for profile_ref in ["konkr.pocket_advance", "ayaneo.konkr_pocket_fit"] {
-        std::fs::write(
-            &plan_path,
-            plan_yaml.replace(
-                pocket_fit_profile,
-                &format!("device_profile_ref: {profile_ref}"),
-            ),
-        )
-        .unwrap();
-        for recipe_id in ["app.retroarch.configure", "app.retroarch.provision"] {
-            for source in ["managed", "uploaded"] {
-                let mut bindings = OrderedMap::new();
-                bindings.insert(
-                    format!("{recipe_id}/retroarch_cfg_source"),
-                    serde_json::json!(source),
-                );
-                if source == "uploaded" {
-                    bindings.insert(
-                        format!("{recipe_id}/retroarch_cfg"),
-                        serde_json::json!(uploaded_config),
-                    );
-                }
-
-                let request = |write_evidence| {
-                    config_create_plan_request(
-                        &authored_root,
-                        recipe_id,
-                        bindings.clone(),
-                        write_evidence,
-                    )
-                };
-                let missing = plan_configuration(request(false)).unwrap();
-                assert!(
-                    missing.plan.is_none(),
-                    "root capability admitted {profile_ref}/{recipe_id}/{source} without scoped evidence"
-                );
-                assert!(
-                    missing
-                        .diagnostics
-                        .iter()
-                        .any(|diagnostic| diagnostic.code == "config_create_write_unverified"),
-                    "{profile_ref}/{recipe_id}/{source}: {:?}",
-                    missing.diagnostics
-                );
-
-                let prepared = super::prepare_configuration(request(true)).unwrap();
-                assert!(super::retroarch_config_create_selected(
-                    &prepared.binding_resolution.resolved_inputs
-                ));
-                let planned = plan_configuration(request(true)).unwrap();
-                if profile_ref == "konkr.pocket_advance" && recipe_id == "app.retroarch.provision" {
-                    assert!(
-                        planned.plan.is_none(),
-                        "scoped config evidence must not make unavailable provisioning copies eligible"
-                    );
-                    assert!(planned.diagnostics.iter().any(|diagnostic| {
-                        diagnostic.code == "required_step_capability_unavailable"
-                    }));
-                    assert!(!planned
-                        .diagnostics
-                        .iter()
-                        .any(|diagnostic| { diagnostic.code == "config_create_write_unverified" }));
-                    continue;
-                }
-                let plan = planned.plan.unwrap_or_else(|| {
-                    panic!(
-                        "current scoped evidence should retain {profile_ref}/{recipe_id}/{source}: {:?}",
-                        planned.diagnostics
-                    )
-                });
-                assert!(plan
-                    .steps
-                    .iter()
-                    .any(|step| step.id.ends_with("/seed_retroarch_cfg")));
-                assert_eq!(
-                    serde_json::to_value(plan).unwrap()["source"]["device_profile_ref"],
-                    profile_ref
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
+fn konkr_configuration_target_does_not_broaden_app_data_write() {
     let temp = tempfile::tempdir().unwrap();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
     let authored_root = temp.path().join("authored");
@@ -353,12 +278,11 @@ fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
         "app.retroarch.configure/retroarch_cfg_source".to_string(),
         serde_json::json!("managed"),
     );
-    let request =
-        config_create_plan_request(&authored_root, "app.retroarch.configure", bindings, true);
+    let request = config_create_plan_request(&authored_root, "app.retroarch.configure", bindings);
     let response = plan_configuration(request).unwrap();
     assert!(
         response.plan.is_some(),
-        "verified configuration-create evidence should admit configuration creation: {:#?}",
+        "qualified route should admit the exact configuration target: {:#?}",
         response.diagnostics
     );
     let plan = response.plan.unwrap();
@@ -464,7 +388,7 @@ fn konkr_evidence_scopes_the_write_grant_to_the_configuration_target() {
     );
     assert!(
         !plan.runtime_capabilities.app_data_write,
-        "the plan receives only the scoped configuration grant"
+        "the plan receives only the configuration-target capability"
     );
     assert!(plan.steps.iter().all(|step| {
         !step
@@ -537,7 +461,6 @@ fn configuration_create_fails_closed_when_authored_app_target_changes() {
         &authored_root,
         "app.retroarch.provision",
         bindings,
-        true,
     ))
     .unwrap();
     assert!(result.plan.is_none());
@@ -548,40 +471,34 @@ fn configuration_create_fails_closed_when_authored_app_target_changes() {
 }
 
 #[test]
-fn legacy_rooted_app_data_write_does_not_admit_config_create_without_evidence() {
+fn configuration_write_requires_a_qualified_root_route() {
     let mut bindings = OrderedMap::new();
     bindings.insert(
         "app.retroarch.provision/retroarch_cfg_source".to_string(),
         serde_json::json!("managed"),
     );
-    let legacy_availability =
-        || runtime_availability(true, true, Some(crate::planner::RootShellRoute::SuCommand));
+
     let mut request = plan_request(bindings.clone());
-    request.runtime_capability_availability = Some(legacy_availability());
+    request.runtime_capability_availability = Some(runtime_availability(
+        true,
+        true,
+        Some(crate::planner::RootShellRoute::SuCommand),
+    ));
+    let admitted = plan_configuration(request).unwrap();
+    assert!(
+        admitted.plan.is_some(),
+        "native authorization is a later execution gate"
+    );
 
-    let prepared = super::prepare_configuration(request.clone()).unwrap();
-    let input = prepared
-        .planner_input("plan.legacy.rooted.test".to_string())
-        .unwrap();
-    assert_eq!(input.device_profile_ref, "ayaneo.konkr_pocket_fit");
-    assert!(input.runtime_capabilities.root_shell);
-    assert!(input.runtime_capabilities.app_data_write);
-
-    let denied = plan_configuration(request).unwrap();
-    assert!(denied.plan.is_none());
-    assert!(denied
+    let mut unsupported_route = plan_request(bindings);
+    unsupported_route.runtime_capability_availability =
+        Some(runtime_availability(true, true, None));
+    let blocked = plan_configuration(unsupported_route).unwrap();
+    assert!(blocked.plan.is_none());
+    assert!(blocked
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.code == "config_create_write_unverified"));
-
-    let mut unverified_route = plan_request(bindings);
-    unverified_route.runtime_capability_availability = Some(runtime_availability(true, true, None));
-    let prepared = super::prepare_configuration(unverified_route).unwrap();
-    let input = prepared
-        .planner_input("plan.legacy.unverified.test".to_string())
-        .unwrap();
-    assert!(!input.runtime_capabilities.root_shell);
-    assert!(!input.runtime_capabilities.app_data_write);
+        .any(|diagnostic| { diagnostic.code == "configuration_write_route_unavailable" }));
 }
 
 fn saved_configuration_source(
@@ -681,6 +598,7 @@ fn selected_configuration_only_recipe_reaches_reviewed_adapter_report() {
     runner
         .prepare_copy_commit_snapshots(&mut plan)
         .expect("ordinary review preparation should bind create-only authority");
+    bind_operation_fence(&mut runner, &plan, directory.path());
     let artifact = match plan.steps[0].params.get("source").unwrap() {
         crate::planner::ExecutionParamValue::Literal { value } => value,
         _ => panic!("reviewed configuration must remain a frozen artifact"),
@@ -700,6 +618,353 @@ fn selected_configuration_only_recipe_reaches_reviewed_adapter_report() {
         report["sha256"],
         super::sha256_hex(b"video_threaded=false\n")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn reviewed_retroarch_config_identity_binds_android_user_zero() {
+    let plan = generated_create_plan();
+    let artifact = crate::executor::retroarch_config_write_artifact_for_review(&plan.steps[0])
+        .expect("reviewed configuration should retain its target identity");
+
+    assert_eq!(artifact["targetIdentity"]["androidUserId"], 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_stops_running_retroarch_for_the_reviewed_package_and_user() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut runner, observations) =
+        running_create_adapter_runner(directory.path(), AdapterCreateResult::Created);
+    let mut plan = generated_create_plan();
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should bind the create precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert!(run.success, "{run:?}");
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.force_stop_user_id.load(Ordering::SeqCst), 0);
+    assert!(observations
+        .force_stop_package_matches
+        .load(Ordering::SeqCst));
+    assert_eq!(observations.process_checks.load(Ordering::SeqCst), 3);
+    assert_eq!(observations.create_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        configuration_report(&run)["retroArchStopStatus"],
+        "stopped_by_emuchef"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn create_requires_manual_closure_when_stopping_retroarch_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut runner, observations) =
+        running_create_adapter_runner(directory.path(), AdapterCreateResult::Created);
+    observations.force_stop_fails.store(true, Ordering::SeqCst);
+    let mut plan = generated_create_plan();
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should bind the create precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert!(!run.success);
+    assert_eq!(configuration_report(&run)["outcome"], "app_stop_failed");
+    assert_eq!(configuration_report(&run)["mayHaveChanged"], false);
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.create_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        run.steps[0]
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Close RetroArch manually"),
+        "{run:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn create_requires_manual_closure_when_retroarch_process_state_is_unknown() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut runner, observations) =
+        running_create_adapter_runner(directory.path(), AdapterCreateResult::Created);
+    observations
+        .process_query_fails
+        .store(true, Ordering::SeqCst);
+    let mut plan = generated_create_plan();
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should bind the create precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert!(!run.success);
+    assert_eq!(
+        configuration_report(&run)["outcome"],
+        "app_state_unverified"
+    );
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(observations.create_calls.load(Ordering::SeqCst), 0);
+    assert!(run.steps[0]
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Close RetroArch manually"));
+}
+
+#[cfg(unix)]
+#[test]
+fn create_pauses_for_manual_closure_if_retroarch_relaunches_after_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut runner, observations) =
+        running_create_adapter_runner(directory.path(), AdapterCreateResult::Created);
+    observations
+        .process_relaunches_after_stop
+        .store(true, Ordering::SeqCst);
+    let mut plan = generated_create_plan();
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should bind the create precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert!(!run.success);
+    assert_eq!(
+        configuration_report(&run)["outcome"],
+        "app_relaunched_before_write"
+    );
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.create_calls.load(Ordering::SeqCst), 0);
+    assert!(run.steps[0]
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Close RetroArch manually"));
+}
+
+#[cfg(unix)]
+#[test]
+fn stopped_retroarch_status_survives_a_later_unverified_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut runner, observations) =
+        running_create_adapter_runner(directory.path(), AdapterCreateResult::PartialWrite);
+    let mut plan = generated_create_plan();
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should bind the create precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert_eq!(
+        configuration_report(&run)["retroArchStopStatus"],
+        "stopped_by_emuchef"
+    );
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_replace_stops_app_and_verifies_backup_before_replacement() {
+    const ORIGINAL_CONFIG: &[u8] = b"previous RetroArch settings\n";
+    const RECIPE_ID: &str = "app.retroarch.configure";
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_cfg_source"),
+        serde_json::json!("managed"),
+    );
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_cfg_write_operation"),
+        serde_json::json!("replace"),
+    );
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_video_threaded"),
+        serde_json::json!(false),
+    );
+    let mut request = plan_request(bindings);
+    request.selected_recipes = Some(vec![RECIPE_ID.to_string()]);
+    let mut plan = plan_configuration(request)
+        .unwrap()
+        .plan
+        .expect("RetroArch replacement should be planable");
+    assert_eq!(plan.steps.len(), 1);
+
+    let (mut runner, observations) =
+        replace_adapter_runner(directory.path(), ORIGINAL_CONFIG, true);
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should capture the original file precondition");
+    let artifact = match plan.steps[0].params.get("source").unwrap() {
+        crate::planner::ExecutionParamValue::Literal { value } => value,
+        _ => panic!("configuration replacement should retain frozen artifact"),
+    };
+    assert_eq!(
+        artifact["originalFilePrecondition"]["sha256"],
+        super::sha256_hex(ORIGINAL_CONFIG)
+    );
+    assert_eq!(
+        artifact["originalFilePrecondition"]["byteLength"],
+        ORIGINAL_CONFIG.len() as u64
+    );
+    assert!(artifact["originalFilePrecondition"]
+        .get("originalSha256")
+        .is_none());
+    bind_operation_fence(&mut runner, &plan, directory.path());
+    let run = runner.run(&plan);
+
+    assert!(run.success, "{run:?}");
+    let report = configuration_report(&run);
+    assert_eq!(report["backupStatus"], "verified");
+    assert_eq!(report["backupSha256"], super::sha256_hex(ORIGINAL_CONFIG));
+    let backup_path = report["backupPath"].as_str().unwrap();
+    assert_eq!(std::fs::read(backup_path).unwrap(), ORIGINAL_CONFIG);
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.force_stop_user_id.load(Ordering::SeqCst), 0);
+    assert!(observations
+        .force_stop_package_matches
+        .load(Ordering::SeqCst));
+    assert_eq!(observations.process_checks.load(Ordering::SeqCst), 3);
+    assert_eq!(observations.replace_calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn waived_replace_skips_backup_and_still_verifies_the_exact_replacement() {
+    const ORIGINAL_CONFIG: &[u8] = b"previous RetroArch settings\n";
+    const RECIPE_ID: &str = "app.retroarch.configure";
+    let waiver_digest = "c".repeat(64);
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_cfg_source"),
+        serde_json::json!("managed"),
+    );
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_cfg_write_operation"),
+        serde_json::json!("replace"),
+    );
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_video_threaded"),
+        serde_json::json!(false),
+    );
+    let mut request = plan_request(bindings);
+    request.selected_recipes = Some(vec![RECIPE_ID.to_string()]);
+    let mut plan = plan_configuration(request)
+        .unwrap()
+        .plan
+        .expect("RetroArch replacement should be planable");
+
+    let (mut runner, observations) =
+        replace_adapter_runner(directory.path(), ORIGINAL_CONFIG, false);
+    let Some(crate::planner::ExecutionParamValue::Literal { value }) =
+        plan.steps[0].params.get_mut("source")
+    else {
+        panic!("configuration replacement should retain its frozen artifact");
+    };
+    value["backupMode"] = serde_json::json!("waived");
+    value["backupWaiverDigest"] = serde_json::json!(waiver_digest);
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should capture the original file precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert!(run.success, "{run:?}");
+    let report = configuration_report(&run);
+    assert_eq!(report["outcome"], "replaced_verified");
+    assert_eq!(report["backupStatus"], "waived");
+    assert_eq!(report["backupWaiverDigest"], waiver_digest);
+    assert!(report["backupPath"].is_null());
+    assert!(!directory.path().join("configuration-backups").exists());
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.force_stop_user_id.load(Ordering::SeqCst), 0);
+    assert!(observations
+        .force_stop_package_matches
+        .load(Ordering::SeqCst));
+    assert_eq!(observations.replace_calls.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn replace_blocks_when_app_remains_running_after_force_stop() {
+    const RECIPE_ID: &str = "app.retroarch.configure";
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_cfg_source"),
+        serde_json::json!("managed"),
+    );
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_cfg_write_operation"),
+        serde_json::json!("replace"),
+    );
+    bindings.insert(
+        format!("{RECIPE_ID}/retroarch_video_threaded"),
+        serde_json::json!(false),
+    );
+    let mut request = plan_request(bindings);
+    request.selected_recipes = Some(vec![RECIPE_ID.to_string()]);
+    let mut plan = plan_configuration(request)
+        .unwrap()
+        .plan
+        .expect("RetroArch replacement should be planable");
+    let (mut runner, observations) = replace_adapter_runner(directory.path(), b"old config", true);
+    observations
+        .process_stays_running
+        .store(true, Ordering::SeqCst);
+    runner
+        .prepare_copy_commit_snapshots(&mut plan)
+        .expect("review should capture the original file precondition");
+    bind_operation_fence(&mut runner, &plan, directory.path());
+
+    let run = runner.run(&plan);
+
+    assert!(!run.success);
+    let report = configuration_report(&run);
+    assert_eq!(report["outcome"], "app_still_running");
+    assert_eq!(report["mayHaveChanged"], false);
+    assert_eq!(observations.force_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observations.replace_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(observations.process_checks.load(Ordering::SeqCst), 2);
+}
+
+fn bind_operation_fence(
+    runner: &mut ExecutorRunner<ConfigurationWriteTestDevice>,
+    plan: &ExecutionPlan,
+    directory: &Path,
+) {
+    let record = crate::operation_fence::OperationFenceRecord {
+        version: 1,
+        operation_id: "replace-test-operation".to_string(),
+        runtime_generation: 1,
+        attempt_sequence: 1,
+        device_handle: "test-device".to_string(),
+        plan_digest: crate::plan_digest::execution_plan_digest(plan).unwrap(),
+        phase: crate::operation_fence::OperationFencePhase::Dispatching,
+        outcome: None,
+        host_cleanup_complete: false,
+        target: None,
+        backup: None,
+    };
+    let path = directory.join("operation-fence.v1");
+    crate::operation_fence::write_initial(&path, &record).unwrap();
+    runner.set_operation_fence(Some(crate::operation_fence::OperationFenceBinding {
+        path,
+        record,
+    }));
 }
 
 fn fake_runner(directory: &Path) -> (ExecutorRunner, PathBuf) {
@@ -774,20 +1039,42 @@ enum AdapterCreateResult {
     HashMismatch,
     PartialWrite,
     LostResponse,
+    PreDispatchFailure,
+    Replaced,
+}
+
+#[derive(Debug, Default)]
+struct ReplaceObservations {
+    force_stop_calls: AtomicUsize,
+    force_stop_user_id: AtomicUsize,
+    force_stop_package_matches: AtomicBool,
+    process_checks: AtomicUsize,
+    process_user_id: AtomicUsize,
+    process_package_matches: AtomicBool,
+    replace_calls: AtomicUsize,
+    create_calls: AtomicUsize,
+    force_stop_fails: AtomicBool,
+    process_query_fails: AtomicBool,
+    process_relaunches_after_stop: AtomicBool,
+    process_stays_running: AtomicBool,
 }
 
 #[derive(Debug)]
-struct CreateOnlyTestDevice {
+struct ConfigurationWriteTestDevice {
     create_result: AdapterCreateResult,
+    expect_backup: bool,
     staged_bytes: Vec<u8>,
     fail_cleanup: bool,
     created: bool,
     stage_creation_response_lost: bool,
     stage_created: bool,
     stage_cleanup_attempted: bool,
+    original_config_bytes: Vec<u8>,
+    app_data_root: Option<PathBuf>,
+    replace_observations: Option<Arc<ReplaceObservations>>,
 }
 
-impl ExecutorDevice for CreateOnlyTestDevice {
+impl ExecutorDevice for ConfigurationWriteTestDevice {
     fn install_apk(
         &mut self,
         _apk_path: &Path,
@@ -863,7 +1150,70 @@ impl ExecutorDevice for CreateOnlyTestDevice {
     }
 
     fn force_stop_app(&mut self, _package_name: &str) -> Result<(), DeviceOperationError> {
+        if let Some(observations) = &self.replace_observations {
+            observations.force_stop_calls.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
+    }
+    fn force_stop_app_for_user(
+        &mut self,
+        package_name: &str,
+        user_id: u32,
+    ) -> Result<(), DeviceOperationError> {
+        if let Some(observations) = &self.replace_observations {
+            observations.force_stop_calls.fetch_add(1, Ordering::SeqCst);
+            observations
+                .force_stop_user_id
+                .store(user_id as usize, Ordering::SeqCst);
+            observations
+                .force_stop_package_matches
+                .store(package_name == "com.retroarch.aarch64", Ordering::SeqCst);
+            if observations.force_stop_fails.load(Ordering::SeqCst) {
+                return Err(DeviceOperationError::other(
+                    "injected RetroArch stop failure",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn app_process_running(&mut self, _package_name: &str) -> Result<bool, DeviceOperationError> {
+        if let Some(observations) = &self.replace_observations {
+            let check = observations.process_checks.fetch_add(1, Ordering::SeqCst);
+            if observations.process_query_fails.load(Ordering::SeqCst) {
+                return Err(DeviceOperationError::other(
+                    "injected process query failure",
+                ));
+            }
+            if observations.process_stays_running.load(Ordering::SeqCst) {
+                return Ok(true);
+            }
+            if observations
+                .process_relaunches_after_stop
+                .load(Ordering::SeqCst)
+                && observations.force_stop_calls.load(Ordering::SeqCst) > 0
+                && check >= 2
+            {
+                return Ok(true);
+            }
+            return Ok(observations.force_stop_calls.load(Ordering::SeqCst) == 0);
+        }
+        Ok(false)
+    }
+
+    fn app_process_running_for_user(
+        &mut self,
+        package_name: &str,
+        user_id: u32,
+    ) -> Result<bool, DeviceOperationError> {
+        if let Some(observations) = &self.replace_observations {
+            observations
+                .process_user_id
+                .store(user_id as usize, Ordering::SeqCst);
+            observations
+                .process_package_matches
+                .store(package_name == "com.retroarch.aarch64", Ordering::SeqCst);
+        }
+        self.app_process_running(package_name)
     }
 
     fn copy_commit_path_binding(&mut self, _path: &str) -> Result<String, DeviceOperationError> {
@@ -900,28 +1250,150 @@ impl ExecutorDevice for CreateOnlyTestDevice {
         _stage_root: &str,
         _helper_path: &str,
         _relative_path: &str,
+        package_name: &str,
+        user_id: u32,
         _expected_absence: &str,
         expected_source_sha256: &str,
-    ) -> Result<CopyCommitCreateFileOutcome, DeviceOperationError> {
+        expected_source_length: u64,
+        operation_id: &str,
+        before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        after_remote_quiescent: &mut dyn FnMut(
+            crate::executor::CopyCommitRemoteOutcome,
+        ) -> Result<(), String>,
+    ) -> Result<CopyCommitConfigurationWriteOutcome, DeviceOperationError> {
+        if operation_id.is_empty() {
+            return Err(DeviceOperationError::other("missing operation identity"));
+        }
+        match self.app_process_running_for_user(package_name, user_id) {
+            Ok(false) => {}
+            Ok(true) => return Ok(CopyCommitConfigurationWriteOutcome::AppStillRunning),
+            Err(_) => return Ok(CopyCommitConfigurationWriteOutcome::AppStateUnverified),
+        }
+        if matches!(self.create_result, AdapterCreateResult::PreDispatchFailure) {
+            return Err(DeviceOperationError::other(
+                "injected helper resolution failure before dispatch",
+            ));
+        }
+        before_helper_dispatch().map_err(DeviceOperationError::other)?;
+        if let Some(observations) = &self.replace_observations {
+            observations.create_calls.fetch_add(1, Ordering::SeqCst);
+        }
         match self.create_result {
             AdapterCreateResult::Created => {
                 self.created = true;
-                Ok(CopyCommitCreateFileOutcome::CreatedVerified {
+                after_remote_quiescent(crate::executor::CopyCommitRemoteOutcome::VerifiedWrite)
+                    .map_err(DeviceOperationError::other)?;
+                Ok(CopyCommitConfigurationWriteOutcome::CreatedVerified {
                     sha256: expected_source_sha256.to_string(),
-                    byte_length: self.staged_bytes.len() as u64,
+                    byte_length: expected_source_length,
                 })
             }
-            AdapterCreateResult::Existing => Ok(CopyCommitCreateFileOutcome::TargetAlreadyExists),
+            AdapterCreateResult::Existing => {
+                after_remote_quiescent(
+                    crate::executor::CopyCommitRemoteOutcome::AbortedBeforeWrite,
+                )
+                .map_err(DeviceOperationError::other)?;
+                Ok(CopyCommitConfigurationWriteOutcome::TargetAlreadyExists)
+            }
             AdapterCreateResult::HashMismatch => {
-                Ok(CopyCommitCreateFileOutcome::SourceHashMismatch)
+                after_remote_quiescent(
+                    crate::executor::CopyCommitRemoteOutcome::AbortedBeforeWrite,
+                )
+                .map_err(DeviceOperationError::other)?;
+                Ok(CopyCommitConfigurationWriteOutcome::SourceHashMismatch)
             }
             AdapterCreateResult::PartialWrite => {
-                Ok(CopyCommitCreateFileOutcome::PartialWriteUnverified)
+                after_remote_quiescent(
+                    crate::executor::CopyCommitRemoteOutcome::PartialWriteTerminal,
+                )
+                .map_err(DeviceOperationError::other)?;
+                Ok(CopyCommitConfigurationWriteOutcome::PartialWriteTerminal)
             }
             AdapterCreateResult::LostResponse => Err(DeviceOperationError::other(
                 "injected lost response after helper invocation",
             )),
+            AdapterCreateResult::Replaced => Err(DeviceOperationError::other(
+                "replacement outcome used through create adapter",
+            )),
+            AdapterCreateResult::PreDispatchFailure => {
+                unreachable!("pre-dispatch failure must return before the helper dispatch boundary")
+            }
         }
+    }
+    fn copy_commit_read_retroarch_config(
+        &mut self,
+        _parent: &str,
+        _parent_binding: &str,
+    ) -> Result<Vec<u8>, DeviceOperationError> {
+        Ok(self.original_config_bytes.clone())
+    }
+    fn copy_commit_replace_retroarch_config(
+        &mut self,
+        _selected_root: &str,
+        _destination_binding: &str,
+        _stage_root: &str,
+        _helper_path: &str,
+        _relative_path: &str,
+        package_name: &str,
+        user_id: u32,
+        expected_original_sha256: &str,
+        expected_original_length: u64,
+        expected_source_sha256: &str,
+        expected_source_length: u64,
+        operation_id: &str,
+        before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        after_remote_quiescent: &mut dyn FnMut(
+            crate::executor::CopyCommitRemoteOutcome,
+        ) -> Result<(), String>,
+    ) -> Result<CopyCommitConfigurationWriteOutcome, DeviceOperationError> {
+        let observations = self
+            .replace_observations
+            .as_ref()
+            .ok_or_else(|| DeviceOperationError::other("replacement test state is missing"))?;
+        observations.replace_calls.fetch_add(1, Ordering::SeqCst);
+        if observations.force_stop_calls.load(Ordering::SeqCst) != 1
+            || observations.process_checks.load(Ordering::SeqCst) != 2
+        {
+            return Err(DeviceOperationError::other(
+                "RetroArch was not stopped and checked before replacement",
+            ));
+        }
+        if crate::runtime_configuration::sha256_hex(&self.original_config_bytes)
+            != expected_original_sha256
+            || self.original_config_bytes.len() as u64 != expected_original_length
+        {
+            return Err(DeviceOperationError::other(
+                "replacement precondition did not match the original config",
+            ));
+        }
+        let app_data_root = self
+            .app_data_root
+            .as_ref()
+            .ok_or_else(|| DeviceOperationError::other("replacement app-data root is missing"))?;
+        if self.expect_backup {
+            let backup_directory = crate::configuration_backups::configuration_backup_directory(
+                app_data_root,
+                operation_id,
+            )
+            .map_err(|error| DeviceOperationError::other(error.to_string()))?;
+            let backup = std::fs::read(backup_directory.join("original.cfg"))
+                .map_err(|error| DeviceOperationError::other(error.to_string()))?;
+            if backup != self.original_config_bytes {
+                return Err(DeviceOperationError::other(
+                    "verified original backup was missing before replacement",
+                ));
+            }
+        }
+        if self.app_process_running_for_user(package_name, user_id)? {
+            return Ok(CopyCommitConfigurationWriteOutcome::AppStillRunning);
+        }
+        before_helper_dispatch().map_err(DeviceOperationError::other)?;
+        after_remote_quiescent(crate::executor::CopyCommitRemoteOutcome::VerifiedWrite)
+            .map_err(DeviceOperationError::other)?;
+        Ok(CopyCommitConfigurationWriteOutcome::ReplacedVerified {
+            sha256: expected_source_sha256.to_string(),
+            byte_length: expected_source_length,
+        })
     }
 
     fn copy_commit_cleanup_mutation_helper(
@@ -956,8 +1428,46 @@ fn adapter_runner(
     directory: &Path,
     create_result: AdapterCreateResult,
     fail_cleanup: bool,
-) -> ExecutorRunner<CreateOnlyTestDevice> {
+) -> ExecutorRunner<ConfigurationWriteTestDevice> {
     adapter_runner_with_stage_creation_response(directory, create_result, fail_cleanup, false)
+}
+
+fn running_create_adapter_runner(
+    directory: &Path,
+    create_result: AdapterCreateResult,
+) -> (
+    ExecutorRunner<ConfigurationWriteTestDevice>,
+    Arc<ReplaceObservations>,
+) {
+    let runtime = directory.join("runtime");
+    let cache = directory.join("cache");
+    let fake_device = directory.join("fake-device");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&fake_device).unwrap();
+    let observations = Arc::new(ReplaceObservations::default());
+    let device = ConfigurationWriteTestDevice {
+        create_result,
+        expect_backup: true,
+        staged_bytes: Vec::new(),
+        fail_cleanup: false,
+        created: false,
+        stage_creation_response_lost: false,
+        stage_created: false,
+        stage_cleanup_attempted: false,
+        original_config_bytes: Vec::new(),
+        app_data_root: Some(directory.to_path_buf()),
+        replace_observations: Some(Arc::clone(&observations)),
+    };
+    let runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        runtime,
+        cache,
+        fake_device,
+        Vec::new(),
+        false,
+    ));
+    (runner, observations)
 }
 
 fn adapter_runner_with_stage_creation_response(
@@ -965,21 +1475,25 @@ fn adapter_runner_with_stage_creation_response(
     create_result: AdapterCreateResult,
     fail_cleanup: bool,
     stage_creation_response_lost: bool,
-) -> ExecutorRunner<CreateOnlyTestDevice> {
+) -> ExecutorRunner<ConfigurationWriteTestDevice> {
     let runtime = directory.join("runtime");
     let cache = directory.join("cache");
     let fake_device = directory.join("fake-device");
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::create_dir_all(&fake_device).unwrap();
-    let device = CreateOnlyTestDevice {
+    let device = ConfigurationWriteTestDevice {
         create_result,
+        expect_backup: true,
         staged_bytes: Vec::new(),
         fail_cleanup,
         created: false,
         stage_creation_response_lost,
         stage_created: false,
         stage_cleanup_attempted: false,
+        original_config_bytes: Vec::new(),
+        app_data_root: None,
+        replace_observations: None,
     };
     ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
         device,
@@ -989,6 +1503,45 @@ fn adapter_runner_with_stage_creation_response(
         Vec::new(),
         false,
     ))
+}
+
+fn replace_adapter_runner(
+    directory: &Path,
+    original_config_bytes: &[u8],
+    expect_backup: bool,
+) -> (
+    ExecutorRunner<ConfigurationWriteTestDevice>,
+    Arc<ReplaceObservations>,
+) {
+    let runtime = directory.join("runtime");
+    let cache = directory.join("artifact-cache");
+    let fake_device = directory.join("fake-device");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&fake_device).unwrap();
+    let observations = Arc::new(ReplaceObservations::default());
+    let device = ConfigurationWriteTestDevice {
+        create_result: AdapterCreateResult::Replaced,
+        expect_backup,
+        staged_bytes: Vec::new(),
+        fail_cleanup: false,
+        created: true,
+        stage_creation_response_lost: false,
+        stage_created: false,
+        stage_cleanup_attempted: false,
+        original_config_bytes: original_config_bytes.to_vec(),
+        app_data_root: Some(directory.to_path_buf()),
+        replace_observations: Some(Arc::clone(&observations)),
+    };
+    let runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        runtime,
+        cache,
+        fake_device,
+        Vec::new(),
+        false,
+    ));
+    (runner, observations)
 }
 
 fn default_mode(value: &str) -> ResolvedInputBinding {
@@ -1007,6 +1560,15 @@ fn default_mode_for_recipe(recipe_id: &str, value: &str) -> ResolvedInputBinding
         "enum",
         serde_json::json!(value),
         BindingSource::RecipeDefault,
+    )
+}
+
+fn write_operation(value: &str, source: BindingSource) -> ResolvedInputBinding {
+    binding(
+        "retroarch_cfg_write_operation",
+        "enum",
+        serde_json::json!(value),
+        source,
     )
 }
 
@@ -1029,6 +1591,54 @@ fn no_selected_source_preserves_optional_configuration_behavior() {
 fn default_none_mode_preserves_optional_configuration_behavior() {
     assert_eq!(
         select_retroarch_configuration_source(&[default_mode("none")]).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn selected_write_operation_is_bound_to_the_managed_or_uploaded_source() {
+    let managed = select_retroarch_configuration_source(&[
+        default_mode("managed"),
+        binding(
+            "retroarch_video_threaded",
+            "boolean",
+            serde_json::json!(true),
+            BindingSource::Explicit,
+        ),
+        write_operation("replace", BindingSource::Explicit),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        managed,
+        super::RetroArchConfigurationSource::Generated { operation, .. }
+            if operation == "replace"
+    ));
+
+    let uploaded = select_retroarch_configuration_source(&[
+        default_mode("uploaded"),
+        binding(
+            "retroarch_cfg",
+            "file",
+            serde_json::json!("/tmp/retroarch.cfg"),
+            BindingSource::Explicit,
+        ),
+        write_operation("create", BindingSource::RecipeDefault),
+    ])
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        uploaded,
+        super::RetroArchConfigurationSource::Uploaded { operation, .. }
+            if operation == "create"
+    ));
+
+    assert_eq!(
+        select_retroarch_configuration_source(&[
+            default_mode("none"),
+            write_operation("replace", BindingSource::Explicit),
+        ])
+        .unwrap(),
         None
     );
 }
@@ -1275,6 +1885,7 @@ fn upload_capture_keeps_exact_bytes_after_source_changes_and_hides_path() {
         "app.retroarch.provision",
         &path,
         BindingSource::Explicit,
+        "create".to_string(),
     )
     .unwrap();
     source.as_file().set_len(0).unwrap();
@@ -1426,6 +2037,7 @@ fn generated_source_uses_the_typed_app_setting() {
             recipe_id: "app.retroarch.provision".to_string(),
             video_threaded: false,
             binding_source: BindingSource::RecipeDefault,
+            operation: "create".to_string(),
         })
     );
 }
@@ -1446,6 +2058,7 @@ fn uploaded_source_preserves_legacy_file_input_without_a_mode_binding() {
             recipe_id: "app.retroarch.provision".to_string(),
             path: "/tmp/retroarch.cfg".to_string(),
             binding_source: BindingSource::Explicit,
+            operation: "create".to_string(),
         })
     );
 }
@@ -1876,7 +2489,7 @@ fn adapter_outcomes_keep_partial_hash_and_lost_response_distinct() {
         ),
         (
             AdapterCreateResult::PartialWrite,
-            "partial_write_unverified",
+            "partial_write_terminal",
             true,
         ),
         (
@@ -1889,6 +2502,7 @@ fn adapter_outcomes_keep_partial_hash_and_lost_response_distinct() {
         let mut runner = adapter_runner(directory.path(), adapter_outcome, false);
         let mut plan = generated_create_plan();
         runner.prepare_copy_commit_snapshots(&mut plan).unwrap();
+        bind_operation_fence(&mut runner, &plan, directory.path());
 
         let run = runner.run(&plan);
 
@@ -1907,11 +2521,55 @@ fn adapter_outcomes_keep_partial_hash_and_lost_response_distinct() {
 }
 
 #[test]
+fn pre_dispatch_failure_cleans_staging_before_recording_no_dispatch() {
+    for fail_cleanup in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runner = adapter_runner(
+            directory.path(),
+            AdapterCreateResult::PreDispatchFailure,
+            fail_cleanup,
+        );
+        let mut plan = generated_create_plan();
+        runner.prepare_copy_commit_snapshots(&mut plan).unwrap();
+        bind_operation_fence(&mut runner, &plan, directory.path());
+
+        let run = runner.run(&plan);
+
+        assert!(!run.success);
+        assert_eq!(
+            configuration_report(&run)["outcome"],
+            "pre_dispatch_failed_no_target_write"
+        );
+        let report = configuration_report(&run);
+        assert_eq!(report["mayHaveChanged"], false);
+        assert_eq!(report["verified"], false);
+        assert_eq!(
+            report["cleanup"]["status"],
+            if fail_cleanup { "warning" } else { "complete" }
+        );
+        assert!(runner.adapters().device().stage_cleanup_attempted);
+
+        let fence =
+            crate::operation_fence::read(&directory.path().join("operation-fence.v1")).unwrap();
+        assert_eq!(
+            fence.phase,
+            crate::operation_fence::OperationFencePhase::RemoteQuiescent
+        );
+        assert_eq!(
+            fence.outcome,
+            Some(crate::operation_fence::OperationFenceOutcome::NotDispatched)
+        );
+        assert_eq!(fence.host_cleanup_complete, !fail_cleanup);
+    }
+}
+
+#[test]
 fn verified_creation_keeps_cleanup_warnings_separate_from_file_outcome() {
     let directory = tempfile::tempdir().unwrap();
     let mut runner = adapter_runner(directory.path(), AdapterCreateResult::Created, true);
     let mut plan = generated_create_plan();
     runner.prepare_copy_commit_snapshots(&mut plan).unwrap();
+    bind_operation_fence(&mut runner, &plan, directory.path());
 
     let run = runner.run(&plan);
 
@@ -1941,6 +2599,7 @@ fn lost_staging_directory_creation_response_defers_cleanup_truthfully() {
     );
     let mut plan = generated_create_plan();
     runner.prepare_copy_commit_snapshots(&mut plan).unwrap();
+    bind_operation_fence(&mut runner, &plan, directory.path());
     let result = runner.run(&plan);
     let report = configuration_report(&result);
 
@@ -1954,4 +2613,248 @@ fn lost_staging_directory_creation_response_defers_cleanup_truthfully() {
     assert!(runner.adapters().device().stage_created);
     assert!(!runner.adapters().device().stage_cleanup_attempted);
     assert!(!runner.adapters().device().created);
+}
+
+#[test]
+fn real_configuration_write_requires_native_claim_and_valid_precondition() {
+    use crate::execution_session::ExecutionMode;
+    use crate::planner::TargetDeviceBinding;
+    use crate::trusted_control::{
+        control_mac_input, NativeConfigurationWriteClaim, TrustedControlVerifier,
+        VerifiedTrustedControl,
+    };
+    use ring::hmac;
+
+    fn authenticated(claim: &NativeConfigurationWriteClaim) -> VerifiedTrustedControl {
+        const KEY: [u8; 32] = [0x39; 32];
+        let claim = serde_json::to_value(claim).unwrap();
+        let payload = serde_json::json!({});
+        let request_id = "config-write-test";
+        let input = control_mac_input(7, 1, request_id, "startExecution", &payload, Some(&claim));
+        let signature = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &KEY), &input);
+        let mut request = serde_json::json!({
+            "id": request_id,
+            "type": "startExecution",
+            "payload": payload,
+            "trustedControl": {
+                "version": 1,
+                "runtimeGeneration": 7,
+                "sequence": 1,
+                "claims": claim,
+                "mac": hex::encode(signature.as_ref())
+            }
+        });
+        TrustedControlVerifier::new(KEY, 7)
+            .verify_request(&mut request)
+            .unwrap()
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let mut plan = generated_create_plan();
+    let target = TargetDeviceBinding {
+        serial: "config-device".to_string(),
+        manufacturer: None,
+        model: None,
+        android_api_level: None,
+    };
+    plan.target_device = Some(target.clone());
+    let mut runner = adapter_runner(temporary.path(), AdapterCreateResult::Created, false);
+    runner.prepare_copy_commit_snapshots(&mut plan).unwrap();
+    let artifact = match plan.steps[0].params.get_mut("source").unwrap() {
+        crate::planner::ExecutionParamValue::Literal { value } => value,
+        _ => panic!("configuration source must be a frozen artifact"),
+    };
+    artifact["backupMode"] = serde_json::json!("disabled");
+    artifact["backupWaiverDigest"] = serde_json::Value::Null;
+
+    let make_claim = |plan: &ExecutionPlan| {
+        let artifact = match plan.steps[0].params.get("source").unwrap() {
+            crate::planner::ExecutionParamValue::Literal { value } => value,
+            _ => unreachable!(),
+        };
+        let operation = artifact["operation"].as_str().unwrap();
+        let precondition_key = match operation {
+            "create" => "absencePrecondition",
+            "replace" => "originalFilePrecondition",
+            _ => unreachable!(),
+        };
+        NativeConfigurationWriteClaim {
+            version: 1,
+            purpose: "retroarch_configuration_write".to_string(),
+            runtime_generation: 7,
+            nonce: "ab".repeat(16),
+            review_handle: "review-config".to_string(),
+            plan_digest: crate::plan_digest::execution_plan_digest(plan).unwrap(),
+            device_handle: "device-handle".to_string(),
+            device_serial: "config-device".to_string(),
+            session_epoch: 2,
+            qualification_context_digest: "cd".repeat(32),
+            profile_id: plan.source.device_profile_ref.clone(),
+            target_identity: artifact["targetIdentity"].clone(),
+            destination:
+                "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg"
+                    .to_string(),
+            operation: operation.to_string(),
+            source_sha256: artifact["sha256"].as_str().unwrap().to_string(),
+            original_file_precondition: artifact[precondition_key].clone(),
+            backup_mode: artifact["backupMode"].as_str().unwrap().to_string(),
+            backup_waiver_digest: None,
+        }
+    };
+
+    let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+    let fence_directory = tempfile::tempdir().unwrap();
+    let fence_path = fence_directory.path().join("active-operation.json");
+    let fence_record = crate::operation_fence::OperationFenceRecord {
+        version: 1,
+        operation_id: "g7-a1-config-create".to_string(),
+        runtime_generation: 7,
+        attempt_sequence: 1,
+        device_handle: "device-handle".to_string(),
+        plan_digest: digest.clone(),
+        phase: crate::operation_fence::OperationFencePhase::Dispatching,
+        outcome: None,
+        host_cleanup_complete: false,
+        target: None,
+        backup: None,
+    };
+    crate::operation_fence::write_initial(&fence_path, &fence_record).unwrap();
+    let operation_fence = crate::operation_fence::OperationFenceBinding {
+        path: fence_path,
+        record: fence_record,
+    };
+    let valid_claim = make_claim(&plan);
+    assert!(
+        crate::request::validate_native_configuration_write_authorization(
+            &plan,
+            &digest,
+            ExecutionMode::Real,
+            Some(&target),
+            &VerifiedTrustedControl::without_claims(),
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        crate::request::validate_native_configuration_write_authorization(
+            &plan,
+            &digest,
+            ExecutionMode::Real,
+            Some(&target),
+            &authenticated(&valid_claim),
+            Some(&operation_fence),
+        )
+        .is_ok()
+    );
+
+    let crate::planner::ExecutionParamValue::Literal { value: artifact } =
+        plan.steps[0].params.get_mut("source").unwrap()
+    else {
+        unreachable!();
+    };
+    artifact["absencePrecondition"]["status"] = serde_json::json!("unrecognized");
+    let malformed_digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+    let malformed_claim = make_claim(&plan);
+    assert!(
+        crate::request::validate_native_configuration_write_authorization(
+            &plan,
+            &malformed_digest,
+            ExecutionMode::Real,
+            Some(&target),
+            &authenticated(&malformed_claim),
+            Some(&operation_fence),
+        )
+        .is_err()
+    );
+
+    let recipe_id = "app.retroarch.configure";
+    let mut replace_bindings = OrderedMap::new();
+    replace_bindings.insert(
+        format!("{recipe_id}/retroarch_cfg_source"),
+        serde_json::json!("managed"),
+    );
+    replace_bindings.insert(
+        format!("{recipe_id}/retroarch_cfg_write_operation"),
+        serde_json::json!("replace"),
+    );
+    replace_bindings.insert(
+        format!("{recipe_id}/retroarch_video_threaded"),
+        serde_json::json!(false),
+    );
+    let mut replace_request = plan_request(replace_bindings);
+    replace_request.selected_recipes = Some(vec![recipe_id.to_string()]);
+    let mut replace_plan = plan_configuration(replace_request)
+        .unwrap()
+        .plan
+        .expect("Replace request should produce an execution plan");
+    replace_plan.target_device = Some(target.clone());
+    let (mut replace_runner, _) =
+        replace_adapter_runner(temporary.path(), b"original config", true);
+    replace_runner
+        .prepare_copy_commit_snapshots(&mut replace_plan)
+        .expect("review should bind the produced original-file precondition");
+    let replace_digest = crate::plan_digest::execution_plan_digest(&replace_plan).unwrap();
+    let replace_artifact = match replace_plan.steps[0].params.get("source").unwrap() {
+        crate::planner::ExecutionParamValue::Literal { value } => value,
+        _ => unreachable!(),
+    };
+    assert_eq!(replace_artifact["operation"], "replace");
+    assert_eq!(
+        replace_artifact["originalFilePrecondition"]["sha256"],
+        crate::runtime_configuration::sha256_hex(b"original config")
+    );
+    let replace_claim = make_claim(&replace_plan);
+    let replace_fence_directory = tempfile::tempdir().unwrap();
+    let replace_fence_path = replace_fence_directory
+        .path()
+        .join("replace-operation.json");
+    let replace_fence_record = crate::operation_fence::OperationFenceRecord {
+        version: 1,
+        operation_id: "replace-config-test".to_string(),
+        runtime_generation: 7,
+        attempt_sequence: 1,
+        device_handle: "device-handle".to_string(),
+        plan_digest: replace_digest.clone(),
+        phase: crate::operation_fence::OperationFencePhase::Dispatching,
+        outcome: None,
+        host_cleanup_complete: false,
+        target: None,
+        backup: None,
+    };
+    crate::operation_fence::write_initial(&replace_fence_path, &replace_fence_record).unwrap();
+    let replace_fence = crate::operation_fence::OperationFenceBinding {
+        path: replace_fence_path,
+        record: replace_fence_record,
+    };
+    assert!(
+        crate::request::validate_native_configuration_write_authorization(
+            &replace_plan,
+            &replace_digest,
+            ExecutionMode::Real,
+            Some(&target),
+            &authenticated(&replace_claim),
+            Some(&replace_fence),
+        )
+        .is_ok(),
+        "the precondition produced by Replace review must pass native admission"
+    );
+
+    let mut legacy_shape_claim = make_claim(&replace_plan);
+    legacy_shape_claim.original_file_precondition = serde_json::json!({
+        "status": "confirmed_existing",
+        "originalSha256": crate::runtime_configuration::sha256_hex(b"original config"),
+        "byteLength": b"original config".len(),
+    });
+    assert!(
+        crate::request::validate_native_configuration_write_authorization(
+            &replace_plan,
+            &replace_digest,
+            ExecutionMode::Real,
+            Some(&target),
+            &authenticated(&legacy_shape_claim),
+            Some(&replace_fence),
+        )
+        .is_err(),
+        "legacy runtime field names must not pass the native claim contract"
+    );
 }

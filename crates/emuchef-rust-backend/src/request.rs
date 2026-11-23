@@ -13,6 +13,10 @@ use crate::protocol;
 use crate::runtime_configuration::{self, ConfigurationContextRequest, UserConfigurationSource};
 use crate::session::DocumentSessionManager;
 use crate::step_specs;
+use crate::trusted_control::{
+    authentication_error, reject_unconfigured_control, NativeConfigurationWriteClaim,
+    VerifiedTrustedControl,
+};
 use crate::user_configuration;
 use crate::validation;
 use crate::yaml;
@@ -27,12 +31,31 @@ pub fn handle_one_shot_value(request: Value) -> Value {
 
 /// Validate and dispatch a sidecar request object, including sidecar id rules.
 pub fn handle_sidecar_value(request: Value, sessions: &mut DocumentSessionManager) -> Value {
+    let control = match reject_unconfigured_control(&request) {
+        Ok(control) => control,
+        Err(error) => {
+            let request_id = request
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return envelope::with_id(envelope::failure(error), request_id);
+        }
+    };
+    handle_sidecar_value_with_control(request, sessions, control)
+}
+
+pub fn handle_sidecar_value_with_control(
+    request: Value,
+    sessions: &mut DocumentSessionManager,
+    control: VerifiedTrustedControl,
+) -> Value {
     let mut request_id = None;
     let response = match validate_request_object(request) {
         Ok(object) => match validate_sidecar_id(&object) {
             Ok(id) => {
                 request_id = Some(id);
-                handle_validated_sidecar_object(&object, sessions).unwrap_or_else(envelope::failure)
+                handle_validated_sidecar_object(&object, sessions, &control)
+                    .unwrap_or_else(envelope::failure)
             }
             Err(error) => envelope::failure(error),
         },
@@ -85,8 +108,12 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
 fn handle_validated_sidecar_object(
     object: &Map<String, Value>,
     sessions: &mut DocumentSessionManager,
+    control: &VerifiedTrustedControl,
 ) -> Result<Value, ApiError> {
     let request_type = validate_request_type(object)?;
+    if request_type != "startExecution" && control.claims.is_some() {
+        return Err(authentication_error());
+    }
     if request_type == "prepareExecutionReview" {
         validate_prepare_execution_review_payload(object)?;
     } else {
@@ -164,7 +191,7 @@ fn handle_validated_sidecar_object(
             Some(sessions),
         ),
         "prepareExecutionReview" => handle_prepare_execution_review(object, sessions),
-        "startExecution" => handle_start_execution(object, sessions),
+        "startExecution" => handle_start_execution(object, sessions, control),
         "getExecution" => handle_get_execution(object, sessions),
         "getExecutionEvents" => handle_get_execution_events(object, sessions),
         "cancelExecution" => handle_cancel_execution(object, sessions),
@@ -215,6 +242,7 @@ fn handle_negotiate_capabilities(object: &Map<String, Value>) -> Result<Value, A
 fn handle_start_execution(
     object: &Map<String, Value>,
     sessions: &DocumentSessionManager,
+    control: &VerifiedTrustedControl,
 ) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     for forbidden in ["runtimeRoot", "cacheRoot", "adbPath"] {
@@ -253,6 +281,25 @@ fn handle_start_execution(
         )
     })?;
     let target = optional_target_device(payload, "targetDevice")?;
+    let operation_fence = payload
+        .get("operationFence")
+        .cloned()
+        .map(serde_json::from_value::<crate::operation_fence::OperationFenceBinding>)
+        .transpose()
+        .map_err(|_| {
+            ApiError::invalid_request_with_details(
+                "Request field 'operationFence' is invalid.",
+                json!({ "field": "operationFence" }),
+            )
+        })?;
+    validate_native_configuration_write_authorization(
+        &plan,
+        &plan_digest,
+        mode,
+        target.as_ref(),
+        control,
+        operation_fence.as_ref(),
+    )?;
     let review_authority_id = match payload.get("reviewAuthorityId") {
         None | Some(Value::Null) => None,
         Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
@@ -275,15 +322,125 @@ fn handle_start_execution(
             )
         })?;
     Ok(envelope::success(
-        sessions.executions().start_with_review_authority(
+        sessions.executions().start_with_operation_fence(
             plan,
             plan_digest,
             mode,
             target,
             setup_location_lease,
             review_authority_id,
+            operation_fence,
         )?,
     ))
+}
+
+pub(crate) fn validate_native_configuration_write_authorization(
+    plan: &crate::planner::ExecutionPlan,
+    plan_digest: &str,
+    mode: crate::execution_session::ExecutionMode,
+    target: Option<&TargetDeviceBinding>,
+    control: &VerifiedTrustedControl,
+    operation_fence: Option<&crate::operation_fence::OperationFenceBinding>,
+) -> Result<(), ApiError> {
+    let protected_write = crate::executor::plan_requires_retroarch_config_write(plan);
+    if mode != crate::execution_session::ExecutionMode::Real || !protected_write {
+        return if control.claims.is_some() || operation_fence.is_some() {
+            Err(authentication_error())
+        } else {
+            Ok(())
+        };
+    }
+
+    if !control.is_authenticated() {
+        return Err(authentication_error());
+    }
+    let claim_value = control.claims.as_ref().ok_or_else(authentication_error)?;
+    let claim: NativeConfigurationWriteClaim =
+        serde_json::from_value(claim_value.clone()).map_err(|_| authentication_error())?;
+    let operation_fence = operation_fence.ok_or_else(authentication_error)?;
+    operation_fence
+        .record
+        .validate()
+        .map_err(|_| authentication_error())?;
+    let durable_fence =
+        crate::operation_fence::read(&operation_fence.path).map_err(|_| authentication_error())?;
+    if !operation_fence.path.is_absolute()
+        || operation_fence.record.phase != crate::operation_fence::OperationFencePhase::Dispatching
+        || operation_fence.record.plan_digest != plan_digest.to_ascii_lowercase()
+        || operation_fence.record.plan_digest != claim.plan_digest.to_ascii_lowercase()
+        || operation_fence.record.device_handle != claim.device_handle
+        || operation_fence.record.runtime_generation != claim.runtime_generation
+        || durable_fence != operation_fence.record
+    {
+        return Err(authentication_error());
+    }
+    let original_file_precondition_is_valid = match claim.operation.as_str() {
+        "create" => {
+            claim
+                .original_file_precondition
+                .get("status")
+                .and_then(Value::as_str)
+                == Some("confirmed_absent")
+        }
+        "replace" => {
+            claim
+                .original_file_precondition
+                .get("status")
+                .and_then(Value::as_str)
+                == Some("confirmed_existing")
+                && claim
+                    .original_file_precondition
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_sha256_hex)
+        }
+        _ => false,
+    };
+    let backup_waiver_is_valid = match claim.backup_mode.as_str() {
+        "waived" => claim
+            .backup_waiver_digest
+            .as_deref()
+            .is_some_and(is_sha256_hex),
+        "verified" | "disabled" => claim.backup_waiver_digest.is_none(),
+        _ => false,
+    };
+    if claim.version != 1
+        || claim.purpose != "retroarch_configuration_write"
+        || Some(claim.runtime_generation) != control.runtime_generation()
+        || claim.plan_digest != plan_digest
+        || claim.profile_id != plan.source.device_profile_ref
+        || target.is_none_or(|target| target.serial != claim.device_serial)
+        || claim.device_handle.trim().is_empty()
+        || claim.review_handle.trim().is_empty()
+        || claim.session_epoch == 0
+        || claim.destination.trim().is_empty()
+        || !is_sha256_hex(&claim.plan_digest)
+        || !is_sha256_hex(&claim.source_sha256)
+        || !is_sha256_hex(&claim.qualification_context_digest)
+        || !matches!(claim.operation.as_str(), "create" | "replace")
+        || !matches!(
+            claim.backup_mode.as_str(),
+            "verified" | "disabled" | "waived"
+        )
+        || !original_file_precondition_is_valid
+        || !backup_waiver_is_valid
+        || claim
+            .backup_waiver_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256_hex(digest))
+        || !crate::executor::native_configuration_write_claim_matches_plan(
+            plan,
+            plan_digest,
+            &claim,
+        )
+    {
+        return Err(authentication_error());
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn handle_sidecar_hello(
@@ -1877,6 +2034,32 @@ fn handle_runtime_configuration_request(
     let device_context = optional_device_context(payload, "deviceContext")?;
     let runtime_capability_availability =
         optional_runtime_capability_availability(payload, "runtimeCapabilityAvailability")?;
+    let configuration_backup_enabled = match payload.get("configurationBackupEnabled") {
+        None => true,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request field 'configurationBackupEnabled' must be a boolean.",
+                json!({ "field": "configurationBackupEnabled" }),
+            ));
+        }
+    };
+    let configuration_backup_waiver_digest = match payload.get("configurationBackupWaiverDigest") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(digest)) if is_sha256_hex(digest) => Some(digest.as_str()),
+        Some(_) => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request field 'configurationBackupWaiverDigest' must be a SHA-256 digest.",
+                json!({ "field": "configurationBackupWaiverDigest" }),
+            ));
+        }
+    };
+    if configuration_backup_waiver_digest.is_some() && !configuration_backup_enabled {
+        return Err(ApiError::invalid_request_with_details(
+            "A one-time configuration backup waiver requires backups to remain enabled.",
+            json!({ "field": "configurationBackupWaiverDigest" }),
+        ));
+    }
     let target_device = optional_target_device(payload, "targetDevice")?;
     let request = ConfigurationContextRequest {
         catalog,
@@ -1893,6 +2076,8 @@ fn handle_runtime_configuration_request(
         runtime_configuration::plan_configuration_with_restriction(
             request,
             restrict_privileged_execution,
+            configuration_backup_enabled,
+                configuration_backup_waiver_digest,
         )
         .and_then(|result| {
             let required_step_ids = result.restricted_qualification_required_step_ids.clone();
@@ -3196,7 +3381,7 @@ steps:
                 name: Some("Example Setup Locations".to_string()),
                 description: None,
             }),
-            config_create_destination: None,
+            config_write_destination: None,
         };
         let planning = crate::planner::plan_execution(input);
         assert_eq!(

@@ -22,6 +22,10 @@ import type {
 
 const mockApi = vi.hoisted(() => ({
   adbStatus: vi.fn(),
+  getConfigurationBackupPreference: vi.fn(),
+  setConfigurationBackupPreference: vi.fn(),
+  inspectOperationFence: vi.fn(),
+  acknowledgeOperationFence: vi.fn(),
   beginAppSession: vi.fn(),
   beginUpdateInteractionSession: vi.fn(),
   catalog: vi.fn(),
@@ -366,6 +370,12 @@ function resetApi(): void {
     catalogVersion: "test",
   });
   mockApi.adbStatus.mockResolvedValue(readyAdb);
+mockApi.getConfigurationBackupPreference.mockResolvedValue(true);
+  mockApi.inspectOperationFence.mockResolvedValue(null);
+  mockApi.acknowledgeOperationFence.mockResolvedValue(undefined);
+mockApi.setConfigurationBackupPreference.mockImplementation(
+  async (enabled: boolean) => enabled,
+);
   mockApi.executionCapabilities.mockResolvedValue({
     realExecutionCompiled: false,
     platformToolsStatus: "notApplicable",
@@ -490,6 +500,93 @@ async function renderReadyApp(): Promise<void> {
   render(<App />);
   await screen.findByRole("heading", { name: "Choose an Android device" });
 }
+
+test("operation-fence recovery labels terminal partial writes without rendering stored paths", async () => {
+  const localBackupPath = "/Users/private-user/EmuChef/original.cfg";
+  const androidTargetPath =
+    "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg";
+  mockApi.inspectOperationFence.mockResolvedValue({
+    record: {
+      version: 1,
+      operationId: "operation-opaque",
+      runtimeGeneration: 4,
+      attemptSequence: 2,
+      deviceHandle: "device-opaque",
+      planDigest: "a".repeat(64),
+      phase: "remote_quiescent",
+      outcome: "partial_write_terminal",
+      target: {
+        operation: "replace",
+        appId: "retroarch",
+        targetId: "config",
+        packageId: "com.retroarch.aarch64",
+        androidUserId: 0,
+        sourceSha256: "c".repeat(64),
+        originalFilePrecondition: { status: "confirmed_existing", sha256: "d".repeat(64), byteLength: 32 },
+        backupMode: "verified",
+        targetPath: androidTargetPath,
+      },
+      backup: {
+        operation: "replace",
+        packageId: "com.retroarch.aarch64",
+        capturedAtUnixMs: 1,
+        sha256: "e".repeat(64),
+        length: 32,
+        path: localBackupPath,
+        metadataPath: `${localBackupPath}.json`,
+        targetPath: androidTargetPath,
+      },
+    },
+    status: "partial_write_terminal",
+    guidance: "The partial write has stopped. Use manual recovery guidance.",
+    canAcknowledge: true,
+  });
+
+  await renderReadyApp();
+
+  expect(
+    await screen.findByRole("heading", { name: "Partial write stopped" }),
+  ).toBeTruthy();
+  expect(screen.getByText("Remote helper stopped")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Review recovery acknowledgment" })).toBeTruthy();
+  expect(screen.queryByText("partial_write_terminal")).toBeNull();
+  expect(document.body.textContent).not.toContain(localBackupPath);
+  expect(document.body.textContent).not.toContain(androidTargetPath);
+  expect(screen.getByText("Location is available in native recovery confirmation.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Review recovery acknowledgment" }));
+  await waitFor(() => {
+    expect(mockApi.acknowledgeOperationFence).toHaveBeenCalledWith("operation-opaque");
+  });
+});
+
+test("operation-fence recovery keeps an unresolved writer blocked", async () => {
+  mockApi.inspectOperationFence.mockResolvedValue({
+    record: {
+      version: 1,
+      operationId: "operation-opaque",
+      runtimeGeneration: 4,
+      attemptSequence: 2,
+      deviceHandle: "device-opaque",
+      planDigest: "b".repeat(64),
+      phase: "commit_pending",
+      outcome: null,
+      target: null,
+      backup: null,
+    },
+    status: "write_unresolved",
+    guidance: "The helper may still be writing. Keep device writes blocked.",
+    canAcknowledge: false,
+  });
+
+  await renderReadyApp();
+
+  expect(
+    await screen.findByRole("heading", { name: "Write outcome unresolved" }),
+  ).toBeTruthy();
+  expect(screen.getByText("Write may still be active")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Review recovery acknowledgment" })).toBeNull();
+  expect(screen.queryByText("write_unresolved")).toBeNull();
+});
 
 async function continueCurrentStep(user: ReturnType<typeof userEvent.setup>) {
   if (screen.queryByRole("heading", { name: "Choose Setup" })) await chooseSupportedSetup(user);

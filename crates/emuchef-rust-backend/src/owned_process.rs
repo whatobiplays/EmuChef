@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime};
 use async_io::{block_on, Timer};
 use async_process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use futures_lite::future::{self, poll_fn};
-use futures_lite::io::{AsyncRead, AsyncReadExt};
+use futures_lite::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub(crate) const OUTPUT_CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -825,6 +825,9 @@ pub(crate) enum ProcessFailureKind {
     StderrOverflow,
     TimedOut,
     ReaderJoin,
+    ProtocolReady,
+    ProtocolWrite,
+    ProtocolCommitPreparation,
 }
 
 /// Whether child reap and local I/O completion were confirmed before return.
@@ -946,6 +949,54 @@ async fn read_streams(
         }
     })
     .await
+}
+
+async fn read_ready_commit_streams<F>(
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    mut stdin: ChildStdin,
+    expected_ready: Vec<u8>,
+    commit_frame: Vec<u8>,
+    before_commit: F,
+) -> Result<(StreamCapture, StreamCapture), ProcessFailureKind>
+where
+    F: FnOnce() -> Result<(), ProcessFailureKind>,
+{
+    let stdout_future = async move {
+        let mut reader = BufReader::new(stdout);
+        let mut ready_line = Vec::new();
+        let count = reader
+            .read_until(b'\n', &mut ready_line)
+            .await
+            .map_err(|_| ProcessFailureKind::ProtocolReady)?;
+        if count == 0 || ready_line != expected_ready {
+            return Err(ProcessFailureKind::ProtocolReady);
+        }
+        if ready_line.len() > OUTPUT_CAPTURE_LIMIT {
+            return Err(ProcessFailureKind::StdoutOverflow);
+        }
+
+        before_commit()?;
+        stdin
+            .write_all(&commit_frame)
+            .await
+            .map_err(|_| ProcessFailureKind::ProtocolWrite)?;
+        stdin
+            .flush()
+            .await
+            .map_err(|_| ProcessFailureKind::ProtocolWrite)?;
+        drop(stdin);
+
+        let remaining = capture_stream(reader, OutputStream::Stdout).await?;
+        if ready_line.len().saturating_add(remaining.bytes.len()) > OUTPUT_CAPTURE_LIMIT {
+            return Err(ProcessFailureKind::StdoutOverflow);
+        }
+        ready_line.extend_from_slice(&remaining.bytes);
+        Ok(StreamCapture { bytes: ready_line })
+    };
+    let stderr_future = capture_stream(stderr, OutputStream::Stderr);
+    let (stdout, stderr) = future::zip(stdout_future, stderr_future).await;
+    Ok((stdout?, stderr?))
 }
 
 enum ProcessEvent {
@@ -1085,15 +1136,36 @@ async fn run_child(
 }
 
 async fn run_child_with_deadline_signal<D: Future>(
-    mut child: Child,
+    child: Child,
     stdout: ChildStdout,
     stderr: ChildStderr,
     deadline_signal: D,
     deadline: Option<Duration>,
     observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    run_child_with_output_future(
+        child,
+        read_streams(stdout, stderr),
+        deadline_signal,
+        deadline,
+        observation,
+    )
+    .await
+}
+
+async fn run_child_with_output_future<D, O>(
+    mut child: Child,
+    output: O,
+    deadline_signal: D,
+    deadline: Option<Duration>,
+    observation: Option<OwnedProcessObservationContext>,
+) -> Result<CapturedProcessOutput, OwnedProcessError>
+where
+    D: Future,
+    O: Future<Output = Result<(StreamCapture, StreamCapture), ProcessFailureKind>>,
+{
     let mut status_future = Box::pin(child.status());
-    let mut output_future = Box::pin(read_streams(stdout, stderr));
+    let mut output_future = Box::pin(output);
     let mut timer = Box::pin(deadline_signal);
     let mut sampled_status = None;
 
@@ -1347,6 +1419,152 @@ pub(crate) fn run_owned_process_with_stdin_file(
     )
 }
 
+/// Own one child while it waits for READY, persists commit intent, and sends COMMIT.
+pub(crate) fn run_owned_process_with_ready_commit<F>(
+    program: &str,
+    args: &[String],
+    operation: ProcessOperation,
+    expected_ready: &[u8],
+    commit_frame: &[u8],
+    before_commit: F,
+) -> Result<CapturedProcessOutput, OwnedProcessError>
+where
+    F: FnOnce() -> Result<(), ProcessFailureKind>,
+{
+    run_owned_process_with_ready_commit_and_observer(
+        program,
+        args,
+        operation,
+        expected_ready,
+        commit_frame,
+        None,
+        before_commit,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn run_owned_process_observed_with_ready_commit<F>(
+    program: &str,
+    args: &[String],
+    operation: ProcessOperation,
+    expected_ready: &[u8],
+    commit_frame: &[u8],
+    observer: OwnedProcessObservationHandle,
+    before_commit: F,
+) -> Result<CapturedProcessOutput, OwnedProcessError>
+where
+    F: FnOnce() -> Result<(), ProcessFailureKind>,
+{
+    run_owned_process_with_ready_commit_and_observer(
+        program,
+        args,
+        operation,
+        expected_ready,
+        commit_frame,
+        Some(observer),
+        before_commit,
+    )
+}
+
+fn run_owned_process_with_ready_commit_and_observer<F>(
+    program: &str,
+    args: &[String],
+    operation: ProcessOperation,
+    expected_ready: &[u8],
+    commit_frame: &[u8],
+    observer: Option<OwnedProcessObservationHandle>,
+    before_commit: F,
+) -> Result<CapturedProcessOutput, OwnedProcessError>
+where
+    F: FnOnce() -> Result<(), ProcessFailureKind>,
+{
+    if expected_ready.is_empty()
+        || expected_ready.len() > 128
+        || !expected_ready.ends_with(b"\n")
+        || commit_frame.is_empty()
+        || commit_frame.len() > 128
+        || !commit_frame.ends_with(b"\n")
+    {
+        return Err(OwnedProcessError::new(
+            ProcessFailureKind::ProtocolReady,
+            ProcessCleanup::NotRequired,
+        ));
+    }
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            OwnedProcessError::new(ProcessFailureKind::Spawn, ProcessCleanup::NotRequired)
+        })?;
+    let observation =
+        observer.map(|observer| OwnedProcessObservationContext::begin(observer, operation));
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let error = cleanup_child(&mut child, ProcessFailureKind::Spawn);
+            if let Some(observation) = observation.as_ref() {
+                observation.terminal();
+            }
+            return Err(error);
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let error = cleanup_child(&mut child, ProcessFailureKind::Spawn);
+            if let Some(observation) = observation.as_ref() {
+                observation.terminal();
+            }
+            return Err(error);
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let error = cleanup_child(&mut child, ProcessFailureKind::Spawn);
+            if let Some(observation) = observation.as_ref() {
+                observation.terminal();
+            }
+            return Err(error);
+        }
+    };
+    if let Some(observation) = observation.as_ref() {
+        observation.mutation_started();
+    }
+
+    let deadline = take_test_process_deadline(operation).unwrap_or_else(|| operation.deadline());
+    let start_wall = SystemTime::now();
+    let deadline_clock_start = Instant::now();
+    let deadline_basis = deadline_basis(deadline_clock_start, start_wall, deadline);
+    let timer = deadline_basis.map_or_else(Timer::never, |basis| Timer::at(basis.deadline_at));
+    if let Some(observation) = observation.as_ref() {
+        observation.install_deadline_basis(deadline_basis);
+    }
+    let output_future = read_ready_commit_streams(
+        stdout,
+        stderr,
+        stdin,
+        expected_ready.to_vec(),
+        commit_frame.to_vec(),
+        before_commit,
+    );
+    let result = block_on(run_child_with_output_future(
+        child,
+        output_future,
+        timer,
+        Some(deadline),
+        observation.clone(),
+    ));
+    if let Some(observation) = observation.as_ref() {
+        observation.terminal();
+    }
+    result
+}
+
 #[cfg(test)]
 pub(crate) fn run_owned_process_observed(
     program: &str,
@@ -1421,6 +1639,34 @@ mod tests {
 
         assert_eq!(output.stdout, payload);
         assert_eq!(output.status_code, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_commit_waits_for_persistence_callback_before_sending_commit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let callback_ran = AtomicBool::new(false);
+        let output = run_owned_process_with_ready_commit(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "printf 'READY op-42\\n'; IFS= read -r frame; printf 'ACK %s\\n' \"$frame\""
+                    .to_string(),
+            ],
+            ProcessOperation::DeviceCopy,
+            b"READY op-42\n",
+            b"COMMIT op-42\n",
+            || {
+                callback_ran.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("the child should receive COMMIT after the durable callback");
+
+        assert!(callback_ran.load(Ordering::SeqCst));
+        assert_eq!(output.status_code, Some(0));
+        assert_eq!(output.stdout, b"READY op-42\nACK COMMIT op-42\n");
     }
 
     #[test]

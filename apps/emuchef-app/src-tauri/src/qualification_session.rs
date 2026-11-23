@@ -6158,10 +6158,7 @@ mod tests {
             let terminal_check_for_thread = Arc::clone(&terminal_check);
             let terminal_thread = scope.spawn(move || {
                 terminal_check_for_thread.wait();
-                let acquired = state_for_terminal
-                    .qualification_transition_gate
-                    .try_lock()
-                    .is_ok();
+                let acquired = !state_for_terminal.qualification_transition_gate.is_active();
                 terminal_gate_tx.send(acquired).unwrap();
                 observe(state_for_terminal, terminal);
             });
@@ -6224,7 +6221,7 @@ mod tests {
             authority_cleared_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .expect("authority loss should pause while owning the transition gate");
-            assert!(state.qualification_transition_gate.try_lock().is_err());
+            assert!(state.qualification_transition_gate.is_active());
 
             let state_for_checkpoint = &state;
             let checkpoint = scope.spawn(move || {
@@ -6492,7 +6489,7 @@ mod tests {
                 crate::execution::tests::poll_simulated_runtime_loss_for_test(
                     state_ref,
                     move || {
-                        assert!(state_ref.qualification_transition_gate.try_lock().is_err());
+                        assert!(state_ref.qualification_transition_gate.is_active());
                         reset_tx.send(()).unwrap();
                         continue_rx.recv().unwrap();
                     },
@@ -6505,7 +6502,7 @@ mod tests {
             let state_ref = &*state;
             let checkpoint_session = session_handle.clone();
             let checkpoint = scope.spawn(move || {
-                let blocked = state_ref.qualification_transition_gate.try_lock().is_err();
+                let blocked = state_ref.qualification_transition_gate.is_active();
                 checkpoint_gate_tx.send(blocked).unwrap();
                 record_checkpoint(
                     state_ref,
@@ -6578,7 +6575,7 @@ mod tests {
             activation_visible_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .expect("the installation should activate while the transition gate is held");
-            assert!(state.qualification_transition_gate.try_lock().is_err());
+            assert!(state.qualification_transition_gate.is_active());
 
             let state_for_checkpoint = &state;
             let checkpoint = scope.spawn(move || {
@@ -6774,12 +6771,7 @@ mod tests {
                     None,
                     || {
                         gate_was_free_tx
-                            .send(
-                                state_for_removal
-                                    .qualification_transition_gate
-                                    .try_lock()
-                                    .is_ok(),
-                            )
+                            .send(!state_for_removal.qualification_transition_gate.is_active())
                             .unwrap();
                     },
                     || {
@@ -6794,7 +6786,7 @@ mod tests {
             removal_visible_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .expect("Platform-Tools removal should commit under the transition gate");
-            assert!(state.qualification_transition_gate.try_lock().is_err());
+            assert!(state.qualification_transition_gate.is_active());
 
             let state_for_checkpoint = &state;
             let checkpoint = scope.spawn(move || {
@@ -7963,7 +7955,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .is_ok();
             let gate_was_released =
-                source_check_started && state.qualification_transition_gate.try_lock().is_ok();
+                source_check_started && !state.qualification_transition_gate.is_active();
             if source_check_started {
                 release_source_read_tx.send(()).unwrap();
             }
@@ -8050,7 +8042,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .is_ok();
             let gate_was_released =
-                source_check_started && state.qualification_transition_gate.try_lock().is_ok();
+                source_check_started && !state.qualification_transition_gate.is_active();
             if source_check_started {
                 release_source_read_tx.send(()).unwrap();
             }
@@ -11310,6 +11302,8 @@ mod tests {
                     qualification_context: Some(old_context.clone()),
                     platform_tools_identity: None,
                     restricted_execution: None,
+                    configuration_backup_waiver: None,
+                    configuration_backup_enabled: true,
                     created: std::time::Instant::now(),
                     last_access: std::time::Instant::now(),
                 });

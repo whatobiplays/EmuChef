@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use std::cell::RefCell;
 use std::fmt;
 use std::fs::File;
@@ -10,13 +11,13 @@ use std::collections::VecDeque;
 
 use crate::device_probe::{CommandOutput, CommandRunner, DeviceProbeError};
 use crate::owned_process::{
-    run_owned_process, run_owned_process_with_stdin_file, OwnedProcessError, ProcessCleanup,
-    ProcessFailureKind, ProcessOperation,
+    run_owned_process, run_owned_process_with_ready_commit, run_owned_process_with_stdin_file,
+    OwnedProcessError, ProcessCleanup, ProcessFailureKind, ProcessOperation,
 };
 #[cfg(test)]
 use crate::owned_process::{
-    run_owned_process_observed, run_owned_process_observed_with_stdin_file,
-    OwnedProcessObservationHandle,
+    run_owned_process_observed, run_owned_process_observed_with_ready_commit,
+    run_owned_process_observed_with_stdin_file, OwnedProcessObservationHandle,
 };
 use crate::planner::{RootShellRoute, TargetDeviceBinding};
 use crate::storage_targets::{StorageTargetBinding, StorageTargetVolumeKind};
@@ -75,6 +76,68 @@ pub enum AdbCommandError {
         phase: IdentityCheckPhase,
     },
     RestrictedExecutionPrivilegedEffectDenied,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerifiedOperationStatus {
+    Complete,
+    Aborted,
+    PartialWriteTerminal,
+}
+
+fn verify_copy_commit_operation_status(
+    output: &str,
+    operation_id: &str,
+    action: &str,
+    source_sha256: &str,
+    source_length: u64,
+    original_sha256: &str,
+    original_length: u64,
+) -> Result<VerifiedOperationStatus, AdbCommandError> {
+    let completed = format!(
+        "STATUS 1 {operation_id} {action} complete retroarch.cfg {source_sha256} {source_length} {original_sha256} {original_length} {source_sha256} {source_length} complete complete\n"
+    );
+    if output == completed {
+        return Ok(VerifiedOperationStatus::Complete);
+    }
+    let aborted = format!(
+        "STATUS 1 {operation_id} {action} aborted retroarch.cfg {source_sha256} {source_length} {original_sha256} {original_length} unknown 0 none none\n"
+    );
+    if output == aborted {
+        return Ok(VerifiedOperationStatus::Aborted);
+    }
+    let failed = format!(
+        "STATUS 1 {operation_id} {action} failed retroarch.cfg {source_sha256} {source_length} {original_sha256} {original_length} unknown 0 unknown unknown\n"
+    );
+    if output == failed {
+        return Ok(VerifiedOperationStatus::PartialWriteTerminal);
+    }
+    Err(AdbCommandError::Resolution(
+        "remote operation status is missing, stale, malformed, or does not match the reviewed write"
+            .to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod operation_status_tests {
+    use super::{verify_copy_commit_operation_status, VerifiedOperationStatus};
+
+    #[test]
+    fn distinguishes_terminal_partial_write_from_unresolved_status() {
+        let partial = "STATUS 1 op-1 replace failed retroarch.cfg source 12 original 9 unknown 0 unknown unknown\n";
+        assert_eq!(
+            verify_copy_commit_operation_status(
+                partial, "op-1", "replace", "source", 12, "original", 9,
+            ),
+            Ok(VerifiedOperationStatus::PartialWriteTerminal)
+        );
+
+        let unresolved = "STATUS 1 op-1 replace commit_pending retroarch.cfg source 12 original 9 unknown 0 none none\n";
+        assert!(verify_copy_commit_operation_status(
+            unresolved, "op-1", "replace", "source", 12, "original", 9,
+        )
+        .is_err());
+    }
 }
 
 /// Generic public result message for a completed ADB command failure.
@@ -291,6 +354,19 @@ pub trait AdbCommandExecutor: fmt::Debug {
             "this ADB command executor cannot attach a file to child stdin".to_string(),
         ))
     }
+
+    fn run_for_with_ready_commit(
+        &mut self,
+        _args: &[String],
+        _operation: ProcessOperation,
+        _expected_ready: &[u8],
+        _commit_frame: &[u8],
+        _before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        Err(AdbCommandError::Resolution(
+            "this ADB command executor cannot run the READY/COMMIT protocol".to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -352,6 +428,60 @@ impl ProcessAdbCommandExecutor {
         })
     }
 
+    fn run_with_ready_commit(
+        &mut self,
+        args: &[String],
+        operation: ProcessOperation,
+        expected_ready: &[u8],
+        commit_frame: &[u8],
+        before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let (executable, command_args) = args.split_first().ok_or_else(|| {
+            AdbCommandError::Resolution("ADB command must not be empty.".to_string())
+        })?;
+        #[cfg(test)]
+        let process_observer = self.process_observer.clone();
+        #[cfg(test)]
+        let output = if let Some(observer) = process_observer {
+            run_owned_process_observed_with_ready_commit(
+                executable,
+                command_args,
+                operation,
+                expected_ready,
+                commit_frame,
+                observer.clone(),
+                || before_commit(self).map_err(|_| ProcessFailureKind::ProtocolCommitPreparation),
+            )
+        } else {
+            run_owned_process_with_ready_commit(
+                executable,
+                command_args,
+                operation,
+                expected_ready,
+                commit_frame,
+                || before_commit(self).map_err(|_| ProcessFailureKind::ProtocolCommitPreparation),
+            )
+        }
+        .map_err(|error| map_process_error(args, error))?;
+        #[cfg(not(test))]
+        let output = run_owned_process_with_ready_commit(
+            executable,
+            command_args,
+            operation,
+            expected_ready,
+            commit_frame,
+            || before_commit(self).map_err(|_| ProcessFailureKind::ProtocolCommitPreparation),
+        )
+        .map_err(|error| map_process_error(args, error))?;
+
+        classify_completed_transport(AdbCommandResult {
+            args: args.to_vec(),
+            returncode: output.status_code.unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn with_process_observer(observer: OwnedProcessObservationHandle) -> Self {
         Self {
@@ -376,6 +506,17 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
         stdin: File,
     ) -> Result<AdbCommandResult, AdbCommandError> {
         self.run_with_optional_stdin(args, operation, Some(stdin))
+    }
+
+    fn run_for_with_ready_commit(
+        &mut self,
+        args: &[String],
+        operation: ProcessOperation,
+        expected_ready: &[u8],
+        commit_frame: &[u8],
+        before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        self.run_with_ready_commit(args, operation, expected_ready, commit_frame, before_commit)
     }
 }
 
@@ -726,6 +867,15 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
     pub(super) fn serial(&self) -> Option<&str> {
         self.serial.as_deref()
     }
+    fn full_args(&self, args: &[String]) -> Vec<String> {
+        let mut full_args = vec![self.executable.clone()];
+        if let Some(serial) = self.serial.as_deref() {
+            full_args.push("-s".to_string());
+            full_args.push(serial.to_string());
+        }
+        full_args.extend_from_slice(args);
+        full_args
+    }
 
     pub(super) fn run_identity_command(
         &mut self,
@@ -763,6 +913,31 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         }
         full_args.extend(args);
         self.run_raw_with_stdin_file(full_args, check, operation, stdin)
+    }
+
+    fn run_with_ready_commit(
+        &mut self,
+        args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+        expected_ready: &[u8],
+        commit_frame: &[u8],
+        before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let mut full_args = vec![self.executable.clone()];
+        if let Some(serial) = self.serial.as_deref() {
+            full_args.push("-s".to_string());
+            full_args.push(serial.to_string());
+        }
+        full_args.extend(args);
+        self.run_raw_with_ready_commit(
+            full_args,
+            check,
+            operation,
+            expected_ready,
+            commit_frame,
+            before_commit,
+        )
     }
 
     fn run_raw(
@@ -807,6 +982,33 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
             } else {
                 Err(command_failed(&result))
             }
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn run_raw_with_ready_commit(
+        &mut self,
+        full_args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+        expected_ready: &[u8],
+        commit_frame: &[u8],
+        before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let result = self.executor.run_for_with_ready_commit(
+            &full_args,
+            operation,
+            expected_ready,
+            commit_frame,
+            before_commit,
+        )?;
+        let result = classify_completed_transport(result)?;
+        if classify_completed_storage(operation, &full_args, &result) {
+            return Err(AdbCommandError::DeviceStorageExhausted);
+        }
+        if check && result.returncode != 0 {
+            Err(command_failed(&result))
         } else {
             Ok(result)
         }
@@ -1358,6 +1560,130 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         })
     }
 
+    /// Inspect one package process through the selected device identity guard.
+    pub fn app_process_running(&mut self, package_name: &str) -> Result<bool, String> {
+        let package_name = package_name.to_string();
+        self.guarded(DeviceCommandEffect::ReadOnly, |device| {
+            let result = device.run_android_shell_unchecked(
+                vec!["pidof".to_string(), package_name],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            if result.returncode == 0 {
+                let pids = result.stdout.split_whitespace().collect::<Vec<_>>();
+                if !pids.is_empty()
+                    && pids
+                        .iter()
+                        .all(|pid| pid.parse::<u32>().is_ok_and(|pid| pid > 0))
+                {
+                    return Ok(true);
+                }
+                return Err(AdbCommandError::Resolution(
+                    "Android process query returned an invalid result".to_string(),
+                ));
+            }
+            if result.returncode == 1 && result.stdout.trim().is_empty() {
+                return Ok(false);
+            }
+            Err(AdbCommandError::Resolution(
+                "Android process state could not be verified".to_string(),
+            ))
+        })
+    }
+
+    /// Checks one package process against the UID assigned to its reviewed Android user.
+    pub fn app_process_running_for_user(
+        &mut self,
+        package_name: &str,
+        user_id: u32,
+    ) -> Result<bool, String> {
+        if !is_valid_android_package_name(package_name) {
+            return Err("Android package identity is invalid".to_string());
+        }
+        let package_name = package_name.to_string();
+        self.guarded(DeviceCommandEffect::ReadOnly, |device| {
+            let package_result = device.run_android_shell_unchecked(
+                vec![
+                    "pm".to_string(),
+                    "list".to_string(),
+                    "packages".to_string(),
+                    "-U".to_string(),
+                    "--user".to_string(),
+                    user_id.to_string(),
+                    package_name.clone(),
+                ],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            if package_result.returncode != 0 || !package_result.stderr.trim().is_empty() {
+                return Err(AdbCommandError::Resolution(
+                    "Android package identity for the selected user could not be verified"
+                        .to_string(),
+                ));
+            }
+            let Some(expected_uid) = parse_user_package_uid(&package_result.stdout, &package_name)?
+            else {
+                return Ok(false);
+            };
+
+            let process_result = device.run_android_shell_unchecked(
+                vec![
+                    "ps".to_string(),
+                    "-A".to_string(),
+                    "-o".to_string(),
+                    "UID,PID,NAME".to_string(),
+                ],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            if process_result.returncode != 0 || !process_result.stderr.trim().is_empty() {
+                return Err(AdbCommandError::Resolution(
+                    "Android process table for the selected user could not be verified".to_string(),
+                ));
+            }
+            process_table_contains_package(&process_result.stdout, expected_uid, &package_name)
+        })
+    }
+
+    fn user_scoped_process_query_args(
+        &self,
+        package_name: &str,
+        user_id: u32,
+    ) -> (Vec<String>, Vec<String>) {
+        let shell_args = |args: Vec<String>| {
+            if self.restricted_execution {
+                let command = build_shell_command_with_mode(&args, false, self.root_shell_mode);
+                vec![
+                    "shell".to_string(),
+                    guard_restricted_shell_identity(&command),
+                ]
+            } else {
+                let mut command = vec!["shell".to_string()];
+                command.extend(args);
+                command
+            }
+        };
+        let package_query = vec![
+            "pm".to_string(),
+            "list".to_string(),
+            "packages".to_string(),
+            "-U".to_string(),
+            "--user".to_string(),
+            user_id.to_string(),
+            package_name.to_string(),
+        ];
+        let process_query = vec![
+            "ps".to_string(),
+            "-A".to_string(),
+            "-o".to_string(),
+            "UID,PID,NAME".to_string(),
+        ];
+        (
+            self.runner.full_args(&shell_args(package_query)),
+            self.runner.full_args(&shell_args(process_query)),
+        )
+    }
+
     pub fn path_exists(&mut self, path: &str) -> Result<bool, String> {
         self.guarded(DeviceCommandEffect::ReadOnly, |device| {
             let result = device.run_shell_unchecked(
@@ -1817,6 +2143,130 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
     }
 
+    pub(crate) fn copy_commit_read_retroarch_config(
+        &mut self,
+        parent: &str,
+        parent_binding: &str,
+    ) -> Result<Vec<u8>, AdbCommandError> {
+        if !is_app_private_path(parent) {
+            return Err(AdbCommandError::Resolution(
+                "RetroArch configuration read requires the reviewed app-private parent.".into(),
+            ));
+        }
+        if self.copy_commit_path_binding(parent)? != parent_binding
+            || self.copy_commit_path_is_symlink(parent)?
+        {
+            return Err(AdbCommandError::Resolution(
+                "RetroArch configuration parent changed before no-follow readback.".into(),
+            ));
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let stage_root = format!(
+            "/data/local/tmp/.emuchef-config-read-{}-{unique}",
+            std::process::id()
+        );
+        let helper_path = format!("{stage_root}-helper");
+        self.copy_commit_prepare_mutation_helper(&stage_root, &helper_path)?;
+
+        let read_result = (|| {
+            let (canonical_path, selected_identity) =
+                Self::copy_commit_helper_binding_arguments(parent_binding)?;
+            let helper_arguments = vec![
+                helper_path.clone(),
+                parent.to_string(),
+                canonical_path,
+                selected_identity,
+                stage_root.clone(),
+                "read-file".to_string(),
+                "retroarch.cfg".to_string(),
+                "regular".to_string(),
+            ];
+            let result = self.guarded_typed(DeviceCommandEffect::ReadOnly, |device| {
+                device.run_shell_with_privilege_unchecked(
+                    helper_arguments,
+                    false,
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+            })?;
+            if result.returncode != 0 {
+                return Err(AdbCommandError::Resolution(format!(
+                    "no-follow RetroArch configuration read failed: {}",
+                    result.stderr.trim()
+                )));
+            }
+
+            let mut lines = result.stdout.lines();
+            let header = lines.next().unwrap_or_default().trim_end();
+            let encoded = lines.next().unwrap_or_default().trim_end();
+            if lines.any(|line| !line.trim().is_empty()) {
+                return Err(AdbCommandError::Resolution(
+                    "no-follow configuration read returned unexpected trailing output.".into(),
+                ));
+            }
+            let mut fields = header.split_whitespace();
+            if fields.next() != Some("READ") {
+                return Err(AdbCommandError::Resolution(
+                    "no-follow configuration read omitted its result marker.".into(),
+                ));
+            }
+            let expected_length = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    AdbCommandError::Resolution(
+                        "no-follow configuration read returned an invalid length.".into(),
+                    )
+                })?;
+            let expected_sha256 = fields
+                .next()
+                .filter(|value| {
+                    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| {
+                    AdbCommandError::Resolution(
+                        "no-follow configuration read returned an invalid digest.".into(),
+                    )
+                })?;
+            if fields.next().is_some() {
+                return Err(AdbCommandError::Resolution(
+                    "no-follow configuration read returned an invalid header.".into(),
+                ));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| {
+                    AdbCommandError::Resolution(
+                        "no-follow configuration read returned invalid base64.".into(),
+                    )
+                })?;
+            if bytes.len() != expected_length
+                || crate::runtime_configuration::sha256_hex(&bytes) != expected_sha256
+            {
+                return Err(AdbCommandError::Resolution(
+                    "no-follow configuration read failed its length or digest check.".into(),
+                ));
+            }
+            Ok(bytes)
+        })();
+
+        let cleanup_result = self.copy_commit_cleanup_mutation_helper(&helper_path);
+        if let Err(error) = cleanup_result {
+            return Err(error);
+        }
+        let bytes = read_result?;
+        if self.copy_commit_path_binding(parent)? != parent_binding {
+            return Err(AdbCommandError::Resolution(
+                "RetroArch configuration parent changed during no-follow readback.".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     /// Applies one reviewed manifest entry from a descriptor-anchored
     /// selected-root directory using the one-shot helper.
     pub(crate) fn copy_commit_apply_selected_root_mutation(
@@ -1914,11 +2364,11 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     ))]
     fn copy_commit_create_file_outcome_for_return_code(
         returncode: i32,
-    ) -> Option<super::CopyCommitCreateFileOutcome> {
+    ) -> Option<super::CopyCommitConfigurationWriteOutcome> {
         match returncode {
-            10 => Some(super::CopyCommitCreateFileOutcome::TargetAlreadyExists),
-            11 => Some(super::CopyCommitCreateFileOutcome::SourceHashMismatch),
-            12 => Some(super::CopyCommitCreateFileOutcome::PartialWriteUnverified),
+            10 => Some(super::CopyCommitConfigurationWriteOutcome::TargetAlreadyExists),
+            11 => Some(super::CopyCommitConfigurationWriteOutcome::SourceHashMismatch),
+            12 => Some(super::CopyCommitConfigurationWriteOutcome::PartialWriteUnverified),
             _ => None,
         }
     }
@@ -1930,10 +2380,24 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         stage_root: &str,
         helper_path: &str,
         relative_path: &str,
+        _package_name: &str,
+        _user_id: u32,
         expected_absence: &str,
         expected_source_sha256: &str,
-    ) -> Result<super::CopyCommitCreateFileOutcome, AdbCommandError> {
-        if relative_path != "retroarch.cfg" || expected_absence != "absent" {
+        expected_source_length: u64,
+        operation_id: &str,
+        before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        after_remote_quiescent: &mut dyn FnMut(
+            super::CopyCommitRemoteOutcome,
+        ) -> Result<(), String>,
+    ) -> Result<super::CopyCommitConfigurationWriteOutcome, AdbCommandError> {
+        if relative_path != "retroarch.cfg"
+            || expected_absence != "absent"
+            || operation_id.is_empty()
+            || !operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
             return Err(AdbCommandError::Resolution(
                 "exclusive file creation requires the reviewed RetroArch config basename and absence precondition"
                     .to_string(),
@@ -1950,6 +2414,9 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 stage_root,
                 helper_path,
                 expected_source_sha256,
+                expected_source_length,
+                before_helper_dispatch,
+                after_remote_quiescent,
             );
             Err(AdbCommandError::Resolution(
                 "exclusive file creation unavailable because the build lacks the Android helper feature"
@@ -1980,52 +2447,382 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 relative_path.to_string(),
                 expected_absence.to_string(),
                 expected_source_sha256.to_string(),
+                operation_id.to_string(),
             ];
-            self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
-                let result = device.run_shell_with_privilege_unchecked(
-                    helper_arguments,
-                    false,
-                    privileged,
-                    ProcessOperation::ShellMutation,
-                )?;
-                match result.returncode {
-                    0 => {
-                        let mut fields = result.stdout.split_whitespace();
-                        let marker = fields.next();
-                        let digest = fields.next();
-                        let byte_length = fields.next().and_then(|value| value.parse::<u64>().ok());
-                        if marker == Some("CREATED")
-                            && digest == Some(expected_source_sha256)
-                            && fields.next().is_none()
-                        {
-                            Ok(super::CopyCommitCreateFileOutcome::CreatedVerified {
-                                sha256: expected_source_sha256.to_string(),
-                                byte_length: byte_length.unwrap_or(0),
-                            })
-                        } else {
-                            Ok(super::CopyCommitCreateFileOutcome::PartialWriteUnverified)
-                        }
-                    }
-                    returncode => {
-                        match Self::copy_commit_create_file_outcome_for_return_code(returncode) {
-                            Some(outcome) => Ok(outcome),
-                            None => Err(AdbCommandError::CommandFailed {
-                                args: result.args,
-                                returncode,
-                                stderr: result.stderr,
-                            }),
-                        }
+            let expected_ready = format!("READY {operation_id}\n");
+            let commit_frame = format!("COMMIT {operation_id}\n");
+            self.revalidate_root_authority_unchecked()?;
+            match self.app_process_running_for_user(_package_name, _user_id) {
+                Ok(false) => {}
+                Ok(true) => return Ok(super::CopyCommitConfigurationWriteOutcome::AppStillRunning),
+                Err(_) => {
+                    return Ok(super::CopyCommitConfigurationWriteOutcome::AppStateUnverified)
+                }
+            }
+            before_helper_dispatch().map_err(AdbCommandError::Resolution)?;
+            let (package_query_args, process_query_args) =
+                self.user_scoped_process_query_args(_package_name, _user_id);
+            let package_name = _package_name.to_string();
+            let commit_block = std::cell::Cell::new(None);
+            let mut allow_commit = |executor: &mut dyn AdbCommandExecutor| {
+                match require_app_stopped_for_user_before_commit(
+                    executor,
+                    &package_query_args,
+                    &process_query_args,
+                    &package_name,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(reason) => {
+                        commit_block.set(Some(reason));
+                        Err(reason.message().to_string())
                     }
                 }
-            })
+            };
+            let result = self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+                device.run_shell_with_privilege_ready_commit_unchecked(
+                    helper_arguments,
+                    privileged,
+                    ProcessOperation::ShellMutation,
+                    expected_ready.as_bytes(),
+                    commit_frame.as_bytes(),
+                    &mut allow_commit,
+                )
+            });
+            if let Some(outcome) = confirmed_commit_block_outcome(&result, commit_block.get()) {
+                return Ok(outcome);
+            }
+            let result = result?;
+            let status = self.copy_commit_read_operation_status(
+                selected_root,
+                destination_binding,
+                stage_root,
+                helper_path,
+                operation_id,
+                "create",
+                expected_source_sha256,
+                expected_source_length,
+                "absent",
+                0,
+            )?;
+            let remote_outcome = match status {
+                VerifiedOperationStatus::Complete => super::CopyCommitRemoteOutcome::VerifiedWrite,
+                VerifiedOperationStatus::Aborted => {
+                    super::CopyCommitRemoteOutcome::AbortedBeforeWrite
+                }
+                VerifiedOperationStatus::PartialWriteTerminal => {
+                    super::CopyCommitRemoteOutcome::PartialWriteTerminal
+                }
+            };
+            after_remote_quiescent(remote_outcome).map_err(AdbCommandError::Resolution)?;
+            if status == VerifiedOperationStatus::PartialWriteTerminal {
+                return Ok(super::CopyCommitConfigurationWriteOutcome::PartialWriteTerminal);
+            }
+            if status == VerifiedOperationStatus::Aborted && result.returncode == 0 {
+                return Err(AdbCommandError::Resolution(
+                    "remote create helper exited without completing the reviewed write".to_string(),
+                ));
+            }
+            match result.returncode {
+                0 => {
+                    if status != VerifiedOperationStatus::Complete {
+                        return Err(AdbCommandError::Resolution(
+                            "remote create helper did not record verified completion".to_string(),
+                        ));
+                    }
+                    let mut fields = result.stdout.split_whitespace();
+                    let marker = fields.next();
+                    let byte_length = fields.next().and_then(|value| value.parse::<u64>().ok());
+                    let digest = fields.next();
+                    let write_state = fields.next();
+                    let flush_state = fields.next();
+                    if marker == Some("CREATED")
+                        && byte_length == Some(expected_source_length)
+                        && digest == Some(expected_source_sha256)
+                        && write_state == Some("write=complete")
+                        && flush_state == Some("flush=complete")
+                        && fields.next().is_none()
+                    {
+                        Ok(
+                            super::CopyCommitConfigurationWriteOutcome::CreatedVerified {
+                                sha256: expected_source_sha256.to_string(),
+                                byte_length: expected_source_length,
+                            },
+                        )
+                    } else {
+                        Ok(super::CopyCommitConfigurationWriteOutcome::PartialWriteUnverified)
+                    }
+                }
+                returncode => {
+                    match Self::copy_commit_create_file_outcome_for_return_code(returncode) {
+                        Some(outcome) => Ok(outcome),
+                        None => Err(AdbCommandError::CommandFailed {
+                            args: result.args,
+                            returncode,
+                            stderr: result.stderr,
+                        }),
+                    }
+                }
+            }
         }
     }
 
+    pub(crate) fn copy_commit_replace_retroarch_config(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        relative_path: &str,
+        package_name: &str,
+        user_id: u32,
+        expected_original_sha256: &str,
+        expected_original_length: u64,
+        expected_source_sha256: &str,
+        expected_source_length: u64,
+        operation_id: &str,
+        before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        after_remote_quiescent: &mut dyn FnMut(
+            super::CopyCommitRemoteOutcome,
+        ) -> Result<(), String>,
+    ) -> Result<super::CopyCommitConfigurationWriteOutcome, AdbCommandError> {
+        if relative_path != "retroarch.cfg"
+            || operation_id.is_empty()
+            || !operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(AdbCommandError::Resolution(
+                "RetroArch replacement requires the reviewed basename and operation identity"
+                    .to_string(),
+            ));
+        }
+
+        #[cfg(not(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        )))]
+        {
+            let _ = (
+                selected_root,
+                destination_binding,
+                stage_root,
+                helper_path,
+                package_name,
+                user_id,
+                expected_original_sha256,
+                expected_original_length,
+                expected_source_sha256,
+                expected_source_length,
+                before_helper_dispatch,
+                after_remote_quiescent,
+            );
+            Err(AdbCommandError::Resolution(
+                "selected-root replacement is unavailable because this build lacks the `android-copy-commit-helper` feature"
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(any(
+            feature = "android-copy-commit-helper",
+            restricted_execution_copy_commit_helper
+        ))]
+        {
+            let privileged = is_app_private_path(selected_root);
+            if !privileged && self.copy_commit_path_binding(selected_root)? != destination_binding {
+                return Err(AdbCommandError::Resolution(
+                    "RetroArch configuration target identity changed immediately before replacement"
+                        .to_string(),
+                ));
+            }
+            let (canonical_path, selected_identity) =
+                Self::copy_commit_helper_binding_arguments(destination_binding)?;
+            let helper_arguments = vec![
+                helper_path.to_string(),
+                selected_root.to_string(),
+                canonical_path,
+                selected_identity,
+                stage_root.to_string(),
+                "replace-file".to_string(),
+                relative_path.to_string(),
+                expected_original_sha256.to_string(),
+                expected_original_length.to_string(),
+                expected_source_sha256.to_string(),
+                operation_id.to_string(),
+            ];
+            let expected_ready = format!("READY {operation_id}\n");
+            let commit_frame = format!("COMMIT {operation_id}\n");
+            self.revalidate_root_authority_unchecked()?;
+            match self.app_process_running_for_user(package_name, user_id) {
+                Ok(false) => {}
+                Ok(true) => return Ok(super::CopyCommitConfigurationWriteOutcome::AppStillRunning),
+                Err(_) => {
+                    return Ok(super::CopyCommitConfigurationWriteOutcome::AppStateUnverified)
+                }
+            }
+            before_helper_dispatch().map_err(AdbCommandError::Resolution)?;
+            let (package_query_args, process_query_args) =
+                self.user_scoped_process_query_args(package_name, user_id);
+            let package_name = package_name.to_string();
+            let commit_block = std::cell::Cell::new(None);
+            let mut allow_commit = |executor: &mut dyn AdbCommandExecutor| {
+                match require_app_stopped_for_user_before_commit(
+                    executor,
+                    &package_query_args,
+                    &process_query_args,
+                    &package_name,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(reason) => {
+                        commit_block.set(Some(reason));
+                        Err(reason.message().to_string())
+                    }
+                }
+            };
+            let result = self.guarded_typed(DeviceCommandEffect::Mutating, |device| {
+                device.run_shell_with_privilege_ready_commit_unchecked(
+                    helper_arguments,
+                    privileged,
+                    ProcessOperation::ShellMutation,
+                    expected_ready.as_bytes(),
+                    commit_frame.as_bytes(),
+                    &mut allow_commit,
+                )
+            });
+            if let Some(outcome) = confirmed_commit_block_outcome(&result, commit_block.get()) {
+                return Ok(outcome);
+            }
+            let result = result?;
+            let status = self.copy_commit_read_operation_status(
+                selected_root,
+                destination_binding,
+                stage_root,
+                helper_path,
+                operation_id,
+                "replace",
+                expected_source_sha256,
+                expected_source_length,
+                expected_original_sha256,
+                expected_original_length,
+            )?;
+            let remote_outcome = match status {
+                VerifiedOperationStatus::Complete => super::CopyCommitRemoteOutcome::VerifiedWrite,
+                VerifiedOperationStatus::Aborted => {
+                    super::CopyCommitRemoteOutcome::AbortedBeforeWrite
+                }
+                VerifiedOperationStatus::PartialWriteTerminal => {
+                    super::CopyCommitRemoteOutcome::PartialWriteTerminal
+                }
+            };
+            after_remote_quiescent(remote_outcome).map_err(AdbCommandError::Resolution)?;
+            if status == VerifiedOperationStatus::PartialWriteTerminal {
+                return Ok(super::CopyCommitConfigurationWriteOutcome::PartialWriteTerminal);
+            }
+            if status == VerifiedOperationStatus::Aborted && result.returncode == 0 {
+                return Err(AdbCommandError::Resolution(
+                    "remote replacement helper exited without completing the reviewed write"
+                        .to_string(),
+                ));
+            }
+            if result.returncode != 0 {
+                return match Self::copy_commit_create_file_outcome_for_return_code(
+                    result.returncode,
+                ) {
+                    Some(outcome) => Ok(outcome),
+                    None => Err(AdbCommandError::CommandFailed {
+                        args: result.args,
+                        returncode: result.returncode,
+                        stderr: result.stderr,
+                    }),
+                };
+            }
+            if status != VerifiedOperationStatus::Complete {
+                return Err(AdbCommandError::Resolution(
+                    "remote replacement helper did not record verified completion".to_string(),
+                ));
+            }
+
+            let replacement_line = result
+                .stdout
+                .lines()
+                .find(|line| line.starts_with("REPLACED "));
+            let mut fields = replacement_line.unwrap_or_default().split_whitespace();
+            let marker = fields.next();
+            let byte_length = fields.next().and_then(|value| value.parse::<u64>().ok());
+            let digest = fields.next();
+            let write_status = fields.next();
+            let flush_status = fields.next();
+            if marker == Some("REPLACED")
+                && digest == Some(expected_source_sha256)
+                && byte_length == Some(expected_source_length)
+                && write_status == Some("write=complete")
+                && flush_status == Some("flush=complete")
+                && fields.next().is_none()
+            {
+                Ok(
+                    super::CopyCommitConfigurationWriteOutcome::ReplacedVerified {
+                        sha256: expected_source_sha256.to_string(),
+                        byte_length: expected_source_length,
+                    },
+                )
+            } else {
+                Ok(super::CopyCommitConfigurationWriteOutcome::PartialWriteUnverified)
+            }
+        }
+    }
+
+    fn copy_commit_read_operation_status(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        operation_id: &str,
+        action: &str,
+        expected_source_sha256: &str,
+        expected_source_length: u64,
+        expected_original_sha256: &str,
+        expected_original_length: u64,
+    ) -> Result<VerifiedOperationStatus, AdbCommandError> {
+        let privileged = is_app_private_path(selected_root);
+        if !privileged && self.copy_commit_path_binding(selected_root)? != destination_binding {
+            return Err(AdbCommandError::Resolution(
+                "selected-root identity changed before remote operation reconciliation".to_string(),
+            ));
+        }
+        let (canonical_path, selected_identity) =
+            Self::copy_commit_helper_binding_arguments(destination_binding)?;
+        let helper_arguments = vec![
+            helper_path.to_string(),
+            selected_root.to_string(),
+            canonical_path,
+            selected_identity,
+            stage_root.to_string(),
+            "operation-status".to_string(),
+            operation_id.to_string(),
+            "v1".to_string(),
+        ];
+        let result = self.guarded_typed(DeviceCommandEffect::ReadOnly, |device| {
+            device.run_shell_with_privilege_no_pty_unchecked(helper_arguments, privileged)
+        })?;
+        if result.returncode != 0 {
+            return Err(AdbCommandError::CommandFailed {
+                args: result.args,
+                returncode: result.returncode,
+                stderr: result.stderr,
+            });
+        }
+        verify_copy_commit_operation_status(
+            &result.stdout,
+            operation_id,
+            action,
+            expected_source_sha256,
+            expected_source_length,
+            expected_original_sha256,
+            expected_original_length,
+        )
+    }
+
     /// Extracts the canonical path and selected identity for separate helper arguments.
-    #[cfg(any(
-        feature = "android-copy-commit-helper",
-        restricted_execution_copy_commit_helper
-    ))]
     fn copy_commit_helper_binding_arguments(
         binding: &str,
     ) -> Result<(String, String), AdbCommandError> {
@@ -2146,6 +2943,31 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         })
     }
 
+    /// Stop one package for the reviewed Android user through an argv-based
+    /// Activity Manager request.
+    pub fn force_stop_app_for_user(
+        &mut self,
+        package_name: &str,
+        user_id: u32,
+    ) -> Result<(), String> {
+        let package_name = package_name.to_string();
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
+            device
+                .run_android_shell_unchecked(
+                    vec![
+                        "am".to_string(),
+                        "force-stop".to_string(),
+                        "--user".to_string(),
+                        user_id.to_string(),
+                        package_name,
+                    ],
+                    true,
+                    ProcessOperation::ForceStop,
+                )
+                .map(|_| ())
+        })
+    }
+
     fn resolve_launcher_activity_unchecked(
         &mut self,
         package_name: &str,
@@ -2246,6 +3068,82 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         Ok(result)
     }
 
+    fn run_shell_with_privilege_ready_commit_unchecked(
+        &mut self,
+        args: Vec<String>,
+        privileged: bool,
+        operation: ProcessOperation,
+        expected_ready: &[u8],
+        commit_frame: &[u8],
+        before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        if self.restricted_execution
+            && (privileged
+                || args
+                    .iter()
+                    .any(|argument| contains_app_private_device_path(argument))
+                || contains_root_escalation_command(&args))
+        {
+            return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+        }
+        if privileged {
+            self.revalidate_root_authority_unchecked()?;
+        }
+        let command = build_shell_command_with_mode(&args, privileged, self.root_shell_mode);
+        let command = if self.restricted_execution {
+            guard_restricted_shell_identity(&command)
+        } else {
+            command
+        };
+        let result = self.runner.run_with_ready_commit(
+            vec!["shell".to_string(), "-T".to_string(), command],
+            false,
+            operation,
+            expected_ready,
+            commit_frame,
+            before_commit,
+        )?;
+        if self.restricted_execution
+            && result.returncode == 125
+            && result.stderr.contains(RESTRICTED_IDENTITY_FAILURE_MARKER)
+        {
+            return Err(AdbCommandError::RestrictedExecutionIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            });
+        }
+        Ok(result)
+    }
+
+    fn run_shell_with_privilege_no_pty_unchecked(
+        &mut self,
+        args: Vec<String>,
+        privileged: bool,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        if self.restricted_execution
+            && (privileged
+                || args
+                    .iter()
+                    .any(|argument| contains_app_private_device_path(argument))
+                || contains_root_escalation_command(&args))
+        {
+            return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
+        }
+        if privileged {
+            self.revalidate_root_authority_unchecked()?;
+        }
+        let command = build_shell_command_with_mode(&args, privileged, self.root_shell_mode);
+        let command = if self.restricted_execution {
+            guard_restricted_shell_identity(&command)
+        } else {
+            command
+        };
+        self.runner.run(
+            vec!["shell".to_string(), "-T".to_string(), command],
+            false,
+            ProcessOperation::Predicate,
+        )
+    }
+
     fn revalidate_root_authority_unchecked(&mut self) -> Result<(), AdbCommandError> {
         if self.restricted_execution {
             return Err(AdbCommandError::RestrictedExecutionPrivilegedEffectDenied);
@@ -2275,12 +3173,189 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 }
 
+fn is_valid_android_package_name(package_name: &str) -> bool {
+    let mut segments = package_name.split('.');
+    let first = segments.next();
+    first.is_some_and(|segment| {
+        segment
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) && segments.all(|segment| {
+        segment
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) && package_name.contains('.')
+}
+
+fn parse_user_package_uid(
+    output: &str,
+    expected_package: &str,
+) -> Result<Option<u32>, AdbCommandError> {
+    let mut entries = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let Some(entry) = entries.next() else {
+        return Ok(None);
+    };
+    if entries.next().is_some() {
+        return Err(AdbCommandError::Resolution(
+            "Android package query returned an ambiguous result".to_string(),
+        ));
+    }
+    let mut fields = entry.split_whitespace();
+    let package = fields
+        .next()
+        .and_then(|field| field.strip_prefix("package:"));
+    let uid = fields
+        .next()
+        .and_then(|field| field.strip_prefix("uid:"))
+        .and_then(|value| value.parse::<u32>().ok());
+    if package != Some(expected_package) || uid.is_none() || fields.next().is_some() {
+        return Err(AdbCommandError::Resolution(
+            "Android package query returned an invalid identity".to_string(),
+        ));
+    }
+    Ok(uid)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppCommitBlockReason {
+    Running,
+    Unverified,
+}
+
+impl AppCommitBlockReason {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Running => "RetroArch relaunched before configuration commit",
+            Self::Unverified => "Android process state could not be rechecked before commit",
+        }
+    }
+
+    fn outcome(self) -> super::CopyCommitConfigurationWriteOutcome {
+        match self {
+            Self::Running => super::CopyCommitConfigurationWriteOutcome::AppStillRunning,
+            Self::Unverified => super::CopyCommitConfigurationWriteOutcome::AppStateUnverified,
+        }
+    }
+}
+
+fn confirmed_commit_block_outcome(
+    result: &Result<AdbCommandResult, AdbCommandError>,
+    reason: Option<AppCommitBlockReason>,
+) -> Option<super::CopyCommitConfigurationWriteOutcome> {
+    if matches!(
+        result.as_ref(),
+        Err(AdbCommandError::ProcessFailed {
+            cleanup: ProcessCleanup::Confirmed,
+            ..
+        })
+    ) {
+        reason.map(AppCommitBlockReason::outcome)
+    } else {
+        None
+    }
+}
+
+fn require_app_stopped_for_user_before_commit(
+    executor: &mut dyn AdbCommandExecutor,
+    package_query_args: &[String],
+    process_query_args: &[String],
+    package_name: &str,
+) -> Result<(), AppCommitBlockReason> {
+    let package_result = executor
+        .run_for(package_query_args, ProcessOperation::Predicate)
+        .map_err(|_| AppCommitBlockReason::Unverified)?;
+    if package_result.returncode != 0 || !package_result.stderr.trim().is_empty() {
+        return Err(AppCommitBlockReason::Unverified);
+    }
+    let expected_uid = parse_user_package_uid(&package_result.stdout, package_name)
+        .map_err(|_| AppCommitBlockReason::Unverified)?
+        .ok_or(AppCommitBlockReason::Unverified)?;
+
+    let process_result = executor
+        .run_for(process_query_args, ProcessOperation::Predicate)
+        .map_err(|_| AppCommitBlockReason::Unverified)?;
+    if process_result.returncode != 0 || !process_result.stderr.trim().is_empty() {
+        return Err(AppCommitBlockReason::Unverified);
+    }
+    let running =
+        process_table_contains_package(&process_result.stdout, expected_uid, package_name)
+            .map_err(|_| AppCommitBlockReason::Unverified)?;
+    if running {
+        return Err(AppCommitBlockReason::Running);
+    }
+    Ok(())
+}
+
+fn process_table_contains_package(
+    output: &str,
+    expected_uid: u32,
+    expected_package: &str,
+) -> Result<bool, AdbCommandError> {
+    let mut lines = output.lines();
+    if lines.next().is_none_or(|header| {
+        header.split_whitespace().collect::<Vec<_>>() != ["UID", "PID", "NAME"]
+    }) {
+        return Err(AdbCommandError::Resolution(
+            "Android process table has an unsupported format".to_string(),
+        ));
+    }
+    let mut package_is_running = false;
+    let mut observed_pids = std::collections::HashSet::new();
+    for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
+        let mut fields = line.split_whitespace();
+        let uid = fields.next().and_then(|value| value.parse::<u32>().ok());
+        let pid = fields.next().and_then(|value| value.parse::<u32>().ok());
+        let process_name = fields.next();
+        if uid.is_none() || !pid.is_some_and(|pid| pid > 0) || process_name.is_none() {
+            return Err(AdbCommandError::Resolution(
+                "Android process table contains an incomplete row".to_string(),
+            ));
+        }
+        if fields.next().is_some() {
+            return Err(AdbCommandError::Resolution(
+                "Android process table contains an ambiguous row".to_string(),
+            ));
+        }
+        let pid = pid.expect("the positive process ID was validated above");
+        if !observed_pids.insert(pid) {
+            return Err(AdbCommandError::Resolution(
+                "Android process table repeats a PID and cannot establish process identity"
+                    .to_string(),
+            ));
+        }
+        let process_name = process_name.unwrap_or_default();
+        package_is_running |= uid == Some(expected_uid)
+            && (process_name == expected_package
+                || process_name
+                    .strip_prefix(expected_package)
+                    .is_some_and(|suffix| suffix.starts_with(':')));
+    }
+    if observed_pids.is_empty() {
+        return Err(AdbCommandError::Resolution(
+            "Android process table is empty and cannot establish package quiescence".to_string(),
+        ));
+    }
+    Ok(package_is_running)
+}
+
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub struct FakeAdbCommandExecutor {
     calls: Vec<Vec<String>>,
     operations: Vec<ProcessOperation>,
     stdin_contents: Vec<Vec<u8>>,
+    ready_commit_frames: Vec<Vec<u8>>,
     responses: VecDeque<FakeAdbResponse>,
 }
 
@@ -2478,6 +3553,10 @@ impl FakeAdbCommandExecutor {
         &self.stdin_contents
     }
 
+    pub fn ready_commit_frames(&self) -> &[Vec<u8>] {
+        &self.ready_commit_frames
+    }
+
     pub fn push_completed(&mut self, returncode: i32, stdout: &str, stderr: &str) {
         self.responses.push_back(FakeAdbResponse::Completed {
             returncode,
@@ -2551,6 +3630,29 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
         })?;
         self.stdin_contents.push(contents);
         self.run_for(args, operation)
+    }
+
+    fn run_for_with_ready_commit(
+        &mut self,
+        args: &[String],
+        operation: ProcessOperation,
+        expected_ready: &[u8],
+        commit_frame: &[u8],
+        before_commit: &mut dyn FnMut(&mut dyn AdbCommandExecutor) -> Result<(), String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        let result = self.run_for(args, operation)?;
+        if !result.stdout.as_bytes().starts_with(expected_ready) {
+            return Err(AdbCommandError::ProcessFailed {
+                kind: ProcessFailureKind::ProtocolReady,
+                cleanup: ProcessCleanup::Confirmed,
+            });
+        }
+        before_commit(self).map_err(|_| AdbCommandError::ProcessFailed {
+            kind: ProcessFailureKind::ProtocolCommitPreparation,
+            cleanup: ProcessCleanup::Confirmed,
+        })?;
+        self.ready_commit_frames.push(commit_frame.to_vec());
+        Ok(result)
     }
 }
 
@@ -2864,7 +3966,7 @@ mod tests {
         assert!(matches!(
             RealAdbDevice::<FakeAdbCommandExecutor>::
                 copy_commit_create_file_outcome_for_return_code(10),
-            Some(super::super::CopyCommitCreateFileOutcome::TargetAlreadyExists)
+            Some(super::super::CopyCommitConfigurationWriteOutcome::TargetAlreadyExists)
         ));
     }
 
@@ -3280,6 +4382,57 @@ mod tests {
         assert_eq!(
             su_zero,
             "su 0 sh -c '/data/local/tmp/emuchef/t03-copy-helper --manifest /data/local/tmp/emuchef/plan.json'"
+        );
+    }
+
+    #[test]
+    fn ready_commit_shell_disables_pty_and_persists_before_sending_commit() {
+        use std::cell::Cell;
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "READY op-42\nDONE op-42\n", "");
+        let mut device = RealAdbDevice::with_executor(
+            "/managed/platform-tools/adb",
+            Some("serial-42"),
+            executor,
+        );
+        let persisted = Cell::new(false);
+        let mut before_commit = |_: &mut dyn AdbCommandExecutor| {
+            persisted.set(true);
+            Ok(())
+        };
+
+        let result = device
+            .run_shell_with_privilege_ready_commit_unchecked(
+                vec![
+                    "/data/local/tmp/emuchef/config-helper".to_string(),
+                    "replace-file".to_string(),
+                    "operation-42".to_string(),
+                ],
+                false,
+                ProcessOperation::ShellMutation,
+                b"READY op-42\n",
+                b"COMMIT op-42\n",
+                &mut before_commit,
+            )
+            .expect("the owned shell should complete the protocol");
+
+        assert!(persisted.get());
+        assert!(result.stdout.starts_with("READY op-42\n"));
+        let executor = device.command_executor();
+        assert_eq!(
+            executor.calls()[0][..5],
+            [
+                "/managed/platform-tools/adb",
+                "-s",
+                "serial-42",
+                "shell",
+                "-T",
+            ]
+        );
+        assert_eq!(
+            executor.ready_commit_frames(),
+            &[b"COMMIT op-42\n".to_vec()]
         );
     }
 
@@ -4178,7 +5331,9 @@ Internal storage (/storage/emulated/0) total size: 32000000000 (30517 MiB)\n";
         device
             .launch_app("com.example.fixture", Some(".MainActivity"))
             .unwrap();
-        device.force_stop_app("com.example.fixture").unwrap();
+        device
+            .force_stop_app_for_user("com.example.fixture", 0)
+            .unwrap();
 
         assert_eq!(
             device.command_executor().operations(),
@@ -4198,6 +5353,242 @@ Internal storage (/storage/emulated/0) total size: 32000000000 (30517 MiB)\n";
                 ProcessOperation::ForceStop,
             ]
         );
+        assert_eq!(
+            device.command_executor().calls().last().unwrap(),
+            &vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "serial".to_string(),
+                "shell".to_string(),
+                "am".to_string(),
+                "force-stop".to_string(),
+                "--user".to_string(),
+                "0".to_string(),
+                "com.example.fixture".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn precommit_process_queries_bind_the_selected_device_package_and_user() {
+        let device = RealAdbDevice::with_executor(
+            "adb",
+            Some("serial-42"),
+            FakeAdbCommandExecutor::default(),
+        );
+
+        let (package_query, process_query) =
+            device.user_scoped_process_query_args("com.retroarch.aarch64", 10);
+
+        assert_eq!(
+            package_query,
+            vec![
+                "adb",
+                "-s",
+                "serial-42",
+                "shell",
+                "pm",
+                "list",
+                "packages",
+                "-U",
+                "--user",
+                "10",
+                "com.retroarch.aarch64",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            process_query,
+            vec![
+                "adb",
+                "-s",
+                "serial-42",
+                "shell",
+                "ps",
+                "-A",
+                "-o",
+                "UID,PID,NAME",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn user_scoped_process_inspection_matches_the_reviewed_package_and_user_uid() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "package:com.retroarch.aarch64 uid:10123\n", "");
+        executor.push_completed(
+            0,
+            "UID PID NAME\n10123 42 com.retroarch.aarch64:playback\n",
+            "",
+        );
+        let mut device = RealAdbDevice::with_executor("adb", None, executor);
+
+        assert!(device
+            .app_process_running_for_user("com.retroarch.aarch64", 0)
+            .unwrap());
+        assert_eq!(
+            device.command_executor().calls(),
+            &[
+                vec![
+                    "adb".to_string(),
+                    "shell".to_string(),
+                    "pm".to_string(),
+                    "list".to_string(),
+                    "packages".to_string(),
+                    "-U".to_string(),
+                    "--user".to_string(),
+                    "0".to_string(),
+                    "com.retroarch.aarch64".to_string(),
+                ],
+                vec![
+                    "adb".to_string(),
+                    "shell".to_string(),
+                    "ps".to_string(),
+                    "-A".to_string(),
+                    "-o".to_string(),
+                    "UID,PID,NAME".to_string(),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn user_scoped_process_inspection_ignores_the_same_package_for_another_user() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "package:com.retroarch.aarch64 uid:110123\n", "");
+        executor.push_completed(0, "UID PID NAME\n10123 42 com.retroarch.aarch64\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", None, executor);
+
+        assert!(!device
+            .app_process_running_for_user("com.retroarch.aarch64", 1)
+            .unwrap());
+    }
+
+    #[test]
+    fn user_scoped_process_inspection_rejects_incomplete_process_output() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "package:com.retroarch.aarch64 uid:10123\n", "");
+        executor.push_completed(0, "UID PID NAME\n10123 invalid\n", "");
+        let mut device = RealAdbDevice::with_executor("adb", None, executor);
+
+        assert!(device
+            .app_process_running_for_user("com.retroarch.aarch64", 0)
+            .is_err());
+    }
+
+    #[test]
+    fn user_scoped_process_inspection_rejects_header_only_process_output() {
+        assert!(
+            process_table_contains_package("UID PID NAME\n", 10123, "com.retroarch.aarch64")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn commit_quiescence_failure_is_reported_only_after_helper_cleanup_is_confirmed() {
+        let confirmed: Result<AdbCommandResult, AdbCommandError> =
+            Err(AdbCommandError::ProcessFailed {
+                kind: ProcessFailureKind::ProtocolCommitPreparation,
+                cleanup: ProcessCleanup::Confirmed,
+            });
+        assert_eq!(
+            confirmed_commit_block_outcome(&confirmed, Some(AppCommitBlockReason::Running)),
+            Some(super::super::CopyCommitConfigurationWriteOutcome::AppStillRunning)
+        );
+        assert_eq!(
+            confirmed_commit_block_outcome(&confirmed, Some(AppCommitBlockReason::Unverified)),
+            Some(super::super::CopyCommitConfigurationWriteOutcome::AppStateUnverified)
+        );
+
+        let uncertain: Result<AdbCommandResult, AdbCommandError> =
+            Err(AdbCommandError::ProcessFailed {
+                kind: ProcessFailureKind::ProtocolCommitPreparation,
+                cleanup: ProcessCleanup::Uncertain,
+            });
+        assert_eq!(
+            confirmed_commit_block_outcome(&uncertain, Some(AppCommitBlockReason::Running)),
+            None
+        );
+    }
+
+    #[test]
+    fn ready_commit_aborts_when_reviewed_app_relaunches_after_helper_ready() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "READY operation-1\n", "");
+        executor.push_completed(0, "package:com.retroarch.aarch64 uid:10123\n", "");
+        executor.push_completed(0, "UID PID NAME\n10123 42 com.retroarch.aarch64\n", "");
+        let package_args = vec![
+            "adb".to_string(),
+            "-s".to_string(),
+            "serial".to_string(),
+            "shell".to_string(),
+            "pm".to_string(),
+            "list".to_string(),
+            "packages".to_string(),
+            "-U".to_string(),
+            "--user".to_string(),
+            "0".to_string(),
+            "com.retroarch.aarch64".to_string(),
+        ];
+        let process_args = vec![
+            "adb".to_string(),
+            "-s".to_string(),
+            "serial".to_string(),
+            "shell".to_string(),
+            "ps".to_string(),
+            "-A".to_string(),
+            "-o".to_string(),
+            "UID,PID,NAME".to_string(),
+        ];
+        let mut before_commit = |runner: &mut dyn AdbCommandExecutor| {
+            require_app_stopped_for_user_before_commit(
+                runner,
+                &package_args,
+                &process_args,
+                "com.retroarch.aarch64",
+            )
+            .map_err(|reason| reason.message().to_string())
+        };
+
+        let result = executor.run_for_with_ready_commit(
+            &["adb".to_string()],
+            ProcessOperation::ShellMutation,
+            b"READY operation-1\n",
+            b"COMMIT operation-1\n",
+            &mut before_commit,
+        );
+
+        assert!(result.is_err());
+        assert!(executor.ready_commit_frames.is_empty());
+        assert_eq!(executor.calls.len(), 3);
+        assert_eq!(executor.calls[1], package_args);
+        assert_eq!(executor.calls[2], process_args);
+        assert_eq!(executor.operations[1], ProcessOperation::Predicate);
+        assert_eq!(executor.operations[2], ProcessOperation::Predicate);
+    }
+
+    #[test]
+    fn user_scoped_process_inspection_rejects_reused_pids_and_extra_columns() {
+        let reused_pid = concat!(
+            "UID PID NAME\n",
+            "10123 42 com.retroarch.aarch64\n",
+            "10123 42 com.other.application\n",
+        );
+        assert!(
+            process_table_contains_package(reused_pid, 10123, "com.retroarch.aarch64").is_err()
+        );
+
+        assert!(process_table_contains_package(
+            "UID PID NAME\n10123 42 com.retroarch.aarch64 unexpected\n",
+            10123,
+            "com.retroarch.aarch64"
+        )
+        .is_err());
     }
 
     #[test]

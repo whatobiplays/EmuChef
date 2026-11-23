@@ -31,6 +31,9 @@ interface InputsStepProps {
   setupLocations: SetupLocationProjection[];
   setupLocationListStatus: "loading" | "unavailable" | "ready";
   bindings: Record<string, unknown>;
+  configurationBackupEnabled: boolean;
+  configurationBackupPreferenceStatus: "loading" | "ready" | "saving" | "failed";
+  configurationBackupPreferenceError: string | null;
   busy: boolean;
   touchedInputKeys: Set<string>;
   validationRequested: boolean;
@@ -46,6 +49,8 @@ interface InputsStepProps {
   ) => void | Promise<void>;
   onRemoveInputEntry: (input: InputDescriptor, entryIndex: number) => void;
   onRefreshValidation: () => void | Promise<void>;
+  onConfigurationBackupEnabledChange: (enabled: boolean) => void | Promise<void>;
+  onRestoreDefaultConfigurationBackupPreference: () => void | Promise<void>;
   realExecutionCompiled?: boolean;
   onReview: (mode: ExecutionMode) => void | Promise<void>;
 }
@@ -55,6 +60,9 @@ export function InputsStep({
   setupLocations,
   setupLocationListStatus,
   bindings,
+  configurationBackupEnabled,
+  configurationBackupPreferenceStatus,
+  configurationBackupPreferenceError,
   busy,
   touchedInputKeys,
   validationRequested,
@@ -66,6 +74,8 @@ export function InputsStep({
   onPickInput,
   onRemoveInputEntry,
   onRefreshValidation,
+  onConfigurationBackupEnabledChange,
+  onRestoreDefaultConfigurationBackupPreference,
   realExecutionCompiled = false,
   onReview,
 }: InputsStepProps) {
@@ -92,10 +102,17 @@ export function InputsStep({
   );
 
   const visibleInputs = description.inputs.filter((input) => {
-    if (input.inputId !== "retroarch_video_threaded" && input.inputId !== "retroarch_cfg") {
+    if (
+      input.inputId !== "retroarch_video_threaded" &&
+      input.inputId !== "retroarch_cfg" &&
+      input.inputId !== "retroarch_cfg_write_operation"
+    ) {
       return true;
     }
     const source = configurationSource(input.recipeId);
+    if (input.inputId === "retroarch_cfg_write_operation") {
+      return source === "managed" || source === "uploaded" || source === "conflict";
+    }
     return input.inputId === "retroarch_video_threaded"
       ? source === "managed" || source === "conflict"
       : source === "uploaded" || source === "conflict";
@@ -495,6 +512,39 @@ export function InputsStep({
             <p>The review and its available action are tied to this mode.</p>
           </fieldset>
         )}
+{realExecutionCompiled && (
+<details className="configuration-backup-settings">
+<summary>Advanced Settings</summary>
+<label>
+<input
+checked={configurationBackupEnabled}
+disabled={busy || configurationBackupPreferenceStatus !== "ready"}
+onChange={(event) => void onConfigurationBackupEnabledChange(event.currentTarget.checked)}
+type="checkbox"
+/>
+Create a private backup before replacing the existing config
+</label>
+<small>The backup is stored with app data and verified before Replace can write to the device.</small>
+{configurationBackupPreferenceStatus === "loading" && (
+<p role="status">Loading the saved backup preference.</p>
+)}
+{configurationBackupPreferenceStatus === "saving" && (
+<p role="status">Saving the backup preference.</p>
+)}
+{configurationBackupPreferenceStatus === "failed" && configurationBackupPreferenceError && (
+<>
+<p className="error" role="alert">{configurationBackupPreferenceError}</p>
+<button
+className="secondary"
+disabled={busy}
+onClick={() => void onRestoreDefaultConfigurationBackupPreference()}
+>
+Keep backups enabled
+</button>
+</>
+)}
+</details>
+)}
         <button
           aria-describedby={busy ? "review-disabled-reason" : undefined}
           disabled={busy}

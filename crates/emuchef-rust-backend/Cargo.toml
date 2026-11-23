@@ -17,17 +17,20 @@ name = "emuchef"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 async-io = "2.6.0"
 async-process = "2.5.0"
 futures-lite = "2.6.1"
 indexmap = { version = "2.14.0", features = ["serde"] }
 regex = "1.12.3"
+ring = "=0.17.14"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "system-proxy"] }
 rustls = { version = "0.23.35", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rusty-axml = { version = "=0.2.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_yaml = "0.9.34"
+hex = "0.4"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 time = { version = "0.3.53", features = ["formatting", "parsing"] }
