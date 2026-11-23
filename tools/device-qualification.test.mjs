@@ -2883,6 +2883,10 @@ test("Rust-produced target and report-only candidates pass Node recorders", () =
           ...process.env,
         TAURI_CONFIG: JSON.stringify({
           ...inheritedTauriConfig,
+        build: {
+          ...(inheritedTauriConfig.build ?? {}),
+          frontendDist: "https://example.invalid/",
+        },
           bundle: {
             ...(inheritedTauriConfig.bundle ?? {}),
             externalBin: [],
