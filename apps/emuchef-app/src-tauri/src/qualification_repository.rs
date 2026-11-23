@@ -685,6 +685,7 @@ impl QualificationRepository {
             .cloned()
             .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
         let candidate_value = Value::Object(candidate.clone());
+        let schema_version = candidate_schema_version(&kind, &candidate_value)?;
         let captured_at = optional_string_field(&candidate_value, "capturedAt")?;
         let build = candidate_build_identity(&candidate_value)?;
         let report = report_metadata_for_candidate(&candidate_value, report_bytes)?;
@@ -700,7 +701,7 @@ impl QualificationRepository {
                 Ok(()) => {
                     candidate.insert(
                         "candidateSchemaVersion".to_string(),
-                        Value::from(candidate_schema_version(&kind, &candidate_value)),
+                        Value::from(schema_version),
                     );
                     candidate.insert("candidateId".to_string(), Value::from(handle.clone()));
                     candidate.insert("kind".to_string(), Value::from(kind.as_str()));
@@ -1000,9 +1001,10 @@ impl QualificationRepository {
             .cloned()
             .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
         let candidate_value = Value::Object(candidate.clone());
+        let schema_version = candidate_schema_version(&kind, &candidate_value)?;
         candidate.insert(
             "candidateSchemaVersion".to_string(),
-            Value::from(candidate_schema_version(&kind, &candidate_value)),
+            Value::from(schema_version),
         );
         candidate.insert("candidateId".to_string(), Value::from(candidate_handle));
         candidate.insert("kind".to_string(), Value::from(kind.as_str()));
@@ -1768,13 +1770,20 @@ fn candidate_build_identity(
     }
 }
 
-fn candidate_schema_version(kind: &CandidateKind, candidate: &Value) -> u64 {
+/// Selects schema v2 only when a run carries a valid qualification session handle.
+fn candidate_schema_version(kind: &CandidateKind, candidate: &Value) -> Result<u64, String> {
     match kind {
-        CandidateKind::TargetRegistration => 1,
-        CandidateKind::QualificationRun if candidate.get("sessionId").is_some() => {
-            CANDIDATE_SCHEMA_VERSION
+        CandidateKind::TargetRegistration => Ok(1),
+        CandidateKind::QualificationRun => {
+            let Some(session_id) = candidate.get("sessionId") else {
+                return Ok(1);
+            };
+            let session_id = session_id
+                .as_str()
+                .ok_or_else(|| "qualification session handle is invalid".to_string())?;
+            crate::qualification_session::validate_session_handle(session_id)?;
+            Ok(CANDIDATE_SCHEMA_VERSION)
         }
-        CandidateKind::QualificationRun => 1,
     }
 }
 
@@ -3453,6 +3462,23 @@ mod tests {
         )
         .expect("session candidate should be valid JSON");
         assert_eq!(session_envelope["payload"]["candidateSchemaVersion"], 2);
+
+        for invalid_session_id in [
+            Value::Null,
+            json!(42),
+            json!("qualification-session-not-a-valid-id"),
+        ] {
+            let invalid_candidate = json!({
+                "build": build_identity_json(),
+                "sessionId": invalid_session_id,
+            });
+            assert!(
+                repository
+                    .create_candidate(CandidateKind::QualificationRun, &invalid_candidate, None,)
+                    .is_err(),
+                "invalid session id should not be persisted: {invalid_candidate}"
+            );
+        }
     }
 
     #[test]

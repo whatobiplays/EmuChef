@@ -2834,7 +2834,12 @@ test("a retroarch run cannot validate as valid when its required human checkpoin
   );
 });
 
-test("Rust-produced target and report-only candidates pass Node recorders", () => {
+test(
+  "Rust-produced target and report-only candidates pass Node recorders",
+  { skip: process.env.EMUCHEF_SKIP_RUST_CANDIDATE_INTEROP === "1" },
+  recordRustProducedCandidatesWithNode,
+);
+function recordRustProducedCandidatesWithNode() {
   const targetRepo = createTempQualificationRepo();
   const runRepo = createTempQualificationRepo();
   const interopRoot = mkdtempSync(path.join(tmpdir(), "candidate-interop-"));
@@ -2949,7 +2954,7 @@ test("Rust-produced target and report-only candidates pass Node recorders", () =
     removeTempTree(runRepo);
     removeTempTree(interopRoot);
   }
-});
+}
 
 test("report-only recording accepts a legacy null ROM Merge metadata field", () => {
   const repoRoot = createTempQualificationRepo();

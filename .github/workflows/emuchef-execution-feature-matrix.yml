@@ -76,6 +76,11 @@ jobs:
         run: npm ci --prefix apps/emuchef-app
       - name: Test backend behavior and protocol contracts
         run: cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml
+      - name: Verify Rust candidate interoperability with Node recorders
+        run: >-
+          node --test
+          --test-name-pattern='Rust-produced target and report-only candidates pass Node recorders'
+          tools/device-qualification.test.mjs
       - name: Check frontend types
         run: npm --prefix apps/emuchef-app run typecheck
       - name: Lint frontend source and tests
@@ -91,20 +96,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           lfs: true
-      - name: Install Tauri Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            librsvg2-dev \
-            patchelf \
-            wget
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -125,6 +116,8 @@ jobs:
       - name: Run Phase 6D.6 result contract tests
         run: node --test tools/phase-6d6-result.test.mjs
       - name: Validate device qualification foundation
+        env:
+          EMUCHEF_SKIP_RUST_CANDIDATE_INTEROP: "1"
         run: |
           node --test tools/device-qualification.test.mjs
           node tools/device-qualification.mjs --check

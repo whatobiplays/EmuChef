@@ -1809,7 +1809,8 @@ fn is_terminal_execution_status(status: &str) -> bool {
     )
 }
 
-fn validate_session_handle(handle: &str) -> Result<(), String> {
+/// Validates the opaque format used for persisted qualification session handles.
+pub(crate) fn validate_session_handle(handle: &str) -> Result<(), String> {
     let suffix = handle
         .strip_prefix(SESSION_HANDLE_PREFIX)
         .ok_or_else(|| "qualification session handle is invalid".to_string())?;
