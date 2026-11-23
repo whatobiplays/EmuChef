@@ -2863,6 +2863,9 @@ test("Rust-produced target and report-only candidates pass Node recorders", () =
         },
       ]),
     );
+  const inheritedTauriConfig = process.env.TAURI_CONFIG
+    ? JSON.parse(process.env.TAURI_CONFIG)
+    : {};
 
     execFileSync(
       process.env.CARGO ?? "cargo",
@@ -2878,6 +2881,13 @@ test("Rust-produced target and report-only candidates pass Node recorders", () =
         cwd: REPO_ROOT,
         env: {
           ...process.env,
+        TAURI_CONFIG: JSON.stringify({
+          ...inheritedTauriConfig,
+          bundle: {
+            ...(inheritedTauriConfig.bundle ?? {}),
+            externalBin: [],
+          },
+        }),
           EMUCHEF_CANDIDATE_INTEROP_INPUT: inputPath,
           EMUCHEF_CANDIDATE_INTEROP_OUTPUT: outputPath,
         },
