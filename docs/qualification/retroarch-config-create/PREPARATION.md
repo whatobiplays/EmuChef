@@ -6,9 +6,9 @@ This plan covers physical qualification of RetroArch configuration creation on t
 
 The host candidate is based on `281d0929c253f187ef622e8be1dd6f438c566f5d`. The pinned RetroArch APK has SHA-256 `361c7ed7b510cf14dbc37a434dace8d201f0f445887c89735d45788df7affc11` and package ID `com.retroarch.aarch64`.
 
-No Android command has been run as part of this plan. APK installation, creation of missing directories, a protected-write probe, configuration creation, and device cleanup each require explicit owner authorization.
+No Android command has been run as part of this plan. APK installation, creation of missing directories, reviewed configuration Create or Replace, and device cleanup each require explicit owner authorization.
 
-The sidecar request carries legacy root facts and the verified root route. It rejects caller-supplied `configCreateWriteEvidence`. Tauri retains destination-scoped evidence in native state and does not send it across IPC. The backend has no production source for this evidence, so real configuration creation remains fail-closed. A trusted evidence bridge and KONKR device-session binding are still required.
+The current path uses native one-use authorization only for the trusted RetroArch `config` App Target. The claim binds the immutable review, exact target, Create or Replace operation, source hash, original-file precondition, backup mode, and device/session identity. Existing root qualification, verified route, Device Profile selection, and execution admission still apply; generic `appDataWrite` permissions do not change. Replace stops the resolved package once for Android user 0, checks process state and the original-file precondition, then creates a private backup by default. A waiver requires a fresh review of a verified backup failure and separate native confirmation. The target remains pending physical qualification, and production real execution remains default-off.
 
 ## 2. Device identity and selection
 
@@ -23,7 +23,7 @@ npm run device-qualification:retroarch-config-create:prepare -- \
   --target-id konkr-pocket-advance-retroarch-config-create
 ```
 
-Preparation checks the sidecar and Tauri package. It does not launch EmuChef or select an ADB device. The KONKR profile has no authored device plan, and the current device-session contract accepts only registered canonical targets. Physical execution remains blocked until a reviewed plan and session contract bind this target to the selected device and current authority.
+Preparation checks the sidecar and Tauri package. It does not launch EmuChef or select an ADB device. This qualification target remains separate from the canonical device workflows and pending physical qualification. A fresh review must bind the selected device, current session, profile, and existing execution authority before any physical operation.
 
 ## 3. Build identity, pins, and recovery
 
@@ -85,40 +85,36 @@ A session can be abandoned without a lease only when the marker proves launch ne
 2. Confirm the owner-attested KONKR identity. Record Android 12 / API 31 and the Android 11 fingerprint discrepancy unless fresh observations resolve it. Run a fresh `su -c id` check and require UID 0 with SELinux enforcing.
 3. Install only the pinned APK. Do not launch RetroArch. Verify the installed package and APK identity.
 4. Inspect `/storage/emulated/0/Android/data/com.retroarch.aarch64/files` and its parents, ownership, and labels. If a required component is absent, stop until the owner approves creation of the exact missing directories and the preparation method establishes Android-compatible ownership and labels. Do not apply recursive permission or label changes.
-5. Run the separately authorized protected-write probe described below. Root access alone does not grant write evidence. If the probe cannot return exact bytes and remove its own marker, leave `appDataWrite` unavailable and stop.
-6. Review and create `retroarch.cfg` through the production configuration path at `/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg`. Create it only after confirming the exact target is absent. The production adapter must verify the staged digest and use exclusive, no-follow creation. An existing target must remain unchanged. Current backend admission blocks real creation until the trusted evidence bridge and session binding exist.
+5. Prepare a fresh real review for the exact RetroArch `config` App Target. Existing root qualification, a verified route, current session, selected profile, and execution admission remain mandatory. Do not create a temporary probe or quarantine marker.
+6. For Create, require a confirmed-absent precondition and exclusive no-follow publication. For Replace, bind the existing file identity and bytes, stop the resolved RetroArch package once for user 0, confirm the app is stopped, and create and verify the default private Mac backup before writing. If backup fails, leave the config unchanged. A separate fresh review may present a one-use waiver for that exact failure; native confirmation is still required. No repeated force-stop is permitted.
 7. Read the completed file independently through a fresh root-shell operation. Compare its exact bytes with the reviewed rendered configuration and calculate SHA-256 on the host. Retain the review, adapter result, readback digest, and sanitized device identity together.
-8. Inspect probe residue and unexpected target changes. Keep RetroArch, the successful configuration, and required parent directories installed for later qualification. Routine cleanup must not remove them.
+8. Inspect the target and temporary-file state. Keep RetroArch, a successfully created or replaced `retroarch.cfg`, and required parent directories installed for later qualification. Routine cleanup must not remove them.
 
-APK installation, missing-parent preparation, the probe, and configuration creation are separate device mutations. Each requires owner authorization before execution.
+APK installation, missing-parent preparation, and configuration creation are separate device mutations. Each requires owner authorization before execution.
 
-## 5. Probe and race limits
+## 5. Native authorization and race limits
 
-The proposed probe uses a cryptographically random lowercase hexadecimal nonce in the exact app-data directory:
+The temporary probe and quarantine design is retired. ADR 0012 records the Android SELinux, FUSE, and path-race findings that led to its rejection. Do not create a marker or run a probe.
 
-```text
-/storage/emulated/0/Android/data/com.retroarch.aarch64/files/.emuchef-config-create-probe-<32-hex>.tmp
-```
+Native authorization applies only to a fresh review whose operation resolves to the RetroArch `config` App Target. The one-use claim binds the review, target, operation, source digest, original-file precondition, backup mode, and current device/session identity. Root qualification, the verified route, selected Device Profile, and normal execution admission remain mandatory. This path does not grant generic `appDataWrite` permission.
 
-The probe creates one marker with exclusive, no-follow semantics, writes a fixed-format nonce payload, reads it through a separate root-shell operation, and compares exact bytes and a host-computed SHA-256. Cleanup may unlink only the exact nonce path after confirming it is a regular file with the expected payload. Retain the probe result and cleanup result before removing the marker. An incomplete probe does not enable `appDataWrite`.
+Create requires the reviewed target to be absent. Replace binds the existing file identity and bytes, stops the resolved package once for Android user 0, confirms that RetroArch is no longer running, and verifies the default private Mac backup before it opens the target. A backup failure leaves the config unchanged. A fresh review may present a one-use waiver for that failure; native confirmation remains required. No second force-stop is allowed.
 
-The approved capability policy preserves profile restrictions, verified root routes, session checks, and execution guards for established rooted workflows. Legacy `appDataWrite` projection remains available when the profile and current root authority permit it. Managed and uploaded configuration creation through `app.retroarch.configure` and `app.retroarch.provision/seed_retroarch_cfg` requires separate current evidence for the resolved destination. That evidence does not grant general `appDataWrite`. Explicit `none` leaves unrelated provisioning outside the gate. A universal write probe would expand policy and disable established workflows, so it is outside this change.
+Replace writes the complete file in place. An interruption may leave partial or uncertain contents. Writer completion, flush success, and complete readback verification are separate results; a matching hash alone does not establish writer quiescence. The report must preserve partial and uncertain outcomes. There is no automatic rollback.
 
-The evidence store has no production probe writer. Root access alone cannot authorize configuration creation. Relevant device, session, root, catalog, or destination-authority changes invalidate stored evidence. Evidence for one package or App Target cannot authorize a different protected destination. Backend planning and real execution remain fail-closed until a reviewed evidence bridge and session binding share the required authority boundary.
-
-Host tests cover existing-target and late-target behavior. Deterministic race injection is compiled only into the host test binary with `EMUCHEF_COPY_COMMIT_HELPER_TEST`; it inserts a competing file immediately before the exclusive final open. No safe physical synchronization mechanism has been qualified, so physical race testing remains blocked. Do not race an ADB process against the adapter or add a production test hook.
-
-The successful physical configuration stays installed. A second create-only attempt against an existing target may verify no-clobber behavior only through the normal reviewed application path. The expected result is `already exists` with exact byte preservation. Planner admission may reject the request before it reaches the adapter; record that as a planner result, not an adapter test. Host fixtures create a fresh operation-owned `retroarch.cfg` for each test run and do not require device resets.
+The executor checks process state before replacement, but an app can relaunch after a check. These checks do not provide adversarial locking. Host and fake-device tests do not establish Android SELinux, FUSE, process, or filesystem behavior. Physical qualification remains pending.
 
 ## 6. Owner authorization required for a physical run
 
-1. Install the exact pinned APK with SHA-256 `361c7ed7b510cf14dbc37a434dace8d201f0f445887c89735d45788df7affc11`. Keep it installed and do not launch RetroArch.
-2. If needed, create only the missing components of `/storage/emulated/0/Android/data/com.retroarch.aarch64/files` using an owner-approved method that preserves Android ownership and SELinux labels.
-3. Create and read one nonce-named probe marker in `files`. Authorization must cover deletion of that exact test-owned marker after evidence has been retained.
-4. Create `retroarch.cfg` only after confirming the exact target is absent, through the production adapter. Keep the APK, configuration, and required parent directories installed afterward.
-5. Authorize an existing-target no-clobber attempt only if the normal reviewed application path can reach the adapter without bypassing planner or executor admission. Require `already exists` and byte-for-byte preservation.
+1. Install only the pinned APK with SHA-256 `361c7ed7b510cf14dbc37a434dace8d201f0f445887c89735d45788df7affc11`. Keep it installed and do not launch RetroArch.
+2. If needed, create only missing components of `/storage/emulated/0/Android/data/com.retroarch.aarch64/files` using an owner-approved method that preserves Android ownership and SELinux labels.
+3. For Create, use the normal review path after confirming that the exact target is absent. Require native confirmation and retain the reviewed output and sanitized results.
+4. For Replace, review the original file identity and bytes, require one stop for Android user 0, and verify the default private Mac backup before writing. If backup verification fails, leave the config unchanged. A waiver requires a separate fresh review and native confirmation, and applies to one replacement only.
+5. If the stop fails or RetroArch remains running or relaunches, do not write. Close it manually and prepare a fresh review. Do not repeat force-stop.
+6. Keep the APK, the resulting `retroarch.cfg`, and required parent directories installed for later qualification. Do not launch or uninstall RetroArch, remove parent directories, or change Magisk or SELinux settings.
+7. An existing-target no-clobber attempt may be authorized only through the normal reviewed application path. Require `already exists` and byte-for-byte preservation. Record a planner rejection as a planner result, not an adapter result.
 
-The plan requests no RetroArch launch or uninstall, no overwrite or deletion of `retroarch.cfg`, no removal of parent directories, and no changes to Magisk or SELinux settings. Physical race testing remains blocked pending a separately reviewed synchronization design.
+Each physical mutation requires separate owner authorization. This preparation plan does not authorize a device operation.
 
 ## 7. Tauri runtime path
 

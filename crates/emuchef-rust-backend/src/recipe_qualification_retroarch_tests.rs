@@ -31,6 +31,8 @@ const TARGET_RECIPE: &str = "app.retroarch.provision";
 const QUALIFICATION_DEVICE_PLAN: &str = "ayaneo.konkr_pocket_fit.base";
 const OPTIONAL_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg";
 const CONFIG_SOURCE_INPUT_KEY: &str = "app.retroarch.provision/retroarch_cfg_source";
+const CONFIG_WRITE_OPERATION_INPUT_KEY: &str =
+    "app.retroarch.provision/retroarch_cfg_write_operation";
 const VIDEO_THREADED_INPUT_KEY: &str = "app.retroarch.provision/retroarch_video_threaded";
 const RETROARCH_PACKAGE: &str = "com.retroarch.aarch64";
 const RETROARCH_LAUNCHER: &str = "com.retroarch.browser.mainmenu.MainMenuActivity";
@@ -168,15 +170,11 @@ fn plan_retroarch_with_permissions(
             root_shell,
             app_data_write: app_data_write.unwrap_or(root_shell),
             root_shell_route: root_shell.then_some(crate::planner::RootShellRoute::SuCommand),
-            config_create_write_evidence: None,
         }),
         None if config_path.is_some() => Some(RuntimeCapabilityAvailability {
             root_shell: true,
             app_data_write: true,
             root_shell_route: Some(crate::planner::RootShellRoute::SuCommand),
-            config_create_write_evidence: Some(
-                crate::runtime_configuration::test_config_create_write_evidence(),
-            ),
         }),
         None => None,
     };
@@ -431,6 +429,7 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
         vec![
             OPTIONAL_INPUT_KEY.to_string(),
             CONFIG_SOURCE_INPUT_KEY.to_string(),
+            CONFIG_WRITE_OPERATION_INPUT_KEY.to_string(),
             VIDEO_THREADED_INPUT_KEY.to_string(),
         ]
     );
@@ -701,7 +700,7 @@ fn retroarch_optional_cfg_is_not_required_for_planning() {
     let plan = result
         .plan
         .expect("plan should be generated without the optional config");
-    assert_eq!(result.resolved_inputs.len(), 3);
+    assert_eq!(result.resolved_inputs.len(), 4);
     assert_eq!(result.resolved_inputs[0].key, OPTIONAL_INPUT_KEY);
     assert!(
         result.resolved_inputs[0].value.is_none(),
@@ -715,6 +714,15 @@ fn retroarch_optional_cfg_is_not_required_for_planning() {
             .unwrap()
             .value,
         Some(Value::String("none".to_string()))
+    );
+    assert_eq!(
+        result
+            .resolved_inputs
+            .iter()
+            .find(|input| input.key == CONFIG_WRITE_OPERATION_INPUT_KEY)
+            .unwrap()
+            .value,
+        Some(Value::String("create".to_string()))
     );
     assert_eq!(
         result

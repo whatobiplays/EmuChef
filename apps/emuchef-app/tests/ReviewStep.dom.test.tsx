@@ -89,6 +89,49 @@ describe("review presentation", () => {
     );
   });
 
+  test("shows the exact failure and file precondition bound to a one-time backup waiver", () => {
+    const privateDestination =
+      "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg";
+    const waiverReview: ReviewSummary = {
+      ...review,
+      executionMode: "real",
+      configurationBackupWaiver: {
+        failureOperationId: "failed-operation-1",
+        failureReportSha256: "b".repeat(64),
+        waiverSha256: "c".repeat(64),
+        target: "RetroArch / config",
+        sourceSha256: "a".repeat(64),
+        originalFilePrecondition: {
+          status: "confirmed_existing",
+          sha256: "d".repeat(64),
+          byteLength: 42,
+        },
+      },
+    };
+    Object.assign(waiverReview.configurationBackupWaiver!, {
+      destination: privateDestination,
+    });
+    render(
+      <ReviewStep
+        busy={false}
+        executionKind="idle"
+        realExecutionCompiled
+        review={waiverReview}
+        reviewStale={false}
+        onApplyToDevice={vi.fn()}
+        onBack={vi.fn()}
+        onStartSimulation={vi.fn()}
+      />,
+    );
+
+    const waiver = screen.getByRole("region", { name: "One-time backup waiver" });
+    expect(within(waiver).getByText("failed-operation-1")).toBeTruthy();
+    expect(within(waiver).getByText("confirmed_existing:", { exact: false })).toBeTruthy();
+    expect(within(waiver).getByText(/without creating a backup/i)).toBeTruthy();
+    expect(within(waiver).getByText(/native confirmation is required/i)).toBeTruthy();
+    expect(document.body.textContent).not.toContain(privateDestination);
+  });
+
   test.each([
     ["EmuChef-generated", "generated"],
     ["Uploaded file", "uploaded"],
@@ -113,11 +156,13 @@ describe("review presentation", () => {
                       "Create this file only when its destination is absent.",
                     deviceLocation: undefined,
                     configurationCreate: {
+                      operation: "create",
                       source,
                       sha256,
                       byteLength: 22,
                       targetLabel: "RetroArch configuration file",
                       confirmedAbsent: true,
+                      confirmedExisting: false,
                       verificationScope:
                         "Dry-run sandbox only; device target not checked",
                     },
@@ -129,7 +174,7 @@ describe("review presentation", () => {
         ],
       };
 
-      const { container } = render(
+      const { container, rerender } = render(
         <ReviewStep
           busy={false}
           executionKind="idle"
@@ -160,6 +205,42 @@ describe("review presentation", () => {
         ),
       ).toBeTruthy();
       expect(container.textContent).not.toContain("/storage/emulated/0/");
+
+      const action =
+        configurationReview.features[0]!.sections[0]!.actions[0]!;
+      action.configurationCreate = {
+        ...action.configurationCreate!,
+        operation: "replace",
+        confirmedAbsent: false,
+        confirmedExisting: true,
+      };
+      rerender(
+        <ReviewStep
+          busy={false}
+          executionKind="idle"
+          realExecutionCompiled
+          review={configurationReview}
+          reviewStale={false}
+          onApplyToDevice={vi.fn()}
+          onBack={vi.fn()}
+          onStartSimulation={vi.fn()}
+        />,
+      );
+
+      const replacement = screen.getByRole("region", {
+        name: "Configuration replacement",
+      });
+      expect(
+        within(replacement).getByText(
+          "Existing configuration confirmed · replacement only",
+        ),
+      ).toBeTruthy();
+      expect(
+        within(replacement).getByText(
+          "Dry-run sandbox only; device target not checked",
+        ),
+      ).toBeTruthy();
+      expect(container.textContent).not.toContain("Absence not confirmed");
     },
   );
 

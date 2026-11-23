@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 use emuchef_rust_backend::storage_targets::SetupLocationExecutionLease;
@@ -31,7 +31,6 @@ use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::qualification_repository::QualificationRepositoryProvider;
 use crate::qualification_session::QualificationSessionStore;
 use crate::recovery::RecoveryState;
-use crate::retroarch_config_create_policy::resolve_retroarch_config_create_target;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
 use crate::support::SupportStore;
@@ -308,58 +307,78 @@ fn report_device_inventory_to_qualification(
     );
 }
 
-/// Serialize a product observation commit and its qualification notification.
-/// A poisoned mutex is recovered because losing this ordering boundary must
-/// never silently drop a committed product transition.
-///
-/// Every acquisition also receives the next monotonic transition revision.
-/// Qualification projections carry the revision of the acquisition under which
-/// they were taken, so the presentation layer can order a status projection
-/// against a command snapshot by the serialized Rust transition order instead
-/// of by frontend request timing.
+/// Order a product commit with its qualification notification. Guards reserve
+/// the transition slot without keeping the gate mutex locked, so an ordered
+/// transition can wait on runtime or device work without holding an ordinary
+/// mutex. Each acquisition receives a revision used to order projections.
+#[derive(Default)]
+struct QualificationTransitionGateState {
+    active: bool,
+}
+
 pub(crate) struct QualificationTransitionGate {
-    lock: Mutex<()>,
+    state: Mutex<QualificationTransitionGateState>,
+    changed: Condvar,
     revision: AtomicU64,
 }
 
 impl QualificationTransitionGate {
     pub(crate) fn new() -> Self {
         Self {
-            lock: Mutex::new(()),
+            state: Mutex::new(QualificationTransitionGateState::default()),
+            changed: Condvar::new(),
             revision: AtomicU64::new(0),
         }
     }
 
-    /// Acquire the gate, recovering a poisoned mutex, and allocate the
-    /// revision that orders every projection taken under this acquisition.
-    fn acquire(&self) -> (MutexGuard<'_, ()>, u64) {
-        let guard = match self.lock.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                let guard = poisoned.into_inner();
-                self.lock.clear_poison();
-                guard
-            }
-        };
+    /// Reserve the logical transition slot and allocate its monotonic revision.
+    fn acquire(&self) -> u64 {
+        let mut state = self.lock_state();
+        while state.active {
+            state = match self.changed.wait(state) {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    self.state.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
+        }
+        state.active = true;
+        drop(state);
         let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
-        (guard, revision)
+        revision
     }
 
-    /// Probe whether another thread currently holds the gate. This supports
-    /// race assertions and never orders lifecycle work, so it allocates no
-    /// revision.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, QualificationTransitionGateState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                self.state.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.lock_state();
+        state.active = false;
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// Report whether another transition owns the logical slot.
     #[cfg(test)]
-    pub(crate) fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
-        self.lock.try_lock()
+    pub(crate) fn is_active(&self) -> bool {
+        self.lock_state().active
     }
 }
 
-/// Held guard for one transition-gate acquisition. Deferred source checks run
-/// only after this guard releases the product-transition gate.
+/// Logical reservation for one product and qualification transition.
 pub(crate) struct QualificationTransitionGuard<'a> {
     state: &'a AppState,
-    guard: Option<MutexGuard<'a, ()>>,
+    gate: &'a QualificationTransitionGate,
     revision: u64,
+    active: bool,
 }
 
 impl QualificationTransitionGuard<'_> {
@@ -374,8 +393,15 @@ impl QualificationTransitionGuard<'_> {
     pub(crate) fn release_and_retry(
         mut self,
     ) -> Result<Option<crate::qualification_session::QualificationSessionSnapshot>, String> {
-        drop(self.guard.take());
+        self.release();
         crate::qualification_session::retry_deferred_finalization(self.state)
+    }
+
+    fn release(&mut self) {
+        if self.active {
+            self.gate.release();
+            self.active = false;
+        }
     }
 
     /// Release the product-transition gate and retry deferred qualification
@@ -391,16 +417,18 @@ impl QualificationTransitionGuard<'_> {
 
 impl Drop for QualificationTransitionGuard<'_> {
     fn drop(&mut self) {
-        drop(self.guard.take());
+        self.release();
     }
 }
 
 pub(crate) fn qualification_transition_lock(state: &AppState) -> QualificationTransitionGuard<'_> {
-    let (guard, revision) = state.qualification_transition_gate.acquire();
+    let gate = &state.qualification_transition_gate;
+    let revision = gate.acquire();
     QualificationTransitionGuard {
         state,
-        guard: Some(guard),
+        gate,
         revision,
+        active: true,
     }
 }
 
@@ -2125,8 +2153,47 @@ pub fn prepare_execution_review(
     bindings: HashMap<String, Value>,
     request_generation: u64,
     mode: String,
+    backup_failure_execution_handle: Option<String>,
+    backup_failure_operation_id: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let configuration_backup_enabled = if mode == "real" {
+        let app_data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "Application settings are unavailable.".to_string())?;
+        crate::configuration_backup_preferences::read_preference(&app_data_root)?
+    } else {
+        true
+    };
+    let configuration_backup_waiver =
+        match (backup_failure_execution_handle, backup_failure_operation_id) {
+            (None, None) => None,
+            (Some(execution_handle), Some(operation_id))
+                if mode == "real" && configuration_backup_enabled =>
+            {
+                Some(
+                    crate::execution::configuration_backup_waiver_for_failed_execution(
+                        &state,
+                        &execution_handle,
+                        &operation_id,
+                    )?,
+                )
+            }
+            (Some(_), Some(_)) => {
+                return Err(safe_error(
+                    "configuration_backup_waiver_unavailable",
+                    "A one-time backup waiver requires a real review with private backups enabled.",
+                ));
+            }
+            _ => {
+                return Err(safe_error(
+                    "configuration_backup_waiver_invalid",
+                    "The backup failure identity is incomplete.",
+                ));
+            }
+        };
     let authority = require_profile_selection(
         &state,
         &device_handle,
@@ -2144,7 +2211,23 @@ pub fn prepare_execution_review(
         &mode,
         &state,
         &authority,
-        &mut |operation, payload| sidecar.request(operation, payload),
+        configuration_backup_waiver.as_ref(),
+        configuration_backup_enabled,
+        &mut |operation, mut payload| {
+            if operation == "planConfiguration" {
+                crate::configuration_backup_preferences::bind_to_plan_payload(
+                    &mut payload,
+                    configuration_backup_enabled,
+                )?;
+                if let Some(waiver) = &configuration_backup_waiver {
+                    crate::configuration_backup_preferences::bind_backup_waiver_to_plan_payload(
+                        &mut payload,
+                        &waiver.digest,
+                    )?;
+                }
+            }
+            sidecar.request(operation, payload)
+        },
     )
 }
 
@@ -2157,6 +2240,8 @@ fn prepare_execution_review_with_runtime<F>(
     mode: &str,
     state: &AppState,
     authority: &crate::profile_selection::SelectedProfile,
+    configuration_backup_waiver: Option<&crate::handles::ConfigurationBackupWaiver>,
+    configuration_backup_enabled: bool,
     request: &mut F,
 ) -> Result<Value, String>
 where
@@ -2202,16 +2287,6 @@ where
             "Re-enter the omitted sensitive configuration values before creating a new review.",
         ));
     }
-    let expected_context = state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "Review session state is unavailable.",
-            )
-        })?
-        .qualification_context(&device_handle);
     let mut payload = configuration_payload(
         state,
         &device_handle,
@@ -2239,41 +2314,7 @@ where
         .cloned()
         .expect("configuration payload always binds a catalog");
     let mut storage_target_error = None;
-    let mut config_create_admission_error = None;
-    let mut config_create_request = |operation: &str, payload: Value| {
-        if operation == "prepareExecutionReview" {
-            let plan = payload.get("plan").ok_or_else(|| {
-                safe_error(
-                    "retroarch_config_create_plan_invalid",
-                    "The reviewed plan omitted its selected configuration operation.",
-                )
-            })?;
-            if let Err(error) = require_config_create_write_evidence(
-                Some(state),
-                &device_handle,
-                plan,
-                expected_context.as_ref(),
-            ) {
-                config_create_admission_error = Some(error.clone());
-                return Err(error);
-            }
-        }
-        let response = request(operation, payload)?;
-        if operation == "planConfiguration" {
-            if let Some(plan) = response.get("plan").filter(|plan| !plan.is_null()) {
-                if let Err(error) = require_config_create_write_evidence(
-                    Some(state),
-                    &device_handle,
-                    plan,
-                    expected_context.as_ref(),
-                ) {
-                    config_create_admission_error = Some(error.clone());
-                    return Err(error);
-                }
-            }
-        }
-        Ok(response)
-    };
+    let mut config_create_request = |operation: &str, payload: Value| request(operation, payload);
     let mut result = plan_and_prepare_execution_review(
         payload,
         &mut config_create_request,
@@ -2320,15 +2361,12 @@ where
         },
     )
     .map_err(|_| {
-        config_create_admission_error
-            .take()
-            .or_else(|| storage_target_error.take())
-            .unwrap_or_else(|| {
-                safe_error(
-                    "review_generation_failed",
-                    "The reviewed plan could not be generated.",
-                )
-            })
+        storage_target_error.take().unwrap_or_else(|| {
+            safe_error(
+                "review_generation_failed",
+                "The reviewed plan could not be generated.",
+            )
+        })
     })?;
     result["executionMode"] = json!(mode);
     result["profileSelectionHandle"] = json!(authority.handle);
@@ -2387,6 +2425,68 @@ where
             )
         })?
         .to_string();
+    if let Some(waiver) = configuration_backup_waiver {
+        let serial = plan
+            .pointer("/target_device/serial")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                safe_error(
+                    "configuration_backup_waiver_invalid",
+                    "The reviewed device identity is unavailable for the one-time backup waiver.",
+                )
+            })?;
+        let qualification_context = state
+            .handles
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "session_state_unavailable",
+                    "The current device session is unavailable for the one-time backup waiver.",
+                )
+            })?
+            .qualification_context(&device_handle)
+            .ok_or_else(|| {
+                safe_error(
+                    "session_state_unavailable",
+                    "The current device session is unavailable for the one-time backup waiver.",
+                )
+            })?;
+        let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+            safe_error(
+                "runtime_generation_unavailable",
+                "The current execution runtime is unavailable for the one-time backup waiver.",
+            )
+        })?;
+        crate::execution::validate_configuration_backup_waiver_plan(
+            waiver,
+            &plan,
+            &device_handle,
+            serial,
+            &qualification_context,
+            runtime_generation,
+        )?;
+        let public_waiver = json!({
+            "failureOperationId": waiver.failure_operation_id,
+            "failureReportSha256": waiver.failure_report_digest,
+            "waiverSha256": waiver.digest,
+            "target": "RetroArch / config",
+            "sourceSha256": waiver.source_sha256,
+            "originalFilePrecondition": crate::execution::project_original_file_precondition(
+                &waiver.original_file_precondition,
+            ),
+        });
+        result
+            .get_mut("review")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                safe_error(
+                    "review_projection_missing",
+                    "The reviewed plan omitted its safe presentation.",
+                )
+            })?
+            .insert("configurationBackupWaiver".to_string(), public_waiver);
+    }
     let restricted_required_step_ids = result
         .as_object_mut()
         .ok_or_else(|| safe_error("review_response_invalid", "The review response is invalid."))?
@@ -2490,6 +2590,8 @@ where
             .qualification_context(&device_handle),
         platform_tools_identity: Some(platform_tools_identity),
         restricted_execution,
+        configuration_backup_waiver: configuration_backup_waiver.cloned(),
+        configuration_backup_enabled,
         created: Instant::now(),
         last_access: Instant::now(),
     };
@@ -2946,85 +3048,7 @@ fn device_runtime_capability_availability(root_granted: bool) -> Value {
     })
 }
 
-/// Require current native evidence for the exact RetroArch configuration destination.
-/// Plans without a selected RetroArch configuration source keep the existing
-/// optional provisioning behavior.
-pub(crate) fn require_config_create_write_evidence(
-    state: Option<&AppState>,
-    device_handle: &str,
-    plan: &Value,
-    expected_context: Option<&crate::device_observation::QualificationContextKey>,
-) -> Result<(), String> {
-    let target = resolve_retroarch_config_create_target(plan).map_err(|code| {
-        safe_error(
-            code,
-            "The selected RetroArch configuration could not be bound to its authored App Target.",
-        )
-    })?;
-    let Some(target) = target else {
-        return Ok(());
-    };
-    let unverified = || {
-        safe_error(
-            "config_create_write_unverified",
-            "The selected RetroArch configuration target has no current write-probe evidence.",
-        )
-    };
-    let Some(state) = state else {
-        return Err(unverified());
-    };
-    let current_context = state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "Device session state is unavailable.",
-            )
-        })?
-        .qualification_context(device_handle)
-        .ok_or_else(unverified)?;
-    if current_context.device_handle != device_handle
-        || expected_context.is_some_and(|expected| expected != &current_context)
-    {
-        return Err(unverified());
-    }
-    let current_catalog_digest = catalog(state)?.digest();
-    let plan_catalog_digest = serde_json::from_str::<Value>(&target.catalog_identity)
-        .ok()
-        .and_then(|identity| {
-            identity
-                .pointer("/contentDigest/value")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    if plan_catalog_digest.as_deref() != Some(current_catalog_digest) {
-        state
-            .root_qualification
-            .lock()
-            .map_err(|_| {
-                safe_error(
-                    "qualification_state_unavailable",
-                    "Device qualification state is unavailable.",
-                )
-            })?
-            .invalidate_config_create_write_evidence();
-        return Err(unverified());
-    }
-    let key = RootQualificationKey::from_context(&current_context);
-    let root_store = state.root_qualification.lock().map_err(|_| {
-        safe_error(
-            "qualification_state_unavailable",
-            "Device qualification state is unavailable.",
-        )
-    })?;
-    if !root_store.config_create_write_is_verified_for_target(&key, &target) {
-        return Err(unverified());
-    }
-    Ok(())
-}
-
-/// Converts trusted snake_case probe facts into the sidecar's camelCase request.
+/// Convert native session facts into the sidecar request shape.
 fn configuration_payload_from_parts(
     catalog: Value,
     device_plan: &str,
@@ -3651,564 +3675,25 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retroarch_config_create_policy::resolve_retroarch_config_create_target;
+
+    #[test]
+    fn transition_guard_reserves_order_without_holding_the_gate_mutex() {
+        let gate = QualificationTransitionGate::new();
+        let revision = gate.acquire();
+
+        assert_eq!(revision, 1);
+        assert!(gate.is_active());
+        assert!(gate.state.try_lock().is_ok());
+
+        gate.release();
+        assert!(!gate.is_active());
+    }
 
     #[test]
     fn verified_root_access_preserves_legacy_app_data_write_capability() {
         let capabilities = device_runtime_capability_availability(true);
         assert_eq!(capabilities["rootShell"], true);
         assert_eq!(capabilities["appDataWrite"], true);
-    }
-
-    #[test]
-    fn config_create_admission_requires_scoped_evidence_for_all_sources_and_entry_points() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut state = reset_test_state(temp.path());
-        let authored_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../authored")
-            .canonicalize()
-            .unwrap();
-        state.catalog =
-            CatalogDescriptor::for_test_root_with_identity(authored_root, "emuchef.test", "test-1");
-        let (device_handle, context) = {
-            let mut handles = state.handles.lock().unwrap();
-            handles
-                .update_devices(&json!({
-                    "devices": [{
-                        "serial": "synthetic-configuration-create-admission",
-                        "state": "available",
-                        "transportId": "synthetic-configuration-create-transport",
-                        "model": "Synthetic Qualification Device"
-                    }]
-                }))
-                .unwrap();
-            let handle = handles.single_available_device_handle().unwrap();
-            handles
-                .set_facts(
-                    &handle,
-                    json!({
-                        "manufacturer": "ARBOR",
-                        "model": "GT78-VN",
-                        "android_version": "12",
-                        "android_api_level": 31
-                    }),
-                )
-                .unwrap();
-            let context = crate::device_observation::QualificationContextKey::new(
-                handle.clone(),
-                handles.device_session_epoch(&handle).unwrap(),
-                3,
-                4,
-                5,
-                "synthetic-configuration-create-capability-fingerprint",
-            );
-            handles.set_qualification_context(context.clone());
-            (handle, context)
-        };
-        let current_key = RootQualificationKey::from_context(&context);
-        let attempt = state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .begin(current_key.clone())
-            .unwrap();
-        assert!(state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .complete_with_route(
-                attempt,
-                RootQualificationState::Granted,
-                Some(crate::device_qualification::RootShellRoute::SuCommand),
-            ));
-        let payload = configuration_payload(
-            &state,
-            &device_handle,
-            "ayaneo.konkr_pocket_fit.base",
-            Some(vec!["app.retroarch.provision".to_string()]),
-            HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            payload["runtimeCapabilityAvailability"].get("configCreateWriteEvidence"),
-            None,
-            "configuration-create evidence must not cross the sidecar request boundary as a caller-authored flag"
-        );
-        let catalog_identity =
-            serde_json::to_value(catalog(&state).unwrap().public_identity()).unwrap();
-        let make_plan = |profile_ref: &str, recipe_id: &str, source: &str| {
-            let package_id = "com.retroarch.aarch64";
-            let source_kind = if source == "managed" {
-                "generated"
-            } else {
-                "uploaded"
-            };
-            json!({
-                "source": {
-                    "device_profile_ref": profile_ref,
-                    "selected_recipe_refs": [recipe_id],
-                    "catalog": catalog_identity
-                },
-                "resolved_inputs": [{
-                    "recipeId": recipe_id,
-                    "inputId": "retroarch_cfg_source",
-                    "value": source
-                }],
-                "apps": [{"id": "retroarch", "package_id": package_id}],
-                "steps": [{
-                    "id": format!("{recipe_id}/seed_retroarch_cfg"),
-                    "recipe_ref": recipe_id,
-                    "app_id": "retroarch",
-                    "type": "copy_files",
-                    "params": {
-                        "source": {"Literal": {"value": {
-                            "type": "configuration_artifact",
-                            "sourceIdentity": {"recipeId": recipe_id, "kind": source_kind},
-                            "targetIdentity": {
-                                "appId": "retroarch",
-                                "packageId": package_id,
-                                "targetId": "config",
-                                "target": {
-                                    "kind": "file",
-                                    "location": "external_app_data",
-                                    "path": "files/retroarch.cfg"
-                                }
-                            }
-                        }}},
-                        "dest": {"Literal": {"value": {"app_target": "config"}}},
-                        "copy_policy": {"Literal": {"value": "create_only"}}
-                    }
-                }]
-            })
-        };
-        let unrelated_rooted_plan = json!({
-            "source": {
-                "device_profile_ref": "konkr.pocket_fit",
-                "selected_recipe_refs": ["app.retroarch.provision", "feature.copy_bios"]
-            },
-            "resolved_inputs": [{
-                "recipeId": "app.retroarch.provision",
-                "inputId": "retroarch_cfg_source",
-                "value": "none"
-            }],
-            "steps": [
-                {"id": "copy_assets", "recipe_ref": "app.retroarch.provision",
-                    "constraints": {"capabilities": ["app_data_write"]}},
-                {"id": "copy_shaders_glsl", "recipe_ref": "app.retroarch.provision",
-                    "constraints": {"capabilities": ["app_data_write"]}},
-                {"id": "copy_cores", "recipe_ref": "app.retroarch.provision",
-                    "constraints": {"capabilities": ["app_data_write"]}},
-                {"id": "copy_bios_dir", "recipe_ref": "feature.copy_bios",
-                    "constraints": {"capabilities": ["app_data_write"]}}
-            ]
-        });
-        assert_eq!(
-            device_runtime_capability_availability(true)["appDataWrite"],
-            true
-        );
-        require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &unrelated_rooted_plan,
-            Some(&context),
-        )
-        .expect("unrelated rooted provisioning must stay outside configuration-create admission");
-        let mut generic_config_writer =
-            make_plan("konkr.pocket_advance", "app.retroarch.provision", "managed");
-        generic_config_writer["resolved_inputs"][0]["value"] = json!("none");
-        generic_config_writer["steps"] = json!([{
-            "id": "app.retroarch.provision/copy_config_file",
-            "recipe_ref": "app.retroarch.provision",
-            "app_id": "retroarch",
-            "type": "copy_files",
-            "params": {
-                "source": {"Literal": {"value": {
-                    "type": "file_path",
-                    "value": "/tmp/retroarch.cfg"
-                }}},
-                "dest": {"Literal": {"value":
-                    "/storage/emulated/0/Android/data/com.retroarch.aarch64/files"
-                }},
-                "copy_policy": {"Literal": {"value": "merge"}}
-            }
-        }]);
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &generic_config_writer,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("retroarch_config_create_configuration_step_missing")));
-        let mut referenced_generic_config_writer = generic_config_writer.clone();
-        referenced_generic_config_writer["resolved_inputs"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "recipeId": "app.retroarch.provision",
-                "inputId": "config_parent",
-            "key": "app.retroarch.provision/config_parent",
-            "type": "directory",
-            "value": "/storage/emulated/0/Android/data/com.retroarch.aarch64/files",
-            "source": "explicit",
-            "label": "Configuration parent",
-            "required": false,
-            "sensitive": false
-            }));
-        referenced_generic_config_writer["steps"][0]["params"]["dest"] =
-            json!({"ref": "inputs.app.retroarch.provision/config_parent"});
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &referenced_generic_config_writer,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("retroarch_config_create_configuration_step_missing")));
-
-        let mut unresolved_generic_writer = generic_config_writer.clone();
-        unresolved_generic_writer["steps"][0]["params"]["dest"] =
-            json!({"ref": "steps.resolve.outputs.device_path"});
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &unresolved_generic_writer,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("retroarch_config_create_destination_unresolved")));
-
-        generic_config_writer["steps"][0]["params"]["source"]["Literal"]["value"]["value"] =
-            json!("/tmp/core.so");
-        require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &generic_config_writer,
-            Some(&context),
-        )
-        .expect("an unrelated file copy must retain legacy rooted admission");
-        let escaped_config_destination = json!({
-            "source": {
-                "device_profile_ref": "konkr.pocket_advance",
-                "selected_recipe_refs": ["app.retroarch.provision"],
-                "catalog": catalog_identity
-            },
-            "resolved_inputs": [{
-                "recipeId": "app.retroarch.provision",
-                "inputId": "retroarch_cfg_source",
-                "value": "none"
-            }],
-            "apps": [{"id": "retroarch", "package_id": "com.retroarch.aarch64"}],
-            "steps": [{
-                "id": "app.retroarch.provision/copy_cores",
-                "recipe_ref": "app.retroarch.provision",
-                "type": "copy_files",
-                "params": {
-                    "source": {"Literal": {"value": {"type": "path_list", "value": []}}},
-                    "dest": {"Literal": {"value": "/../storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg"}},
-                    "copy_policy": {"Literal": {"value": "merge"}}
-                }
-            }]
-        });
-        let escaped_error = require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &escaped_config_destination,
-            Some(&context),
-        )
-        .expect_err("native plan inspection must reject root-escaping config paths");
-        assert!(
-            escaped_error.contains("retroarch_config_create_destination_escapes_root"),
-            "{escaped_error}"
-        );
-
-        for profile_ref in ["konkr.pocket_advance", "konkr.pocket_fit"] {
-            for recipe_id in ["app.retroarch.configure", "app.retroarch.provision"] {
-                for source in ["managed", "uploaded"] {
-                    state
-                        .root_qualification
-                        .lock()
-                        .unwrap()
-                        .invalidate_config_create_write_evidence();
-                    let plan = make_plan(profile_ref, recipe_id, source);
-                    let denied = require_config_create_write_evidence(
-                        Some(&state),
-                        &device_handle,
-                        &plan,
-                        Some(&context),
-                    )
-                    .expect_err("verified root access alone must not admit config creation");
-                    assert!(
-                        denied.contains("config_create_write_unverified"),
-                        "{profile_ref}/{recipe_id}/{source}: {denied}"
-                    );
-                    let target = resolve_retroarch_config_create_target(&plan)
-                        .unwrap()
-                        .unwrap();
-                    state
-                        .root_qualification
-                        .lock()
-                        .unwrap()
-                        .mark_config_create_write_probe_verified_for_test(&current_key, target);
-                    let payload = configuration_payload(
-                        &state,
-                        &device_handle,
-                        "ayaneo.konkr_pocket_fit.base",
-                        Some(vec![recipe_id.to_string()]),
-                        HashMap::new(),
-                    )
-                    .unwrap();
-                    assert_eq!(
-                        payload["runtimeCapabilityAvailability"].get("configCreateWriteEvidence"),
-                        None,
-                        "native target evidence must stay in the Tauri authority store"
-                    );
-                    require_config_create_write_evidence(
-                        Some(&state),
-                        &device_handle,
-                        &plan,
-                        Some(&context),
-                    )
-                    .expect("exact controlled evidence should admit the host test path");
-                }
-            }
-        }
-
-        let mut mixed_plan =
-            make_plan("konkr.pocket_advance", "app.retroarch.provision", "managed");
-        mixed_plan["steps"].as_array_mut().unwrap().push(json!({
-            "id": "copy_bios",
-            "recipe_ref": "feature.copy_bios",
-            "app_id": "retroarch",
-            "type": "copy_files"
-        }));
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-        assert_eq!(
-            device_runtime_capability_availability(true)["appDataWrite"],
-            true
-        );
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &mixed_plan,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("config_create_write_unverified")));
-
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-        let mut mixed_protected_writes =
-            make_plan("konkr.pocket_advance", "app.retroarch.provision", "managed");
-        mixed_protected_writes["steps"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "id": "write_other_protected_target",
-                "recipe_ref": "feature.copy_private_asset",
-                "type": "copy_files",
-                "constraints": { "capabilities": ["app_data_write"] }
-            }));
-        let valid_target = resolve_retroarch_config_create_target(&make_plan(
-            "konkr.pocket_advance",
-            "app.retroarch.provision",
-            "managed",
-        ))
-        .unwrap()
-        .unwrap();
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .mark_config_create_write_probe_verified_for_test(&current_key, valid_target.clone());
-        assert_eq!(
-            resolve_retroarch_config_create_target(&mixed_protected_writes).unwrap(),
-            Some(valid_target)
-        );
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &mixed_protected_writes,
-            Some(&context),
-        )
-        .is_ok());
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-
-        for profile_ref in ["konkr.pocket_advance", "konkr.pocket_fit"] {
-            let no_configuration = json!({
-                "source": {
-                    "device_profile_ref": profile_ref,
-                    "selected_recipe_refs": ["app.retroarch.provision"]
-                },
-                "resolved_inputs": [{
-                    "recipeId": "app.retroarch.provision",
-                    "inputId": "retroarch_cfg_source",
-                    "value": "none"
-                }],
-                "steps": [{"id": "install_retroarch", "recipe_ref": "app.retroarch.provision"}]
-            });
-            require_config_create_write_evidence(None, &device_handle, &no_configuration, None)
-                .expect("explicit none must preserve unrelated optional provisioning");
-        }
-
-        let valid_plan = make_plan("konkr.pocket_advance", "app.retroarch.configure", "managed");
-        let mut pruned_configuration =
-            make_plan("konkr.pocket_fit", "app.retroarch.provision", "managed");
-        pruned_configuration["steps"] = json!([]);
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &pruned_configuration,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("retroarch_config_create_configuration_step_missing")));
-
-        let mut wrong_destination_plan =
-            make_plan("konkr.pocket_fit", "app.retroarch.provision", "uploaded");
-        wrong_destination_plan["steps"][0]["params"]["dest"]["Literal"]["value"] =
-            json!({"app_target": "other"});
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &wrong_destination_plan,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("retroarch_config_create_target_invalid")));
-
-        let valid_target = resolve_retroarch_config_create_target(&valid_plan)
-            .unwrap()
-            .unwrap();
-        let stale_context = crate::device_observation::QualificationContextKey {
-            session_epoch: context.session_epoch + 1,
-            ..context.clone()
-        };
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-        let stale_key = RootQualificationKey::from_context(&stale_context);
-        let stale_attempt = state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .begin(stale_key.clone())
-            .unwrap();
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .complete_with_route(
-                stale_attempt,
-                RootQualificationState::Granted,
-                Some(crate::device_qualification::RootShellRoute::SuCommand),
-            );
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .mark_config_create_write_probe_verified_for_test(&stale_key, valid_target.clone());
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &valid_plan,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("config_create_write_unverified")));
-
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-        let wrong_device_context = crate::device_observation::QualificationContextKey {
-            device_handle: "different-device".to_string(),
-            ..context.clone()
-        };
-        let wrong_device_key = RootQualificationKey::from_context(&wrong_device_context);
-        let wrong_device_attempt = state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .begin(wrong_device_key.clone())
-            .unwrap();
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .complete_with_route(
-                wrong_device_attempt,
-                RootQualificationState::Granted,
-                Some(crate::device_qualification::RootShellRoute::SuCommand),
-            );
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .mark_config_create_write_probe_verified_for_test(
-                &wrong_device_key,
-                valid_target.clone(),
-            );
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &valid_plan,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("config_create_write_unverified")));
-
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-        let mut wrong_target = valid_target.clone();
-        wrong_target.package_id = "com.other.package".to_string();
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .mark_config_create_write_probe_verified_for_test(&current_key, wrong_target);
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &valid_plan,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("config_create_write_unverified")));
-
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .invalidate_config_create_write_evidence();
-        state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .mark_config_create_write_probe_verified_for_test(&current_key, valid_target.clone());
-        let mut changed_catalog_plan = valid_plan.clone();
-        changed_catalog_plan["source"]["catalog"]["contentDigest"]["value"] =
-            json!("changed-catalog-digest");
-        assert!(require_config_create_write_evidence(
-            Some(&state),
-            &device_handle,
-            &changed_catalog_plan,
-            Some(&context),
-        )
-        .is_err_and(|error| error.contains("config_create_write_unverified")));
-        assert!(!state
-            .root_qualification
-            .lock()
-            .unwrap()
-            .config_create_write_is_verified_for_target(&current_key, &valid_target));
     }
 
     #[cfg(feature = "real-execution")]
@@ -4490,6 +3975,8 @@ mod tests {
                 qualification_context: None,
                 platform_tools_identity: None,
                 restricted_execution: None,
+                configuration_backup_waiver: None,
+                configuration_backup_enabled: true,
                 created: Instant::now(),
                 last_access: Instant::now(),
             });
@@ -4611,7 +4098,7 @@ mod tests {
                 || {
                     let before =
                         profile_binding(&state, &state.handles.lock().unwrap(), &device).unwrap();
-                    assert!(state.qualification_transition_gate.lock.try_lock().is_err());
+                    assert!(state.qualification_transition_gate.is_active());
                     // Qualification-attempt notification does not publish product context.
                     commit_match_device_observation_in_transition(
                         &state,
@@ -4739,6 +4226,8 @@ mod tests {
                     "dry_run",
                     &state,
                     &authority,
+                    None,
+                    true,
                     &mut |_, _| panic!("stale selection must reject before planning"),
                 )
             });
@@ -4905,6 +4394,8 @@ mod tests {
             "real",
             &state,
             &authority,
+            None,
+            true,
             &mut |operation, payload| {
                 if operation == "planConfiguration" {
                     plan_request = Some(payload.clone());
@@ -5149,9 +4640,9 @@ mod tests {
             Some("t03.copy_fixture.base"),
         )
         .unwrap();
-        let public_review = super::prepare_execution_review(
+        let sidecar = &state.sidecar;
+        let public_review = super::prepare_execution_review_with_runtime(
             device_handle,
-            Some(selection.handle),
             "t03.copy_fixture.base".to_string(),
             Some(vec!["t03.copy_app_target".to_string()]),
             HashMap::from([
@@ -5162,8 +4653,20 @@ mod tests {
                 ("t03.copy_app_target/policy".to_string(), json!("merge")),
             ]),
             1,
-            "real".to_string(),
-            app.state(),
+            "real",
+            &state,
+            &selection,
+            None,
+            true,
+            &mut |operation, mut payload| {
+                if operation == "planConfiguration" {
+                    crate::configuration_backup_preferences::bind_to_plan_payload(
+                        &mut payload,
+                        true,
+                    )?;
+                }
+                sidecar.request(operation, payload)
+            },
         )
         .unwrap_or_else(|error| {
             panic!("the Tauri review command should prepare the synthetic App Target: {error}")
@@ -5440,10 +4943,7 @@ mod tests {
                 state.executions.try_lock(),
                 Err(std::sync::TryLockError::WouldBlock)
             ));
-            assert!(matches!(
-                state.qualification_transition_gate.try_lock(),
-                Err(std::sync::TryLockError::WouldBlock)
-            ));
+            assert!(state.qualification_transition_gate.is_active());
             initialized = true;
         });
 
@@ -5795,6 +5295,8 @@ mod tests {
             qualification_context: None,
             platform_tools_identity: None,
             restricted_execution: None,
+            configuration_backup_waiver: None,
+            configuration_backup_enabled: true,
             created: Instant::now(),
             last_access: Instant::now(),
         }
@@ -6973,7 +6475,7 @@ mod prepared_review_bridge_tests {
     }
 
     #[test]
-    fn projected_recipe_selection_rejects_caller_authored_config_create_write_evidence() {
+    fn projected_recipe_selection_keeps_config_preview_simulated_and_rejects_legacy_field() {
         const CONFIGURATION_RECIPE_ID: &str = "app.retroarch.configure";
         let temp = tempfile::tempdir().unwrap();
         let catalog_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -7166,7 +6668,7 @@ mod prepared_review_bridge_tests {
             Some("ayaneo.konkr_pocket_fit.base"),
         )
         .unwrap();
-        let missing_evidence = prepare_execution_review_with_runtime(
+        let simulated_preview = prepare_execution_review_with_runtime(
             device_handle.clone(),
             "ayaneo.konkr_pocket_fit.base".to_string(),
             selected_recipes.clone(),
@@ -7175,14 +6677,18 @@ mod prepared_review_bridge_tests {
             "dry_run",
             &state,
             &authority,
+            None,
+            true,
             &mut request,
         )
-        .expect_err("legacy root capability must not admit configuration creation");
-        assert!(
-            missing_evidence.contains("review_not_ready"),
-            "{missing_evidence}"
+        .expect("a dry-run configuration preview does not authorize a device write");
+        assert_eq!(simulated_preview["executionMode"], "simulated");
+        assert_eq!(
+            simulated_preview["features"][0]["sections"][0]["actions"][0]["configurationCreate"]
+                ["verificationScope"],
+            "Dry-run sandbox only; device target not checked"
         );
-        assert_eq!(prepare_review_calls.get(), 0);
+        assert_eq!(prepare_review_calls.get(), 1);
 
         let mut caller_authored_payload = planning_payload.clone();
         caller_authored_payload["runtimeCapabilityAvailability"]["configCreateWriteEvidence"] =
@@ -7191,6 +6697,6 @@ mod prepared_review_bridge_tests {
             .request("planConfiguration", caller_authored_payload)
             .expect_err("caller-authored configuration-create evidence must be rejected by the sidecar contract");
         assert!(!caller_authored_error.trim().is_empty());
-        assert_eq!(prepare_review_calls.get(), 0);
+        assert_eq!(prepare_review_calls.get(), 1);
     }
 }

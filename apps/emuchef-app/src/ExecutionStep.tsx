@@ -76,6 +76,8 @@ interface ExecutionStepProps {
   onCancel: () => void;
   onExportReport: () => void;
   onLaunchConfiguredApp: () => void;
+  onOpenConfigurationBackup?: (operationId: string) => void;
+  onPrepareBackupWaiverReview?: (executionHandle: string, operationId: string) => void;
   onPrepareRepair: () => void;
   onReturn: () => void;
 }
@@ -88,6 +90,8 @@ export function ExecutionStep({
   onCancel,
   onExportReport,
   onLaunchConfiguredApp,
+  onOpenConfigurationBackup,
+  onPrepareBackupWaiverReview,
   onPrepareRepair,
   onReturn,
 }: ExecutionStepProps) {
@@ -236,6 +240,32 @@ export function ExecutionStep({
                 <span>{stepStatusLabel(step.status, terminal)}</span>
                 {step.note && step.note !== step.name && <small>{step.name}</small>}
                 {step.message && <small>{step.message}</small>}
+                {!snapshot.simulated && step.configurationBackupOperationId && onOpenConfigurationBackup && (
+                  <button
+                    className="secondary"
+                    onClick={() => onOpenConfigurationBackup(step.configurationBackupOperationId!)}
+                  >
+                    Open private backup folder
+                  </button>
+                )}
+                {terminal &&
+                  execution.mode === "real" &&
+                  snapshot.status === "failed" &&
+                  !snapshot.simulated &&
+                  step.configurationBackupFailureOperationId &&
+                  onPrepareBackupWaiverReview && (
+                    <button
+                      className="secondary"
+                      onClick={() =>
+                        onPrepareBackupWaiverReview(
+                          snapshot.executionHandle,
+                          step.configurationBackupFailureOperationId!,
+                        )
+                      }
+                    >
+                      Review one-time backup waiver
+                    </button>
+                  )}
               </li>
             ))}
           </ol>

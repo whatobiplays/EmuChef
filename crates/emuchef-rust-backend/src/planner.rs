@@ -177,7 +177,7 @@ fn index_app_definitions(
 
 const SCHEMA_VERSION: i64 = 1;
 
-const RETROARCH_CONFIG_CREATE_RECIPES: [&str; 2] =
+const RETROARCH_CONFIG_WRITE_RECIPES: [&str; 2] =
     ["app.retroarch.configure", "app.retroarch.provision"];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -426,10 +426,10 @@ impl RuntimeCapability {
     fn is_available_for_step(
         self,
         capabilities: &RuntimeCapabilities,
-        config_create_write_authorized_for_step: bool,
+        config_write_authorized_for_step: bool,
     ) -> bool {
         self.is_available(capabilities)
-            || (matches!(self, Self::AppDataWrite) && config_create_write_authorized_for_step)
+            || (matches!(self, Self::AppDataWrite) && config_write_authorized_for_step)
     }
 
     fn set_available(self, capabilities: &mut RuntimeCapabilities, available: bool) {
@@ -449,16 +449,16 @@ impl RuntimeCapability {
 #[derive(Clone, Copy)]
 struct StepAvailabilityContext<'a> {
     runtime_capabilities: &'a RuntimeCapabilities,
-    config_create_destination: Option<&'a str>,
+    config_write_destination: Option<&'a str>,
 }
 
-fn is_retroarch_config_create_operation(
+fn is_retroarch_config_write_operation(
     recipe: &Recipe,
     step: &Step,
     usage: &app_targets::ResolvedStepUsage,
-    config_create_destination: Option<&str>,
+    config_write_destination: Option<&str>,
 ) -> bool {
-    if !RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe.id.as_str())
+    if !RETROARCH_CONFIG_WRITE_RECIPES.contains(&recipe.id.as_str())
         || step.type_name != "copy_files"
         || step.app_ref.as_deref() != Some("retroarch")
         || !recipe.config.as_ref().is_some_and(|configuration| {
@@ -474,7 +474,8 @@ fn is_retroarch_config_create_operation(
         )
         || !matches!(
             step.params.get("copy_policy"),
-            Some(ParamValue::Literal(value)) if value.as_str() == Some("create_only")
+            Some(ParamValue::Literal(value))
+                if matches!(value.as_str(), Some("create_only" | "replace"))
         )
     {
         return false;
@@ -484,7 +485,7 @@ fn is_retroarch_config_create_operation(
         && usage
             .dest
             .as_deref()
-            .is_some_and(|destination| config_create_destination == Some(destination))
+            .is_some_and(|destination| config_write_destination == Some(destination))
 }
 
 pub(crate) fn runtime_capability_available(
@@ -974,7 +975,7 @@ pub struct PlannerInput {
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
     /// Destination authorized by the trusted RetroArch configuration-create planning path.
-    pub(crate) config_create_destination: Option<String>,
+    pub(crate) config_write_destination: Option<String>,
     pub catalog_identity: Option<CatalogIdentity>,
     pub target_device: Option<TargetDeviceBinding>,
     /// Optional Device Plan presentation supplied by product planning.
@@ -1055,7 +1056,7 @@ impl PlannerInput {
             device_profile_ref,
             device_context,
             runtime_capabilities,
-            config_create_destination: None,
+            config_write_destination: None,
             catalog_identity: None,
             target_device: None,
             device_plan_presentation: None,
@@ -1107,7 +1108,7 @@ impl PlannerInput {
             device_profile_ref: parts.device_profile_ref,
             device_context: parts.device_context,
             runtime_capabilities: parts.runtime_capabilities,
-            config_create_destination: None,
+            config_write_destination: None,
             catalog_identity: None,
             target_device: None,
         })
@@ -1294,7 +1295,7 @@ fn plan_execution_with_app_definitions_inner(
         &effective_input_bindings,
         StepAvailabilityContext {
             runtime_capabilities: &input.runtime_capabilities,
-            config_create_destination: input.config_create_destination.as_deref(),
+            config_write_destination: input.config_write_destination.as_deref(),
         },
         &target_usage,
         &permission_plans,
@@ -1965,11 +1966,11 @@ fn selected_step_ids(
                             && permission_plan.has_applicable_actions()
                             && !availability_context.runtime_capabilities.root_shell
                     });
-            let config_create_write_authorized_for_step = is_retroarch_config_create_operation(
+            let config_write_authorized_for_step = is_retroarch_config_write_operation(
                 recipe,
                 step,
                 usage,
-                availability_context.config_create_destination,
+                availability_context.config_write_destination,
             );
             if report_unrecognized_capability_warnings
                 && !assume_unrecognized_capabilities_available
@@ -1998,7 +1999,7 @@ fn selected_step_ids(
                     |capability| {
                         capability.is_available_for_step(
                             availability_context.runtime_capabilities,
-                            config_create_write_authorized_for_step,
+                            config_write_authorized_for_step,
                         )
                     },
                 )
@@ -2010,7 +2011,7 @@ fn selected_step_ids(
                         |capability| {
                             capability.is_available_for_step(
                                 availability_context.runtime_capabilities,
-                                config_create_write_authorized_for_step,
+                                config_write_authorized_for_step,
                             )
                         },
                     );

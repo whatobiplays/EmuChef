@@ -1,4 +1,8 @@
 use std::io;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -14,7 +18,7 @@ fn main() {
         return;
     }
     if args.first().is_some_and(|argument| argument == "--sidecar") {
-        let (config, restricted_build_identity, runtime_generation) =
+        let (config, restricted_build_identity, runtime_generation, trusted_control) =
             match sidecar_startup_policy(&args[1..]) {
                 Ok(policy) => policy,
                 Err(message) => {
@@ -24,13 +28,26 @@ fn main() {
             };
         let stdin = io::stdin();
         let stdout = io::stdout();
-        if let Err(error) = emuchef_rust_backend::jsonl::run_jsonl_sidecar_with_startup_policy(
-            stdin.lock(),
-            stdout.lock(),
-            config,
-            restricted_build_identity,
-            runtime_generation,
-        ) {
+        let result = match trusted_control {
+            Some((key, generation)) => {
+                emuchef_rust_backend::jsonl::run_jsonl_sidecar_with_trusted_control(
+                    stdin.lock(),
+                    stdout.lock(),
+                    config,
+                    restricted_build_identity,
+                    generation,
+                    key,
+                )
+            }
+            None => emuchef_rust_backend::jsonl::run_jsonl_sidecar_with_startup_policy(
+                stdin.lock(),
+                stdout.lock(),
+                config,
+                restricted_build_identity,
+                runtime_generation,
+            ),
+        };
+        if let Err(error) = result {
             eprintln!("sidecar failed: {error}");
             std::process::exit(1);
         }
@@ -54,6 +71,7 @@ fn sidecar_startup_policy(
         emuchef_rust_backend::execution_session::SidecarRuntimeConfig,
         Option<String>,
         Option<u64>,
+        Option<([u8; 32], u64)>,
     ),
     String,
 > {
@@ -74,6 +92,8 @@ fn sidecar_startup_policy(
             args,
             restricted_build_identity.is_some(),
         )?;
+    let mut control_fd = None;
+    let mut control_generation = None;
     let mut config = emuchef_rust_backend::execution_session::SidecarRuntimeConfig::default();
     let mut index = 0;
     while index < args.len() {
@@ -87,6 +107,30 @@ fn sidecar_startup_policy(
             continue;
         }
         if option == "--runtime-generation" {
+            index += 2;
+            continue;
+        }
+        if option == "--trusted-control-fd" {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --trusted-control-fd".to_string())?;
+            control_fd = Some(
+                value
+                    .parse::<i32>()
+                    .map_err(|_| "invalid value for --trusted-control-fd".to_string())?,
+            );
+            index += 2;
+            continue;
+        }
+        if option == "--control-generation" {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing value for --control-generation".to_string())?;
+            control_generation = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "invalid value for --control-generation".to_string())?,
+            );
             index += 2;
             continue;
         }
@@ -109,5 +153,46 @@ fn sidecar_startup_policy(
         }
         index += 1;
     }
-    Ok((config, restricted_build_identity, runtime_generation))
+    let trusted_control = match (control_fd, control_generation) {
+        (Some(fd), Some(generation)) => Some((read_control_key(fd)?, generation)),
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err("control generation requires a private control descriptor".to_string())
+        }
+        (Some(_), None) => {
+            return Err("private control key requires a control generation".to_string())
+        }
+    };
+    Ok((
+        config,
+        restricted_build_identity,
+        runtime_generation,
+        trusted_control,
+    ))
+}
+
+#[cfg(unix)]
+fn read_control_key(fd: i32) -> Result<[u8; 32], String> {
+    if fd < 0 {
+        return Err("private control descriptor is invalid".to_string());
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut key = [0u8; 32];
+    file.read_exact(&mut key)
+        .map_err(|_| "private runtime session could not be initialized".to_string())?;
+    let mut trailing = [0u8; 1];
+    if file
+        .read(&mut trailing)
+        .map_err(|_| "private runtime session could not be initialized".to_string())?
+        != 0
+    {
+        key.fill(0);
+        return Err("private control bootstrap data is invalid".to_string());
+    }
+    Ok(key)
+}
+
+#[cfg(not(unix))]
+fn read_control_key(_fd: i32) -> Result<[u8; 32], String> {
+    Err("private control transport is unavailable on this platform".to_string())
 }

@@ -111,6 +111,9 @@ function renderSetupLocationInput(listStatus: "loading" | "unavailable" | "ready
       setupLocations={[]}
       setupLocationListStatus={listStatus}
       bindings={{}}
+        configurationBackupEnabled={true}
+        configurationBackupPreferenceStatus="ready"
+        configurationBackupPreferenceError={null}
       busy={false}
       touchedInputKeys={new Set()}
       validationRequested={false}
@@ -122,6 +125,8 @@ function renderSetupLocationInput(listStatus: "loading" | "unavailable" | "ready
       onPickInput={vi.fn()}
       onRemoveInputEntry={vi.fn()}
       onRefreshValidation={vi.fn()}
+        onConfigurationBackupEnabledChange={vi.fn()}
+        onRestoreDefaultConfigurationBackupPreference={vi.fn()}
       onReview={vi.fn()}
     />,
   );
@@ -377,6 +382,9 @@ test("renders safe Setup Location references without exposing physical binding d
     <InputsStep
       description={description}
       bindings={{}}
+      configurationBackupEnabled={true}
+      configurationBackupPreferenceStatus="ready"
+      configurationBackupPreferenceError={null}
       busy={false}
       touchedInputKeys={new Set()}
       validationRequested={false}
@@ -388,6 +396,8 @@ test("renders safe Setup Location references without exposing physical binding d
       onPickInput={vi.fn()}
       onRemoveInputEntry={vi.fn()}
       onRefreshValidation={vi.fn()}
+      onConfigurationBackupEnabledChange={vi.fn()}
+      onRestoreDefaultConfigurationBackupPreference={vi.fn()}
       onReview={vi.fn()}
       setupLocations={setupLocations}
       setupLocationListStatus="ready"

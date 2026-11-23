@@ -7,7 +7,7 @@
       "sourceKind": "recipe",
       "id": "app.retroarch.provision",
       "path": "authored/recipes/app.retroarch.provision.yaml",
-      "sha256": "8f626cf663790286e0e15721918d713cb1e05ad39bad8976c3d0d3af35b46b7a"
+      "sha256": "7d3df9ab40e7935df6be1a490ba840d0eeab4d919c687b8cb87f0d1375f71c67"
     },
     {
       "sourceKind": "appDefinition",
@@ -80,6 +80,7 @@
   "optionalInputs": [
     "app.retroarch.provision/retroarch_cfg",
     "app.retroarch.provision/retroarch_cfg_source",
+    "app.retroarch.provision/retroarch_cfg_write_operation",
     "app.retroarch.provision/retroarch_video_threaded"
   ],
   "requiredOperationFamilies": [

@@ -1,6 +1,8 @@
 mod adb;
 mod catalog;
 mod commands;
+mod configuration_backup_preferences;
+pub(crate) mod configuration_backups;
 mod device_observation;
 mod device_qualification;
 mod device_storage;
@@ -16,7 +18,7 @@ mod qualification_process_lease;
 pub(crate) mod qualification_repository;
 mod qualification_session;
 mod recovery;
-mod retroarch_config_create_policy;
+mod retroarch_config_write_policy;
 mod saved_configurations;
 mod sidecar;
 mod support;
@@ -159,6 +161,9 @@ pub fn run() {
             qualification_mode::record_qualification_run,
             commands::describe_configuration,
             commands::prepare_execution_review,
+configuration_backup_preferences::get_configuration_backup_preference,
+configuration_backup_preferences::set_configuration_backup_preference,
+            configuration_backups::open_configuration_backup_folder,
             commands::discard_review,
             commands::get_review_status,
             commands::pick_input_path,
@@ -187,6 +192,8 @@ pub fn run() {
             execution::get_simulated_execution_events,
             execution::cancel_simulated_execution,
             execution::get_execution_capabilities,
+            execution::inspect_operation_fence,
+            execution::acknowledge_operation_fence,
             execution::start_real_execution,
             execution::get_real_execution,
             execution::get_real_execution_events,

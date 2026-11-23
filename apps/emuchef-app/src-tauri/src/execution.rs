@@ -12,17 +12,16 @@
 mod root_requirements;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_dialog::{DialogExt, FilePath, MessageDialogButtons, MessageDialogKind};
 use uuid::Uuid;
 
 use crate::adb::{AdbRevalidationError, PlatformToolsReadiness};
@@ -33,8 +32,12 @@ use crate::device_observation::{
 use crate::device_qualification::{
     RootQualificationKey, RootQualificationState, RootQualificationStore,
 };
-use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
+use crate::handles::{ConfigurationBackupWaiver, DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::sidecar::SidecarState;
+use emuchef_rust_backend::operation_fence::{
+    self as operation, OperationFenceBinding, OperationFenceOutcome, OperationFencePhase,
+    OperationFenceRecord,
+};
 use emuchef_rust_backend::storage_targets::SetupLocationExecutionLease;
 
 const ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER: &str =
@@ -62,6 +65,116 @@ struct LaunchActionRecord {
 enum ExecutionKind {
     Simulated,
     Real,
+}
+
+/// Identifies one start reservation so a stale caller cannot release a later start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecutionStartReservationToken(u64);
+
+/// Records the reviewed backup preference and configuration operation admitted
+/// by one real-execution reservation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReviewedBackupPreferenceAdmission {
+    reservation_token: ExecutionStartReservationToken,
+    review_handle: String,
+    plan_digest: String,
+    configuration_backup_enabled: bool,
+    backup_mode: String,
+    operation_binding_digest: String,
+}
+
+impl ReviewedBackupPreferenceAdmission {
+    fn validate_review(
+        &self,
+        review_handle: &str,
+        review: &ReviewedPlanSnapshot,
+    ) -> Result<(), String> {
+        let plan = review
+            .response
+            .get("plan")
+            .ok_or_else(|| stale_review("The retained reviewed plan is unavailable."))?;
+        let target =
+            crate::retroarch_config_write_policy::resolve_retroarch_config_write_target(plan)
+                .map_err(|_| {
+                    stale_review("The reviewed RetroArch configuration target is invalid.")
+                })?;
+        if self.review_handle != review_handle
+            || !self.plan_digest.eq_ignore_ascii_case(&review.plan_digest)
+            || self.configuration_backup_enabled != review.configuration_backup_enabled
+            || target.as_ref().map(|target| target.backup_mode.as_str())
+                != Some(self.backup_mode.as_str())
+        {
+            return Err(stale_review(
+                "The reviewed backup admission no longer matches this configuration operation.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Holds the execution and update-activity leases across native confirmation.
+/// Dropping it releases only the reservation carrying this exact token.
+struct ExecutionStartReservation<'a> {
+    state: &'a AppState,
+    token: ExecutionStartReservationToken,
+    _activity: crate::updates::ActivityLease,
+}
+
+impl<'a> ExecutionStartReservation<'a> {
+    fn reserve(state: &'a AppState) -> Result<Self, String> {
+        let activity = state.update_activity.reserve_execution_start()?;
+        let token = {
+            let mut executions = state.executions.lock().map_err(|_| {
+                safe_error(
+                    "execution_state_unavailable",
+                    "Real-device execution state is unavailable.",
+                )
+            })?;
+            executions.reserve_start(ExecutionKind::Real).map_err(|()| {
+                if executions.has_durable_operation_fence() {
+                    safe_error(
+                        "execution_quiescence_unconfirmed",
+                        "A previous device operation may still be active. New device writes are blocked.",
+                    )
+                } else {
+                    safe_error(
+                        "execution_in_progress",
+                        "Another execution is already starting or active.",
+                    )
+                }
+            })?
+        };
+        Ok(Self {
+            state,
+            token,
+            _activity: activity,
+        })
+    }
+
+    fn token(&self) -> ExecutionStartReservationToken {
+        self.token
+    }
+
+    fn admit_reviewed_backup_preference(
+        &self,
+        intent: &NativeConfigurationWriteIntent,
+    ) -> Result<ReviewedBackupPreferenceAdmission, String> {
+        let mut executions = self.state.executions.lock().map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Real-device execution state is unavailable.",
+            )
+        })?;
+        executions.admit_reviewed_backup_preference(self.token, intent)
+    }
+}
+
+impl Drop for ExecutionStartReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut executions) = self.state.executions.lock() {
+            executions.release_start_if_owned(&self.token);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +217,8 @@ fn synthetic_in_flight_review() -> ReviewedPlanSnapshot {
         qualification_context: None,
         platform_tools_identity: None,
         restricted_execution: None,
+        configuration_backup_waiver: None,
+        configuration_backup_enabled: true,
         created: std::time::Instant::now(),
         last_access: std::time::Instant::now(),
     }
@@ -122,8 +237,32 @@ struct UnresolvedRealStart {
     plan_digest: String,
 }
 
-#[cfg(unix)]
-fn write_durable_operation_fence(path: &Path) -> std::io::Result<()> {
+impl UnresolvedRealStart {
+    fn operation_fence_record(&self) -> OperationFenceRecord {
+        let digest_prefix = self.plan_digest.get(..16).unwrap_or("invalid-digest");
+        OperationFenceRecord {
+            version: 1,
+            operation_id: format!(
+                "g{}-a{}-{digest_prefix}",
+                self.runtime_generation, self.attempt_sequence
+            ),
+            runtime_generation: self.runtime_generation,
+            attempt_sequence: self.attempt_sequence,
+            device_handle: self.device_handle.clone(),
+            plan_digest: self.plan_digest.clone(),
+            phase: OperationFencePhase::Dispatching,
+            outcome: None,
+            host_cleanup_complete: false,
+            target: None,
+            backup: None,
+        }
+    }
+}
+
+fn write_durable_operation_fence(
+    path: &Path,
+    record: &OperationFenceRecord,
+) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -131,28 +270,84 @@ fn write_durable_operation_fence(path: &Path) -> std::io::Result<()> {
         )
     })?;
     fs::create_dir_all(parent)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
-    let mut marker = options.open(path)?;
-    marker.write_all(b"EmuChef unresolved real-device operation\n")?;
-    marker.sync_all()?;
-    File::open(parent)?.sync_all()
+    operation::write_initial(path, record)
+}
+
+#[cfg(unix)]
+fn clear_durable_operation_fence_file(
+    path: &Path,
+    expected_identity: &OperationFenceRecord,
+    allow_dispatching: bool,
+    requires_remote_quiescence: bool,
+) -> Result<(), String> {
+    let record = operation::read(path).map_err(|_| {
+        safe_error(
+            "execution_fence_unavailable",
+            "The durable operation fence is malformed or unreadable.",
+        )
+    })?;
+    let phase_is_clearable = if allow_dispatching {
+        record.phase == OperationFencePhase::Dispatching
+    } else if requires_remote_quiescence {
+        record.can_acknowledge_quiescence()
+    } else {
+        record.phase != OperationFencePhase::CommitPending
+    };
+    if !record.has_same_identity(expected_identity) || !phase_is_clearable {
+        return Err(safe_error(
+            "execution_quiescence_unconfirmed",
+            "The active device operation has not been reconciled.",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        safe_error(
+            "execution_fence_unavailable",
+            "Device-operation state is unavailable. Later device writes remain blocked.",
+        )
+    })?;
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "The app could not safely clear device-operation state. Later device writes remain blocked.",
+            ));
+        }
+    }
+    if File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .is_err()
+    {
+        let _ = operation::restore_removed(path, &record);
+        return Err(safe_error(
+            "execution_fence_unavailable",
+            "The app could not safely clear device-operation state. Later device writes remain blocked.",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn write_durable_operation_fence(_path: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "durable device-operation fencing is unavailable on this platform",
+fn clear_durable_operation_fence_file(
+    _path: &Path,
+    _expected_identity: &OperationFenceRecord,
+    _allow_dispatching: bool,
+    _requires_remote_quiescence: bool,
+) -> Result<(), String> {
+    Err(safe_error(
+        "execution_fence_unavailable",
+        "This platform cannot safely clear device-operation state. Later device writes remain blocked.",
     ))
 }
 
 #[derive(Default)]
 pub struct ExecutionHandleStore {
     next_setup_location_attempt_sequence: u64,
+    next_start_reservation_sequence: u64,
     start_reserved: Option<ExecutionKind>,
+    start_reservation_token: Option<ExecutionStartReservationToken>,
+    reviewed_backup_preference_admission: Option<ReviewedBackupPreferenceAdmission>,
     // A lost or malformed real-start response leaves the old operation
     // unresolved. This fence grants no execution rights; it keeps restart and
     // later starts blocked until the same request receives terminal evidence.
@@ -165,8 +360,401 @@ pub struct ExecutionHandleStore {
     launch_actions: HashMap<String, LaunchActionRecord>,
     launch_attempts_in_flight: HashSet<String>,
     successful_launches: HashSet<String>,
+    consumed_configuration_backup_waivers: HashSet<String>,
     durable_operation_fence_path: Option<PathBuf>,
     durable_operation_fence_active: bool,
+    durable_operation_fence_identity: Option<OperationFenceRecord>,
+    durable_operation_fence_requires_remote_quiescence: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperationFenceRecoveryInspection {
+    pub record: OperationFenceRecord,
+    pub status: &'static str,
+    pub guidance: String,
+    pub can_acknowledge: bool,
+}
+
+/// Path-free recovery details returned to the frontend.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationFenceRecoveryProjection {
+    pub record: OperationFenceRecordProjection,
+    pub status: &'static str,
+    pub guidance: String,
+    pub can_acknowledge: bool,
+}
+
+/// Reviewed target facts that are safe to show in the recovery view.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationFenceTargetProjection {
+    pub operation: String,
+    pub app_id: String,
+    pub target_id: String,
+    pub package_id: String,
+    pub android_user_id: u32,
+    pub source_sha256: String,
+    pub original_file_precondition: OriginalFilePreconditionProjection,
+    pub backup_mode: String,
+}
+
+/// A verified backup summary with local and device paths removed.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationFenceBackupProjection {
+    pub operation: String,
+    pub package_id: String,
+    pub captured_at_unix_ms: u64,
+    pub sha256: String,
+    pub length: u64,
+}
+
+/// Durable recovery state safe for frontend presentation.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationFenceRecordProjection {
+    pub version: u8,
+    pub operation_id: String,
+    pub runtime_generation: u64,
+    pub attempt_sequence: u64,
+    pub device_handle: String,
+    pub plan_digest: String,
+    pub phase: OperationFencePhase,
+    pub outcome: Option<OperationFenceOutcome>,
+    pub host_cleanup_complete: bool,
+    pub target: Option<OperationFenceTargetProjection>,
+    pub backup: Option<OperationFenceBackupProjection>,
+}
+
+/// Safe summary of the original-file check shown during recovery.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginalFilePreconditionProjection {
+    pub status: Option<String>,
+    pub sha256: Option<String>,
+    pub byte_length: Option<u64>,
+}
+
+/// Gives one start flow brief access to execution state without keeping its
+/// mutex locked while the flow waits on the runtime or the device.
+enum ExecutionStoreAccess<'a> {
+    Borrowed(&'a mut ExecutionHandleStore),
+    Locked {
+        store: &'a Mutex<ExecutionHandleStore>,
+        token: ExecutionStartReservationToken,
+        reviewed_backup_preference_admission: Option<ReviewedBackupPreferenceAdmission>,
+    },
+}
+
+impl<'a> ExecutionStoreAccess<'a> {
+    fn borrowed(store: &'a mut ExecutionHandleStore) -> Self {
+        Self::Borrowed(store)
+    }
+
+    fn locked(
+        store: &'a Mutex<ExecutionHandleStore>,
+        token: ExecutionStartReservationToken,
+        reviewed_backup_preference_admission: Option<ReviewedBackupPreferenceAdmission>,
+    ) -> Self {
+        Self::Locked {
+            store,
+            token,
+            reviewed_backup_preference_admission,
+        }
+    }
+
+    fn with_store<R>(
+        &mut self,
+        update: impl FnOnce(&mut ExecutionHandleStore) -> R,
+    ) -> Result<R, String> {
+        match self {
+            Self::Borrowed(store) => Ok(update(store)),
+            Self::Locked {
+                store,
+                token,
+                reviewed_backup_preference_admission,
+            } => {
+                let mut store = store.lock().map_err(|_| {
+                    safe_error(
+                        "execution_state_unavailable",
+                        "Real-device execution state is unavailable.",
+                    )
+                })?;
+                if store.start_reservation_token != Some(*token) {
+                    return Err(safe_error(
+                        "execution_start_reservation_lost",
+                        "The current execution start no longer owns its reservation.",
+                    ));
+                }
+                if reviewed_backup_preference_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.reservation_token != *token)
+                {
+                    return Err(safe_error(
+                        "execution_start_reservation_lost",
+                        "The reviewed backup admission belongs to a different execution reservation.",
+                    ));
+                }
+                if store.reviewed_backup_preference_admission
+                    != *reviewed_backup_preference_admission
+                {
+                    return Err(safe_error(
+                        "execution_start_reservation_lost",
+                        "The current execution start no longer owns its reviewed backup admission.",
+                    ));
+                }
+                Ok(update(&mut store))
+            }
+        }
+    }
+
+    fn persist_durable_operation_fence(
+        &mut self,
+        record: &OperationFenceRecord,
+        requires_remote_quiescence: bool,
+    ) -> Result<(), String> {
+        let (path, active) = self.with_store(|store| {
+            (
+                store.durable_operation_fence_path.clone(),
+                store.durable_operation_fence_active,
+            )
+        })?;
+        if active {
+            return Err(safe_error(
+                "execution_quiescence_unconfirmed",
+                "A previous device operation may still be active. New device writes remain blocked.",
+            ));
+        }
+        let Some(path) = path else {
+            return Ok(());
+        };
+        if write_durable_operation_fence(&path, record).is_err() {
+            let active = match fs::symlink_metadata(&path) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            };
+            let _ = self.with_store(|store| store.durable_operation_fence_active = active);
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "The app could not safely retain device-operation state. No device operation was started.",
+            ));
+        }
+        self.with_store(|store| store.durable_operation_fence_active = true)?;
+        self.with_store(|store| {
+            store.durable_operation_fence_identity = Some(record.clone());
+            store.durable_operation_fence_requires_remote_quiescence = requires_remote_quiescence;
+        })?;
+        Ok(())
+    }
+
+    fn operation_fence_binding(
+        &mut self,
+        operation: &UnresolvedRealStart,
+    ) -> Result<Option<OperationFenceBinding>, String> {
+        let (path, active, identity) = self.with_store(|store| {
+            (
+                store.durable_operation_fence_path.clone(),
+                store.durable_operation_fence_active,
+                store.durable_operation_fence_identity.clone(),
+            )
+        })?;
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let expected = operation.operation_fence_record();
+        if !active || identity.as_ref() != Some(&expected) {
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "The active device operation identity is unavailable.",
+            ));
+        }
+        let durable_record = operation::read(&path).map_err(|_| {
+            safe_error(
+                "execution_fence_unavailable",
+                "The durable device operation record is unreadable.",
+            )
+        })?;
+        if durable_record != expected {
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "The durable device operation record does not match this attempt.",
+            ));
+        }
+        Ok(Some(OperationFenceBinding {
+            path,
+            record: expected,
+        }))
+    }
+
+    fn clear_durable_operation_fence(&mut self) -> Result<(), String> {
+        let (path, active, expected_identity) = self.with_store(|store| {
+            (
+                store.durable_operation_fence_path.clone(),
+                store.durable_operation_fence_active,
+                store.durable_operation_fence_identity.clone(),
+            )
+        })?;
+        if !active {
+            return Ok(());
+        }
+        let Some(path) = path else {
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "Device-operation state is unavailable. Later device writes remain blocked.",
+            ));
+        };
+        let Some(expected_identity) = expected_identity else {
+            return Err(safe_error(
+                "execution_fence_unavailable",
+                "The active device operation identity is unavailable.",
+            ));
+        };
+        clear_durable_operation_fence_file(&path, &expected_identity, true, false)?;
+        if let Err(error) = self.with_store(|store| {
+            store.durable_operation_fence_active = false;
+            store.durable_operation_fence_identity = None;
+            store.durable_operation_fence_requires_remote_quiescence = false;
+        }) {
+            let _ = operation::restore_removed(&path, &expected_identity);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn retain_unresolved_real_start(
+        &mut self,
+        operation: UnresolvedRealStart,
+    ) -> Result<(), String> {
+        self.retain_unresolved_real_start_with_policy(operation, false)
+    }
+
+    fn retain_unresolved_real_start_with_policy(
+        &mut self,
+        operation: UnresolvedRealStart,
+        requires_remote_quiescence: bool,
+    ) -> Result<(), String> {
+        let already_unresolved = self.with_store(|store| store.unresolved_real_start.is_some())?;
+        if already_unresolved {
+            return Err(runtime_session_lost_error());
+        }
+        self.persist_durable_operation_fence(
+            &operation.operation_fence_record(),
+            requires_remote_quiescence,
+        )?;
+        self.with_store(|store| {
+            if store.unresolved_real_start.is_some() {
+                return Err(runtime_session_lost_error());
+            }
+            store.unresolved_real_start = Some(operation);
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    fn release_unrequested_real_start(
+        &mut self,
+        operation: &UnresolvedRealStart,
+    ) -> Result<bool, String> {
+        let (eligible, path, active) = self.with_store(|store| {
+            let eligible = store.start_reserved == Some(ExecutionKind::Real)
+                && store.active.is_none()
+                && store.pending_setup_location_lease.is_none()
+                && store.unresolved_real_start.as_ref() == Some(operation);
+            (
+                eligible,
+                store.durable_operation_fence_path.clone(),
+                store.durable_operation_fence_active,
+            )
+        })?;
+        if !eligible {
+            return Ok(false);
+        }
+        if active {
+            let Some(path) = path.as_deref() else {
+                return Err(safe_error(
+                    "execution_fence_unavailable",
+                    "Device-operation state is unavailable. Later device writes remain blocked.",
+                ));
+            };
+            let expected_identity = operation.operation_fence_record();
+            clear_durable_operation_fence_file(path, &expected_identity, true, false)?;
+        }
+        match self.with_store(|store| {
+            if store.start_reserved != Some(ExecutionKind::Real)
+                || store.active.is_some()
+                || store.pending_setup_location_lease.is_some()
+                || store.unresolved_real_start.as_ref() != Some(operation)
+            {
+                return Err(runtime_session_lost_error());
+            }
+            store.unresolved_real_start = None;
+            store.durable_operation_fence_active = false;
+            store.durable_operation_fence_identity = None;
+            store.release_start();
+            Ok(true)
+        }) {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) | Err(error) => {
+                if active {
+                    if let Some(path) = path.as_deref() {
+                        let expected_identity = operation.operation_fence_record();
+                        let _ = write_durable_operation_fence(path, &expected_identity);
+                        let _ = self.with_store(|store| {
+                            store.durable_operation_fence_active = true;
+                            store.durable_operation_fence_identity = Some(expected_identity);
+                        });
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn set_pending_setup_location_lease(
+        &mut self,
+        lease: Option<SetupLocationExecutionLease>,
+    ) -> Result<(), String> {
+        self.with_store(|store| store.set_pending_setup_location_lease(lease))?
+    }
+
+    fn clear_setup_location_lease_after_revocation(
+        &mut self,
+        lease: &SetupLocationExecutionLease,
+    ) -> Result<bool, String> {
+        self.with_store(|store| store.clear_setup_location_lease_after_revocation(lease))
+    }
+
+    fn release_start(&mut self) -> Result<(), String> {
+        self.with_store(ExecutionHandleStore::release_start)?;
+        Ok(())
+    }
+
+    fn pending_setup_location_lease_is_none(&mut self) -> Result<bool, String> {
+        self.with_store(|store| store.pending_setup_location_lease.is_none())
+    }
+
+    fn clear_unresolved_real_start(
+        &mut self,
+        operation: &UnresolvedRealStart,
+    ) -> Result<bool, String> {
+        self.with_store(|store| store.clear_unresolved_real_start(operation))
+    }
+
+    fn mapping(
+        &mut self,
+        kind: ExecutionKind,
+        public_handle: &str,
+        unavailable_message: &str,
+    ) -> Result<ExecutionMapping, String> {
+        self.with_store(|store| store.mapping(kind, public_handle, unavailable_message))?
+    }
+
+    fn consume_configuration_backup_waiver(&mut self, digest: &str) -> Result<(), String> {
+        self.with_store(|store| store.consume_configuration_backup_waiver(digest))?
+    }
 }
 
 impl ExecutionHandleStore {
@@ -189,12 +777,146 @@ impl ExecutionHandleStore {
         Self {
             durable_operation_fence_path: Some(path),
             durable_operation_fence_active,
+            durable_operation_fence_requires_remote_quiescence: durable_operation_fence_active,
             ..Self::default()
         }
     }
 
     pub(crate) fn has_durable_operation_fence(&self) -> bool {
         self.durable_operation_fence_active
+    }
+
+    /// Reads the retained operation identity and classifies its durable outcome.
+    pub(crate) fn inspect_durable_operation_fence(
+        &mut self,
+    ) -> Result<Option<OperationFenceRecoveryInspection>, String> {
+        let Some(path) = self.durable_operation_fence_path.as_deref() else {
+            return Ok(None);
+        };
+        match fs::symlink_metadata(path) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && !self.durable_operation_fence_active =>
+            {
+                return Ok(None)
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(safe_error(
+                    "execution_fence_unavailable",
+                    "The durable operation fence could not be inspected safely.",
+                ))
+            }
+        }
+        let record = operation::read(path).map_err(|_| {
+            safe_error(
+                "execution_fence_unavailable",
+                "The durable operation fence is unreadable. Later device writes remain blocked.",
+            )
+        })?;
+        self.durable_operation_fence_active = true;
+        self.durable_operation_fence_identity = Some(record.clone());
+        self.durable_operation_fence_requires_remote_quiescence = true;
+        let (status, guidance) = match (record.phase, record.outcome) {
+            (OperationFencePhase::Dispatching, _) => (
+                "dispatch_unresolved",
+                "Dispatch may still be delayed. Keep device writes blocked until the original attempt reaches a terminal state.",
+            ),
+            (OperationFencePhase::CommitPending, _) => (
+                "write_unresolved",
+                "The helper outcome is unresolved. It may still be active or may have stopped without recording a result. Keep device writes blocked.",
+            ),
+            (OperationFencePhase::RemoteQuiescent, Some(OperationFenceOutcome::NotDispatched)) => (
+                "not_dispatched",
+                "The backend recorded that no remote helper was dispatched. Review the device before continuing.",
+            ),
+            (OperationFencePhase::RemoteQuiescent, Some(OperationFenceOutcome::VerifiedWrite)) => (
+                "write_verified",
+                "The helper verified the reviewed target bytes and reached a terminal state. Review the device before continuing.",
+            ),
+            (
+                OperationFencePhase::RemoteQuiescent,
+                Some(OperationFenceOutcome::AbortedBeforeWrite),
+            ) => (
+                "write_aborted",
+                "The helper stopped before changing the target. Review the device before continuing.",
+            ),
+            (
+                OperationFencePhase::RemoteQuiescent,
+                Some(OperationFenceOutcome::PartialWriteTerminal),
+            ) => (
+                "partial_write_terminal",
+                "The helper reported a terminal failure after changing the target. It is no longer writing. Use the verified private backup for manual recovery.",
+            ),
+            (OperationFencePhase::RemoteQuiescent, None) => (
+                "quiescence_outcome_missing",
+                "This fence does not record a verified terminal outcome. Keep device writes blocked.",
+            ),
+        };
+        let guidance = if status == "partial_write_terminal" {
+            record.backup.as_ref().map_or_else(
+            || {
+                "The helper reported terminal failure after changing the target. No verified private backup is recorded; keep the report and use manual recovery.".to_string()
+            },
+            |backup| {
+                format!(
+                    "The helper reported terminal failure after changing the target. It is no longer writing. For manual recovery, use the verified private backup at {} ({} bytes, SHA-256 {}) for {} at {}.",
+                    backup.path,
+                    backup.length,
+                    backup.sha256,
+                    backup.package_id,
+                    backup.target_path,
+                )
+            },
+        )
+        } else {
+            guidance.to_string()
+        };
+        Ok(Some(OperationFenceRecoveryInspection {
+            can_acknowledge: record.can_acknowledge_quiescence(),
+            record,
+            status,
+            guidance,
+        }))
+    }
+
+    /// Clears a fence only when the exact inspected terminal outcome is unchanged.
+    pub(crate) fn acknowledge_durable_operation_fence(
+        &mut self,
+        expected_record: &OperationFenceRecord,
+    ) -> Result<(), String> {
+        if !expected_record.can_acknowledge_quiescence() {
+            return Err(safe_error(
+                "execution_quiescence_unconfirmed",
+                "The inspected operation has no confirmed quiescent outcome.",
+            ));
+        }
+        let inspection = self.inspect_durable_operation_fence()?.ok_or_else(|| {
+            safe_error(
+                "execution_fence_unavailable",
+                "No retained operation fence was found.",
+            )
+        })?;
+        if !inspection.can_acknowledge || inspection.record != *expected_record {
+            return Err(safe_error(
+                "execution_quiescence_unconfirmed",
+                "The operation fence changed after inspection. Review its current state before acknowledging it.",
+            ));
+        }
+        let path = self
+            .durable_operation_fence_path
+            .as_deref()
+            .ok_or_else(|| {
+                safe_error(
+                    "execution_fence_unavailable",
+                    "Operation-fence storage is unavailable.",
+                )
+            })?;
+        clear_durable_operation_fence_file(path, expected_record, false, true)?;
+        self.durable_operation_fence_active = false;
+        self.durable_operation_fence_identity = None;
+        self.durable_operation_fence_requires_remote_quiescence = false;
+        Ok(())
     }
 
     pub(crate) fn profile_change_allowed(&self) -> bool {
@@ -206,6 +928,21 @@ impl ExecutionHandleStore {
             || self.active.is_some()
             || self.unresolved_real_start.is_some()
             || self.durable_operation_fence_active
+    }
+
+    fn consume_configuration_backup_waiver(&mut self, digest: &str) -> Result<(), String> {
+        if !is_lowercase_sha256(digest) {
+            return Err(stale_review("The reviewed backup waiver is invalid."));
+        }
+        if !self
+            .consumed_configuration_backup_waivers
+            .insert(digest.to_string())
+        {
+            return Err(stale_review(
+                "This one-time backup waiver has already been used. Prepare a fresh review.",
+            ));
+        }
+        Ok(())
     }
 
     /// Whether the shared execution slot is currently owned by a real start
@@ -225,26 +962,48 @@ impl ExecutionHandleStore {
 
     pub fn reset(&mut self) {
         let next_setup_location_attempt_sequence = self.next_setup_location_attempt_sequence;
+        let next_start_reservation_sequence = self.next_start_reservation_sequence;
         let unresolved_real_start = self.unresolved_real_start.clone();
         let pending_setup_location_lease = self.pending_setup_location_lease.clone();
         let durable_operation_fence_path = self.durable_operation_fence_path.clone();
         let durable_operation_fence_active = self.durable_operation_fence_active;
+        let durable_operation_fence_identity = self.durable_operation_fence_identity.clone();
+        let durable_operation_fence_requires_remote_quiescence =
+            self.durable_operation_fence_requires_remote_quiescence;
+        let consumed_configuration_backup_waivers =
+            self.consumed_configuration_backup_waivers.clone();
         *self = Self::default();
         self.next_setup_location_attempt_sequence = next_setup_location_attempt_sequence;
+        self.next_start_reservation_sequence = next_start_reservation_sequence;
         self.unresolved_real_start = unresolved_real_start;
         self.pending_setup_location_lease = pending_setup_location_lease;
         self.durable_operation_fence_path = durable_operation_fence_path;
         self.durable_operation_fence_active = durable_operation_fence_active;
+        self.durable_operation_fence_identity = durable_operation_fence_identity;
+        self.durable_operation_fence_requires_remote_quiescence =
+            durable_operation_fence_requires_remote_quiescence;
+        self.consumed_configuration_backup_waivers = consumed_configuration_backup_waivers;
     }
 
     fn retain_unresolved_real_start(
         &mut self,
         operation: UnresolvedRealStart,
     ) -> Result<(), String> {
+        self.retain_unresolved_real_start_with_policy(operation, false)
+    }
+
+    fn retain_unresolved_real_start_with_policy(
+        &mut self,
+        operation: UnresolvedRealStart,
+        requires_remote_quiescence: bool,
+    ) -> Result<(), String> {
         if self.unresolved_real_start.is_some() {
             return Err(runtime_session_lost_error());
         }
-        self.persist_durable_operation_fence()?;
+        self.persist_durable_operation_fence(
+            &operation.operation_fence_record(),
+            requires_remote_quiescence,
+        )?;
         self.unresolved_real_start = Some(operation);
         Ok(())
     }
@@ -270,7 +1029,7 @@ impl ExecutionHandleStore {
         {
             return Ok(false);
         }
-        self.clear_durable_operation_fence()?;
+        self.clear_unrequested_operation_fence()?;
         if !self.clear_unresolved_real_start(operation) {
             return Ok(false);
         }
@@ -278,7 +1037,11 @@ impl ExecutionHandleStore {
         Ok(true)
     }
 
-    fn persist_durable_operation_fence(&mut self) -> Result<(), String> {
+    fn persist_durable_operation_fence(
+        &mut self,
+        record: &OperationFenceRecord,
+        requires_remote_quiescence: bool,
+    ) -> Result<(), String> {
         let Some(path) = self.durable_operation_fence_path.as_deref() else {
             return Ok(());
         };
@@ -289,9 +1052,12 @@ impl ExecutionHandleStore {
             ));
         }
 
-        match write_durable_operation_fence(path) {
+        match write_durable_operation_fence(path, record) {
             Ok(()) => {
                 self.durable_operation_fence_active = true;
+                self.durable_operation_fence_identity = Some(record.clone());
+                self.durable_operation_fence_requires_remote_quiescence =
+                    requires_remote_quiescence;
                 Ok(())
             }
             Err(_) => {
@@ -309,6 +1075,17 @@ impl ExecutionHandleStore {
     }
 
     fn clear_durable_operation_fence(&mut self) -> Result<(), String> {
+        self.clear_durable_operation_fence_in_phase(false)
+    }
+
+    fn clear_unrequested_operation_fence(&mut self) -> Result<(), String> {
+        self.clear_durable_operation_fence_in_phase(true)
+    }
+
+    fn clear_durable_operation_fence_in_phase(
+        &mut self,
+        allow_dispatching: bool,
+    ) -> Result<(), String> {
         if !self.durable_operation_fence_active {
             return Ok(());
         }
@@ -318,45 +1095,26 @@ impl ExecutionHandleStore {
                 "Device-operation state is unavailable. Later device writes remain blocked.",
             ));
         };
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            return Err(safe_error(
-                "execution_fence_unavailable",
-                "This platform cannot safely clear device-operation state. Later device writes remain blocked.",
-            ));
-        }
-        #[cfg(unix)]
-        {
-            let parent = path.parent().ok_or_else(|| {
+        let expected_identity = self
+            .durable_operation_fence_identity
+            .as_ref()
+            .ok_or_else(|| {
                 safe_error(
                     "execution_fence_unavailable",
-                    "Device-operation state is unavailable. Later device writes remain blocked.",
+                    "The active device operation identity is unavailable.",
                 )
-            })?;
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => {
-                    return Err(safe_error(
-                        "execution_fence_unavailable",
-                        "The app could not safely clear device-operation state. Later device writes remain blocked.",
-                    ));
-                }
-            }
-            if File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .is_err()
-            {
-                let _ = write_durable_operation_fence(path);
-                return Err(safe_error(
-                    "execution_fence_unavailable",
-                    "The app could not safely clear device-operation state. Later device writes remain blocked.",
-                ));
-            }
-            self.durable_operation_fence_active = false;
-            Ok(())
-        }
+            })?
+            .clone();
+        clear_durable_operation_fence_file(
+            path,
+            &expected_identity,
+            allow_dispatching,
+            self.durable_operation_fence_requires_remote_quiescence,
+        )?;
+        self.durable_operation_fence_active = false;
+        self.durable_operation_fence_identity = None;
+        self.durable_operation_fence_requires_remote_quiescence = false;
+        Ok(())
     }
 
     fn issue_setup_location_attempt_sequence(&mut self) -> Result<u64, String> {
@@ -453,7 +1211,7 @@ impl ExecutionHandleStore {
         })
     }
 
-    fn reserve_start(&mut self, kind: ExecutionKind) -> Result<(), ()> {
+    fn reserve_start(&mut self, kind: ExecutionKind) -> Result<ExecutionStartReservationToken, ()> {
         if self.start_reserved.is_some()
             || self.active.is_some()
             || self.unresolved_real_start.is_some()
@@ -462,8 +1220,48 @@ impl ExecutionHandleStore {
         {
             return Err(());
         }
+        self.next_start_reservation_sequence = self
+            .next_start_reservation_sequence
+            .checked_add(1)
+            .ok_or(())?;
+        let token = ExecutionStartReservationToken(self.next_start_reservation_sequence);
         self.start_reserved = Some(kind);
-        Ok(())
+        self.start_reservation_token = Some(token);
+        Ok(token)
+    }
+
+    fn admit_reviewed_backup_preference(
+        &mut self,
+        token: ExecutionStartReservationToken,
+        intent: &NativeConfigurationWriteIntent,
+    ) -> Result<ReviewedBackupPreferenceAdmission, String> {
+        if self.start_reserved != Some(ExecutionKind::Real)
+            || self.start_reservation_token != Some(token)
+            || self.reviewed_backup_preference_admission.is_some()
+        {
+            return Err(safe_error(
+                "execution_start_reservation_lost",
+                "The current execution start no longer owns its reviewed backup admission.",
+            ));
+        }
+        let admission = ReviewedBackupPreferenceAdmission {
+            reservation_token: token,
+            review_handle: intent.review_handle.clone(),
+            plan_digest: intent.plan_digest.clone(),
+            configuration_backup_enabled: intent.configuration_backup_enabled,
+            backup_mode: intent.backup_mode.clone(),
+            operation_binding_digest: intent.preference_admission_binding_digest()?,
+        };
+        self.reviewed_backup_preference_admission = Some(admission.clone());
+        Ok(admission)
+    }
+
+    fn release_start_if_owned(&mut self, token: &ExecutionStartReservationToken) -> bool {
+        if self.start_reservation_token.as_ref() != Some(token) {
+            return false;
+        }
+        self.release_start();
+        self.start_reservation_token.as_ref() != Some(token)
     }
 
     fn release_start(&mut self) {
@@ -475,6 +1273,8 @@ impl ExecutionHandleStore {
             return;
         }
         self.start_reserved = None;
+        self.start_reservation_token = None;
+        self.reviewed_backup_preference_admission = None;
         if self.active.is_none() {
             self.pending_setup_location_lease = None;
         }
@@ -489,6 +1289,7 @@ impl ExecutionHandleStore {
     pub(crate) fn force_in_flight_for_test(&mut self, active: bool) {
         let kind = ExecutionKind::Real;
         self.start_reserved = Some(kind);
+        self.start_reservation_token = None;
         if active {
             self.start_reserved = None;
             self.active = Some(ExecutionMapping {
@@ -517,6 +1318,8 @@ impl ExecutionHandleStore {
             review,
         };
         self.start_reserved = None;
+        self.start_reservation_token = None;
+        self.reviewed_backup_preference_admission = None;
         self.active = Some(mapping.clone());
         mapping
     }
@@ -873,6 +1676,18 @@ impl ExecutionHandleStore {
 pub(crate) trait RuntimeRequester {
     fn request(&self, request_type: &str, payload: Value) -> Result<Value, String>;
 
+    fn request_with_trusted_claims(
+        &self,
+        request_type: &str,
+        payload: Value,
+        claims: Option<Value>,
+    ) -> Result<Value, String> {
+        if claims.is_some() {
+            return Err("Native configuration authorization is unavailable.".to_string());
+        }
+        self.request(request_type, payload)
+    }
+
     fn generation(&self) -> Option<u64> {
         None
     }
@@ -885,6 +1700,15 @@ impl RuntimeRequester for SidecarState {
 
     fn generation(&self) -> Option<u64> {
         self.try_generation().ok()
+    }
+
+    fn request_with_trusted_claims(
+        &self,
+        request_type: &str,
+        payload: Value,
+        claims: Option<Value>,
+    ) -> Result<Value, String> {
+        SidecarState::request_with_trusted_claims(self, request_type, payload, claims)
     }
 }
 
@@ -938,23 +1762,31 @@ fn list_and_reconcile_preflight_inventory<R>(
     state: &AppState,
     runtime: &R,
     platform_tools: &crate::commands::AdbRuntimeSnapshot,
-    execution_store: Option<&mut ExecutionHandleStore>,
+    execution_store: Option<&mut ExecutionStoreAccess<'_>>,
 ) -> Result<Vec<DeviceDto>, PreflightInventoryFailure>
 where
     R: RuntimeRequester,
 {
     let snapshot = request_preflight_inventory(state, runtime, platform_tools)?;
     let result = match execution_store {
-        Some(executions) => {
-            crate::commands::reconcile_inventory_snapshot_with_execution_store_and_hook(
-                state,
-                &snapshot.inventory,
-                snapshot.runtime_generation,
-                snapshot.platform_tools.revision,
-                executions,
-                || {},
-            )
-        }
+        Some(executions) => executions
+            .with_store(|store| {
+                crate::commands::reconcile_inventory_snapshot_with_execution_store_and_hook(
+                    state,
+                    &snapshot.inventory,
+                    snapshot.runtime_generation,
+                    snapshot.platform_tools.revision,
+                    store,
+                    || {},
+                )
+            })
+            .map_err(|error| {
+                if runtime_session_lost(state, &error) {
+                    PreflightInventoryFailure::Runtime(error)
+                } else {
+                    PreflightInventoryFailure::ProductUnavailable
+                }
+            })?,
         None => crate::commands::reconcile_inventory_snapshot_with_state_and_hook(
             state,
             &snapshot.inventory,
@@ -1024,29 +1856,30 @@ pub(crate) fn start_simulated_execution_with_runtime<R: RuntimeRequester>(
     // ActivityGate is always acquired before the execution store. The short
     // lease closes the race with an already-reserved browser handoff.
     let _activity = state.update_activity.reserve_execution_start()?;
-    let mut executions = state.executions.lock().map_err(|_| {
-        safe_error(
-            "execution_state_unavailable",
-            "Simulated execution state is unavailable.",
-        )
-    })?;
-    executions
-        .reserve_start(ExecutionKind::Simulated)
-        .map_err(|()| {
+    let reservation_token = {
+        let mut executions = state.executions.lock().map_err(|_| {
             safe_error(
-                "execution_in_progress",
-                "A simulated run is already starting or active.",
+                "execution_state_unavailable",
+                "Simulated execution state is unavailable.",
             )
         })?;
+        executions
+            .reserve_start(ExecutionKind::Simulated)
+            .map_err(|()| {
+                safe_error(
+                    "execution_in_progress",
+                    "A simulated run is already starting or active.",
+                )
+            })?
+    };
 
-    let outcome = start_simulated_execution_inner_with_runtime(
-        review_handle,
-        state,
-        &mut executions,
-        runtime,
-    );
+    let mut executions = ExecutionStoreAccess::locked(&state.executions, reservation_token, None);
+    let outcome =
+        start_simulated_execution_inner_with_access(review_handle, state, &mut executions, runtime);
     if outcome.is_err() {
-        executions.release_start();
+        if let Ok(mut executions) = state.executions.lock() {
+            executions.release_start_if_owned(&reservation_token);
+        }
     }
     outcome
 }
@@ -1062,6 +1895,16 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
     review_handle: &str,
     state: &AppState,
     executions: &mut ExecutionHandleStore,
+    runtime: &R,
+) -> Result<Value, String> {
+    let mut executions = ExecutionStoreAccess::borrowed(executions);
+    start_simulated_execution_inner_with_access(review_handle, state, &mut executions, runtime)
+}
+
+fn start_simulated_execution_inner_with_access<R: RuntimeRequester>(
+    review_handle: &str,
+    state: &AppState,
+    executions: &mut ExecutionStoreAccess<'_>,
     runtime: &R,
 ) -> Result<Value, String> {
     let review = state
@@ -1084,18 +1927,24 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
         ));
     }
     let platform_tools = crate::commands::current_adb_runtime_snapshot(state)?;
-    let _devices =
-        list_and_reconcile_preflight_inventory(state, runtime, &platform_tools, Some(executions))
-            .map_err(|failure| match failure {
-            PreflightInventoryFailure::ProductUnavailable => {
-                stale_review("The reviewed device inventory changed.")
-            }
-            PreflightInventoryFailure::Runtime(error) => {
-                resolve_simulated_start_failure(state, executions, &error, || {
+    let _devices = match list_and_reconcile_preflight_inventory(
+        state,
+        runtime,
+        &platform_tools,
+        Some(executions),
+    ) {
+        Ok(devices) => devices,
+        Err(PreflightInventoryFailure::ProductUnavailable) => {
+            return Err(stale_review("The reviewed device inventory changed."));
+        }
+        Err(PreflightInventoryFailure::Runtime(error)) => {
+            return Err(executions.with_store(|store| {
+                resolve_simulated_start_failure(state, store, &error, || {
                     stale_review("The reviewed device could not be found.")
                 })
-            }
-        })?;
+            })?);
+        }
+    };
 
     let (serial, refreshed_review) = {
         let mut handles = state.handles.lock().map_err(|_| session_error())?;
@@ -1118,27 +1967,15 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
     ) {
         Ok(facts) => facts,
         Err(error) => {
-            return Err(resolve_simulated_start_failure(
-                state,
-                executions,
-                &error,
-                || stale_review("The reviewed device facts could not be refreshed."),
-            ));
+            return Err(executions.with_store(|store| {
+                resolve_simulated_start_failure(state, store, &error, || {
+                    stale_review("The reviewed device facts could not be refreshed.")
+                })
+            })?);
         }
     };
     validate_target(&refreshed_review.target, &serial, &facts)?;
     validate_plan_digest(&refreshed_review)?;
-
-    let reviewed_plan = refreshed_review
-        .response
-        .get("plan")
-        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
-    crate::commands::require_config_create_write_evidence(
-        Some(state),
-        &refreshed_review.device_handle,
-        reviewed_plan,
-        refreshed_review.qualification_context.as_ref(),
-    )?;
 
     {
         let epoch = state
@@ -1153,9 +1990,11 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
             .map_err(|_| session_error())?
             .set_facts_for_epoch(&refreshed_review.device_handle, epoch, facts.clone())?;
     }
-    revalidate_profile_for_start(state, runtime, &refreshed_review, &facts).map_err(|error| {
-        resolve_simulated_start_failure(state, executions, &error, || error.clone())
-    })?;
+    if let Err(error) = revalidate_profile_for_start(state, runtime, &refreshed_review, &facts) {
+        return Err(executions.with_store(|store| {
+            resolve_simulated_start_failure(state, store, &error, || error.clone())
+        })?);
+    }
     let transition = crate::commands::qualification_transition_lock(state);
     let selected = refreshed_review.response["profileSelectionHandle"]
         .as_str()
@@ -1166,12 +2005,20 @@ pub(crate) fn start_simulated_execution_inner_with_runtime<R: RuntimeRequester>(
         Some(selected),
         None,
     )?;
-    let start_response = request_dry_run_start(runtime, &refreshed_review);
     transition.release_and_retry_best_effort();
-    let start_result = start_response.map_err(|error| {
-        resolve_simulated_start_failure(state, executions, &error, || execution_start_error(&error))
-    })?;
-    bind_start_result(executions, review_handle, refreshed_review, &start_result)
+    let start_result = match request_dry_run_start(runtime, &refreshed_review) {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(executions.with_store(|store| {
+                resolve_simulated_start_failure(state, store, &error, || {
+                    execution_start_error(&error)
+                })
+            })?);
+        }
+    };
+    executions.with_store(|store| {
+        bind_start_result(store, review_handle, refreshed_review, &start_result)
+    })?
 }
 
 /// Resolve one failed simulated-start runtime request.
@@ -1525,6 +2372,317 @@ struct RealExecutionConfirmation {
     keep_device_connected_acknowledged: bool,
 }
 
+/// Immutable operation details shown by the native confirmation before a
+/// RetroArch configuration write can be authorized.
+#[derive(Clone, Debug, PartialEq)]
+struct NativeConfigurationWriteIntent {
+    review_handle: String,
+    plan_digest: String,
+    device_handle: String,
+    device_serial: String,
+    session_epoch: u64,
+    runtime_generation: u64,
+    qualification_context_digest: String,
+    profile_id: String,
+    target_identity: Value,
+    destination: String,
+    operation: crate::retroarch_config_write_policy::RetroArchConfigurationOperation,
+    source_sha256: String,
+    original_file_precondition: Value,
+    backup_mode: String,
+    configuration_backup_enabled: bool,
+    backup_waiver_digest: Option<String>,
+    backup_failure_operation_id: Option<String>,
+    backup_failure_report_digest: Option<String>,
+}
+
+impl NativeConfigurationWriteIntent {
+    fn preference_admission_binding_digest(&self) -> Result<String, String> {
+        canonical_json_digest(&json!({
+            "reviewHandle": &self.review_handle,
+            "planDigest": &self.plan_digest,
+            "deviceHandle": &self.device_handle,
+            "deviceSerial": &self.device_serial,
+            "sessionEpoch": self.session_epoch,
+            "runtimeGeneration": self.runtime_generation,
+            "qualificationContextDigest": &self.qualification_context_digest,
+            "profileId": &self.profile_id,
+            "targetIdentity": &self.target_identity,
+            "destination": &self.destination,
+            "operation": self.operation.as_str(),
+            "sourceSha256": &self.source_sha256,
+            "originalFilePrecondition": &self.original_file_precondition,
+            "backupMode": &self.backup_mode,
+            "configurationBackupEnabled": self.configuration_backup_enabled,
+            "backupWaiverDigest": &self.backup_waiver_digest,
+            "backupFailureOperationId": &self.backup_failure_operation_id,
+            "backupFailureReportDigest": &self.backup_failure_report_digest,
+        }))
+        .map_err(|_| stale_review("The reviewed configuration operation could not be bound."))
+    }
+
+    fn authorize(self) -> NativeConfigurationWriteAuthorization {
+        let operation_binding_digest = self
+            .preference_admission_binding_digest()
+            .expect("native configuration write intent is serializable");
+        NativeConfigurationWriteAuthorization {
+            claim: emuchef_rust_backend::trusted_control::NativeConfigurationWriteClaim {
+                version: 1,
+                purpose: "retroarch_configuration_write".to_string(),
+                runtime_generation: self.runtime_generation,
+                nonce: Uuid::new_v4().simple().to_string(),
+                review_handle: self.review_handle,
+                plan_digest: self.plan_digest,
+                device_handle: self.device_handle,
+                device_serial: self.device_serial,
+                session_epoch: self.session_epoch,
+                qualification_context_digest: self.qualification_context_digest,
+                profile_id: self.profile_id,
+                target_identity: self.target_identity,
+                destination: self.destination,
+                operation: self.operation.as_str().to_string(),
+                source_sha256: self.source_sha256,
+                original_file_precondition: self.original_file_precondition,
+                backup_mode: self.backup_mode,
+                backup_waiver_digest: self.backup_waiver_digest,
+            },
+            operation_binding_digest,
+        }
+    }
+
+    fn confirmation_message(&self) -> String {
+        let operation = match self.operation {
+            crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Create => {
+                "Create"
+            }
+            crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace => {
+                "Replace"
+            }
+        };
+        let original = serde_json::to_string(&self.original_file_precondition)
+            .unwrap_or_else(|_| "unavailable".to_string());
+        let waiver = self
+            .backup_waiver_digest
+            .as_deref()
+            .map(|digest| format!("\nBackup waiver SHA-256: {digest}"))
+            .unwrap_or_default();
+        let failure = match (
+            self.backup_failure_operation_id.as_deref(),
+            self.backup_failure_report_digest.as_deref(),
+        ) {
+            (Some(operation_id), Some(report_digest)) => format!(
+                "\nBackup failure operation: {operation_id}\nBackup failure report SHA-256: {report_digest}"
+            ),
+            _ => String::new(),
+        };
+        let consequences = match self.operation {
+            crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Create => {
+                "\nRetroArch may be stopped if it is running. Stopping it may discard unsaved application state. Create writes the new configuration after checking that the target is absent."
+            }
+            crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace => {
+                "\nRetroArch may be stopped if it is running. Stopping it may discard unsaved application state. Replace overwrites the entire configuration, including custom settings and comments. The replacement is non-atomic; interruption may leave partial contents."
+            }
+        };
+        let backup_consequence = if self.operation
+            == crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace
+            && (self.backup_mode == "waived" || !self.configuration_backup_enabled)
+        {
+            "\nNo verified private backup will be available for this replacement; recovery may not be possible."
+        } else if self.operation
+            == crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace
+        {
+            "\nA verified private backup is created before replacement and remains available for manual recovery."
+        } else {
+            "\nCreate has no original configuration file to back up."
+        };
+        format!(
+            "{operation} the reviewed RetroArch config?\n\nDevice: {}\nDevice session: {}\nProfile: {}\nApp Target: RetroArch / config\nDestination: {}\nSource SHA-256: {}\nOriginal-file precondition: {original}\nBackup mode: {}{failure}{waiver}{consequences}{backup_consequence}\n\nThis approval applies once to this exact reviewed operation.",
+            self.device_serial,
+            self.session_epoch,
+            self.profile_id,
+            self.destination,
+            self.source_sha256,
+            self.backup_mode,
+        )
+    }
+}
+
+/// A confirmed configuration write claim is consumed by one sidecar request.
+struct NativeConfigurationWriteAuthorization {
+    claim: emuchef_rust_backend::trusted_control::NativeConfigurationWriteClaim,
+    operation_binding_digest: String,
+}
+
+impl NativeConfigurationWriteAuthorization {
+    fn runtime_generation(&self) -> u64 {
+        self.claim.runtime_generation
+    }
+
+    fn into_claim(self) -> Value {
+        serde_json::to_value(self.claim)
+            .expect("trusted configuration authorization always serializes")
+    }
+}
+
+fn native_configuration_write_intent(
+    review_handle: &str,
+    review: &ReviewedPlanSnapshot,
+    runtime_generation: u64,
+    session_epoch: u64,
+) -> Result<Option<NativeConfigurationWriteIntent>, String> {
+    validate_plan_digest(review)?;
+    let plan = review
+        .response
+        .get("plan")
+        .ok_or_else(|| stale_review("The retained reviewed plan is unavailable."))?;
+    let Some(target) =
+        crate::retroarch_config_write_policy::resolve_retroarch_config_write_target(plan)
+            .map_err(|_| stale_review("The reviewed RetroArch configuration target is invalid."))?
+    else {
+        if review.configuration_backup_waiver.is_some() {
+            return Err(stale_review(
+                "The one-time backup waiver no longer matches a RetroArch config target.",
+            ));
+        }
+        return Ok(None);
+    };
+    let qualification = review.qualification_context.as_ref().ok_or_else(|| {
+        safe_error(
+            "configuration_write_session_unavailable",
+            "Current device-session authority is unavailable for this configuration write.",
+        )
+    })?;
+    if qualification.device_handle != review.device_handle
+        || qualification.session_epoch != session_epoch
+        || qualification.runtime_generation != runtime_generation
+    {
+        return Err(stale_review(
+            "The reviewed device session or qualification context changed.",
+        ));
+    }
+    let device_serial = review
+        .target
+        .get("serial")
+        .and_then(Value::as_str)
+        .filter(|serial| !serial.trim().is_empty())
+        .ok_or_else(|| stale_review("The reviewed device identity is unavailable."))?
+        .to_string();
+    let profile_id = plan
+        .pointer("/source/device_profile_ref")
+        .and_then(Value::as_str)
+        .filter(|profile| !profile.trim().is_empty())
+        .ok_or_else(|| stale_review("The reviewed device profile is unavailable."))?
+        .to_string();
+    let context_value = json!({
+        "deviceHandle": qualification.device_handle,
+        "sessionEpoch": qualification.session_epoch,
+        "runtimeGeneration": qualification.runtime_generation,
+        "platformToolsRevision": qualification.platform_tools_revision,
+        "qualificationRevision": qualification.qualification_revision,
+        "capabilityFingerprint": qualification.capability_fingerprint,
+    });
+    let qualification_context_digest = canonical_json_digest(&context_value)
+        .map_err(|_| stale_review("The reviewed qualification context could not be verified."))?;
+
+    let (backup_failure_operation_id, backup_failure_report_digest) = if target.backup_mode
+        == "waived"
+    {
+        let waiver = review
+            .configuration_backup_waiver
+            .as_ref()
+            .ok_or_else(|| stale_review("The one-time backup waiver is unavailable."))?;
+        if waiver.created.elapsed() > Duration::from_secs(15 * 60)
+            || !is_lowercase_sha256(&waiver.digest)
+            || !is_lowercase_sha256(&waiver.failure_report_digest)
+            || !is_lowercase_sha256(&waiver.original_plan_digest)
+            || waiver.waiver_nonce.is_empty()
+            || waiver.failure_execution_handle.is_empty()
+            || waiver.failure_operation_id.is_empty()
+            || waiver.original_review_handle.is_empty()
+            || target.operation
+                != crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace
+            || target.backup_waiver_digest.as_deref() != Some(waiver.digest.as_str())
+            || waiver.device_handle != review.device_handle
+            || waiver.device_serial != device_serial
+            || waiver.session_epoch != session_epoch
+            || waiver.runtime_generation != runtime_generation
+            || waiver.qualification_context_digest != qualification_context_digest
+            || waiver.profile_id != profile_id
+            || waiver.target_identity != target.target_identity
+            || waiver.destination != target.destination
+            || waiver.source_sha256 != target.source_sha256
+            || waiver.original_file_precondition != target.original_file_precondition
+        {
+            return Err(stale_review(
+                "The one-time backup waiver is stale or no longer matches this reviewed operation.",
+            ));
+        }
+        (
+            Some(waiver.failure_operation_id.clone()),
+            Some(waiver.failure_report_digest.clone()),
+        )
+    } else {
+        if review.configuration_backup_waiver.is_some() || target.backup_waiver_digest.is_some() {
+            return Err(stale_review(
+                "The reviewed backup waiver no longer matches this operation.",
+            ));
+        }
+        (None, None)
+    };
+
+    Ok(Some(NativeConfigurationWriteIntent {
+        review_handle: review_handle.to_string(),
+        plan_digest: review.plan_digest.to_lowercase(),
+        device_handle: review.device_handle.clone(),
+        device_serial,
+        session_epoch,
+        runtime_generation,
+        qualification_context_digest,
+        profile_id,
+        target_identity: target.target_identity,
+        destination: target.destination,
+        operation: target.operation,
+        source_sha256: target.source_sha256,
+        original_file_precondition: target.original_file_precondition,
+        backup_mode: target.backup_mode,
+        configuration_backup_enabled: review.configuration_backup_enabled,
+        backup_waiver_digest: target.backup_waiver_digest,
+        backup_failure_operation_id,
+        backup_failure_report_digest,
+    }))
+}
+
+async fn show_native_configuration_write_confirmation(
+    app: &AppHandle,
+    state: &AppState,
+    intent: &NativeConfigurationWriteIntent,
+) -> Result<bool, String> {
+    let _dialog_activity = state.update_activity.reserve_native_dialog()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.dialog()
+        .message(intent.confirmation_message())
+        .title("Confirm RetroArch configuration write")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancel)
+        .show(move |confirmed| {
+            let _ = sender.send(confirmed);
+        });
+    tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| {
+            safe_error(
+                "native_confirmation_unavailable",
+                "Native confirmation failed.",
+            )
+        })?
+        .map_err(|_| {
+            safe_error(
+                "native_confirmation_unavailable",
+                "Native confirmation failed.",
+            )
+        })
+}
+
 /// Sanitized Platform-Tools readiness authored by the trusted backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1645,18 +2803,677 @@ fn execution_capabilities_unavailable() -> String {
 }
 
 #[tauri::command]
-pub fn start_real_execution(
+pub fn inspect_operation_fence(
+    state: State<'_, AppState>,
+) -> Result<Option<OperationFenceRecoveryProjection>, String> {
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Device-operation recovery state is unavailable.",
+        )
+    })?;
+    Ok(executions
+        .inspect_durable_operation_fence()?
+        .as_ref()
+        .map(project_operation_fence_inspection))
+}
+
+#[tauri::command]
+pub async fn acknowledge_operation_fence(
+    app: AppHandle,
+    operation_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let inspection = {
+        let mut executions = state.executions.lock().map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Device-operation recovery state is unavailable.",
+            )
+        })?;
+        executions
+            .inspect_durable_operation_fence()?
+            .ok_or_else(|| {
+                safe_error(
+                    "execution_fence_unavailable",
+                    "No retained operation fence was found.",
+                )
+            })?
+    };
+    if !inspection.can_acknowledge || inspection.record.operation_id != operation_id {
+        return Err(safe_error(
+            "execution_quiescence_unconfirmed",
+            "The operation fence changed after inspection. Review its current state before acknowledging it.",
+        ));
+    }
+    if !show_native_operation_fence_confirmation(&app, &state, &inspection).await? {
+        return Err(safe_error(
+            "operation_fence_acknowledgment_cancelled",
+            "The operation fence remains in place because native acknowledgment was cancelled.",
+        ));
+    }
+    let mut executions = state.executions.lock().map_err(|_| {
+        safe_error(
+            "execution_state_unavailable",
+            "Device-operation recovery state is unavailable.",
+        )
+    })?;
+    executions.acknowledge_durable_operation_fence(&inspection.record)
+}
+
+fn project_operation_fence_inspection(
+    inspection: &OperationFenceRecoveryInspection,
+) -> OperationFenceRecoveryProjection {
+    let guidance = match inspection.status {
+        "dispatch_unresolved" => {
+            "Dispatch may still be delayed. Keep device writes blocked until the original attempt reaches a terminal state."
+        }
+        "write_unresolved" => {
+            "The helper outcome is unresolved. Keep device writes blocked."
+        }
+        "not_dispatched" => {
+            "The backend recorded that no remote helper was dispatched. Review the device before continuing."
+        }
+        "write_verified" => {
+            "The helper verified the reviewed target bytes and reached a terminal state. Review the device before continuing."
+        }
+        "write_aborted" => {
+            "The helper stopped before changing the target. Review the device before continuing."
+        }
+        "partial_write_terminal" if inspection.record.backup.is_some() => {
+            "The helper reported a terminal failure after changing the target. It is no longer writing. Use the verified private backup for manual recovery; its location is shown only in native confirmation."
+        }
+        "partial_write_terminal" => {
+            "The helper reported terminal failure after changing the target. No verified private backup is recorded; keep the report and use manual recovery."
+        }
+        _ => "This fence does not record a verified terminal outcome. Keep device writes blocked.",
+    }
+    .to_string();
+    let record = &inspection.record;
+    OperationFenceRecoveryProjection {
+        record: OperationFenceRecordProjection {
+            version: record.version,
+            operation_id: record.operation_id.clone(),
+            runtime_generation: record.runtime_generation,
+            attempt_sequence: record.attempt_sequence,
+            device_handle: record.device_handle.clone(),
+            plan_digest: record.plan_digest.clone(),
+            phase: record.phase,
+            outcome: record.outcome,
+            host_cleanup_complete: record.host_cleanup_complete,
+            target: record
+                .target
+                .as_ref()
+                .map(|target| OperationFenceTargetProjection {
+                    operation: target.operation.clone(),
+                    app_id: target.app_id.clone(),
+                    target_id: target.target_id.clone(),
+                    package_id: target.package_id.clone(),
+                    android_user_id: target.android_user_id,
+                    source_sha256: target.source_sha256.clone(),
+                    original_file_precondition: project_original_file_precondition(
+                        &target.original_file_precondition,
+                    ),
+                    backup_mode: target.backup_mode.clone(),
+                }),
+            backup: record
+                .backup
+                .as_ref()
+                .map(|backup| OperationFenceBackupProjection {
+                    operation: backup.operation.clone(),
+                    package_id: backup.package_id.clone(),
+                    captured_at_unix_ms: backup.captured_at_unix_ms,
+                    sha256: backup.sha256.clone(),
+                    length: backup.length,
+                }),
+        },
+        status: inspection.status,
+        guidance,
+        can_acknowledge: inspection.can_acknowledge,
+    }
+}
+
+pub(crate) fn project_original_file_precondition(
+    value: &Value,
+) -> OriginalFilePreconditionProjection {
+    OriginalFilePreconditionProjection {
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        sha256: value
+            .get("sha256")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        byte_length: value.get("byteLength").and_then(Value::as_u64),
+    }
+}
+
+async fn show_native_operation_fence_confirmation(
+    app: &AppHandle,
+    state: &AppState,
+    inspection: &OperationFenceRecoveryInspection,
+) -> Result<bool, String> {
+    let _dialog_activity = state.update_activity.reserve_native_dialog()?;
+    let message = operation_fence_confirmation_message(inspection);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.dialog()
+        .message(message)
+        .title("Confirm device-operation recovery")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancel)
+        .show(move |confirmed| {
+            let _ = sender.send(confirmed);
+        });
+    tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|_| {
+            safe_error(
+                "native_confirmation_unavailable",
+                "Native recovery confirmation failed.",
+            )
+        })?
+        .map_err(|_| {
+            safe_error(
+                "native_confirmation_unavailable",
+                "Native recovery confirmation was unavailable.",
+            )
+        })
+}
+
+fn operation_fence_confirmation_message(inspection: &OperationFenceRecoveryInspection) -> String {
+    let record = &inspection.record;
+    let outcome = record
+        .outcome
+        .map(|outcome| format!("{outcome:?}"))
+        .unwrap_or_else(|| "Unresolved".to_string());
+    let target = record.target.as_ref().map_or_else(
+        || "\n\nNo reviewed RetroArch configuration target is recorded.".to_string(),
+        |target| {
+            let precondition = serde_json::to_string(&target.original_file_precondition)
+                .unwrap_or_else(|_| "unavailable".to_string());
+            format!(
+                "\n\nReviewed operation: {}\nApp Target: {}/{}\nPackage: {}\nAndroid user: {}\nDestination: {}\nSource SHA-256: {}\nOriginal-file precondition: {}\nBackup mode: {}",
+                target.operation,
+                target.app_id,
+                target.target_id,
+                target.package_id,
+                target.android_user_id,
+                target.target_path,
+                target.source_sha256,
+                precondition,
+                target.backup_mode,
+            )
+        },
+    );
+    let backup = record.backup.as_ref().map_or_else(
+        || "\n\nNo verified private backup is recorded for this operation.".to_string(),
+        |backup| {
+            format!(
+                "\n\nVerified private backup: {}\nOriginal: {} bytes, SHA-256 {}\nTarget: {} · {}\nCaptured at (UTC): {}",
+                backup.path,
+                backup.length,
+                backup.sha256,
+                backup.package_id,
+                backup.target_path,
+                backup.captured_at_unix_ms,
+            )
+        },
+    );
+    format!(
+        "Clear EmuChef's local device-write block for the inspected operation?\n\nStatus: {}\n{}\n\nOperation ID: {}\nDevice handle: {}\nRuntime generation: {}\nAttempt sequence: {}\nPlan SHA-256: {}\nFence phase: {:?}\nRecorded outcome: {}{}{}\n\nThis clears only EmuChef's local block. It does not restore configuration or mark the write successful.",
+        inspection.status,
+        inspection.guidance,
+        record.operation_id,
+        record.device_handle,
+        record.runtime_generation,
+        record.attempt_sequence,
+        record.plan_digest,
+        record.phase,
+        outcome,
+        target,
+        backup,
+    )
+}
+
+#[tauri::command]
+pub async fn start_real_execution(
     app: AppHandle,
     request: Value,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    start_real_execution_with_monitor(request, &state, move |execution_handle| {
-        spawn_real_execution_terminal_monitor(app, execution_handle);
+    let monitor_app = app.clone();
+    start_real_execution_with_confirmation(&app, request, &state, move |execution_handle| {
+        spawn_real_execution_terminal_monitor(monitor_app, execution_handle);
+    })
+    .await
+}
+
+async fn start_real_execution_with_confirmation<F>(
+    app: &AppHandle,
+    request: Value,
+    state: &AppState,
+    spawn_monitor: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(String),
+{
+    if !cfg!(feature = "real-execution") {
+        return Err(safe_error(
+            "real_execution_disabled",
+            "Real-device execution is not enabled for this build.",
+        ));
+    }
+    let request = parse_real_start_request(request)?;
+    let reservation = ExecutionStartReservation::reserve(state)?;
+    let initial_intent =
+        native_configuration_write_intent_for_current_session(state, &request.review_handle)?;
+    if let Some(intent) = initial_intent {
+        crate::qualification_session::capture_execution_admission_fence(
+            state,
+            &request.review_handle,
+        )?;
+        let confirmed = show_native_configuration_write_confirmation(app, state, &intent).await?;
+        return continue_after_native_configuration_confirmation(confirmed, || {
+            let refreshed_intent = native_configuration_write_intent_for_current_session(
+                state,
+                &request.review_handle,
+            )?;
+            if refreshed_intent.as_ref() != Some(&intent) {
+                return Err(stale_review(
+                    "The reviewed configuration operation or device session changed during confirmation.",
+                ));
+            }
+            let authorization = intent.clone().authorize();
+            let admission_fence = crate::qualification_session::capture_execution_admission_fence(
+                state,
+                &request.review_handle,
+            )?;
+            let app_data_root = app
+                .path()
+                .app_data_dir()
+                .map_err(|_| stale_review("Application backup settings are unavailable."))?;
+            let reviewed_backup_preference_admission =
+                crate::configuration_backup_preferences::with_reviewed_preference(
+                    &app_data_root,
+                    intent.configuration_backup_enabled,
+                    || reservation.admit_reviewed_backup_preference(&intent),
+                )
+                .map_err(reviewed_backup_preference_start_error)?;
+            start_real_execution_reserved(
+                request,
+                state,
+                reservation.token(),
+                admission_fence,
+                Some(authorization),
+                Some(reviewed_backup_preference_admission),
+                spawn_monitor,
+            )
+        });
+    }
+    let admission_fence = crate::qualification_session::capture_execution_admission_fence(
+        state,
+        &request.review_handle,
+    )?;
+    start_real_execution_reserved(
+        request,
+        state,
+        reservation.token(),
+        admission_fence,
+        None,
+        None,
+        spawn_monitor,
+    )
+}
+
+fn continue_after_native_configuration_confirmation<T>(
+    confirmed: bool,
+    dispatch: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if confirmed {
+        dispatch()
+    } else {
+        Err(safe_error(
+            "native_configuration_write_cancelled",
+            "No RetroArch configuration write started because native confirmation was cancelled.",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod native_configuration_confirmation_tests {
+    use super::continue_after_native_configuration_confirmation;
+
+    #[test]
+    fn cancelling_native_confirmation_produces_no_device_dispatch() {
+        let mut dispatch_count = 0;
+        let error = continue_after_native_configuration_confirmation(false, || {
+            dispatch_count += 1;
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("native_configuration_write_cancelled"));
+        assert_eq!(dispatch_count, 0);
+    }
+
+    #[test]
+    fn dispatch_uncertainty_keeps_its_error_after_native_confirmation() {
+        let dispatch_error = r#"{"code":"real_execution_dispatch_uncertain"}"#.to_string();
+        let result: Result<(), String> =
+            continue_after_native_configuration_confirmation(true, || Err(dispatch_error.clone()));
+
+        assert_eq!(result, Err(dispatch_error));
+    }
+}
+
+/// Preserve start failures and map only preference-check failures to stale review.
+fn reviewed_backup_preference_start_error(
+    error: crate::configuration_backup_preferences::ReviewedPreferenceError<String>,
+) -> String {
+    match error {
+        crate::configuration_backup_preferences::ReviewedPreferenceError::ExecutionStart(error) => {
+            error
+        }
+        crate::configuration_backup_preferences::ReviewedPreferenceError::PreferenceUnavailableOrStale => {
+            stale_review(
+                "The persistent backup preference changed or became unavailable. Prepare a new review.",
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod reviewed_backup_preference_error_tests {
+    use super::reviewed_backup_preference_start_error;
+    use crate::configuration_backup_preferences::ReviewedPreferenceError;
+
+    #[test]
+    fn execution_start_failures_keep_their_original_classification() {
+        for start_error in [
+            r#"{"code":"real_execution_dispatch_uncertain"}"#,
+            r#"{"code":"device_session_lost"}"#,
+            r#"{"code":"operation_fence_unresolved"}"#,
+        ] {
+            let start_error = start_error.to_string();
+            assert_eq!(
+                reviewed_backup_preference_start_error(ReviewedPreferenceError::ExecutionStart(
+                    start_error.clone()
+                )),
+                start_error
+            );
+        }
+    }
+}
+
+fn native_configuration_write_intent_for_current_session(
+    state: &AppState,
+    review_handle: &str,
+) -> Result<Option<NativeConfigurationWriteIntent>, String> {
+    let (review, session_epoch) = {
+        let mut handles = state.handles.lock().map_err(|_| session_error())?;
+        let review = handles.review(review_handle)?.clone();
+        let plan = review
+            .response
+            .get("plan")
+            .ok_or_else(|| stale_review("The retained reviewed plan is unavailable."))?;
+        if crate::retroarch_config_write_policy::resolve_retroarch_config_write_target(plan)
+            .map_err(|_| stale_review("The reviewed RetroArch configuration target is invalid."))?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let session_epoch = handles
+            .device_session_epoch(&review.device_handle)
+            .ok_or_else(|| stale_review("The reviewed device session is no longer available."))?;
+        let current_context = handles
+            .qualification_context(&review.device_handle)
+            .ok_or_else(|| {
+                stale_review("The reviewed qualification context is no longer current.")
+            })?;
+        if review.qualification_context.as_ref() != Some(&current_context) {
+            return Err(stale_review(
+                "The reviewed qualification context is no longer current.",
+            ));
+        }
+        (review, session_epoch)
+    };
+    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+        safe_error(
+            "runtime_generation_unavailable",
+            "Device qualification state is temporarily unavailable.",
+        )
+    })?;
+    native_configuration_write_intent(review_handle, &review, runtime_generation, session_epoch)
+}
+
+pub(crate) fn configuration_backup_waiver_for_failed_execution(
+    state: &AppState,
+    execution_handle: &str,
+    operation_id: &str,
+) -> Result<ConfigurationBackupWaiver, String> {
+    let (mapping, stored) = {
+        let executions = state.executions.lock().map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "The failed configuration operation is unavailable for review.",
+            )
+        })?;
+        let mapping = executions.mapping(
+            ExecutionKind::Real,
+            execution_handle,
+            REAL_EXECUTION_UNAVAILABLE,
+        )?;
+        let stored = executions.terminal_report(execution_handle)?;
+        (mapping, stored)
+    };
+    let report = &stored.report;
+    if report.get("status").and_then(Value::as_str) != Some("failed")
+        || report.get("simulated").and_then(Value::as_bool) != Some(false)
+        || report.get("planDigest").and_then(Value::as_str)
+            != Some(mapping.review.plan_digest.as_str())
+    {
+        return Err(stale_review(
+            "A backup waiver requires the matching failed real-device report.",
+        ));
+    }
+
+    let mut matching_reports = Vec::new();
+    for step in report
+        .get("recipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|recipe| {
+            recipe
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+    {
+        let Some(output) = step
+            .get("outputs")
+            .and_then(|outputs| outputs.get("configuration_create_report"))
+        else {
+            continue;
+        };
+        let configuration_report = output.get("value").unwrap_or(output);
+        if configuration_report
+            .get("operationId")
+            .and_then(Value::as_str)
+            == Some(operation_id)
+        {
+            matching_reports.push((step, configuration_report));
+        }
+    }
+    if matching_reports.len() != 1 {
+        return Err(stale_review(
+            "The requested backup failure is not uniquely present in the retained report.",
+        ));
+    }
+    let (step, failed_operation) = matching_reports[0];
+    let outcome = failed_operation
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let is_backup_failure = matches!(
+        outcome,
+        "backup_storage_unavailable" | "backup_failed" | "backup_verification_failed"
+    );
+    if step.get("status").and_then(Value::as_str) != Some("failed")
+        || !is_backup_failure
+        || failed_operation.get("backupStatus").and_then(Value::as_str) != Some("failed")
+        || failed_operation.get("operation").and_then(Value::as_str) != Some("replace")
+        || failed_operation.get("backupMode").and_then(Value::as_str) != Some("verified")
+        || failed_operation
+            .pointer("/target/appId")
+            .and_then(Value::as_str)
+            != Some("retroarch")
+        || failed_operation
+            .pointer("/target/targetId")
+            .and_then(Value::as_str)
+            != Some("config")
+        || failed_operation
+            .get("verificationScope")
+            .and_then(Value::as_str)
+            != Some("device")
+        || failed_operation
+            .get("mayHaveChanged")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || failed_operation.get("verified").and_then(Value::as_bool) != Some(false)
+        || failed_operation
+            .get("appliedToDevice")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || failed_operation.get("simulated").and_then(Value::as_bool) != Some(false)
+    {
+        return Err(stale_review(
+            "The retained operation does not prove a verified-backup failure before replacement.",
+        ));
+    }
+
+    let intent =
+        native_configuration_write_intent_for_current_session(state, &mapping.review_handle)?
+            .ok_or_else(|| {
+                stale_review("The failed review has no trusted RetroArch config target.")
+            })?;
+    if intent.operation
+        != crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace
+        || intent.backup_mode != "verified"
+        || intent.backup_waiver_digest.is_some()
+        || failed_operation.get("sha256").and_then(Value::as_str)
+            != Some(intent.source_sha256.as_str())
+    {
+        return Err(stale_review(
+            "The failed backup operation no longer matches its original reviewed Replace.",
+        ));
+    }
+
+    let failure_report_digest = canonical_json_digest(report)
+        .map_err(|_| stale_review("The retained failure report could not be verified."))?;
+    let waiver_nonce = Uuid::new_v4().simple().to_string();
+    let binding = json!({
+        "version": 1,
+        "waiverNonce": waiver_nonce,
+        "failureExecutionHandle": execution_handle,
+        "failureOperationId": operation_id,
+        "failureReportDigest": failure_report_digest,
+        "originalReviewHandle": mapping.review_handle,
+        "originalPlanDigest": mapping.review.plan_digest,
+        "deviceHandle": intent.device_handle,
+        "deviceSerial": intent.device_serial,
+        "sessionEpoch": intent.session_epoch,
+        "runtimeGeneration": intent.runtime_generation,
+        "qualificationContextDigest": intent.qualification_context_digest,
+        "profileId": intent.profile_id,
+        "targetIdentity": intent.target_identity,
+        "destination": intent.destination,
+        "operation": "replace",
+        "sourceSha256": intent.source_sha256,
+        "originalFilePrecondition": intent.original_file_precondition,
+        "originalBackupMode": "verified",
+        "backupMode": "waived",
+    });
+    let digest = canonical_json_digest(&binding)
+        .map_err(|_| stale_review("The one-time backup waiver could not be bound."))?;
+
+    Ok(ConfigurationBackupWaiver {
+        digest,
+        waiver_nonce,
+        failure_execution_handle: execution_handle.to_string(),
+        failure_operation_id: operation_id.to_string(),
+        failure_report_digest,
+        original_review_handle: mapping.review_handle,
+        original_plan_digest: mapping.review.plan_digest,
+        device_handle: intent.device_handle,
+        device_serial: intent.device_serial,
+        session_epoch: intent.session_epoch,
+        runtime_generation: intent.runtime_generation,
+        qualification_context_digest: intent.qualification_context_digest,
+        profile_id: intent.profile_id,
+        target_identity: intent.target_identity,
+        destination: intent.destination,
+        source_sha256: intent.source_sha256,
+        original_file_precondition: intent.original_file_precondition,
+        created: Instant::now(),
     })
 }
 
-/// Run the real-apply command flow while leaving terminal-monitor scheduling
-/// injectable for headless Tauri command tests.
+pub(crate) fn validate_configuration_backup_waiver_plan(
+    waiver: &ConfigurationBackupWaiver,
+    plan: &Value,
+    device_handle: &str,
+    device_serial: &str,
+    qualification: &crate::device_observation::QualificationContextKey,
+    runtime_generation: u64,
+) -> Result<(), String> {
+    let target = crate::retroarch_config_write_policy::resolve_retroarch_config_write_target(plan)
+        .map_err(|_| stale_review("The backup-waiver plan target is invalid."))?
+        .ok_or_else(|| stale_review("The backup-waiver plan has no RetroArch config target."))?;
+    let qualification_context_digest = canonical_json_digest(&json!({
+        "deviceHandle": &qualification.device_handle,
+        "sessionEpoch": qualification.session_epoch,
+        "runtimeGeneration": qualification.runtime_generation,
+        "platformToolsRevision": qualification.platform_tools_revision,
+        "qualificationRevision": qualification.qualification_revision,
+        "capabilityFingerprint": &qualification.capability_fingerprint,
+    }))
+    .map_err(|_| stale_review("The current qualification context could not be verified."))?;
+    if waiver.created.elapsed() > Duration::from_secs(15 * 60)
+        || !is_lowercase_sha256(&waiver.digest)
+        || !is_lowercase_sha256(&waiver.failure_report_digest)
+        || !is_lowercase_sha256(&waiver.original_plan_digest)
+        || waiver.device_handle != device_handle
+        || waiver.device_serial != device_serial
+        || qualification.device_handle != device_handle
+        || qualification.session_epoch != waiver.session_epoch
+        || qualification.runtime_generation != runtime_generation
+        || qualification.runtime_generation != waiver.runtime_generation
+        || qualification_context_digest != waiver.qualification_context_digest
+        || plan
+            .pointer("/source/device_profile_ref")
+            .and_then(Value::as_str)
+            != Some(waiver.profile_id.as_str())
+        || target.operation
+            != crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace
+        || target.backup_mode != "waived"
+        || target.backup_waiver_digest.as_deref() != Some(waiver.digest.as_str())
+        || target.target_identity != waiver.target_identity
+        || target.destination != waiver.destination
+        || target.source_sha256 != waiver.source_sha256
+        || target.original_file_precondition != waiver.original_file_precondition
+    {
+        return Err(stale_review(
+            "The one-time backup waiver is stale or does not match this new review.",
+        ));
+    }
+    Ok(())
+}
+
+/// Synchronous start seam used by headless tests that do not open native UI.
+#[cfg(test)]
 pub(crate) fn start_real_execution_with_monitor<F>(
     request: Value,
     state: &AppState,
@@ -1672,43 +3489,52 @@ where
         ));
     }
     let request = parse_real_start_request(request)?;
-    let _activity = state.update_activity.reserve_execution_start()?;
-    let mut executions = state.executions.lock().map_err(|_| {
-        safe_error(
-            "execution_state_unavailable",
-            "Real-device execution state is unavailable.",
-        )
-    })?;
-    executions
-        .reserve_start(ExecutionKind::Real)
-        .map_err(|()| {
-            if executions.has_durable_operation_fence() {
-                safe_error(
-                    "execution_quiescence_unconfirmed",
-                    "A previous device operation may still be active. New device writes are blocked.",
-                )
-            } else {
-                safe_error(
-                    "execution_in_progress",
-                    "Another execution is already starting or active.",
-                )
-            }
-        })?;
-    let admission_fence = match crate::qualification_session::capture_execution_admission_fence(
+    let reservation = ExecutionStartReservation::reserve(state)?;
+    let admission_fence = crate::qualification_session::capture_execution_admission_fence(
         state,
         &request.review_handle,
-    ) {
-        Ok(fence) => fence,
-        Err(error) => {
-            executions.release_start();
-            return Err(error);
-        }
-    };
+    )?;
+    start_real_execution_reserved(
+        request,
+        state,
+        reservation.token(),
+        admission_fence,
+        None,
+        None,
+        spawn_monitor,
+    )
+}
+
+fn start_real_execution_reserved<F>(
+    request: RealExecutionStartRequest,
+    state: &AppState,
+    reservation_token: ExecutionStartReservationToken,
+    admission_fence: Option<crate::qualification_session::QualificationAdmissionFence>,
+    authorization: Option<NativeConfigurationWriteAuthorization>,
+    reviewed_backup_preference_admission: Option<ReviewedBackupPreferenceAdmission>,
+    spawn_monitor: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(String),
+{
+    if authorization
+        .as_ref()
+        .map(|authorization| authorization.operation_binding_digest.as_str())
+        != reviewed_backup_preference_admission
+            .as_ref()
+            .map(|admission| admission.operation_binding_digest.as_str())
+    {
+        return Err(stale_review(
+            "Native confirmation and backup admission do not match the same reviewed operation.",
+        ));
+    }
     match start_real_execution_inner(
         &request.review_handle,
         state,
-        &mut executions,
+        reservation_token,
         admission_fence,
+        authorization,
+        reviewed_backup_preference_admission,
     ) {
         Ok(public) => {
             // The product owns terminal retention for every real execution, so
@@ -1722,10 +3548,7 @@ where
             }
             Ok(public)
         }
-        Err(error) => {
-            executions.release_start();
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -1752,9 +3575,17 @@ fn parse_real_start_request(request: Value) -> Result<RealExecutionStartRequest,
 fn start_real_execution_inner(
     review_handle: &str,
     state: &AppState,
-    executions: &mut ExecutionHandleStore,
+    reservation_token: ExecutionStartReservationToken,
     admission_fence: Option<crate::qualification_session::QualificationAdmissionFence>,
+    authorization: Option<NativeConfigurationWriteAuthorization>,
+    reviewed_backup_preference_admission: Option<ReviewedBackupPreferenceAdmission>,
 ) -> Result<Value, String> {
+    let mut executions = ExecutionStoreAccess::locked(
+        &state.executions,
+        reservation_token,
+        reviewed_backup_preference_admission.clone(),
+    );
+    executions.with_store(|_| ())?;
     let review = state
         .handles
         .lock()
@@ -1762,6 +3593,9 @@ fn start_real_execution_inner(
         .review(review_handle)?
         .clone();
     validate_review_executable(&review, "real")?;
+    if let Some(admission) = &reviewed_backup_preference_admission {
+        admission.validate_review(review_handle, &review)?;
+    }
 
     let expected_adb = review.platform_tools_identity.as_ref().ok_or_else(|| {
         stale_review(
@@ -1797,10 +3631,11 @@ fn start_real_execution_inner(
         Some(state),
         &state.handles,
         &state.root_qualification,
-        executions,
+        &mut executions,
         &state.sidecar,
         &platform_tools,
         admission_fence,
+        authorization,
     )
 }
 
@@ -1829,6 +3664,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     runtime: &R,
     platform_tools: &PlatformToolsSnapshot<'_>,
 ) -> Result<Value, String> {
+    let mut executions = ExecutionStoreAccess::borrowed(executions);
     let admission_fence = match qualification_state {
         Some(state) => {
             crate::qualification_session::capture_execution_admission_fence(state, review_handle)?
@@ -1840,10 +3676,11 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
         qualification_state,
         handles,
         root_qualification,
-        executions,
+        &mut executions,
         runtime,
         platform_tools,
         admission_fence,
+        None,
     )
 }
 
@@ -1854,10 +3691,11 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     qualification_state: Option<&AppState>,
     handles: &Mutex<SessionHandles>,
     root_qualification: &Mutex<RootQualificationStore>,
-    executions: &mut ExecutionHandleStore,
+    executions: &mut ExecutionStoreAccess<'_>,
     runtime: &R,
     platform_tools: &PlatformToolsSnapshot<'_>,
     admission_fence: Option<crate::qualification_session::QualificationAdmissionFence>,
+    authorization: Option<NativeConfigurationWriteAuthorization>,
 ) -> Result<Value, String> {
     let review = handles
         .lock()
@@ -1878,40 +3716,45 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
 
     let inventory_request =
         |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
-    let inventory = inventory_request(
+    let inventory = match inventory_request(
         "listAdbDevices",
         json!({ "adbPath": platform_tools.adb_path }),
-    )
-    .map_err(|error| {
-        // The final-gate inventory request can be the first request to
-        // discover that the shared runtime session is gone, so it takes the
-        // ordered runtime-loss transition instead of a plain
-        // disconnected-device error that would leave the start reservation and
-        // every other piece of authority derived from the lost process
-        // generation in place.
-        resolve_runtime_request_failure(
-            qualification_state,
-            executions,
-            &error,
-            device_disconnected,
-        )
-    })?;
+    ) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            // The final-gate inventory request can be the first request to
+            // discover that the shared runtime session is gone, so it takes
+            // the ordered runtime-loss transition instead of a plain
+            // disconnected-device error.
+            return Err(executions.with_store(|store| {
+                resolve_runtime_request_failure(
+                    qualification_state,
+                    store,
+                    &error,
+                    device_disconnected,
+                )
+            })?);
+        }
+    };
     if let Some(state) = qualification_state {
-        crate::commands::reconcile_inventory_snapshot_with_execution_store_and_hook(
-            state,
-            &inventory,
-            platform_tools.runtime_generation,
-            platform_tools.platform_tools_revision,
-            executions,
-            || {},
-        )
-        .map_err(|error| {
-            if runtime_session_lost(state, &error) {
-                resolve_proven_runtime_session_loss(state, executions)
+        let reconciliation = executions.with_store(|store| {
+            crate::commands::reconcile_inventory_snapshot_with_execution_store_and_hook(
+                state,
+                &inventory,
+                platform_tools.runtime_generation,
+                platform_tools.platform_tools_revision,
+                store,
+                || {},
+            )
+        })?;
+        if let Err(error) = reconciliation {
+            let resolved = if runtime_session_lost(state, &error) {
+                executions.with_store(|store| resolve_proven_runtime_session_loss(state, store))?
             } else {
                 device_disconnected()
-            }
-        })?;
+            };
+            return Err(resolved);
+        }
     } else {
         crate::device_qualification::reconcile_inventory_with_context(
             handles,
@@ -1961,12 +3804,14 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             // fails closed instead of reporting only a failed probe for the
             // retained device.
             if qualification_state.is_some_and(|state| runtime_session_lost(state, &error)) {
-                return Err(resolve_runtime_request_failure(
-                    qualification_state,
-                    executions,
-                    &error,
-                    device_disconnected,
-                ));
+                return Err(executions.with_store(|store| {
+                    resolve_runtime_request_failure(
+                        qualification_state,
+                        store,
+                        &error,
+                        device_disconnected,
+                    )
+                })?);
             }
             if let Some(state) = qualification_state {
                 let transition = crate::commands::qualification_transition_lock(state);
@@ -2087,7 +3932,9 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     };
     if lost_runtime_session {
         if let Some(state) = qualification_state {
-            return Err(resolve_proven_runtime_session_loss(state, executions));
+            return Err(
+                executions.with_store(|store| resolve_proven_runtime_session_loss(state, store))?
+            );
         }
     }
     let current = observation?;
@@ -2121,17 +3968,6 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     };
     validate_final_qualification(&refreshed_review, &current, root_granted)?;
 
-    let reviewed_plan = refreshed_review
-        .response
-        .get("plan")
-        .ok_or_else(|| stale_review("The retained reviewed plan is no longer available."))?;
-    crate::commands::require_config_create_write_evidence(
-        qualification_state,
-        &refreshed_review.device_handle,
-        reviewed_plan,
-        refreshed_review.qualification_context.as_ref(),
-    )?;
-
     let current_profile_id = qualification_device_plan.as_ref().and_then(|device_plan| {
         let state = qualification_state?;
         let catalog = crate::commands::catalog(state).ok()?.internal_payload();
@@ -2157,7 +3993,9 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     });
     if lost_runtime_session {
         if let Some(state) = qualification_state {
-            return Err(resolve_proven_runtime_session_loss(state, executions));
+            return Err(
+                executions.with_store(|store| resolve_proven_runtime_session_loss(state, store))?
+            );
         }
     }
 
@@ -2213,13 +4051,15 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     }
 
     if let Some(state) = qualification_state {
-        revalidate_profile_for_start(state, runtime, &refreshed_review, &facts).map_err(
-            |error| {
-                resolve_runtime_request_failure(Some(state), executions, &error, || error.clone())
-            },
-        )?;
+        if let Err(error) = revalidate_profile_for_start(state, runtime, &refreshed_review, &facts)
+        {
+            return Err(executions.with_store(|store| {
+                resolve_runtime_request_failure(Some(state), store, &error, || error.clone())
+            })?);
+        }
     }
-    let setup_location_attempt_sequence = executions.issue_setup_location_attempt_sequence()?;
+    let setup_location_attempt_sequence =
+        executions.with_store(ExecutionHandleStore::issue_setup_location_attempt_sequence)??;
     let setup_location_lease = setup_location_lease_for_review(
         &refreshed_review,
         session_epoch,
@@ -2232,7 +4072,15 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         device_handle: refreshed_review.device_handle.clone(),
         plan_digest: refreshed_review.plan_digest.clone(),
     };
-    executions.retain_unresolved_real_start(unresolved_real_start.clone())?;
+    executions.retain_unresolved_real_start_with_policy(
+        unresolved_real_start.clone(),
+        authorization.is_some(),
+    )?;
+    let operation_fence = if authorization.is_some() {
+        executions.operation_fence_binding(&unresolved_real_start)?
+    } else {
+        None
+    };
     let start_response = if let Some(lease) = setup_location_lease.as_ref() {
         let transition = qualification_state.map(crate::commands::qualification_transition_lock);
         let current = handles
@@ -2268,8 +4116,20 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             }
             return Err(device_disconnected());
         }
+        if let Some(waiver) = &refreshed_review.configuration_backup_waiver {
+            if let Err(error) = executions.consume_configuration_backup_waiver(&waiver.digest) {
+                executions.release_unrequested_real_start(&unresolved_real_start)?;
+                return Err(error);
+            }
+        }
         executions.set_pending_setup_location_lease(Some(lease.clone()))?;
-        let mut response = request_real_start(runtime, &refreshed_review, Some(lease));
+        let mut response = request_real_start_authorized(
+            runtime,
+            &refreshed_review,
+            Some(lease),
+            operation_fence.as_ref(),
+            authorization,
+        );
         if response.is_err() {
             let revocation = qualification_state
                 .map(|state| retire_setup_location_lease_attempt(state, &lease))
@@ -2280,8 +4140,8 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
                 // acknowledged, so later work cannot replace its authority.
                 response = Err(error);
             } else {
-                if executions.clear_setup_location_lease_after_revocation(&lease) {
-                    executions.release_start();
+                if executions.clear_setup_location_lease_after_revocation(&lease)? {
+                    executions.release_start()?;
                 } else {
                     response = Err(runtime_session_lost_error());
                 }
@@ -2311,7 +4171,19 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             executions.release_unrequested_real_start(&unresolved_real_start)?;
             return Err(error);
         }
-        let response = request_real_start(runtime, &refreshed_review, None);
+        if let Some(waiver) = &refreshed_review.configuration_backup_waiver {
+            if let Err(error) = executions.consume_configuration_backup_waiver(&waiver.digest) {
+                executions.release_unrequested_real_start(&unresolved_real_start)?;
+                return Err(error);
+            }
+        }
+        let response = request_real_start_authorized(
+            runtime,
+            &refreshed_review,
+            None,
+            operation_fence.as_ref(),
+            authorization,
+        );
         if let Some(transition) = transition {
             transition.release_and_retry_best_effort();
         }
@@ -2320,19 +4192,20 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
     let start_result = match start_response {
         Ok(public) => public,
         Err(error) => {
-            if execution_start_error_proves_rejection(qualification_state, &error)
-                && executions.pending_setup_location_lease.is_none()
-            {
+            let rejection_proven =
+                execution_start_error_proves_rejection(qualification_state, &error);
+            if rejection_proven && executions.pending_setup_location_lease_is_none()? {
                 executions.clear_durable_operation_fence()?;
-                executions.clear_unresolved_real_start(&unresolved_real_start);
-                executions.release_start();
             }
-            return Err(resolve_runtime_request_failure(
-                qualification_state,
-                executions,
-                &error,
-                || real_start_error(&error),
-            ));
+            return Err(executions.with_store(|store| {
+                if rejection_proven && store.pending_setup_location_lease.is_none() {
+                    store.clear_unresolved_real_start(&unresolved_real_start);
+                    store.release_start();
+                }
+                resolve_runtime_request_failure(qualification_state, store, &error, || {
+                    real_start_error(&error)
+                })
+            })?);
         }
     };
     // The runtime accepted the start request, so an execution now exists
@@ -2348,7 +4221,9 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
             return Err(runtime_session_lost_error());
         };
         state.sidecar.invalidate_runtime_session();
-        return Err(resolve_proven_runtime_session_loss(state, executions));
+        return Err(
+            executions.with_store(|store| resolve_proven_runtime_session_loss(state, store))?
+        );
     }
     if let Some(state) = qualification_state {
         // The sidecar start request is complete. Retain product admission and
@@ -2356,17 +4231,26 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         // terminal report cannot cross the commit-to-observation boundary.
         let transition = crate::commands::qualification_transition_lock(state);
         let result = (|| {
-            let public =
-                bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
-            if !executions.clear_unresolved_real_start(&unresolved_real_start) {
-                return Err(runtime_session_lost_error());
-            }
-            if let Some(execution_handle) = public.get("executionHandle").and_then(Value::as_str) {
-                let mapping = executions.mapping(
-                    ExecutionKind::Real,
-                    execution_handle,
-                    REAL_EXECUTION_UNAVAILABLE,
-                )?;
+            let (public, mapping) = executions.with_store(|store| {
+                let public =
+                    bind_real_start_result(store, review_handle, refreshed_review, &start_result)?;
+                if !store.clear_unresolved_real_start(&unresolved_real_start) {
+                    return Err(runtime_session_lost_error());
+                }
+                let mapping = public
+                    .get("executionHandle")
+                    .and_then(Value::as_str)
+                    .map(|execution_handle| {
+                        store.mapping(
+                            ExecutionKind::Real,
+                            execution_handle,
+                            REAL_EXECUTION_UNAVAILABLE,
+                        )
+                    })
+                    .transpose()?;
+                Ok((public, mapping))
+            })??;
+            if let Some(mapping) = mapping {
                 observe_real_admission(state, admission_fence.as_ref(), &mapping, &mapping.review);
             }
             Ok(public)
@@ -2374,12 +4258,14 @@ fn start_real_execution_inner_with_admission_fence<R: RuntimeRequester>(
         transition.release_and_retry_best_effort();
         result
     } else {
-        let public =
-            bind_real_start_result(executions, review_handle, refreshed_review, &start_result)?;
-        if !executions.clear_unresolved_real_start(&unresolved_real_start) {
-            return Err(runtime_session_lost_error());
-        }
-        Ok(public)
+        executions.with_store(|store| {
+            let public =
+                bind_real_start_result(store, review_handle, refreshed_review, &start_result)?;
+            if !store.clear_unresolved_real_start(&unresolved_real_start) {
+                return Err(runtime_session_lost_error());
+            }
+            Ok(public)
+        })?
     }
 }
 
@@ -2439,6 +4325,16 @@ fn request_real_start(
     review: &ReviewedPlanSnapshot,
     setup_location_lease: Option<&SetupLocationExecutionLease>,
 ) -> Result<Value, String> {
+    request_real_start_authorized(runtime, review, setup_location_lease, None, None)
+}
+
+fn request_real_start_authorized(
+    runtime: &impl RuntimeRequester,
+    review: &ReviewedPlanSnapshot,
+    setup_location_lease: Option<&SetupLocationExecutionLease>,
+    operation_fence: Option<&OperationFenceBinding>,
+    authorization: Option<NativeConfigurationWriteAuthorization>,
+) -> Result<Value, String> {
     // The raw runtime error is preserved so the start seam can distinguish a
     // lost runtime session from an ordinary start rejection before the error is
     // sanitized for the frontend.
@@ -2456,11 +4352,27 @@ fn request_real_start(
         }
         payload["reviewAuthorityId"] = json!(authority.review_authority_id);
     }
+    if authorization
+        .as_ref()
+        .is_some_and(|authority| runtime.generation() != Some(authority.runtime_generation()))
+    {
+        return Err(stale_review(
+            "The execution runtime changed during native configuration confirmation.",
+        ));
+    }
     if let Some(lease) = setup_location_lease {
         payload["setupLocationLease"] =
             serde_json::to_value(lease).map_err(|_| runtime_session_lost_error())?;
     }
-    runtime_request(runtime, "startExecution", payload)
+    if let Some(operation_fence) = operation_fence {
+        payload["operationFence"] =
+            serde_json::to_value(operation_fence).map_err(|_| runtime_session_lost_error())?;
+    }
+    runtime.request_with_trusted_claims(
+        "startExecution",
+        payload,
+        authorization.map(NativeConfigurationWriteAuthorization::into_claim),
+    )
 }
 
 fn setup_location_lease_for_review(
@@ -3704,10 +5616,11 @@ fn production_execution_report_bytes_for_with_qualification(
             "Wait for execution to finish before exporting its report.",
         ));
     }
-    let public = match mapping.kind {
+    let mut public = match mapping.kind {
         ExecutionKind::Simulated => project_snapshot(mapping, report),
         ExecutionKind::Real => project_real_snapshot(mapping, report),
     };
+    strip_ui_only_configuration_backup_fields(&mut public);
     let (document, qualification_claim_invalidated) = execution_report_document_with_qualification(
         mapping,
         report,
@@ -3726,6 +5639,24 @@ fn production_execution_report_bytes_for_with_qualification(
         bytes: serialized.into_bytes(),
         qualification_claim_invalidated,
     })
+}
+
+/// Keeps native backup controls out of the stable execution-report schema.
+fn strip_ui_only_configuration_backup_fields(public: &mut Value) {
+    let Some(recipes) = public.get_mut("recipes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for recipe in recipes {
+        let Some(steps) = recipe.get_mut("steps").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for step in steps {
+            if let Some(step) = step.as_object_mut() {
+                step.remove("configurationBackupOperationId");
+                step.remove("configurationBackupFailureOperationId");
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -4354,7 +6285,7 @@ fn validate_review_executable(
     review: &ReviewedPlanSnapshot,
     expected_mode: &str,
 ) -> Result<(), String> {
-    let has_retroarch_config_create = review
+    let has_retroarch_config_write = review
         .response
         .pointer("/plan/steps")
         .and_then(Value::as_array)
@@ -4365,7 +6296,7 @@ fn validate_review_executable(
                     .is_some_and(|id| id.ends_with("/seed_retroarch_cfg"))
             })
         });
-    if has_retroarch_config_create
+    if has_retroarch_config_write
         && review.response.get("executionMode").and_then(Value::as_str) != Some(expected_mode)
     {
         return Err(safe_error(
@@ -4484,6 +6415,13 @@ pub(crate) fn canonical_json_digest(value: &Value) -> Result<String, serde_json:
     let canonical = canonicalize(value.clone());
     let bytes = serde_json::to_vec(&canonical)?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn canonicalize(value: Value) -> Value {
@@ -4625,6 +6563,8 @@ pub(crate) fn project_phase6d6_terminal(public_handle: &str, report: Value) -> V
             qualification_context: None,
             platform_tools_identity: None,
             restricted_execution: None,
+            configuration_backup_waiver: None,
+            configuration_backup_enabled: true,
             created: std::time::Instant::now(),
             last_access: std::time::Instant::now(),
         },
@@ -5448,8 +7388,40 @@ fn project_step(step: &Value, exact_serial: &str) -> Value {
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("pending");
+    let configuration_backup_operation_id = step
+        .get("outputs")
+        .and_then(|outputs| outputs.get("configuration_create_report"))
+        .map(|output| output.get("value").unwrap_or(output))
+        .filter(|report| report.get("backupStatus").and_then(Value::as_str) == Some("verified"))
+        .and_then(|report| report.get("operationId"))
+        .and_then(Value::as_str);
+    let configuration_backup_failure_operation_id = step
+        .get("outputs")
+        .and_then(|outputs| outputs.get("configuration_create_report"))
+        .map(|output| output.get("value").unwrap_or(output))
+        .filter(|report| {
+            status == "failed"
+                && matches!(
+                    report.get("outcome").and_then(Value::as_str),
+                    Some(
+                        "backup_storage_unavailable"
+                            | "backup_failed"
+                            | "backup_verification_failed"
+                    )
+                )
+                && report.get("operation").and_then(Value::as_str) == Some("replace")
+                && report.get("backupMode").and_then(Value::as_str) == Some("verified")
+                && report.get("backupStatus").and_then(Value::as_str) == Some("failed")
+                && report.get("verificationScope").and_then(Value::as_str) == Some("device")
+                && report.get("simulated").and_then(Value::as_bool) == Some(false)
+                && report.get("mayHaveChanged").and_then(Value::as_bool) == Some(false)
+                && report.get("verified").and_then(Value::as_bool) == Some(false)
+                && report.get("appliedToDevice").and_then(Value::as_bool) == Some(false)
+        })
+        .and_then(|report| report.get("operationId"))
+        .and_then(Value::as_str);
     let message = copy_commit_failure_message(step)
-        .or_else(|| configuration_create_report_message(step))
+        .or_else(|| configuration_write_report_message(step))
         .or_else(|| match status {
             "failed" => Some("This action did not complete.".to_string()),
             "blocked" => Some("This action was blocked by required earlier work.".to_string()),
@@ -5461,10 +7433,12 @@ fn project_step(step: &Value, exact_serial: &str) -> Value {
         "note": step.get("note").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
         "status": status,
         "message": message,
+        "configurationBackupOperationId": configuration_backup_operation_id,
+        "configurationBackupFailureOperationId": configuration_backup_failure_operation_id,
     })
 }
 
-fn configuration_create_report_message(step: &Value) -> Option<String> {
+fn configuration_write_report_message(step: &Value) -> Option<String> {
     let output = step.get("outputs")?.get("configuration_create_report")?;
     let report = output.get("value").unwrap_or(output);
     let outcome = report.get("outcome")?.as_str()?;
@@ -5473,26 +7447,45 @@ fn configuration_create_report_message(step: &Value) -> Option<String> {
             "The configuration file was simulated in a sandbox; no device file was changed."
         }
         "created_verified" => "The configuration file was created and its exact bytes were verified.",
+        "replaced_verified" => "The RetroArch configuration was replaced and its exact bytes were verified.",
         "blocked_existing_target" => {
             "An existing destination entry blocked creation; it was left untouched."
         }
         "staging_failed_no_target_write" => {
-            "Configuration creation stopped before opening the destination."
+            "The configuration write stopped before opening the destination."
+        }
+        "pre_dispatch_failed_no_target_write" => {
+            "The configuration write did not reach the destination. Check staging cleanup before retrying."
         }
         "staged_source_hash_mismatch" => {
             "Staged bytes did not match the reviewed digest; the destination was not opened."
         }
         "partial_write_unverified" => {
-            "Configuration creation may have left partial bytes; inspect the destination before retrying."
+            "The configuration write may have left partial bytes; inspect the destination before retrying."
         }
         "completion_uncertain" => {
             "The final configuration state is uncertain; inspect it before retrying."
         }
         "final_readback_mismatch" => {
-            "The configuration file was created, but final byte verification failed."
+            "The configuration file changed, but final byte verification failed."
         }
         "created_unverified" => {
-            "The configuration file may have been created, but its final state could not be verified."
+            "The configuration file may have changed, but its final state could not be verified."
+        }
+        "app_still_running" => {
+            "RetroArch stayed open after the stop request. Close it and create a fresh review."
+        }
+        "app_stop_failed" => {
+            "RetroArch could not be stopped for this reviewed Replace; no replacement was started."
+        }
+        "app_relaunched_before_replace" => {
+            "RetroArch reopened before replacement. Close it and create a fresh review."
+        }
+        "app_state_unverified" => {
+            "RetroArch process state could not be verified; no replacement was started."
+        }
+        "backup_storage_unavailable" | "backup_failed" | "backup_verification_failed" => {
+            "The private original-file backup could not be verified; no replacement was started."
         }
         "review_parent_changed" | "review_target_stale" | "review_precondition_invalid"
         | "review_authority_stale" => {
@@ -5517,6 +7510,20 @@ fn configuration_create_report_message(step: &Value) -> Option<String> {
             "Temporary staging cleanup is deferred because the final outcome is uncertain."
                 .to_string(),
         ),
+        _ => {}
+    }
+
+    match report.get("backupStatus").and_then(Value::as_str) {
+        Some("verified") => messages.push(
+            "A private copy of the original file is available in the backup folder.".to_string(),
+        ),
+        Some("waived") => messages.push(
+            "No private backup was created under the one-time waiver for this replacement."
+                .to_string(),
+        ),
+        Some("disabled") => {
+            messages.push("Private backup was disabled for this reviewed replacement.".to_string())
+        }
         _ => {}
     }
     Some(messages.join(" "))
@@ -5983,6 +7990,230 @@ pub(crate) mod tests {
 
     use super::*;
 
+    #[test]
+    fn operation_fence_frontend_projection_omits_target_and_backup_paths() {
+        let android_path =
+            "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg";
+        let local_path = "/Users/private-user/EmuChef/original.cfg";
+        let record = OperationFenceRecord {
+            version: 1,
+            operation_id: "operation-private".to_string(),
+            runtime_generation: 7,
+            attempt_sequence: 13,
+            device_handle: "device-handle".to_string(),
+            plan_digest: "a".repeat(64),
+            phase: OperationFencePhase::RemoteQuiescent,
+            outcome: Some(OperationFenceOutcome::PartialWriteTerminal),
+            host_cleanup_complete: true,
+            target: Some(operation::OperationFenceTarget {
+                operation: "replace".to_string(),
+                app_id: "retroarch".to_string(),
+                target_id: "config".to_string(),
+                package_id: "com.retroarch.aarch64".to_string(),
+                android_user_id: 0,
+                target_path: android_path.to_string(),
+                source_sha256: "c".repeat(64),
+                original_file_precondition: json!({
+                    "status": "confirmed_existing",
+                    "sha256": "d".repeat(64),
+                    "byteLength": 42,
+                    "targetPath": android_path,
+                }),
+                backup_mode: "verified".to_string(),
+            }),
+            backup: Some(operation::OperationFenceBackup {
+                path: local_path.to_string(),
+                metadata_path: format!("{local_path}.json"),
+                operation: "replace".to_string(),
+                device_handle: "device-handle".to_string(),
+                package_id: "com.retroarch.aarch64".to_string(),
+                target_path: android_path.to_string(),
+                captured_at_unix_ms: 1_800_000_000_000,
+                sha256: "b".repeat(64),
+                length: 42,
+            }),
+        };
+        let inspection = OperationFenceRecoveryInspection {
+            record,
+            status: "partial_write_terminal",
+            guidance: format!("private path {local_path}; target {android_path}"),
+            can_acknowledge: true,
+        };
+
+        let public = project_operation_fence_inspection(&inspection);
+        let serialized = serde_json::to_string(&public).unwrap();
+
+        assert!(!serialized.contains(local_path));
+        assert!(!serialized.contains(android_path));
+        assert!(!serialized.contains("metadataPath"));
+        assert!(serialized.contains("partial_write_terminal"));
+        assert!(serialized.contains("confirmed_existing"));
+        assert!(serialized.contains(&"b".repeat(64)));
+        assert!(public.can_acknowledge);
+    }
+
+    #[test]
+    fn unresolved_real_start_persists_a_versioned_operation_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active-device-operation.marker");
+        let mut store = ExecutionHandleStore::with_durable_operation_fence(path.clone());
+        store
+            .retain_unresolved_real_start(UnresolvedRealStart {
+                runtime_generation: 7,
+                attempt_sequence: 13,
+                device_handle: "device-handle".to_string(),
+                plan_digest: "a".repeat(64),
+            })
+            .unwrap();
+
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(record["version"], 1);
+        assert_eq!(record["phase"], "dispatching");
+        assert_eq!(record["runtimeGeneration"], 7);
+        assert_eq!(record["attemptSequence"], 13);
+        assert_eq!(record["deviceHandle"], "device-handle");
+        assert_eq!(record["planDigest"], "a".repeat(64));
+        assert!(!record["operationId"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovered_terminal_partial_write_can_be_inspected_and_acknowledged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active-device-operation.marker");
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 13,
+            device_handle: "device-handle".to_string(),
+            plan_digest: "a".repeat(64),
+        };
+        let record = operation.operation_fence_record();
+        operation::write_initial(&path, &record).unwrap();
+        let target_path =
+            "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg";
+        let record = operation::record_reviewed_target(
+            &path,
+            &record,
+            operation::OperationFenceTarget {
+                operation: "replace".to_string(),
+                app_id: "retroarch".to_string(),
+                target_id: "config".to_string(),
+                package_id: "com.retroarch.aarch64".to_string(),
+                android_user_id: 0,
+                target_path: target_path.to_string(),
+                source_sha256: "c".repeat(64),
+                original_file_precondition: json!({
+                    "status": "confirmed_existing",
+                    "targetPath": target_path,
+                }),
+                backup_mode: "verified".to_string(),
+            },
+        )
+        .unwrap();
+        let record = operation::record_verified_backup(
+            &path,
+            &record,
+            operation::OperationFenceBackup {
+                path: "/private/configuration-backups/op-1/original.cfg".to_string(),
+                metadata_path: "/private/configuration-backups/op-1/metadata.v2.json".to_string(),
+                operation: "replace".to_string(),
+                device_handle: record.device_handle.clone(),
+                package_id: "com.retroarch.aarch64".to_string(),
+                target_path: target_path.to_string(),
+                captured_at_unix_ms: 1_800_000_000_000,
+                sha256: "b".repeat(64),
+                length: 42,
+            },
+        )
+        .unwrap();
+        operation::advance(
+            &path,
+            &record,
+            OperationFencePhase::Dispatching,
+            OperationFencePhase::CommitPending,
+        )
+        .unwrap();
+        operation::advance_with_outcome(
+            &path,
+            &record,
+            OperationFencePhase::CommitPending,
+            OperationFenceOutcome::PartialWriteTerminal,
+        )
+        .unwrap();
+        assert!(!operation::read(&path).unwrap().can_acknowledge_quiescence());
+        assert!(operation::mark_host_cleanup_complete(&path, &record).unwrap());
+
+        let mut recovered = ExecutionHandleStore::with_durable_operation_fence(path.clone());
+        let inspection = recovered
+            .inspect_durable_operation_fence()
+            .unwrap()
+            .unwrap();
+        assert_eq!(inspection.status, "partial_write_terminal");
+        assert!(inspection.can_acknowledge);
+        let message = operation_fence_confirmation_message(&inspection);
+        for expected in [
+            "Operation ID:",
+            "Device handle: device-handle",
+            "Runtime generation: 7",
+            "Attempt sequence: 13",
+            "Fence phase: RemoteQuiescent",
+            "Recorded outcome: PartialWriteTerminal",
+            "Reviewed operation: replace",
+            "App Target: retroarch/config",
+            "Package: com.retroarch.aarch64",
+            "Android user: 0",
+            "/private/configuration-backups/op-1/original.cfg",
+            "com.retroarch.aarch64",
+            "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?} from {message:?}"
+            );
+        }
+        assert!(!message.contains("Device session: 7"));
+
+        recovered
+            .acknowledge_durable_operation_fence(&inspection.record)
+            .unwrap();
+
+        assert!(!path.exists());
+        assert!(!recovered.has_durable_operation_fence());
+    }
+
+    #[test]
+    fn recovered_commit_pending_fence_remains_blocked_without_quiescence_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active-device-operation.marker");
+        let operation = UnresolvedRealStart {
+            runtime_generation: 7,
+            attempt_sequence: 14,
+            device_handle: "device-handle".to_string(),
+            plan_digest: "b".repeat(64),
+        };
+        let record = operation.operation_fence_record();
+        operation::write_initial(&path, &record).unwrap();
+        operation::advance(
+            &path,
+            &record,
+            OperationFencePhase::Dispatching,
+            OperationFencePhase::CommitPending,
+        )
+        .unwrap();
+
+        let mut recovered = ExecutionHandleStore::with_durable_operation_fence(path.clone());
+        let inspection = recovered
+            .inspect_durable_operation_fence()
+            .unwrap()
+            .unwrap();
+        assert_eq!(inspection.status, "write_unresolved");
+        assert!(!inspection.can_acknowledge);
+        assert!(recovered
+            .acknowledge_durable_operation_fence(&inspection.record)
+            .is_err());
+        assert!(path.is_file());
+    }
+
     pub(crate) fn profile_change_blocking_stores(
         root: &Path,
     ) -> Vec<(&'static str, ExecutionHandleStore)> {
@@ -6224,9 +8455,253 @@ pub(crate) mod tests {
             qualification_context: None,
             platform_tools_identity: None,
             restricted_execution: None,
+            configuration_backup_waiver: None,
+            configuration_backup_enabled: true,
             created: Instant::now(),
             last_access: Instant::now(),
         }
+    }
+
+    fn retroarch_configuration_review() -> ReviewedPlanSnapshot {
+        let mut reviewed = review();
+        let recipe_id = "app.retroarch.configure";
+        let package_id = "com.retroarch.aarch64";
+        let plan = json!({
+            "kind": "execution_plan",
+            "id": "plan.retroarch-config",
+            "source": {
+                "device_profile_ref": "konkr.pocket_advance",
+                "selected_recipe_refs": [recipe_id],
+                "catalog": {"sourceId": "fixture-catalog"}
+            },
+            "resolved_inputs": [{
+                "key": "app.retroarch.configure/retroarch_cfg_source",
+                "recipeId": recipe_id,
+                "inputId": "retroarch_cfg_source",
+                "type": "enum",
+                "value": "uploaded",
+                "source": "explicit",
+                "label": "Configuration source",
+                "required": true,
+                "sensitive": false
+            }],
+            "apps": [{"id": "retroarch", "package_id": package_id}],
+            "steps": [{
+                "id": "app.retroarch.configure/seed_retroarch_cfg",
+                "recipe_ref": recipe_id,
+                "app_id": "retroarch",
+                "type": "copy_files",
+                "params": {
+                    "source": {"Literal": {"value": {
+                        "type": "configuration_artifact",
+                        "sourceIdentity": {"recipeId": recipe_id, "kind": "uploaded"},
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "absencePrecondition": {"status": "confirmed_absent"},
+                        "backupMode": "disabled",
+                        "backupWaiverDigest": null,
+                        "targetIdentity": {
+                            "appId": "retroarch",
+                            "packageId": package_id,
+                            "targetId": "config",
+                            "androidUserId": 0,
+                            "target": {
+                                "kind": "file",
+                                "location": "external_app_data",
+                                "path": "files/retroarch.cfg"
+                            }
+                        }
+                    }}},
+                    "dest": {"Literal": {"value": {"app_target": "config"}}},
+                    "copy_policy": {"Literal": {"value": "create_only"}}
+                }
+            }]
+        });
+        reviewed.response["plan"] = plan.clone();
+        reviewed.plan_digest = canonical_json_digest(&plan).unwrap();
+        reviewed.qualification_context = Some(crate::device_observation::QualificationContextKey {
+            device_handle: reviewed.device_handle.clone(),
+            session_epoch: 4,
+            runtime_generation: 7,
+            platform_tools_revision: 2,
+            qualification_revision: 9,
+            capability_fingerprint: "capability-fingerprint".to_string(),
+        });
+        reviewed
+    }
+
+    #[test]
+    fn native_configuration_write_intent_binds_confirmed_operation_and_session() {
+        let reviewed = retroarch_configuration_review();
+        let create = native_configuration_write_intent("review-native", &reviewed, 7, 4)
+            .unwrap()
+            .expect("the exact RetroArch config target requires native confirmation");
+        assert_eq!(
+            create.operation,
+            crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Create
+        );
+        assert_eq!(create.device_serial, "sensitive-serial");
+        assert_eq!(create.session_epoch, 4);
+        assert_eq!(create.target_identity["targetId"], "config");
+        let message = create.confirmation_message();
+        for expected in [
+            "Create",
+            "sensitive-serial",
+            "Device session: 4",
+            "konkr.pocket_advance",
+            "/storage/emulated/0/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "confirmed_absent",
+            "disabled",
+            "RetroArch may be stopped if it is running",
+            "Stopping it may discard unsaved application state",
+            "checking that the target is absent",
+            "Create has no original configuration file to back up",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?} from {message:?}"
+            );
+        }
+        let claim = create.clone().authorize().into_claim();
+        assert_eq!(claim["purpose"], "retroarch_configuration_write");
+        assert_eq!(claim["operation"], "create");
+        assert_eq!(claim["reviewHandle"], "review-native");
+        assert_eq!(claim["planDigest"], reviewed.plan_digest);
+        assert_eq!(claim["nonce"].as_str().unwrap().len(), 32);
+
+        let mut replace_review = reviewed.clone();
+        replace_review.response["plan"]["steps"][0]["params"]["copy_policy"]["Literal"]["value"] =
+            json!("replace");
+        let artifact = &mut replace_review.response["plan"]["steps"][0]["params"]["source"]
+            ["Literal"]["value"];
+        artifact["absencePrecondition"] = Value::Null;
+        artifact["originalFilePrecondition"] = json!({
+            "status": "confirmed_existing",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        });
+        artifact["backupMode"] = json!("verified");
+        replace_review.plan_digest =
+            canonical_json_digest(&replace_review.response["plan"]).unwrap();
+        let replace = native_configuration_write_intent("review-native", &replace_review, 7, 4)
+            .unwrap()
+            .expect("Replace also requires native confirmation");
+        assert_eq!(
+            replace.operation,
+            crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace
+        );
+        assert_eq!(replace.backup_mode, "verified");
+        assert_eq!(
+            replace.original_file_precondition["status"],
+            "confirmed_existing"
+        );
+        let replace_message = replace.confirmation_message();
+        for expected in [
+            "Replace",
+            "RetroArch may be stopped if it is running",
+            "Stopping it may discard unsaved application state",
+            "overwrites the entire configuration, including custom settings and comments",
+            "non-atomic; interruption may leave partial contents",
+            "A verified private backup is created before replacement and remains available for manual recovery",
+        ] {
+            assert!(
+                replace_message.contains(expected),
+                "missing {expected:?} from {replace_message:?}"
+            );
+        }
+
+        let mut persistent_opt_out = replace_review.clone();
+        persistent_opt_out.configuration_backup_enabled = false;
+        persistent_opt_out.response["plan"]["steps"][0]["params"]["source"]["Literal"]["value"]
+            ["backupMode"] = json!("disabled");
+        persistent_opt_out.plan_digest =
+            canonical_json_digest(&persistent_opt_out.response["plan"]).unwrap();
+        let opted_out =
+            native_configuration_write_intent("review-native", &persistent_opt_out, 7, 4)
+                .unwrap()
+                .unwrap();
+        assert!(opted_out
+            .confirmation_message()
+            .contains("No verified private backup will be available for this replacement; recovery may not be possible."));
+
+        assert_ne!(create, replace);
+        assert!(native_configuration_write_intent("review-native", &reviewed, 7, 5).is_err());
+    }
+
+    #[test]
+    fn native_configuration_write_intent_requires_a_matching_backup_waiver() {
+        let mut reviewed = retroarch_configuration_review();
+        reviewed.response["plan"]["steps"][0]["params"]["copy_policy"]["Literal"]["value"] =
+            json!("replace");
+        let artifact =
+            &mut reviewed.response["plan"]["steps"][0]["params"]["source"]["Literal"]["value"];
+        artifact["absencePrecondition"] = Value::Null;
+        artifact["originalFilePrecondition"] = json!({
+            "status": "confirmed_existing",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        });
+        artifact["backupMode"] = json!("verified");
+        reviewed.plan_digest = canonical_json_digest(&reviewed.response["plan"]).unwrap();
+        let verified = native_configuration_write_intent("review-native", &reviewed, 7, 4)
+            .unwrap()
+            .unwrap();
+
+        let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let mut waived = reviewed.clone();
+        let artifact =
+            &mut waived.response["plan"]["steps"][0]["params"]["source"]["Literal"]["value"];
+        artifact["backupMode"] = json!("waived");
+        artifact["backupWaiverDigest"] = json!(digest);
+        waived.plan_digest = canonical_json_digest(&waived.response["plan"]).unwrap();
+        assert!(native_configuration_write_intent("review-native", &waived, 7, 4).is_err());
+
+        waived.configuration_backup_waiver = Some(crate::handles::ConfigurationBackupWaiver {
+            digest: digest.to_string(),
+            waiver_nonce: "waiver-nonce".to_string(),
+            failure_execution_handle: "failed-execution".to_string(),
+            failure_operation_id: "failed-operation".to_string(),
+            failure_report_digest:
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string(),
+            original_review_handle: "failed-review".to_string(),
+            original_plan_digest:
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+            device_handle: verified.device_handle.clone(),
+            device_serial: verified.device_serial.clone(),
+            session_epoch: verified.session_epoch,
+            runtime_generation: verified.runtime_generation,
+            qualification_context_digest: verified.qualification_context_digest.clone(),
+            profile_id: verified.profile_id.clone(),
+            target_identity: verified.target_identity.clone(),
+            destination: verified.destination.clone(),
+            source_sha256: verified.source_sha256.clone(),
+            original_file_precondition: verified.original_file_precondition.clone(),
+            created: Instant::now(),
+        });
+        let intent = native_configuration_write_intent("review-native", &waived, 7, 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.backup_mode, "waived");
+        assert_eq!(intent.backup_waiver_digest.as_deref(), Some(digest));
+        assert!(intent
+            .confirmation_message()
+            .contains("Backup failure operation: failed-operation"));
+        assert!(intent
+            .confirmation_message()
+            .contains("No verified private backup will be available for this replacement; recovery may not be possible."));
+
+        waived.response["plan"]["steps"][0]["params"]["source"]["Literal"]["value"]["sha256"] =
+            json!("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        waived.plan_digest = canonical_json_digest(&waived.response["plan"]).unwrap();
+        assert!(native_configuration_write_intent("review-native", &waived, 7, 4).is_err());
+    }
+
+    #[test]
+    fn consumed_backup_waiver_cannot_be_reused_after_store_reset() {
+        let digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let mut store = ExecutionHandleStore::default();
+        assert!(store.consume_configuration_backup_waiver(digest).is_ok());
+        assert!(store.consume_configuration_backup_waiver(digest).is_err());
+        store.reset();
+        assert!(store.consume_configuration_backup_waiver(digest).is_err());
     }
 
     #[test]
@@ -9038,6 +11513,24 @@ pub(crate) mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn report_v2_omits_native_configuration_backup_controls() {
+        let mut public = json!({
+            "recipes": [{
+                "steps": [{
+                    "configurationBackupOperationId": "backup-operation",
+                    "configurationBackupFailureOperationId": "failed-operation"
+                }]
+            }]
+        });
+
+        strip_ui_only_configuration_backup_fields(&mut public);
+
+        let step = &public["recipes"][0]["steps"][0];
+        assert!(step.get("configurationBackupOperationId").is_none());
+        assert!(step.get("configurationBackupFailureOperationId").is_none());
     }
 
     /// Checks that Node validator fixtures match bytes from the retained report export path.
@@ -14333,6 +16826,7 @@ pub(crate) mod tests {
                     "appId": "retroarch",
                     "packageId": package_id,
                     "targetId": "config",
+                    "androidUserId": 0,
                     "target": {
                         "kind": "file",
                         "location": "external_app_data",
@@ -14429,7 +16923,8 @@ pub(crate) mod tests {
                 requests: Mutex::new(Vec::new()),
             };
             {
-                let mut executions = state.executions.lock().unwrap();
+                let mut execution_store = ExecutionHandleStore::default();
+                let mut executions = ExecutionStoreAccess::borrowed(&mut execution_store);
                 list_and_reconcile_preflight_inventory(
                     &state,
                     &preflight_runtime,
@@ -14493,17 +16988,6 @@ pub(crate) mod tests {
                     ));
             }
             retained.qualification_context = Some(current_context);
-            let write_target =
-                crate::retroarch_config_create_policy::resolve_retroarch_config_create_target(
-                    &plan,
-                )
-                .unwrap()
-                .unwrap();
-            state
-                .root_qualification
-                .lock()
-                .unwrap()
-                .mark_config_create_write_probe_verified_for_test(&root_key, write_target.clone());
             let review_handle = state
                 .handles
                 .lock()
@@ -14618,7 +17102,7 @@ pub(crate) mod tests {
             (
                 "partial_write_unverified",
                 "not_required",
-                "Configuration creation may have left partial bytes; inspect the destination before retrying.",
+                "The configuration write may have left partial bytes; inspect the destination before retrying.",
             ),
             (
                 "completion_uncertain",
@@ -14628,7 +17112,7 @@ pub(crate) mod tests {
             (
                 "staging_failed_no_target_write",
                 "warning",
-                "Configuration creation stopped before opening the destination. Temporary staging cleanup remains pending.",
+                "The configuration write stopped before opening the destination. Temporary staging cleanup remains pending.",
             ),
         ] {
             let step = json!({
@@ -14642,11 +17126,42 @@ pub(crate) mod tests {
                 },
             });
             assert_eq!(
-                configuration_create_report_message(&step).as_deref(),
+                configuration_write_report_message(&step).as_deref(),
                 Some(expected),
                 "unexpected projection for {outcome}"
             );
         }
+    }
+
+    #[test]
+    fn backup_failure_operation_is_exposed_only_for_verified_prewrite_replace_failures() {
+        let mut step = json!({
+            "status": "failed",
+            "outputs": {
+                "configuration_create_report": {
+                    "value": {
+                        "operation": "replace",
+                        "outcome": "backup_failed",
+                        "backupMode": "verified",
+                        "backupStatus": "failed",
+                        "verificationScope": "device",
+                        "simulated": false,
+                        "mayHaveChanged": false,
+                        "verified": false,
+                        "appliedToDevice": false,
+                        "operationId": "backup-failure-operation"
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            project_step(&step, "serial")["configurationBackupFailureOperationId"],
+            "backup-failure-operation"
+        );
+
+        step["outputs"]["configuration_create_report"]["value"]["mayHaveChanged"] =
+            Value::Bool(true);
+        assert!(project_step(&step, "serial")["configurationBackupFailureOperationId"].is_null());
     }
 
     #[test]
@@ -14753,8 +17268,7 @@ pub(crate) mod tests {
             0,
             || true,
             || {
-                reset_was_inside_transition =
-                    state.qualification_transition_gate.try_lock().is_err();
+                reset_was_inside_transition = state.qualification_transition_gate.is_active();
             },
         )
         .unwrap_err();
@@ -14782,7 +17296,7 @@ pub(crate) mod tests {
             },
         });
         assert_eq!(
-            configuration_create_report_message(&step).as_deref(),
+            configuration_write_report_message(&step).as_deref(),
             Some("This host cannot safely simulate configuration creation; no device file was changed.")
         );
     }
@@ -15173,7 +17687,7 @@ pub(crate) mod tests {
 
         request_real_start(&runtime, &retained, Some(&lease)).unwrap();
 
-        assert!(state.qualification_transition_gate.try_lock().is_err());
+        assert!(state.qualification_transition_gate.is_active());
         let requests = runtime.requests.lock().unwrap();
         assert_eq!(
             requests.len(),
@@ -15594,5 +18108,193 @@ pub(crate) mod tests {
             .as_array()
             .unwrap();
         assert!(attached.contains(&Value::String("launch_configured_app".to_string())));
+    }
+
+    #[test]
+    fn locked_start_access_releases_the_execution_mutex_after_each_update() {
+        let store = Mutex::new(ExecutionHandleStore::default());
+        let token = store
+            .lock()
+            .unwrap()
+            .reserve_start(ExecutionKind::Real)
+            .unwrap();
+        let mut access = ExecutionStoreAccess::locked(&store, token, None);
+
+        access
+            .with_store(|store| assert!(store.has_in_flight()))
+            .unwrap();
+
+        assert!(store.try_lock().is_ok());
+    }
+
+    fn reviewed_backup_preference_test_intent() -> NativeConfigurationWriteIntent {
+        NativeConfigurationWriteIntent {
+            review_handle: "review-preference-admission".to_string(),
+            plan_digest: "a".repeat(64),
+            device_handle: "device-preference-admission".to_string(),
+            device_serial: "device-serial".to_string(),
+            session_epoch: 3,
+            runtime_generation: 7,
+            qualification_context_digest: "b".repeat(64),
+            profile_id: "profile-test".to_string(),
+            target_identity: json!({ "appId": "retroarch", "targetId": "config" }),
+            destination: "/data/retroarch.cfg".to_string(),
+            operation:
+                crate::retroarch_config_write_policy::RetroArchConfigurationOperation::Replace,
+            source_sha256: "c".repeat(64),
+            original_file_precondition: json!({
+                "status": "confirmed_existing",
+                "sha256": "d".repeat(64),
+                "byteLength": 42,
+            }),
+            backup_mode: "verified".to_string(),
+            configuration_backup_enabled: true,
+            backup_waiver_digest: None,
+            backup_failure_operation_id: None,
+            backup_failure_report_digest: None,
+        }
+    }
+
+    #[test]
+    fn preference_change_after_admission_preserves_the_reviewed_operation_mode() {
+        let root = tempfile::tempdir().unwrap();
+        crate::configuration_backup_preferences::set_preference_for_test(root.path(), true)
+            .unwrap();
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let token = executions
+            .lock()
+            .unwrap()
+            .reserve_start(ExecutionKind::Real)
+            .unwrap();
+        let intent = reviewed_backup_preference_test_intent();
+
+        let admission = crate::configuration_backup_preferences::with_reviewed_preference(
+            root.path(),
+            true,
+            || {
+                executions
+                    .lock()
+                    .unwrap()
+                    .admit_reviewed_backup_preference(token, &intent)
+            },
+        )
+        .unwrap();
+        crate::configuration_backup_preferences::set_preference_for_test(root.path(), false)
+            .unwrap();
+
+        assert!(admission.configuration_backup_enabled);
+        assert_eq!(admission.backup_mode, "verified");
+        let mut changed_intent = intent.clone();
+        changed_intent.source_sha256 = "e".repeat(64);
+        assert_ne!(
+            admission.operation_binding_digest,
+            changed_intent
+                .preference_admission_binding_digest()
+                .unwrap()
+        );
+        let mut access = ExecutionStoreAccess::locked(&executions, token, Some(admission.clone()));
+        access.with_store(|_| ()).unwrap();
+        assert_eq!(
+            executions
+                .lock()
+                .unwrap()
+                .reviewed_backup_preference_admission,
+            Some(admission)
+        );
+        assert!(!crate::configuration_backup_preferences::read_preference(root.path()).unwrap());
+    }
+
+    #[test]
+    fn concurrent_attempt_cannot_admit_using_an_obsolete_backup_preference() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let root = tempfile::tempdir().unwrap();
+        crate::configuration_backup_preferences::set_preference_for_test(root.path(), true)
+            .unwrap();
+        let executions = Arc::new(Mutex::new(ExecutionHandleStore::default()));
+        let first_token = executions
+            .lock()
+            .unwrap()
+            .reserve_start(ExecutionKind::Real)
+            .unwrap();
+        let first_intent = reviewed_backup_preference_test_intent();
+        let first_admission = crate::configuration_backup_preferences::with_reviewed_preference(
+            root.path(),
+            true,
+            || {
+                executions
+                    .lock()
+                    .unwrap()
+                    .admit_reviewed_backup_preference(first_token, &first_intent)
+            },
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let competing_store = Arc::clone(&executions);
+        let competing_path = root.path().to_path_buf();
+        let competing_barrier = Arc::clone(&barrier);
+        let competing_attempt = thread::spawn(move || {
+            competing_barrier.wait();
+            crate::configuration_backup_preferences::with_reviewed_preference(
+                &competing_path,
+                true,
+                || {
+                    let token = competing_store
+                        .lock()
+                        .unwrap()
+                        .reserve_start(ExecutionKind::Real)
+                        .map_err(|()| {
+                            safe_error(
+                                "execution_in_progress",
+                                "Another execution is already starting or active.",
+                            )
+                        })?;
+                    competing_store
+                        .lock()
+                        .unwrap()
+                        .admit_reviewed_backup_preference(
+                            token,
+                            &reviewed_backup_preference_test_intent(),
+                        )
+                },
+            )
+        });
+        let updating_path = root.path().to_path_buf();
+        let updating_barrier = Arc::clone(&barrier);
+        let preference_update = thread::spawn(move || {
+            updating_barrier.wait();
+            crate::configuration_backup_preferences::set_preference_for_test(&updating_path, false)
+        });
+        barrier.wait();
+
+        assert!(competing_attempt.join().unwrap().is_err());
+        preference_update.join().unwrap().unwrap();
+        assert_eq!(
+            executions
+                .lock()
+                .unwrap()
+                .reviewed_backup_preference_admission,
+            Some(first_admission)
+        );
+        assert!(!crate::configuration_backup_preferences::read_preference(root.path()).unwrap());
+    }
+
+    #[test]
+    fn stale_start_reservation_token_cannot_release_a_later_start() {
+        let mut store = ExecutionHandleStore::default();
+
+        let first = store.reserve_start(ExecutionKind::Real).unwrap();
+        assert!(store.has_in_flight());
+        assert!(store.release_start_if_owned(&first));
+        assert!(!store.has_in_flight());
+
+        let second = store.reserve_start(ExecutionKind::Real).unwrap();
+        assert_ne!(first, second);
+        assert!(!store.release_start_if_owned(&first));
+        assert!(store.has_in_flight());
+        assert!(store.release_start_if_owned(&second));
+        assert!(!store.has_in_flight());
     }
 }

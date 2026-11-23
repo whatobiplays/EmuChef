@@ -2,11 +2,17 @@
 
 **Status:** Accepted product direction; retention and interrupted-write details open.
 
-Configuration backups are enabled by default. Before changing an existing app configuration, EmuChef normally preserves its original bytes as a protected, bounded recovery artifact and supports explicit per-file restoration. If backup is enabled but fails for an affected file, that file's update requires a distinct, informed waiver for that execution, stating that restoration may not be available.
+Configuration backups are enabled by default. Before changing an existing app configuration, EmuChef preserves its original bytes as a protected recovery artifact under the retention policy for that workflow. The product direction includes explicit per-file restoration where implemented. If backup is enabled but fails for an affected file, that file's update requires a distinct, informed waiver for that execution, stating that restoration may not be available.
 
 A user may instead disable automatic configuration backups persistently in Advanced Settings. Enabling that opt-out requires explicit confirmation of its consequences; during review of affected changes, EmuChef clearly states that configuration backups are disabled. While the preference is active, EmuChef does not attempt automatic backups or repeatedly demand per-file waivers. Re-enabling backups restores the default behavior for subsequent operations. Neither an isolated waiver nor a persistent opt-out bypasses safe parsing, preservation of unrelated settings, operation review, or any other execution safety condition.
 
 A configuration backup waiver is not a promise of recovery; no whole-device or whole-setup rollback is implied. Reports preserve each operation's actual completed, failed, skipped, or partial state. Exact backup retention limits, restoration target validation, interruption recovery, and settings persistence details remain implementation design questions.
+
+## Issue #56 implementation status — 2026-11-21
+
+Issue #56 implements a narrow backup path for Replace of the exact RetroArch `config` App Target. Backups are on by default, stored in a private Mac folder, and retained without automatic limits. Advanced Settings can disable backups for later reviews. A verified-backup failure blocks the write; a waiver requires a fresh review of that failure and native confirmation for one exact replacement. The result view can open the backup folder when a verified backup exists.
+
+This path does not add Backup History, backup deletion, automatic rollback, or in-app restoration. General target-aware restore and the broader T10 recovery contract remain separate work. Physical-device qualification and production enablement remain outstanding.
 
 ## Open engineering contract (not implemented)
 

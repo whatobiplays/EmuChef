@@ -52,8 +52,35 @@ pub struct ReviewedPlanSnapshot {
     pub platform_tools_identity: Option<AdbInstallationIdentity>,
     /// Sidecar-only one-use authority retained outside renderer-visible review data.
     pub(crate) restricted_execution: Option<RestrictedExecutionReview>,
+    /// Native receipt authorizing one reviewed backup-failure waiver.
+    pub(crate) configuration_backup_waiver: Option<ConfigurationBackupWaiver>,
+    /// Persistent backup setting captured when the review was prepared.
+    pub(crate) configuration_backup_enabled: bool,
     pub created: Instant,
     pub last_access: Instant,
+}
+
+/// Binds a one-use backup waiver to its failed operation and reviewed file.
+#[derive(Clone, Debug)]
+pub(crate) struct ConfigurationBackupWaiver {
+    pub(crate) digest: String,
+    pub(crate) waiver_nonce: String,
+    pub(crate) failure_execution_handle: String,
+    pub(crate) failure_operation_id: String,
+    pub(crate) failure_report_digest: String,
+    pub(crate) original_review_handle: String,
+    pub(crate) original_plan_digest: String,
+    pub(crate) device_handle: String,
+    pub(crate) device_serial: String,
+    pub(crate) session_epoch: u64,
+    pub(crate) runtime_generation: u64,
+    pub(crate) qualification_context_digest: String,
+    pub(crate) profile_id: String,
+    pub(crate) target_identity: Value,
+    pub(crate) destination: String,
+    pub(crate) source_sha256: String,
+    pub(crate) original_file_precondition: Value,
+    pub(crate) created: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -383,7 +410,6 @@ impl SessionHandles {
     }
 
     /// Return the native continuity epoch for one currently retained device.
-    #[cfg(test)]
     pub fn device_session_epoch(&self, handle: &str) -> Option<u64> {
         self.devices_by_handle
             .get(handle)
@@ -744,6 +770,8 @@ mod tests {
             qualification_context: None,
             platform_tools_identity: None,
             restricted_execution: None,
+            configuration_backup_waiver: None,
+            configuration_backup_enabled: true,
             created: Instant::now(),
             last_access: Instant::now(),
         }

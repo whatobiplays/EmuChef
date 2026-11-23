@@ -2,9 +2,18 @@
 
 use std::env;
 use std::future::Future;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use async_io::{block_on, Timer};
 use async_process::{ChildStdin, ChildStdout, Command, Stdio};
@@ -13,6 +22,11 @@ use emuchef_rust_backend::session::DocumentSessionManager;
 use emuchef_rust_backend::{isolate_process_group, OwnedProcessGroup};
 use futures_lite::future::poll_fn;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use ring::{
+    hmac,
+    rand::{SecureRandom, SystemRandom},
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -49,6 +63,81 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
+const TRUSTED_CONTROL_FD: RawFd = 198;
+
+#[cfg(unix)]
+struct TrustedControlSigner {
+    key: [u8; 32],
+    runtime_generation: u64,
+    next_sequence: u64,
+}
+
+#[cfg(unix)]
+impl TrustedControlSigner {
+    fn new_random(runtime_generation: u64) -> Result<Self, String> {
+        let mut key = [0u8; 32];
+        SystemRandom::new()
+            .fill(&mut key)
+            .map_err(|_| "The private runtime session could not be initialized.".to_string())?;
+        Ok(Self {
+            key,
+            runtime_generation,
+            next_sequence: 1,
+        })
+    }
+
+    fn sign_request(&mut self, request: &mut Value, claims: Option<Value>) -> Result<(), String> {
+        let object = request
+            .as_object_mut()
+            .ok_or_else(|| "Runtime request could not be authenticated.".to_string())?;
+        let request_id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Runtime request could not be authenticated.".to_string())?;
+        let request_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Runtime request could not be authenticated.".to_string())?;
+        let sequence = self.next_sequence;
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "Private runtime request sequence is exhausted.".to_string())?;
+        let payload = object.get("payload").unwrap_or(&Value::Null);
+        let input = emuchef_rust_backend::trusted_control::control_mac_input(
+            self.runtime_generation,
+            sequence,
+            request_id,
+            request_type,
+            payload,
+            claims.as_ref(),
+        );
+        let signature = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &self.key), &input);
+        object.insert(
+            "trustedControl".to_string(),
+            json!({
+                "version": 1,
+                "runtimeGeneration": self.runtime_generation,
+                "sequence": sequence,
+                "claims": claims,
+                "mac": hex::encode(signature.as_ref()),
+            }),
+        );
+        self.next_sequence = next_sequence;
+        Ok(())
+    }
+
+    fn key_bytes(&self) -> &[u8; 32] {
+        &self.key
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TrustedControlSigner {
+    fn drop(&mut self) {
+        self.key.fill(0);
+    }
+}
 
 /// Records whether the last owned sidecar process reached a confirmed terminal
 /// state. `NotRequired` means no child existed for that lifecycle attempt.
@@ -258,6 +347,18 @@ impl SidecarState {
             .map_err(|_| "Rust runtime state is unavailable.".to_string())?
             .request(request_type, payload)
     }
+
+    pub(crate) fn request_with_trusted_claims(
+        &self,
+        request_type: &str,
+        payload: Value,
+        claims: Option<Value>,
+    ) -> Result<Value, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "Rust runtime state unavailable.".to_string())?
+            .request_with_claims(request_type, payload, claims)
+    }
 }
 
 struct SidecarClient {
@@ -375,7 +476,11 @@ impl SidecarClient {
 
     fn negotiate_existing_process(&mut self) -> Result<u64, StartFailure> {
         let hello = self
-            .raw_request("hello", json!({ "runtimeGeneration": self.generation }))
+            .raw_request(
+                "hello",
+                json!({ "runtimeGeneration": self.generation }),
+                None,
+            )
             .map_err(StartFailure::SessionLost)?;
         let result = startup_result(&hello)?;
         let restriction = result
@@ -442,7 +547,11 @@ impl SidecarClient {
             ));
         }
         let negotiation = self
-            .raw_request("negotiateCapabilities", capability_negotiation_payload())
+            .raw_request(
+                "negotiateCapabilities",
+                capability_negotiation_payload(),
+                None,
+            )
             .map_err(StartFailure::SessionLost)?;
         let result = startup_result(&negotiation)?;
         if result.get("compatible").and_then(Value::as_bool) != Some(true) {
@@ -477,6 +586,15 @@ impl SidecarClient {
     }
 
     fn request(&mut self, request_type: &str, payload: Value) -> Result<Value, String> {
+        self.request_with_claims(request_type, payload, None)
+    }
+
+    fn request_with_claims(
+        &mut self,
+        request_type: &str,
+        payload: Value,
+        claims: Option<Value>,
+    ) -> Result<Value, String> {
         if matches!(
             &self.status,
             RuntimeStatusDto::Failed { error } if error.code == "runtime_session_lost"
@@ -486,7 +604,7 @@ impl SidecarClient {
         if !matches!(self.status, RuntimeStatusDto::Ready { .. }) {
             return Err("Rust runtime is not ready.".to_string());
         }
-        let envelope = match self.raw_request(request_type, payload) {
+        let envelope = match self.raw_request(request_type, payload, claims) {
             Ok(envelope) => envelope,
             Err(_) => return Err(self.fail_runtime_session()),
         };
@@ -541,7 +659,12 @@ impl SidecarClient {
         runtime_session_lost_error()
     }
 
-    fn raw_request(&mut self, request_type: &str, payload: Value) -> Result<Value, String> {
+    fn raw_request(
+        &mut self,
+        request_type: &str,
+        payload: Value,
+        claims: Option<Value>,
+    ) -> Result<Value, String> {
         let request_id = format!("app-{}", self.next_request_id);
         self.next_request_id += 1;
         let process = self
@@ -551,7 +674,22 @@ impl SidecarClient {
         if process.generation() != self.generation {
             return Err("Rust runtime response belonged to a stale generation.".to_string());
         }
-        let request = json!({ "id": request_id, "type": request_type, "payload": payload });
+        let mut request = json!({ "id": request_id, "type": request_type, "payload": payload });
+        #[cfg(unix)]
+        match process {
+            SidecarProcess::Child {
+                trusted_control_signer: Some(signer),
+                ..
+            } => signer.sign_request(&mut request, claims)?,
+            _ if claims.is_some() => {
+                return Err("Native configuration authorization is unavailable.".to_string())
+            }
+            _ => {}
+        }
+        #[cfg(not(unix))]
+        if claims.is_some() {
+            return Err("Native configuration authorization is unavailable.".to_string());
+        }
         let mut encoded = serde_json::to_vec(&request)
             .map_err(|_| "Rust runtime request could not be encoded.".to_string())?;
         encoded.push(b'\n');
@@ -614,6 +752,8 @@ enum SidecarProcess {
         child: OwnedProcessGroup,
         stdin: ChildStdin,
         stdout: BufReader<ChildStdout>,
+        #[cfg(unix)]
+        trusted_control_signer: Option<TrustedControlSigner>,
     },
     #[cfg(test)]
     Scripted {
@@ -816,6 +956,32 @@ fn start_process(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    #[cfg(unix)]
+    let (mut bootstrap_writer, bootstrap_reader, inherited_control_fd, signer) = {
+        let (writer, reader) = UnixStream::pair().map_err(|_| StartProcessFailure {
+            message: "The private runtime session could not be initialized.".to_string(),
+            cleanup: SidecarCleanup::NotRequired,
+        })?;
+        let signer = TrustedControlSigner::new_random(generation).map_err(|message| {
+            StartProcessFailure {
+                message,
+                cleanup: SidecarCleanup::NotRequired,
+            }
+        })?;
+        command
+            .arg("--trusted-control-fd")
+            .arg(TRUSTED_CONTROL_FD.to_string())
+            .arg("--control-generation")
+            .arg(generation.to_string());
+        let inherited =
+            inherit_private_control_fd(&mut command, reader.as_raw_fd()).map_err(|_| {
+                StartProcessFailure {
+                    message: "The private runtime session could not be initialized.".to_string(),
+                    cleanup: SidecarCleanup::NotRequired,
+                }
+            })?;
+        (writer, reader, inherited, signer)
+    };
     let process_group_config = isolate_process_group(&mut command);
     let mut command = Command::from(command);
     command
@@ -830,6 +996,24 @@ fn start_process(
         Some(config) => config.attach_to(child),
         None => OwnedProcessGroup::without_group(child),
     };
+    #[cfg(unix)]
+    let trusted_control_signer = {
+        drop(bootstrap_reader);
+        if bootstrap_writer.write_all(signer.key_bytes()).is_err() {
+            drop(bootstrap_writer);
+            drop(inherited_control_fd);
+            let cleanup = cleanup_child(child);
+            return Err(StartProcessFailure {
+                message: "The private runtime session could not be initialized.".to_string(),
+                cleanup,
+            });
+        }
+        drop(bootstrap_writer);
+        drop(inherited_control_fd);
+        Some(signer)
+    };
+    #[cfg(not(unix))]
+    let trusted_control_signer = None;
     let stdin = match child.take_stdin() {
         Some(stdin) => stdin,
         None => {
@@ -857,7 +1041,35 @@ fn start_process(
         child,
         stdin,
         stdout: BufReader::new(stdout),
+        #[cfg(unix)]
+        trusted_control_signer,
     })
+}
+
+#[cfg(unix)]
+fn inherit_private_control_fd(
+    command: &mut std::process::Command,
+    source_fd: RawFd,
+) -> std::io::Result<OwnedFd> {
+    let duplicated_fd =
+        unsafe { libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, TRUSTED_CONTROL_FD + 1) };
+    if duplicated_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let inherited_fd = unsafe { OwnedFd::from_raw_fd(duplicated_fd) };
+    let child_fd = inherited_fd.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(child_fd, TRUSTED_CONTROL_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::close(child_fd) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(inherited_fd)
 }
 
 fn sidecar_command(program: &Path, cache_root: &Path) -> std::process::Command {

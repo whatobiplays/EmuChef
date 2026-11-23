@@ -1,29 +1,43 @@
-# ADR 0012: RetroArch configuration-create policy boundary
+# ADR 0012: RetroArch configuration-write policy boundary
 
 **Status:** Accepted
 
+**Supersedes:** The 2026-11-16 probe-based evidence gate for RetroArch `config` writes.
+
 ## Context
 
-RetroArch configuration creation is authorized from a trusted planned operation and its resolved App Target. Parsing a plan is a separate responsibility from retaining mutable root and device-session authority.
+RetroArch configuration Create and Replace operate on the trusted, native-resolved `config` App Target. The target is an app-owned file destination with a frozen source, operation, and original-file precondition. Generic protected writes continue to follow their existing capability policy.
+
+Root qualification, the verified root route, current device-session identity, Device Profile selection, and execution admission remain required for real execution. Native consent adds authority for one reviewed configuration operation; it does not replace those checks.
 
 ## Decision
 
-`retroarch_config_create_policy` resolves the selected Recipe, configuration source, frozen artifact, App Target, package, destination, catalog identity, and create-only semantics. It rejects missing, malformed, ambiguous, or pruned configuration operations.
+`retroarch_config_write_policy` resolves the authored Recipe and source, frozen artifact, `config` App Target, package, catalog identity, destination, operation, source SHA-256, original-file precondition, and backup mode. Native authorization applies only to a matching Create or Replace operation for that target. The policy does not broaden `appDataWrite` or authorize another step that happens to use the same path.
 
-`RootQualificationStore` owns root attempts and routes, current session authority, destination-scoped write evidence, and evidence invalidation. Planning and execution resolve the same target identity before consulting that store. The store's evidence insertion helper remains test-only and is not exposed through IPC.
+Tauri presents native confirmation and sends a one-use claim through the existing `start_real_execution` admission path. The claim binds the immutable review digest, exact target and destination, Create or Replace operation, source hash, original-file precondition, backup mode, device identity, and session. Renderer data and ordinary sidecar requests cannot construct this claim.
 
-Existing rooted operations retain their profile restrictions, verified root route, session checks, execution guards, and legacy `appDataWrite` behavior. Managed or uploaded RetroArch configuration creation requires separate current evidence for its exact package, catalog, device session, root authority, and destination. The planner grants scoped `app_data_write` only to the create-only operation resolved against the RetroArch `config` App Target; matching the destination alone does not grant another step permission. Explicit `none` leaves provisioning to other targets outside this requirement. A copy that still resolves to `files/retroarch.cfg` remains subject to configuration-create evidence.
+Create requires a freshly reviewed confirmed-absent precondition and exclusive creation. Replace requires the reviewed original-file identity and byte precondition, then writes the complete frozen file directly in place. The executor stops the resolved RetroArch package once for Android user 0, checks that the process has stopped and has not relaunched, and revalidates the original precondition before writing.
 
-## Rationale
+Replace uses a durable private Mac backup by default. A backup failure blocks before the RetroArch config is opened. A waiver requires a fresh review derived from the retained failed report and a separate native confirmation. It binds the failed operation, report digest, exact target, source, original-file precondition, backup mode, and current device/session identity. Tauri consumes it once at dispatch. The waiver skips backup creation for that replacement only.
 
-Keeping plan interpretation in a pure policy module makes its parser rules and failures independently testable. Keeping mutable authority in the root store gives a future trusted probe a single destination-scoped evidence boundary and keeps configuration parsing independent from probe mechanics.
+Missing or stale authorization, an unsupported root route, changed session or profile, a running or relaunched app, and failed file preconditions block execution. Selecting source `none` skips the configuration-specific operation.
 
-A universal write probe would change admission for established rooted workflows. The policy therefore preserves their current authorization behavior and adds the stricter evidence requirement only to RetroArch configuration creation.
+## Historical rationale
+
+The earlier temporary-marker and quarantine design was abandoned because changing UID, GID, or groups does not establish RetroArch's SELinux domain. A denied read does not prove that writes, directory traversal, or unlink are denied. A check followed by a path-based rename can move a raced replacement. Host access mocks and cross-compilation cannot establish Android SELinux or FUSE behavior. The helper therefore returned `ENOTSUP` before creating a probe marker because isolation had not been established.
+
+The probe-based evidence gate also depended on a test-only evidence insertion path with no production writer. A universal write probe would change admission for established rooted workflows. Those findings remain relevant to the abandoned mechanism; the current policy authorizes one exact reviewed operation and retains all existing root and session checks.
 
 ## Consequences
 
-Root access and legacy `appDataWrite` do not authorize RetroArch configuration creation. General profile selection can bind an ambiguous choice to the current device session, but that selection does not grant target-specific write authority. The production protected-app-data probe and trusted target-specific write evidence remain outstanding, so physical configuration creation stays blocked until those boundaries are implemented and reviewed.
+RetroArch `config` writes have an operation-specific native authorization path. General `appDataWrite` behavior and permissions for other App Targets remain unchanged. Backups remain available in the private host folder without automatic pruning. V1 adds no Backup History, deletion UI, automatic rollback, or in-app restoration.
 
-## Implementation status — 2026-11-16
+This decision does not establish physical-device qualification or production enablement. The KONKR target remains pending physical qualification.
 
-The KONKR Pocket Advance has a product Device Profile and linked base Device Plan. The profile keeps conservative capability defaults. The plan selects RetroArch provisioning and BIOS copy by default and leaves configuration creation optional. Ambiguous eligible KONKR and AYANEO matches require a choice bound to the current device session. Host regressions verify that unavailable required APK-install and app-launch steps produce a planning error, and that a configuration-only plan can use test-scoped evidence only for the create-only `config` App Target. Session-bound profile selection does not provide target-specific write authority. The production protected-app-data probe and trusted target-specific write evidence remain outstanding; physical configuration creation remains blocked.
+## Historical implementation status — 2026-11-16
+
+The KONKR Pocket Advance had a product Device Profile and linked base Device Plan with conservative capability defaults. Ambiguous eligible KONKR and AYANEO matches required a choice bound to the current device session. Host regressions covered unavailable required APK-install and app-launch steps and test-scoped evidence for the create-only `config` App Target. The production protected-app-data probe and trusted evidence bridge were absent, so real configuration creation remained blocked.
+
+## Current implementation status — 2026-11-21
+
+The Issue #56 implementation adds native one-use authorization for Create and Replace, default private backups, a report-bound backup-failure waiver, and host-side replacement checks. Host and fake-device checks do not establish Android behavior. No physical-device operation or production enablement has been performed.

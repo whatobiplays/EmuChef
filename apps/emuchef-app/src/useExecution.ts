@@ -33,6 +33,7 @@ interface UseExecutionOptions {
    * re-read runtime state instead of continuing to offer stale handles.
    */
   onRuntimeSessionLost: () => void;
+  onExecutionTerminal: () => void;
   realExecutionCompiled: boolean;
   qualification?: DeviceQualificationSnapshot | null;
   runtimeGenerationRef: MutableValueRef<number>;
@@ -51,6 +52,7 @@ export function useExecution({
   dispatch,
   mainRef,
   onRuntimeSessionLost,
+  onExecutionTerminal,
   realExecutionCompiled,
   qualification,
   runtimeGenerationRef,
@@ -63,6 +65,7 @@ export function useExecution({
   const [reportState, setReportState] = useState<ExecutionReportState>("idle");
   const [launchState, setLaunchState] = useState<ExecutionLaunchState>("idle");
   const announcementKeyRef = useRef<string | null>(null);
+  const terminalIdentityRef = useRef<string | null>(null);
   const reportIdentityRef = useRef<string | null>(executionReportIdentity(workflow.execution));
   const reportIdentity = executionReportIdentity(workflow.execution);
 
@@ -143,13 +146,18 @@ const startSimulation = useCallback(async () => {
     announcementKeyRef.current = next.key;
     announce(next.message, next.assertive);
     if (workflow.execution.kind === "terminal") {
+      const terminalIdentity = `${workflow.execution.generation}:${workflow.execution.snapshot.executionHandle}`;
+      if (terminalIdentityRef.current !== terminalIdentity) {
+        terminalIdentityRef.current = terminalIdentity;
+        onExecutionTerminal();
+      }
       const generation = claimFocusTransition();
       queueMicrotask(() => restoreAccessibleFocus({
         preferred: [mainRef.current?.querySelector<HTMLElement>("[data-step-heading]")],
         generation,
       }));
     }
-  }, [announce, mainRef, workflow.execution]);
+  }, [announce, mainRef, onExecutionTerminal, workflow.execution]);
 
   const activeExecution = workflow.execution.kind === "active" ? workflow.execution : null;
 

@@ -13,6 +13,7 @@ import type {
 
 const RECIPE_ID = "app.retroarch.configure";
 const SOURCE_KEY = `${RECIPE_ID}/retroarch_cfg_source`;
+const OPERATION_KEY = `${RECIPE_ID}/retroarch_cfg_write_operation`;
 const UPLOAD_KEY = `${RECIPE_ID}/retroarch_cfg`;
 const MANAGED_KEY = `${RECIPE_ID}/retroarch_video_threaded`;
 type ConfigurationSource = "none" | "managed" | "uploaded" | "conflict";
@@ -48,6 +49,17 @@ const description: ConfigurationDescription = {
   inputs: [
     input({}),
     input({
+      key: OPERATION_KEY,
+      inputId: "retroarch_cfg_write_operation",
+      type: "enum",
+      label: "Configuration operation",
+      options: [
+        { value: "create", label: "Create only" },
+        { value: "replace", label: "Replace existing file" },
+      ],
+      value: "create",
+    }),
+    input({
       key: MANAGED_KEY,
       inputId: "retroarch_video_threaded",
       type: "boolean",
@@ -73,15 +85,24 @@ function InputsHarness({
   source,
   effectiveSource = source,
   savedBindings = {},
+  configurationBackupEnabled = true,
+  onConfigurationBackupEnabledChange = vi.fn(),
+  onRestoreDefaultConfigurationBackupPreference = vi.fn(),
+  realExecutionCompiled = false,
   onBindingChange,
 }: {
   source: "none" | "managed" | "uploaded";
   effectiveSource?: ConfigurationSource;
   savedBindings?: { managed?: unknown; uploaded?: unknown };
+  configurationBackupEnabled?: boolean;
+  onConfigurationBackupEnabledChange?: (enabled: boolean) => void | Promise<void>;
+  onRestoreDefaultConfigurationBackupPreference?: () => void | Promise<void>;
+  realExecutionCompiled?: boolean;
   onBindingChange: (key: string, value: unknown) => void;
 }) {
   const [bindings, setBindings] = useState<Record<string, unknown>>({
     [SOURCE_KEY]: source,
+    [OPERATION_KEY]: "create",
     [MANAGED_KEY]: savedBindings.managed ?? (source === "managed"),
     [UPLOAD_KEY]: savedBindings.uploaded ?? (source === "uploaded" ? "/tmp/retroarch.cfg" : null),
   });
@@ -113,6 +134,10 @@ function InputsHarness({
       setupLocations={[]}
       setupLocationListStatus="ready"
       bindings={bindings}
+      configurationBackupEnabled={configurationBackupEnabled}
+      configurationBackupPreferenceStatus="ready"
+      configurationBackupPreferenceError={null}
+      realExecutionCompiled={realExecutionCompiled}
       busy={false}
       touchedInputKeys={touchedInputKeys}
       validationRequested={false}
@@ -130,18 +155,42 @@ function InputsHarness({
       onPickInput={vi.fn()}
       onRemoveInputEntry={vi.fn()}
       onRefreshValidation={vi.fn()}
+      onConfigurationBackupEnabledChange={onConfigurationBackupEnabledChange}
+      onRestoreDefaultConfigurationBackupPreference={onRestoreDefaultConfigurationBackupPreference}
       onReview={vi.fn()}
     />
   );
 }
 
+test("offers the private backup preference under Advanced Settings", async () => {
+  const user = userEvent.setup();
+  const onConfigurationBackupEnabledChange = vi.fn();
+  render(
+    <InputsHarness
+      source="managed"
+      realExecutionCompiled={true}
+      onBindingChange={vi.fn()}
+      onConfigurationBackupEnabledChange={onConfigurationBackupEnabledChange}
+    />,
+  );
+
+  await user.click(screen.getByText("Advanced Settings"));
+  const checkbox = screen.getByLabelText(
+    "Create a private backup before replacing the existing config",
+  ) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  await user.click(checkbox);
+
+  expect(onConfigurationBackupEnabledChange).toHaveBeenCalledWith(false);
+});
+
 test.each([
-  ["managed", true, false],
-  ["uploaded", false, true],
-  ["none", false, false],
+  ["managed", true, false, true],
+  ["uploaded", false, true, true],
+  ["none", false, false, false],
 ] as const)(
   "shows only the inputs for the %s configuration source",
-  (source, showsManaged, showsUpload) => {
+  (source, showsManaged, showsUpload, showsOperation) => {
     render(<InputsHarness source={source} onBindingChange={vi.fn()} />);
 
     expect(screen.getByLabelText("Configuration source")).toBeTruthy();
@@ -159,8 +208,20 @@ test.each([
     expect(Boolean(screen.queryByLabelText("Threaded video"))).toBe(showsManaged);
     expect(Boolean(screen.queryByRole("group", { name: "RetroArch config" })))
       .toBe(showsUpload);
+    expect(Boolean(screen.queryByLabelText("Configuration operation")))
+      .toBe(showsOperation);
   },
 );
+
+test("passes the selected operation through the configuration input binding", async () => {
+  const user = userEvent.setup();
+  const onBindingChange = vi.fn();
+  render(<InputsHarness source="managed" onBindingChange={onBindingChange} />);
+
+  await user.selectOptions(screen.getByLabelText("Configuration operation"), "replace");
+
+  expect(onBindingChange).toHaveBeenCalledWith(OPERATION_KEY, "replace");
+});
 
 test("displays Rust's uploaded projection for a legacy saved file-only setup", () => {
   render(

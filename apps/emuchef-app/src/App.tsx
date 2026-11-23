@@ -56,6 +56,10 @@ import type {
   InputDescriptor,
   RecentConfiguration,
   RuntimeStatus,
+  OperationFenceOutcome,
+  OperationFencePhase,
+  OperationFenceRecoveryInspection,
+  OperationFenceRecoveryStatus,
   SavedConfigurationDocument,
   SavedConfigurationMutation,
   SavedConfigurationPreview,
@@ -174,6 +178,55 @@ const capabilityAvailabilityLabels: Record<
   unavailable: "Unavailable",
   unknown: "Unknown",
 };
+
+const operationFenceRecoveryStatusLabels: Record<
+  OperationFenceRecoveryStatus,
+  string
+> = {
+  dispatch_unresolved: "Execution start unresolved",
+  write_unresolved: "Write outcome unresolved",
+  not_dispatched: "No helper was dispatched",
+  write_verified: "Write completed and verified",
+  write_aborted: "Write stopped before changing the target",
+  partial_write_terminal: "Partial write stopped",
+  quiescence_outcome_missing: "Quiescence outcome missing",
+};
+
+const operationFencePhaseLabels: Record<OperationFencePhase, string> = {
+  dispatching: "Dispatch may still be pending",
+  commit_pending: "Write may still be active",
+  remote_quiescent: "Remote helper stopped",
+};
+
+const operationFenceOutcomeLabels: Record<OperationFenceOutcome, string> = {
+  not_dispatched: "No helper was dispatched",
+  verified_write: "Write verified",
+  aborted_before_write: "Stopped before changing the target",
+  partial_write_terminal: "Partial write stopped",
+};
+
+function operationFenceRecoveryStatusLabel(status: string): string {
+  return (
+    operationFenceRecoveryStatusLabels[
+      status as OperationFenceRecoveryStatus
+    ] ?? "Unknown operation state"
+  );
+}
+
+function operationFencePhaseLabel(phase: string): string {
+  return (
+    operationFencePhaseLabels[phase as OperationFencePhase] ??
+    "Unknown operation phase"
+  );
+}
+
+function operationFenceOutcomeLabel(outcome: string | null): string {
+  if (outcome === null) return "Unconfirmed";
+  return (
+    operationFenceOutcomeLabels[outcome as OperationFenceOutcome] ??
+    "Unknown operation outcome"
+  );
+}
 
 function DeviceQualificationDetails({
   qualification,
@@ -338,6 +391,12 @@ export function App({
   const [adb, setAdb] = useState<AdbSetupStatus | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [busy, setBusy] = useState(false);
+const [configurationBackupPreference, setConfigurationBackupPreference] =
+useState<{
+enabled: boolean;
+status: "loading" | "ready" | "saving" | "failed";
+error: string | null;
+}>({ enabled: true, status: "loading", error: null });
   const [platformToolsOperation, setPlatformToolsOperation] = useState<{
     phase: "idle" | "picker" | "processing";
     kind: "import" | "replace" | "remove";
@@ -350,6 +409,91 @@ export function App({
   const [notice, setNotice] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
+  const [operationFenceInspection, setOperationFenceInspection] =
+    useState<OperationFenceRecoveryInspection | null>(null);
+  const [operationFenceInspectionError, setOperationFenceInspectionError] =
+    useState<string | null>(null);
+  const [operationFenceAcknowledging, setOperationFenceAcknowledging] =
+    useState(false);
+  const refreshOperationFenceInspection = useCallback(async () => {
+    try {
+      setOperationFenceInspection(await api.inspectOperationFence());
+      setOperationFenceInspectionError(null);
+    } catch (error) {
+      setOperationFenceInspection(null);
+      setOperationFenceInspectionError(errorMessage(error));
+    }
+  }, []);
+  useEffect(() => {
+    void refreshOperationFenceInspection();
+  }, [refreshOperationFenceInspection]);
+  const acknowledgeOperationFence = useCallback(async () => {
+    if (!operationFenceInspection?.canAcknowledge || operationFenceAcknowledging) return;
+    setOperationFenceAcknowledging(true);
+    setOperationFenceInspectionError(null);
+    try {
+      await api.acknowledgeOperationFence(operationFenceInspection.record.operationId);
+      await refreshOperationFenceInspection();
+      setNotice("The terminal operation fence was cleared. Review the device before starting new work.");
+    } catch (error) {
+      setOperationFenceInspectionError(errorMessage(error));
+      await refreshOperationFenceInspection();
+    } finally {
+      setOperationFenceAcknowledging(false);
+    }
+  }, [
+    operationFenceAcknowledging,
+    operationFenceInspection,
+    refreshOperationFenceInspection,
+  ]);
+useEffect(() => {
+let active = true;
+void api
+.getConfigurationBackupPreference()
+.then((enabled) => {
+if (active) {
+setConfigurationBackupPreference({ enabled, status: "ready", error: null });
+}
+})
+.catch((error) => {
+if (active) {
+setConfigurationBackupPreference({
+enabled: true,
+status: "failed",
+error: errorMessage(error),
+});
+}
+});
+return () => {
+active = false;
+};
+}, []);
+const updateConfigurationBackupPreference = useCallback(async (enabled: boolean) => {
+setConfigurationBackupPreference((current) => ({
+...current,
+status: "saving",
+error: null,
+}));
+try {
+const saved = await api.setConfigurationBackupPreference(enabled);
+setConfigurationBackupPreference({ enabled: saved, status: "ready", error: null });
+} catch (error) {
+setConfigurationBackupPreference((current) => ({
+...current,
+status: "failed",
+error: errorMessage(error),
+}));
+}
+}, []);
+const openConfigurationBackupFolder = useCallback(async (operationId: string) => {
+try {
+await api.openConfigurationBackupFolder(operationId);
+setOperationError(null);
+setNotice("Opened the private configuration backup folder.");
+} catch (error) {
+setOperationError(errorMessage(error));
+}
+}, []);
   const [deviceQualification, setDeviceQualification] =
     useState<DeviceQualificationSnapshot | null>(null);
   // Trusted storage projection for the selected device's setup step. A storage
@@ -720,6 +864,7 @@ export function App({
     dispatch,
     mainRef,
     onRuntimeSessionLost: handleRuntimeSessionLost,
+onExecutionTerminal: refreshOperationFenceInspection,
     qualification: deviceQualification,
     realExecutionCompiled,
     runtimeGenerationRef,
@@ -1070,8 +1215,10 @@ export function App({
       await applyRecoveryResult(result);
       return true;
     } catch (error) {
-      if (runtimeGenerationRef.current === runtimeGeneration)
+      if (runtimeGenerationRef.current === runtimeGeneration) {
         setNotice(errorMessage(error));
+        void refreshOperationFenceInspection();
+      }
       return false;
     }
   };
@@ -3786,9 +3933,21 @@ if (rejectSetupActionDuringRepair()) return;
     workflow.step,
   ]);
 
-const generateReview = async (mode: ExecutionMode) => {
+const generateReview = async (
+    mode: ExecutionMode,
+    backupFailure?: { executionHandle: string; operationId: string },
+  ) => {
     if (rejectSetupActionDuringRepair()) return;
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
+    if (
+      backupFailure &&
+      (mode !== "real" ||
+        workflow.execution.kind !== "terminal" ||
+        workflow.execution.mode !== "real" ||
+        workflow.execution.snapshot.executionHandle !== backupFailure.executionHandle)
+    ) {
+      return;
+    }
     setValidationRequested(true);
     if (!reviewReady(workflow)) {
       if (workflow.description) focusValidationSummary(workflow.description);
@@ -3807,7 +3966,21 @@ const generateReview = async (mode: ExecutionMode) => {
     const operation = ++setupOperationGenerationRef.current;
     const setupGeneration = workflow.requestGeneration;
     const selectionHandle = workflow.selectionHandle;
-    const currentRequest = () => setupOperationGenerationRef.current === operation && runtimeGenerationRef.current === runtimeGeneration && workflowRef.current.requestGeneration === setupGeneration && workflowRef.current.selectionHandle === selectionHandle;
+    const currentRequest = () => {
+      if (
+        setupOperationGenerationRef.current !== operation ||
+        runtimeGenerationRef.current !== runtimeGeneration ||
+        workflowRef.current.requestGeneration !== setupGeneration ||
+        workflowRef.current.selectionHandle !== selectionHandle
+      ) {
+        return false;
+      }
+      if (!backupFailure) return true;
+      const currentExecution = workflowRef.current.execution;
+      return currentExecution.kind === "terminal" &&
+        currentExecution.mode === "real" &&
+        currentExecution.snapshot.executionHandle === backupFailure.executionHandle;
+    };
     try {
       const review = await api.prepareExecutionReview({
         deviceHandle: workflow.deviceHandle,
@@ -3817,6 +3990,12 @@ const generateReview = async (mode: ExecutionMode) => {
         bindings: workflow.bindings,
         requestGeneration,
         mode: mode === "simulated" ? "dry_run" : "real",
+        ...(backupFailure
+          ? {
+              backupFailureExecutionHandle: backupFailure.executionHandle,
+              backupFailureOperationId: backupFailure.operationId,
+            }
+          : {}),
       });
       if (!currentRequest())
         return;
@@ -3853,6 +4032,7 @@ const generateReview = async (mode: ExecutionMode) => {
       realConfirmationRef.current = emptyRealExecutionConfirmation;
       setRealConfirmation(emptyRealExecutionConfirmation);
       await startRealExecution(confirmation);
+      void refreshOperationFenceInspection();
     }
   };
 
@@ -5196,6 +5376,9 @@ const generateReview = async (mode: ExecutionMode) => {
             {workflow.step === "inputs" && workflow.description && (
               <InputsStep
                 bindings={workflow.bindings}
+            configurationBackupEnabled={configurationBackupPreference.enabled}
+            configurationBackupPreferenceStatus={configurationBackupPreference.status}
+            configurationBackupPreferenceError={configurationBackupPreference.error}
                 realExecutionCompiled={realExecutionCompiled}
                 busy={setupIntentBusy || workflow.descriptionDirty}
                 description={workflow.description}
@@ -5207,6 +5390,10 @@ const generateReview = async (mode: ExecutionMode) => {
                 onPickInput={pickInputValue}
                 onRemoveInputEntry={removeInputEntry}
                 onRefreshValidation={describe}
+            onConfigurationBackupEnabledChange={updateConfigurationBackupPreference}
+            onRestoreDefaultConfigurationBackupPreference={() =>
+              updateConfigurationBackupPreference(true)
+            }
                 onReview={generateReview}
                 touchedInputKeys={touchedInputKeys}
                 validationErrors={validationErrors}
@@ -5241,6 +5428,10 @@ const generateReview = async (mode: ExecutionMode) => {
                   onCancel={cancelExecution}
                   onExportReport={exportExecutionReport}
                   onLaunchConfiguredApp={launchConfiguredApp}
+                  onOpenConfigurationBackup={openConfigurationBackupFolder}
+                  onPrepareBackupWaiverReview={(executionHandle, operationId) =>
+                    void generateReview("real", { executionHandle, operationId })
+                  }
                   onPrepareRepair={prepareRepair}
                   onReturn={() => {
                     const execution = workflow.execution;
@@ -5316,6 +5507,100 @@ const generateReview = async (mode: ExecutionMode) => {
                 </dd>
               </div>
             </dl>
+{operationFenceInspection && (
+<section className="operation-fence-recovery" aria-labelledby="operation-fence-heading">
+<p className="eyebrow">Device-write recovery</p>
+<h3 id="operation-fence-heading">{operationFenceRecoveryStatusLabel(operationFenceInspection.status)}</h3>
+<p>{operationFenceInspection.guidance}</p>
+<dl>
+<div>
+<dt>Operation ID</dt>
+<dd>{operationFenceInspection.record.operationId}</dd>
+</div>
+<div>
+<dt>Device handle</dt>
+<dd>{operationFenceInspection.record.deviceHandle}</dd>
+</div>
+<div>
+<dt>Runtime generation / attempt</dt>
+<dd>{operationFenceInspection.record.runtimeGeneration} / {operationFenceInspection.record.attemptSequence}</dd>
+</div>
+<div>
+<dt>Plan SHA-256</dt>
+<dd><code>{operationFenceInspection.record.planDigest}</code></dd>
+</div>
+<div>
+<dt>Fence phase</dt>
+<dd>{operationFencePhaseLabel(operationFenceInspection.record.phase)}</dd>
+</div>
+<div>
+<dt>Recorded outcome</dt>
+<dd>{operationFenceOutcomeLabel(operationFenceInspection.record.outcome)}</dd>
+</div>
+{operationFenceInspection.record.target && (
+<>
+<div>
+<dt>Reviewed operation</dt>
+<dd>{operationFenceInspection.record.target.operation} · {operationFenceInspection.record.target.appId}/{operationFenceInspection.record.target.targetId}</dd>
+</div>
+<div>
+<dt>Reviewed App Target</dt>
+<dd>{operationFenceInspection.record.target.packageId} · Android user {operationFenceInspection.record.target.androidUserId}</dd>
+</div>
+<div>
+<dt>Reviewed source SHA-256</dt>
+<dd><code>{operationFenceInspection.record.target.sourceSha256}</code></dd>
+</div>
+<div>
+<dt>Original-file precondition / backup mode</dt>
+<dd>{operationFenceInspection.record.target.originalFilePrecondition.status ?? "Unavailable"} · {operationFenceInspection.record.target.backupMode}</dd>
+</div>
+</>
+)}
+{operationFenceInspection.record.backup && (
+<>
+<div>
+<dt>Verified private backup</dt>
+<dd>Location is available in native recovery confirmation.</dd>
+</div>
+<div>
+<dt>Original file</dt>
+<dd>{operationFenceInspection.record.backup.length} bytes · SHA-256 <code>{operationFenceInspection.record.backup.sha256}</code></dd>
+</div>
+<div>
+<dt>Backup target</dt>
+<dd>{operationFenceInspection.record.backup.packageId}</dd>
+</div>
+<div>
+<dt>Backup captured</dt>
+<dd>{new Date(operationFenceInspection.record.backup.capturedAtUnixMs).toISOString()}</dd>
+</div>
+</>
+)}
+</dl>
+{operationFenceInspection.canAcknowledge && (
+<button
+type="button"
+onClick={() => void acknowledgeOperationFence()}
+disabled={operationFenceAcknowledging}
+>
+{operationFenceAcknowledging ? "Waiting for native confirmation…" : "Review recovery acknowledgment"}
+</button>
+)}
+</section>
+)}
+{operationFenceInspectionError && (
+<div className="warning" role="status">
+<p>Operation-fence inspection failed: {operationFenceInspectionError}</p>
+<button
+type="button"
+className="secondary"
+onClick={() => void refreshOperationFenceInspection()}
+>
+Inspect again
+</button>
+</div>
+)}
             {adb.warning && <p className="warning">{adb.warning}</p>}
             {adb.warning && (
               <p className="fine-print">

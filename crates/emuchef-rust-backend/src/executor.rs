@@ -491,11 +491,22 @@ pub(crate) struct DeviceOperationError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CopyCommitCreateFileOutcome {
+pub(crate) enum CopyCommitConfigurationWriteOutcome {
     CreatedVerified { sha256: String, byte_length: u64 },
+    ReplacedVerified { sha256: String, byte_length: u64 },
+    AppStillRunning,
+    AppStateUnverified,
     TargetAlreadyExists,
     SourceHashMismatch,
+    PartialWriteTerminal,
     PartialWriteUnverified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyCommitRemoteOutcome {
+    VerifiedWrite,
+    AbortedBeforeWrite,
+    PartialWriteTerminal,
 }
 
 impl DeviceOperationError {
@@ -685,6 +696,36 @@ pub trait ExecutorDevice: std::fmt::Debug {
     ) -> Result<(), DeviceOperationError>;
     fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError>;
 
+    /// Force-stop one reviewed app for an explicit Android user. Adapters
+    /// without user-scoped process control reject the Replace operation.
+    fn force_stop_app_for_user(
+        &mut self,
+        _package_name: &str,
+        _user_id: u32,
+    ) -> Result<(), DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support user-scoped Android app stop",
+        ))
+    }
+
+    /// Check whether one package has a running Android process.
+    /// Adapters without a trustworthy process query block replacement.
+    fn app_process_running_for_user(
+        &mut self,
+        _package_name: &str,
+        _user_id: u32,
+    ) -> Result<bool, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support Android process inspection for an exact user",
+        ))
+    }
+
+    fn app_process_running(&mut self, _package_name: &str) -> Result<bool, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support Android process inspection",
+        ))
+    }
+
     /// Inspect one selected Android directory without following symbolic links.
     /// Adapters that cannot provide a deterministic manifest reject this
     /// capability so reviewed copy operations fail closed.
@@ -776,11 +817,51 @@ pub trait ExecutorDevice: std::fmt::Debug {
         _stage_root: &str,
         _helper_path: &str,
         _relative_path: &str,
+        _package_name: &str,
+        _user_id: u32,
         _expected_absence: &str,
         _expected_source_sha256: &str,
-    ) -> Result<CopyCommitCreateFileOutcome, DeviceOperationError> {
+        _expected_source_length: u64,
+        _operation_id: &str,
+        _before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        _after_remote_quiescent: &mut dyn FnMut(CopyCommitRemoteOutcome) -> Result<(), String>,
+    ) -> Result<CopyCommitConfigurationWriteOutcome, DeviceOperationError> {
         Err(DeviceOperationError::other(
             "adapter does not support reviewed exclusive file creation",
+        ))
+    }
+
+    /// Reads the existing RetroArch configuration through the no-follow helper.
+    fn copy_commit_read_retroarch_config(
+        &mut self,
+        _parent: &str,
+        _parent_binding: &str,
+    ) -> Result<Vec<u8>, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support no-follow RetroArch configuration reads",
+        ))
+    }
+
+    /// Replaces the reviewed RetroArch configuration in place after the native commit callback.
+    fn copy_commit_replace_retroarch_config(
+        &mut self,
+        _selected_root: &str,
+        _destination_binding: &str,
+        _stage_root: &str,
+        _helper_path: &str,
+        _relative_path: &str,
+        _package_name: &str,
+        _user_id: u32,
+        _expected_original_sha256: &str,
+        _expected_original_length: u64,
+        _expected_source_sha256: &str,
+        _expected_source_length: u64,
+        _operation_id: &str,
+        _before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        _after_remote_quiescent: &mut dyn FnMut(CopyCommitRemoteOutcome) -> Result<(), String>,
+    ) -> Result<CopyCommitConfigurationWriteOutcome, DeviceOperationError> {
+        Err(DeviceOperationError::other(
+            "adapter does not support operation-bound RetroArch configuration replacement",
         ))
     }
 
@@ -851,6 +932,7 @@ impl PermissionOperation {
 pub struct ExecutorRunner<D: ExecutorDevice = FakeDryRunDevice> {
     adapters: ExecutorAdapters<D>,
     setup_location_lease: Option<Arc<SetupLocationMutationLease>>,
+    operation_fence: Option<crate::operation_fence::OperationFenceBinding>,
     root_preflight: RootPreflightState,
     root_preflight_failure: Option<String>,
     #[cfg(test)]
@@ -871,6 +953,7 @@ impl Default for ExecutorRunner<FakeDryRunDevice> {
         Self {
             adapters: ExecutorAdapters::default(),
             setup_location_lease: None,
+            operation_fence: None,
             root_preflight: RootPreflightState::NotRun,
             root_preflight_failure: None,
             #[cfg(test)]
@@ -940,11 +1023,19 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Self {
             adapters,
             setup_location_lease,
+            operation_fence: None,
             root_preflight: RootPreflightState::NotRun,
             root_preflight_failure: None,
             #[cfg(test)]
             github_release_metadata_fixtures: None,
         }
+    }
+
+    pub(crate) fn set_operation_fence(
+        &mut self,
+        operation_fence: Option<crate::operation_fence::OperationFenceBinding>,
+    ) {
+        self.operation_fence = operation_fence;
     }
 
     /// Capture the source and selected destination state for each App Target
@@ -992,7 +1083,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .iter()
             .filter(|step| step.type_name == "copy_files")
         {
-            if is_retroarch_config_create_step(step) {
+            if is_retroarch_config_write_step(step) {
                 continue;
             }
             if has_runtime_output_reference(step) {
@@ -1153,7 +1244,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             &snapshots,
         )?;
         plan.copy_commit_snapshots = snapshots;
-        self.prepare_retroarch_config_create_absence_precondition(plan, &sandbox)?;
+        self.prepare_retroarch_config_write_precondition(plan, &sandbox)?;
         Ok(())
     }
 
@@ -1161,7 +1252,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     /// The caller finalizes the reviewed plan digest only after this binding is
     /// recorded, so execution can use the retained bytes without re-reading a
     /// mutable host source.
-    fn prepare_retroarch_config_create_absence_precondition(
+    fn prepare_retroarch_config_write_precondition(
         &mut self,
         plan: &mut ExecutionPlan,
         sandbox: &SandboxRoots,
@@ -1170,7 +1261,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let step_ids = plan
             .steps
             .iter()
-            .filter(|step| is_retroarch_config_create_step(step))
+            .filter(|step| is_retroarch_config_write_step(step))
             .map(|step| step.id.clone())
             .collect::<Vec<_>>();
 
@@ -1182,18 +1273,25 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 .ok_or_else(|| {
                     "RetroArch configuration step disappeared during review.".to_string()
                 })?;
-            let artifact = retroarch_config_create_artifact_for_review(step)
+            let artifact = retroarch_config_write_artifact_for_review(step)
                 .cloned()
                 .ok_or_else(|| "Frozen RetroArch configuration artifact is missing.".to_string())?;
-            if !artifact["absencePrecondition"].is_null() {
+            if !artifact["absencePrecondition"].is_null()
+                || !artifact["originalFilePrecondition"].is_null()
+            {
                 return Err(
-                    "RetroArch configuration absence precondition was already prepared."
-                        .to_string(),
+                    "RetroArch configuration file precondition was already prepared.".to_string(),
                 );
             }
+            let operation = artifact["operation"]
+                .as_str()
+                .filter(|operation| matches!(*operation, "create" | "replace"))
+                .ok_or_else(|| {
+                    "Frozen RetroArch configuration operation is invalid.".to_string()
+                })?;
             let params =
                 resolve_step_params(&state, &step.params).map_err(|error| error.message)?;
-            let destination_kind = if is_retroarch_config_create_step(step) {
+            let destination_kind = if is_retroarch_config_write_step(step) {
                 if step.app_id.as_deref() != Some("retroarch")
                     || params.get("dest_kind").and_then(Value::as_str) != Some("file")
                 {
@@ -1216,7 +1314,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 .get("dest")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "RetroArch configuration destination is unresolved.".to_string())?;
-            let frozen_bytes = retroarch_config_create_artifact_bytes(&artifact)?;
+            let frozen_bytes = retroarch_config_write_artifact_bytes(&artifact)?;
             if artifact["targetIdentity"]["appId"].as_str() != Some("retroarch")
                 || artifact["targetIdentity"]["targetId"].as_str() != Some("config")
             {
@@ -1266,7 +1364,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 let fake_parent = fake_target
                     .parent()
                     .ok_or_else(|| "Dry-run configuration target has no parent.".to_string())?;
-                open_fake_config_create_parent_directory(root_anchor, fake_parent, true).map_err(
+                open_fake_config_write_parent_directory(root_anchor, fake_parent, true).map_err(
                     |_| "Dry-run configuration parent could not be prepared safely.".to_string(),
                 )?;
                 let binding = Self::fake_directory_identity_binding(fake_parent)?;
@@ -1312,21 +1410,62 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 (before, exists, is_symlink, "device")
             };
 
-            if target_exists || target_is_symlink {
+            if operation == "create" && (target_exists || target_is_symlink) {
                 return Err(
                     "RetroArch configuration target already exists; create-only review is blocked."
                         .to_string(),
                 );
             }
+            if operation == "replace" && (!target_exists || target_is_symlink) {
+                return Err(
+                    "RetroArch configuration replacement requires an existing regular file."
+                        .to_string(),
+                );
+            }
 
-            let precondition = json!({
-                "status": "confirmed_absent",
-                "authority": authority,
-                "targetPath": destination,
-                "parentPath": parent,
-                "parentBinding": parent_binding,
-                "entryName": file_name,
-            });
+            let precondition = if operation == "create" {
+                json!({
+                    "status": "confirmed_absent",
+                    "authority": authority,
+                    "targetPath": destination,
+                    "parentPath": parent,
+                    "parentBinding": parent_binding,
+                    "entryName": file_name,
+                })
+            } else {
+                let original_bytes = if self.adapters.device.uses_fake_device_filesystem() {
+                    let target = sandbox
+                        .fake_device_path(destination)
+                        .map_err(|error| error.message)?;
+                    let metadata = std::fs::symlink_metadata(&target).map_err(|error| {
+                        format!("RetroArch configuration target could not be inspected: {error}")
+                    })?;
+                    if !metadata.file_type().is_file() {
+                        return Err(
+                            "RetroArch configuration replacement requires a regular file."
+                                .to_string(),
+                        );
+                    }
+                    std::fs::read(&target).map_err(|error| {
+                        format!("RetroArch configuration target could not be read: {error}")
+                    })?
+                } else {
+                    self.adapters
+                        .device
+                        .copy_commit_read_retroarch_config(&parent, &parent_binding)
+                        .map_err(|error| error.message)?
+                };
+                json!({
+                    "status": "confirmed_existing",
+                    "authority": authority,
+                    "targetPath": destination,
+                    "parentPath": parent,
+                    "parentBinding": parent_binding,
+                    "entryName": file_name,
+                    "sha256": crate::runtime_configuration::sha256_hex(&original_bytes),
+                    "byteLength": original_bytes.len(),
+                })
+            };
             let step = plan
                 .steps
                 .iter_mut()
@@ -1341,7 +1480,20 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             let crate::planner::ExecutionParamValue::Literal { value } = source else {
                 return Err("Frozen RetroArch configuration source is not immutable.".to_string());
             };
-            value["absencePrecondition"] = precondition;
+            value["absencePrecondition"] = if operation == "create" {
+                precondition.clone()
+            } else {
+                Value::Null
+            };
+            value["originalFilePrecondition"] = if operation == "replace" {
+                precondition
+            } else {
+                Value::Null
+            };
+            if operation == "create" {
+                value["backupMode"] = json!("disabled");
+                value["backupWaiverDigest"] = Value::Null;
+            }
         }
         Ok(())
     }
@@ -2728,8 +2880,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        if is_retroarch_config_create_step(step) {
-            return self.execute_retroarch_config_create(plan, step, resolved_params);
+        if is_retroarch_config_write_step(step) {
+            return self.execute_retroarch_config_write(plan, step, resolved_params);
         }
         let source = runtime_value_param(resolved_params, "source")?;
         let setup_destination = runtime_value_param(resolved_params, "dest")
@@ -2802,7 +2954,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         if app_private_dest
             && !(plan.runtime_capabilities.root_shell
                 && (plan.runtime_capabilities.app_data_write
-                    || config_create_scoped_write_authorizes_destination(plan, step, dest)))
+                    || config_write_scope_authorizes_destination(plan, step, dest)))
         {
             return Err(StepFailure::new(format!(
                 "app_data_write_unavailable: Destination {dest:?} requires both app_data_write and root_shell runtime capabilities."
@@ -2993,23 +3145,220 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Ok(outputs)
     }
 
-    /// Create the reviewed RetroArch file without replacing any existing path.
-    /// The adapter receives the frozen bytes and returns the final readback
-    /// result; this method never renders or opens the original host source.
-    fn execute_retroarch_config_create(
+    /// Stop the reviewed RetroArch package once for the bound Android user.
+    fn quiesce_retroarch_config_target(
+        device: &mut D,
+        artifact: &mut Value,
+    ) -> Result<(String, u32), StepFailure> {
+        let package_id = artifact["targetIdentity"]["packageId"]
+            .as_str()
+            .filter(|package_id| !package_id.trim().is_empty())
+            .map(str::to_owned);
+        let user_id = artifact["targetIdentity"]["androidUserId"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok());
+        let (Some(package_id), Some(user_id)) = (package_id, user_id) else {
+            artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            return Err(qualification_failure(
+            "The reviewed RetroArch app identity is incomplete. Close RetroArch manually and prepare a fresh review.",
+            config_write_report(
+                artifact,
+                "review_target_invalid",
+                "device",
+                false,
+                false,
+                "not_started",
+                &[],
+            ),
+        ));
+        };
+        if user_id != 0 {
+            artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            return Err(qualification_failure(
+            "The reviewed RetroArch configuration is not bound to Android user 0. Close RetroArch manually and prepare a fresh review.",
+            config_write_report(
+                artifact,
+                "review_target_invalid",
+                "device",
+                false,
+                false,
+                "not_started",
+                &[],
+            ),
+        ));
+        }
+        let running = device
+        .app_process_running_for_user(&package_id, user_id)
+        .map_err(|_| {
+            artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            qualification_failure(
+                "RetroArch process state could not be verified. Close RetroArch manually and prepare a fresh review.",
+                config_write_report(
+                    artifact,
+                    "app_state_unverified",
+                    "device",
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            )
+        })?;
+        if !running {
+            artifact["retroArchStopStatus"] = json!("already_stopped");
+            return Ok((package_id, user_id));
+        }
+        if device
+            .force_stop_app_for_user(&package_id, user_id)
+            .is_err()
+        {
+            artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            return Err(qualification_failure(
+            "RetroArch could not be stopped. Close RetroArch manually and prepare a fresh review.",
+            config_write_report(
+                artifact,
+                "app_stop_failed",
+                "device",
+                false,
+                false,
+                "not_started",
+                &[],
+            ),
+        ));
+        }
+        let still_running = device
+        .app_process_running_for_user(&package_id, user_id)
+        .map_err(|_| {
+            artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            qualification_failure(
+                "RetroArch stop could not be verified. Close RetroArch manually and prepare a fresh review.",
+                config_write_report(
+                    artifact,
+                    "app_state_unverified",
+                    "device",
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            )
+        })?;
+        if still_running {
+            artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            return Err(qualification_failure(
+                "RetroArch is still running. Close RetroArch manually and prepare a fresh review.",
+                config_write_report(
+                    artifact,
+                    "app_still_running",
+                    "device",
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+        artifact["retroArchStopStatus"] = json!("stopped_by_emuchef");
+        Ok((package_id, user_id))
+    }
+
+    /// Apply the reviewed RetroArch config operation to its exact App Target.
+    /// The helper receives frozen bytes and a bound file precondition; this
+    /// method never renders or reopens the original host source.
+    fn execute_retroarch_config_write(
         &mut self,
         plan: &ExecutionPlan,
         step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
-        let artifact = resolved_params.get("source").ok_or_else(|| {
+        let operation_fence = self.operation_fence.clone();
+        let mut result = self.execute_retroarch_config_write_inner(plan, step, resolved_params);
+        if let Some(binding) = operation_fence {
+            let current = crate::operation_fence::read(&binding.path).map_err(|_| {
+            StepFailure::new(
+                "The durable device-operation fence could not be reconciled; later device writes remain blocked."
+                    .to_string(),
+            )
+        })?;
+            if !current.has_same_identity(&binding.record) {
+                return Err(StepFailure::new(
+                "The durable device-operation fence identity changed; later device writes remain blocked."
+                    .to_string(),
+            ));
+            }
+            if current.phase == crate::operation_fence::OperationFencePhase::Dispatching {
+                let mut cleanup_warnings = Vec::new();
+                record_not_dispatched_host_cleanup(
+                    &binding.path,
+                    &binding.record,
+                    &mut cleanup_warnings,
+                );
+                if !cleanup_warnings.is_empty() {
+                    let warning = cleanup_warnings.join(", ");
+                    if let Err(failure) = &mut result {
+                        failure.message.push_str(&format!(
+                            " Host cleanup evidence is unresolved ({warning})."
+                        ));
+                    } else {
+                        return Err(StepFailure::new(format!(
+                            "The operation did not dispatch, and host cleanup evidence is unresolved ({warning})."
+                        )));
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn execute_retroarch_config_write_inner(
+        &mut self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let artifact_value = resolved_params.get("source").cloned().ok_or_else(|| {
             StepFailure::new("Reviewed RetroArch configuration artifact is missing.".to_string())
         })?;
-        let bytes = retroarch_config_create_artifact_bytes(artifact).map_err(StepFailure::new)?;
+        let artifact = &artifact_value;
+        let mut report_artifact = artifact_value.clone();
+        let bytes = retroarch_config_write_artifact_bytes(artifact).map_err(StepFailure::new)?;
         let expected_sha256 = artifact["sha256"]
             .as_str()
             .expect("validated configuration artifact has a digest")
             .to_string();
+        let operation = artifact["operation"]
+            .as_str()
+            .filter(|operation| matches!(*operation, "create" | "replace"))
+            .ok_or_else(|| {
+                StepFailure::new("Reviewed configuration operation is invalid.".to_string())
+            })?;
+        let is_create = operation == "create";
+        let backup_mode = artifact["backupMode"].as_str().unwrap_or("invalid");
+        let backup_waiver_digest = artifact["backupWaiverDigest"].as_str();
+        let backup_waiver_is_valid = backup_waiver_digest.is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if (!is_create && !matches!(backup_mode, "verified" | "disabled" | "waived"))
+            || (backup_mode == "waived") != backup_waiver_is_valid
+            || (backup_mode != "waived" && !artifact["backupWaiverDigest"].is_null())
+        {
+            return Err(qualification_failure(
+                "The reviewed backup mode is invalid; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "review_backup_mode_invalid",
+                    "unknown",
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+        let expected_policy = if is_create { "create_only" } else { "replace" };
         let destination = resolved_params
             .get("dest")
             .and_then(Value::as_str)
@@ -3018,12 +3367,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             })?;
         if !qualification_target_matches_plan(plan, step, artifact, destination)
             || resolved_params.get("dest_kind").and_then(Value::as_str) != Some("file")
-            || resolved_params.get("copy_policy").and_then(Value::as_str) != Some("create_only")
+            || resolved_params.get("copy_policy").and_then(Value::as_str) != Some(expected_policy)
         {
             return Err(qualification_failure(
-                "Reviewed configuration no longer matches the app-owned create-only target.",
-                config_create_report(
-                    artifact,
+                "Reviewed configuration no longer matches its app-owned operation and target.",
+                config_write_report(
+                    &report_artifact,
                     "review_target_stale",
                     "unknown",
                     false,
@@ -3036,7 +3385,16 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let parent = device_parent(destination).ok_or_else(|| {
             StepFailure::new("Reviewed configuration target is invalid.".to_string())
         })?;
-        let expected_precondition = &artifact["absencePrecondition"];
+        let expected_precondition = if is_create {
+            &artifact["absencePrecondition"]
+        } else {
+            &artifact["originalFilePrecondition"]
+        };
+        let expected_status = if is_create {
+            "confirmed_absent"
+        } else {
+            "confirmed_existing"
+        };
         let expected_parent_binding =
             expected_precondition["parentBinding"]
                 .as_str()
@@ -3054,18 +3412,26 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .ok_or_else(|| {
                 StepFailure::new("Reviewed configuration target name is invalid.".to_string())
             })?;
-        if expected_precondition["status"].as_str() != Some("confirmed_absent")
+        if expected_precondition["status"].as_str() != Some(expected_status)
             || expected_precondition["targetPath"].as_str() != Some(destination)
             || expected_precondition["parentPath"].as_str() != Some(parent)
             || expected_precondition["entryName"].as_str() != Some(expected_name)
             || expected_name != "retroarch.cfg"
             || artifact["targetIdentity"]["appId"].as_str() != Some("retroarch")
             || artifact["targetIdentity"]["targetId"].as_str() != Some("config")
+            || artifact["targetIdentity"]["androidUserId"].as_u64() != Some(0)
+            || (!is_create
+                && (!expected_precondition["sha256"]
+                    .as_str()
+                    .is_some_and(|value| {
+                        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    || expected_precondition["byteLength"].as_u64().is_none()))
         {
             return Err(qualification_failure(
                 "Reviewed configuration target or absence precondition is stale.",
-                config_create_report(
-                    artifact,
+                config_write_report(
+                    &report_artifact,
                     "review_precondition_invalid",
                     expected_authority,
                     false,
@@ -3083,8 +3449,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         {
             return Err(qualification_failure(
                 "Reviewed configuration authority no longer matches the selected adapter.",
-                config_create_report(
-                    artifact,
+                config_write_report(
+                    &report_artifact,
                     "review_authority_stale",
                     expected_authority,
                     false,
@@ -3102,7 +3468,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             // reviewed parent identity.
             let sandbox_parent_binding =
                 (expected_authority == "dry_run_sandbox").then_some(expected_parent_binding);
-            return execute_fake_retroarch_config_create(
+            return execute_fake_retroarch_config_write(
                 &sandbox,
                 self.adapters.fake_protected_write_root_anchor.as_ref(),
                 destination,
@@ -3112,7 +3478,92 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             );
         }
 
+        let mut original_config_bytes = None;
+        let mut operation_fence = self.operation_fence.clone().ok_or_else(|| {
+            qualification_failure(
+                "The operation-bound device fence is unavailable; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "operation_fence_unavailable",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            )
+        })?;
+        let durable_record = crate::operation_fence::read(&operation_fence.path).map_err(|_| {
+            qualification_failure(
+                "The durable device-operation fence could not be verified; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "operation_fence_unavailable",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            )
+        })?;
+        let plan_digest = crate::plan_digest::execution_plan_digest(plan).map_err(|_| {
+            StepFailure::new("The reviewed plan digest is unavailable.".to_string())
+        })?;
+        if operation_fence.record.phase != crate::operation_fence::OperationFencePhase::Dispatching
+            || operation_fence.record.plan_digest != plan_digest
+            || durable_record != operation_fence.record
+        {
+            return Err(qualification_failure(
+                "The operation-bound device fence is stale; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "operation_fence_stale",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+        let reviewed_package_id = artifact["targetIdentity"]["packageId"]
+            .as_str()
+            .expect("validated RetroArch configuration target package")
+            .to_string();
+        operation_fence.record = crate::operation_fence::record_reviewed_target(
+            &operation_fence.path,
+            &operation_fence.record,
+            crate::operation_fence::OperationFenceTarget {
+                operation: operation.to_string(),
+                app_id: "retroarch".to_string(),
+                target_id: "config".to_string(),
+                package_id: reviewed_package_id,
+                android_user_id: 0,
+                target_path: destination.to_string(),
+                source_sha256: expected_sha256.clone(),
+                original_file_precondition: expected_precondition.clone(),
+                backup_mode: backup_mode.to_string(),
+            },
+        )
+        .map_err(|_| {
+            qualification_failure(
+                "The reviewed configuration target could not be attached to the durable operation record; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "operation_fence_target_persistence_failed",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            )
+        })?;
+        let operation_id = operation_fence.record.operation_id.clone();
         self.ensure_root_preflight()?;
+        let (retroarch_package_id, android_user_id) =
+            Self::quiesce_retroarch_config_target(&mut self.adapters.device, &mut report_artifact)?;
         let binding_before = self
             .adapters
             .device
@@ -3136,8 +3587,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         if binding_before != expected_parent_binding || binding_after != binding_before {
             return Err(qualification_failure(
                 "Reviewed configuration parent identity changed before creation.",
-                config_create_report(
-                    artifact,
+                config_write_report(
+                    &report_artifact,
                     "review_parent_changed",
                     expected_authority,
                     false,
@@ -3147,11 +3598,11 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 ),
             ));
         }
-        if exists || symlink {
+        if is_create && (exists || symlink) {
             return Err(qualification_failure(
                 "RetroArch configuration target already exists; no bytes were replaced.",
-                config_create_report(
-                    artifact,
+                config_write_report(
+                    &report_artifact,
                     "blocked_existing_target",
                     expected_authority,
                     false,
@@ -3161,13 +3612,211 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 ),
             ));
         }
+        if !is_create {
+            if !exists || symlink {
+                return Err(qualification_failure(
+                    "RetroArch configuration replacement requires the reviewed regular file.",
+                    config_write_report(
+                        &report_artifact,
+                        "review_precondition_changed",
+                        expected_authority,
+                        false,
+                        false,
+                        "not_started",
+                        &[],
+                    ),
+                ));
+            }
+            let original_bytes = self
+                .adapters
+                .device
+                .copy_commit_read_retroarch_config(parent, expected_parent_binding)
+                .map_err(StepFailure::from)?;
+            let original_sha256 = crate::runtime_configuration::sha256_hex(&original_bytes);
+            if Some(original_sha256.as_str()) != expected_precondition["sha256"].as_str()
+                || Some(original_bytes.len() as u64) != expected_precondition["byteLength"].as_u64()
+            {
+                return Err(qualification_failure(
+                    "RetroArch configuration changed after review; replacement was not started.",
+                    config_write_report(
+                        &report_artifact,
+                        "review_precondition_changed",
+                        expected_authority,
+                        false,
+                        false,
+                        "not_started",
+                        &[],
+                    ),
+                ));
+            }
+            original_config_bytes = Some(original_bytes);
+        }
 
-        let stage_root = next_retroarch_config_create_stage_root();
+        let durable_record = crate::operation_fence::read(&operation_fence.path).map_err(|_| {
+            qualification_failure(
+                "The operation-bound device fence is unreadable; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "operation_fence_unavailable",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            )
+        })?;
+        let plan_digest = crate::plan_digest::execution_plan_digest(plan).map_err(|_| {
+            StepFailure::new("The reviewed plan digest is unavailable.".to_string())
+        })?;
+        if operation_fence.record.phase != crate::operation_fence::OperationFencePhase::Dispatching
+            || operation_fence.record.plan_digest != plan_digest
+            || durable_record != operation_fence.record
+        {
+            return Err(qualification_failure(
+                "The operation-bound device fence is stale; configuration was not written.",
+                config_write_report(
+                    &report_artifact,
+                    "operation_fence_stale",
+                    expected_authority,
+                    false,
+                    false,
+                    "not_started",
+                    &[],
+                ),
+            ));
+        }
+
+        let mut configuration_backup = None;
+        let mut backup_status = if is_create {
+            "not_required"
+        } else if backup_mode == "disabled" {
+            "disabled"
+        } else if backup_mode == "waived" {
+            "waived"
+        } else {
+            "not_started"
+        };
+        if !is_create && backup_mode == "verified" {
+            let original_bytes = original_config_bytes
+                .as_deref()
+                .expect("replacement captured the reviewed original bytes");
+            let app_data_root =
+                crate::configuration_backups::app_data_root_from_cache_root(&sandbox.cache_root)
+                    .map_err(|_| {
+                        qualification_failure(
+                "Private configuration backup storage is unavailable; no replacement was started.",
+                configuration_backup_report(
+                    config_write_report(&report_artifact,
+                        "backup_storage_unavailable",
+                        expected_authority,
+                        false,
+                        false,
+                        "not_started",
+                        &[],
+                    ),
+                    &operation_id,
+                    "failed",
+                    None,
+                ),
+            )
+                    })?;
+            let backup_context = crate::configuration_backups::ConfigurationBackupContext {
+                device_handle: &operation_fence.record.device_handle,
+                runtime_generation: operation_fence.record.runtime_generation,
+                attempt_sequence: operation_fence.record.attempt_sequence,
+                package_id: &retroarch_package_id,
+                target_path: destination,
+                operation,
+            };
+            let backup = crate::configuration_backups::store_configuration_backup(
+                &app_data_root,
+                &operation_id,
+                &backup_context,
+                original_bytes,
+            )
+        .map_err(|_| {
+            qualification_failure(
+                "The private configuration backup could not be verified; no replacement was started.",
+                configuration_backup_report(
+                    config_write_report(&report_artifact,
+                        "backup_failed",
+                        expected_authority,
+                        false,
+                        false,
+                        "not_started",
+                        &[],
+                    ),
+                    &operation_id,
+                    "failed",
+                    None,
+                ),
+            )
+        })?;
+            if backup.sha256 != crate::runtime_configuration::sha256_hex(original_bytes)
+                || backup.length != original_bytes.len() as u64
+            {
+                return Err(qualification_failure(
+                "The private configuration backup did not match the reviewed original; no replacement was started.",
+                configuration_backup_report(
+                    config_write_report(&report_artifact,
+                        "backup_verification_failed",
+                        expected_authority,
+                        false,
+                        false,
+                        "not_started",
+                        &[],
+                    ),
+                    &operation_id,
+                    "failed",
+                    None,
+                ),
+            ));
+            }
+            let durable_backup = crate::operation_fence::OperationFenceBackup {
+                path: backup.path.to_string_lossy().into_owned(),
+                metadata_path: backup.metadata_path.to_string_lossy().into_owned(),
+                operation: operation.to_string(),
+                device_handle: operation_fence.record.device_handle.clone(),
+                package_id: retroarch_package_id.clone(),
+                target_path: destination.to_string(),
+                captured_at_unix_ms: backup.captured_at_unix_ms,
+                sha256: backup.sha256.clone(),
+                length: backup.length,
+            };
+            operation_fence.record = crate::operation_fence::record_verified_backup(
+                &operation_fence.path,
+                &operation_fence.record,
+                durable_backup,
+            )
+            .map_err(|_| {
+                qualification_failure(
+                    "The verified private backup could not be attached to the durable operation record; no replacement was started.",
+                    configuration_backup_report(
+                        config_write_report(&report_artifact,
+                            "backup_fence_persistence_failed",
+                            expected_authority,
+                            true,
+                            false,
+                            "not_started",
+                            &[],
+                        ),
+                        &operation_id,
+                        "failed",
+                        Some(&backup),
+                    ),
+                )
+            })?;
+            backup_status = "verified";
+            configuration_backup = Some(backup);
+        }
+        let stage_root = next_retroarch_config_write_stage_root(&operation_id);
         let helper_path = format!("{stage_root}-helper");
         let staged_source = format!("{stage_root}/retroarch.cfg");
         let mut stage_creation_attempted = false;
         let mut stage_created = false;
         let mut helper_may_exist = false;
+        let fence_binding = operation_fence.clone();
         let stage_result = (|| {
             self.adapters
                 .device
@@ -3206,7 +3855,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             Ok::<(), StepFailure>(())
         })();
         if let Err(stage_failure) = stage_result {
-            let cleanup_warnings = cleanup_retroarch_config_create_stage(
+            let mut cleanup_warnings = cleanup_retroarch_config_write_stage(
                 &mut self.adapters.device,
                 &stage_root,
                 &helper_path,
@@ -3215,8 +3864,13 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 stage_created,
                 helper_may_exist,
             );
-            let report = config_create_report(
-                artifact,
+            record_host_cleanup_after_staging(
+                &fence_binding.path,
+                &fence_binding.record,
+                &mut cleanup_warnings,
+            );
+            let report = config_write_report(
+                &report_artifact,
                 "staging_failed_no_target_write",
                 expected_authority,
                 false,
@@ -3231,65 +3885,256 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             return Err(qualification_failure(stage_failure.message, report));
         }
 
-        let create_result = self.adapters.device.copy_commit_create_file_exclusive(
-            parent,
-            expected_parent_binding,
-            &stage_root,
-            &helper_path,
-            expected_name,
-            "absent",
-            &expected_sha256,
-        );
+        let mut before_helper_dispatch = || {
+            crate::operation_fence::advance(
+                &fence_binding.path,
+                &fence_binding.record,
+                crate::operation_fence::OperationFencePhase::Dispatching,
+                crate::operation_fence::OperationFencePhase::CommitPending,
+            )
+            .map(|_| ())
+            .map_err(|_| {
+                "The durable operation fence could not advance before helper dispatch.".to_string()
+            })
+        };
+        let after_remote_quiescent = fence_binding.clone();
+        let mut after_remote_quiescent = move |remote_outcome| {
+            let outcome = match remote_outcome {
+                CopyCommitRemoteOutcome::VerifiedWrite => {
+                    crate::operation_fence::OperationFenceOutcome::VerifiedWrite
+                }
+                CopyCommitRemoteOutcome::AbortedBeforeWrite => {
+                    crate::operation_fence::OperationFenceOutcome::AbortedBeforeWrite
+                }
+                CopyCommitRemoteOutcome::PartialWriteTerminal => {
+                    crate::operation_fence::OperationFenceOutcome::PartialWriteTerminal
+                }
+            };
+            crate::operation_fence::advance_with_outcome(
+                &after_remote_quiescent.path,
+                &after_remote_quiescent.record,
+                crate::operation_fence::OperationFencePhase::CommitPending,
+                outcome,
+            )
+            .map(|_| ())
+            .map_err(|_| {
+                "Remote helper completion could not be reconciled with the durable operation fence."
+                    .to_string()
+            })
+        };
+        let create_result = if is_create {
+            self.adapters.device.copy_commit_create_file_exclusive(
+                parent,
+                expected_parent_binding,
+                &stage_root,
+                &helper_path,
+                expected_name,
+                &retroarch_package_id,
+                android_user_id,
+                "absent",
+                &expected_sha256,
+                bytes.len() as u64,
+                &operation_id,
+                &mut before_helper_dispatch,
+                &mut after_remote_quiescent,
+            )
+        } else {
+            let original_sha256 = expected_precondition["sha256"]
+                .as_str()
+                .expect("validated replacement precondition digest");
+            let original_length = expected_precondition["byteLength"]
+                .as_u64()
+                .expect("validated replacement precondition length");
+            self.adapters.device.copy_commit_replace_retroarch_config(
+                parent,
+                expected_parent_binding,
+                &stage_root,
+                &helper_path,
+                expected_name,
+                &retroarch_package_id,
+                android_user_id,
+                original_sha256,
+                original_length,
+                &expected_sha256,
+                bytes.len() as u64,
+                &operation_id,
+                &mut before_helper_dispatch,
+                &mut after_remote_quiescent,
+            )
+        };
         let outcome = match create_result {
-            Ok(CopyCommitCreateFileOutcome::CreatedVerified { sha256, byte_length })
-                if sha256 == expected_sha256 && byte_length == bytes.len() as u64 =>
+            Ok(CopyCommitConfigurationWriteOutcome::CreatedVerified { sha256, byte_length })
+                if is_create && sha256 == expected_sha256 && byte_length == bytes.len() as u64 =>
             {
                 ("created_verified", false, true, true, None)
             }
-            Ok(CopyCommitCreateFileOutcome::CreatedVerified { .. }) => (
+            Ok(CopyCommitConfigurationWriteOutcome::ReplacedVerified { sha256, byte_length })
+                if !is_create && sha256 == expected_sha256 && byte_length == bytes.len() as u64 =>
+            {
+                ("replaced_verified", false, true, true, None)
+            }
+            Ok(CopyCommitConfigurationWriteOutcome::CreatedVerified { .. }) => (
                 "final_readback_mismatch",
                 true,
                 false,
                 true,
                 Some("Final configuration readback did not match the reviewed bytes.".to_string()),
             ),
-            Ok(CopyCommitCreateFileOutcome::TargetAlreadyExists) => (
+            Ok(CopyCommitConfigurationWriteOutcome::ReplacedVerified { .. }) => {
+                return Err(StepFailure::new(
+                    "Configuration helper returned an unexpected replacement result.".to_string(),
+                ));
+            }
+        Ok(CopyCommitConfigurationWriteOutcome::AppStillRunning) => {
+            report_artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            (
+                "app_relaunched_before_write",
+                false,
+                false,
+                true,
+                Some(
+                    "RetroArch reopened before the configuration write. Close RetroArch manually and prepare a fresh review."
+                        .to_string(),
+                ),
+            )
+        }
+        Ok(CopyCommitConfigurationWriteOutcome::AppStateUnverified) => {
+            report_artifact["retroArchStopStatus"] = json!("manual_closure_required");
+            (
+                "app_state_unverified",
+                false,
+                false,
+                true,
+                Some(
+                    "RetroArch process state could not be verified. Close it manually and prepare a fresh review."
+                        .to_string(),
+                ),
+            )
+        }
+            Ok(CopyCommitConfigurationWriteOutcome::TargetAlreadyExists) => (
                 "blocked_existing_target",
                 false,
                 false,
                 true,
                 Some("RetroArch configuration target already exists; no bytes were replaced.".to_string()),
             ),
-            Ok(CopyCommitCreateFileOutcome::SourceHashMismatch) => (
+            Ok(CopyCommitConfigurationWriteOutcome::SourceHashMismatch) => (
                 "staged_source_hash_mismatch",
                 false,
                 false,
                 true,
                 Some("Staged configuration did not match the reviewed digest; target was not opened.".to_string()),
             ),
-            Ok(CopyCommitCreateFileOutcome::PartialWriteUnverified) => (
+            Ok(CopyCommitConfigurationWriteOutcome::PartialWriteUnverified) => (
                 "partial_write_unverified",
                 true,
                 false,
                 true,
                 Some("Configuration creation may have left partial bytes; no cleanup was attempted on the target.".to_string()),
             ),
+        Ok(CopyCommitConfigurationWriteOutcome::PartialWriteTerminal) => (
+            "partial_write_terminal",
+            true,
+            false,
+            true,
+            Some(
+                "The configuration write stopped after changing the target. The helper is no longer active; use the verified private backup for manual recovery."
+                    .to_string(),
+            ),
+        ),
             Err(error) => {
                 let failure: StepFailure = error.into();
-                let report = config_create_report(
-                    artifact,
-                    "completion_uncertain",
+                let mut cleanup_warnings = Vec::new();
+                let fence_state = crate::operation_fence::read(&fence_binding.path);
+                let (outcome, may_have_changed, cleanup_status) = match fence_state {
+                    Ok(current)
+                        if current.phase
+                            == crate::operation_fence::OperationFencePhase::Dispatching =>
+                    {
+                        cleanup_warnings.extend(cleanup_retroarch_config_write_stage(
+                            &mut self.adapters.device,
+                            &stage_root,
+                            &helper_path,
+                            &staged_source,
+                            stage_creation_attempted,
+                            stage_created,
+                            helper_may_exist,
+                        ));
+                        record_host_cleanup_after_staging(
+                            &fence_binding.path,
+                            &fence_binding.record,
+                            &mut cleanup_warnings,
+                        );
+                        (
+                            "pre_dispatch_failed_no_target_write",
+                            false,
+                            cleanup_report_status(&cleanup_warnings),
+                        )
+                    }
+                    Ok(current)
+                        if current.phase
+                            == crate::operation_fence::OperationFencePhase::RemoteQuiescent =>
+                    {
+                        cleanup_warnings.extend(cleanup_retroarch_config_write_stage(
+                            &mut self.adapters.device,
+                            &stage_root,
+                            &helper_path,
+                            &staged_source,
+                            stage_creation_attempted,
+                            stage_created,
+                            helper_may_exist,
+                        ));
+                        record_host_cleanup_after_staging(
+                            &fence_binding.path,
+                            &fence_binding.record,
+                            &mut cleanup_warnings,
+                        );
+                        let no_target_write = matches!(
+                            current.outcome,
+                            Some(
+                                crate::operation_fence::OperationFenceOutcome::NotDispatched
+                                    | crate::operation_fence::OperationFenceOutcome::AbortedBeforeWrite
+                            )
+                        );
+                        (
+                            if no_target_write {
+                                "pre_dispatch_failed_no_target_write"
+                            } else {
+                                "completion_uncertain"
+                            },
+                            !no_target_write,
+                            cleanup_report_status(&cleanup_warnings),
+                        )
+                    }
+                    Ok(_) => (
+                        "completion_uncertain",
+                        true,
+                        "deferred_due_uncertain_outcome",
+                    ),
+                    Err(_) => {
+                        cleanup_warnings
+                            .push("operation_fence_cleanup_evidence_unavailable".to_string());
+                        (
+                            "completion_uncertain",
+                            true,
+                            cleanup_report_status(&cleanup_warnings),
+                        )
+                    }
+                };
+                let report = config_write_report(
+                    &report_artifact,
+                    outcome,
                     expected_authority,
-                    true,
+                    may_have_changed,
                     false,
-                    "deferred_due_uncertain_outcome",
-                    &[],
+                    cleanup_status,
+                    &cleanup_warnings,
                 );
                 return Err(qualification_failure_with_kind(failure, report));
             }
         };
 
-        let cleanup_warnings = cleanup_retroarch_config_create_stage(
+        let mut cleanup_warnings = cleanup_retroarch_config_write_stage(
             &mut self.adapters.device,
             &stage_root,
             &helper_path,
@@ -3298,18 +4143,24 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             stage_created,
             helper_may_exist,
         );
-        let report = config_create_report(
-            artifact,
-            outcome.0,
-            expected_authority,
-            outcome.1,
-            outcome.2,
-            if cleanup_warnings.is_empty() {
-                "complete"
-            } else {
-                "warning"
-            },
-            &cleanup_warnings,
+        record_host_cleanup_after_staging(
+            &fence_binding.path,
+            &fence_binding.record,
+            &mut cleanup_warnings,
+        );
+        let report = configuration_backup_report(
+            config_write_report(
+                &report_artifact,
+                outcome.0,
+                expected_authority,
+                outcome.1,
+                outcome.2,
+                cleanup_report_status(&cleanup_warnings),
+                &cleanup_warnings,
+            ),
+            &operation_id,
+            backup_status,
+            configuration_backup.as_ref(),
         );
         if let Some(message) = outcome.4 {
             return Err(qualification_failure(message, report));
@@ -3531,7 +4382,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 }
 
 pub(crate) fn plan_requires_copy_commit_preparation(plan: &ExecutionPlan) -> bool {
-    if plan.steps.iter().any(is_retroarch_config_create_step) {
+    if plan.steps.iter().any(is_retroarch_config_write_step) {
         return true;
     }
     if validate_supported_copy_plan(plan).is_err() {
@@ -3549,12 +4400,12 @@ pub(crate) fn plan_requires_copy_commit_preparation(plan: &ExecutionPlan) -> boo
         })
 }
 
-const RETROARCH_CONFIG_CREATE_RECIPES: [&str; 2] =
+const RETROARCH_CONFIG_WRITE_RECIPES: [&str; 2] =
     ["app.retroarch.provision", "app.retroarch.configure"];
 
-fn is_retroarch_config_create_step(step: &ExecutionStep) -> bool {
+fn is_retroarch_config_write_step(step: &ExecutionStep) -> bool {
     step.type_name == "copy_files"
-        && RETROARCH_CONFIG_CREATE_RECIPES.contains(&step.recipe_ref.as_str())
+        && RETROARCH_CONFIG_WRITE_RECIPES.contains(&step.recipe_ref.as_str())
         && step.id.ends_with("seed_retroarch_cfg")
 }
 
@@ -3562,7 +4413,7 @@ fn is_retroarch_config_create_step(step: &ExecutionStep) -> bool {
 /// Missing or malformed input can indicate that both the source and create step were pruned.
 fn configuration_source_requires_write_admission(plan: &ExecutionPlan) -> bool {
     plan.source.selected_recipe_refs.iter().any(|recipe_id| {
-        if !RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe_id.as_str()) {
+        if !RETROARCH_CONFIG_WRITE_RECIPES.contains(&recipe_id.as_str()) {
             return false;
         }
 
@@ -3579,15 +4430,15 @@ fn configuration_source_requires_write_admission(plan: &ExecutionPlan) -> bool {
 }
 
 /// Returns whether a selected source or step represents RetroArch configuration creation.
-pub(crate) fn plan_requires_retroarch_config_create(plan: &ExecutionPlan) -> bool {
+pub(crate) fn plan_requires_retroarch_config_write(plan: &ExecutionPlan) -> bool {
     configuration_source_requires_write_admission(plan)
         || plan.steps.iter().any(|step| {
-            if is_retroarch_config_create_step(step)
+            if is_retroarch_config_write_step(step)
                 || step_targets_retroarch_config_destination(plan, step)
             {
                 return true;
             }
-            if !RETROARCH_CONFIG_CREATE_RECIPES.contains(&step.recipe_ref.as_str())
+            if !RETROARCH_CONFIG_WRITE_RECIPES.contains(&step.recipe_ref.as_str())
                 || !plan
                     .source
                     .selected_recipe_refs
@@ -3597,7 +4448,7 @@ pub(crate) fn plan_requires_retroarch_config_create(plan: &ExecutionPlan) -> boo
             {
                 return false;
             }
-            let Some(artifact) = retroarch_config_create_artifact_for_review(step) else {
+            let Some(artifact) = retroarch_config_write_artifact_for_review(step) else {
                 return false;
             };
             let target_identity = &artifact["targetIdentity"];
@@ -3617,9 +4468,116 @@ pub(crate) fn plan_requires_retroarch_config_create(plan: &ExecutionPlan) -> boo
         })
 }
 
+pub(crate) fn native_configuration_write_claim_matches_plan(
+    plan: &ExecutionPlan,
+    plan_digest: &str,
+    claim: &crate::trusted_control::NativeConfigurationWriteClaim,
+) -> bool {
+    if claim.plan_digest != plan_digest
+        || plan
+            .target_device
+            .as_ref()
+            .is_none_or(|target| target.serial != claim.device_serial)
+        || claim.profile_id != plan.source.device_profile_ref
+    {
+        return false;
+    }
+
+    let protected_steps = plan
+        .steps
+        .iter()
+        .filter(|step| is_retroarch_config_write_step(step))
+        .collect::<Vec<_>>();
+    let [step] = protected_steps.as_slice() else {
+        return false;
+    };
+    let Some(crate::planner::ExecutionParamValue::Literal { value: artifact }) =
+        step.params.get("source")
+    else {
+        return false;
+    };
+    let Some(crate::planner::ExecutionParamValue::Literal { value: policy }) =
+        step.params.get("copy_policy")
+    else {
+        return false;
+    };
+    let operation = match policy.as_str() {
+        Some("create_only") => "create",
+        Some("replace") => "replace",
+        _ => return false,
+    };
+    if artifact.get("operation").and_then(Value::as_str) != Some(operation) {
+        return false;
+    }
+    let precondition_key = match operation {
+        "create" => "absencePrecondition",
+        "replace" => "originalFilePrecondition",
+        _ => unreachable!(),
+    };
+    let Some(package_id) = claim
+        .target_identity
+        .get("packageId")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let expected_destination =
+        format!("/storage/emulated/0/Android/data/{package_id}/files/retroarch.cfg");
+    let matching_apps = plan
+        .apps
+        .iter()
+        .filter(|app| app.id == "retroarch" && app.package_id == package_id)
+        .count();
+    let state = ExecutionState::from_plan(plan);
+    let resolved_destination = resolve_step_params(&state, &step.params)
+        .ok()
+        .and_then(|params| {
+            params
+                .get("dest")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+
+    operation == claim.operation
+        && artifact.get("type").and_then(Value::as_str) == Some("configuration_artifact")
+        && artifact.get("sha256").and_then(Value::as_str) == Some(claim.source_sha256.as_str())
+        && artifact.get("targetIdentity") == Some(&claim.target_identity)
+        && artifact.get("backupMode").and_then(Value::as_str) == Some(claim.backup_mode.as_str())
+        && artifact.get(precondition_key) == Some(&claim.original_file_precondition)
+        && artifact
+            .get("backupWaiverDigest")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            == claim.backup_waiver_digest.as_deref()
+        && claim.destination == expected_destination
+        && resolved_destination.as_deref() == Some(claim.destination.as_str())
+        && matching_apps == 1
+        && claim.target_identity.get("appId").and_then(Value::as_str) == Some("retroarch")
+        && claim
+            .target_identity
+            .get("targetId")
+            .and_then(Value::as_str)
+            == Some("config")
+        && claim
+            .target_identity
+            .pointer("/target/kind")
+            .and_then(Value::as_str)
+            == Some("file")
+        && claim
+            .target_identity
+            .pointer("/target/location")
+            .and_then(Value::as_str)
+            == Some("external_app_data")
+        && claim
+            .target_identity
+            .pointer("/target/path")
+            .and_then(Value::as_str)
+            == Some("files/retroarch.cfg")
+}
+
 fn step_targets_retroarch_config_destination(plan: &ExecutionPlan, step: &ExecutionStep) -> bool {
     if step.type_name != "copy_files"
-        || !RETROARCH_CONFIG_CREATE_RECIPES.contains(&step.recipe_ref.as_str())
+        || !RETROARCH_CONFIG_WRITE_RECIPES.contains(&step.recipe_ref.as_str())
     {
         return false;
     }
@@ -3707,6 +4665,7 @@ fn qualification_target_matches_plan(
     if step.app_id.as_deref() != Some("retroarch")
         || artifact["targetIdentity"]["appId"].as_str() != Some("retroarch")
         || artifact["targetIdentity"]["targetId"].as_str() != Some("config")
+        || artifact["targetIdentity"]["androidUserId"].as_u64() != Some(0)
         || artifact["targetIdentity"]["target"]["path"].as_str() != Some("files/retroarch.cfg")
     {
         return false;
@@ -3727,7 +4686,7 @@ fn qualification_target_matches_plan(
             == format!("/storage/emulated/0/Android/data/{package_id}/files/retroarch.cfg")
 }
 
-fn config_create_report(
+fn config_write_report(
     artifact: &Value,
     outcome: &str,
     verification_scope: &str,
@@ -3738,7 +4697,7 @@ fn config_create_report(
 ) -> Value {
     json!({
         "schemaVersion": 1,
-        "operation": "create_only",
+        "operation": artifact["operation"],
         "outcome": outcome,
         "sourceKind": artifact["sourceIdentity"]["kind"],
         "sha256": artifact["sha256"],
@@ -3749,11 +4708,239 @@ fn config_create_report(
         "simulated": verification_scope == "dry_run_sandbox",
         "appliedToDevice": verified && verification_scope == "device",
         "verified": verified,
+        "backupMode": artifact["backupMode"],
+        "backupStatus": if artifact["operation"] == "create" {
+            "not_required"
+        } else if artifact["backupMode"] == "disabled" {
+            "disabled"
+        } else if artifact["backupMode"] == "waived" {
+            "waived"
+        } else {
+            "not_started"
+        },
+        "backupWaiverDigest": artifact["backupWaiverDigest"],
+        "backupPath": Value::Null,
+        "backupSha256": Value::Null,
+        "backupLength": Value::Null,
+        "operationId": Value::Null,
+        "retroArchStopStatus": artifact
+            .get("retroArchStopStatus")
+            .and_then(Value::as_str)
+            .unwrap_or("not_checked"),
         "cleanup": {
             "status": cleanup_status,
             "warnings": cleanup_warnings,
         },
     })
+}
+
+fn configuration_backup_report(
+    mut report: Value,
+    operation_id: &str,
+    backup_status: &str,
+    backup: Option<&crate::configuration_backups::ConfigurationBackup>,
+) -> Value {
+    report["operationId"] = json!(operation_id);
+    report["backupStatus"] = json!(backup_status);
+    if let Some(backup) = backup {
+        report["backupPath"] = json!(backup.path.to_string_lossy());
+        report["backupSha256"] = json!(backup.sha256);
+        report["backupLength"] = json!(backup.length);
+    }
+    report
+}
+
+/// Map the cleanup marker result to a warning when durable cleanup evidence is missing.
+fn host_cleanup_recording_warning(result: io::Result<bool>) -> Option<&'static str> {
+    match result {
+        Ok(true) => None,
+        Ok(false) => Some("operation_fence_reconciliation_incomplete"),
+        Err(_) => Some("operation_fence_cleanup_evidence_unavailable"),
+    }
+}
+
+/// Records a no-dispatch outcome before marking completed host staging cleanup.
+fn record_not_dispatched_host_cleanup(
+    path: &std::path::Path,
+    record: &crate::operation_fence::OperationFenceRecord,
+    cleanup_warnings: &mut Vec<String>,
+) {
+    if crate::operation_fence::advance_with_outcome(
+        path,
+        record,
+        crate::operation_fence::OperationFencePhase::Dispatching,
+        crate::operation_fence::OperationFenceOutcome::NotDispatched,
+    )
+    .is_err()
+    {
+        cleanup_warnings.push("operation_fence_reconciliation_incomplete".to_string());
+        return;
+    }
+
+    if cleanup_warnings.is_empty() {
+        if let Some(warning) = host_cleanup_recording_warning(
+            crate::operation_fence::mark_host_cleanup_complete(path, record),
+        ) {
+            cleanup_warnings.push(warning.to_string());
+        }
+    }
+}
+
+fn record_host_cleanup_after_staging(
+    path: &std::path::Path,
+    record: &crate::operation_fence::OperationFenceRecord,
+    cleanup_warnings: &mut Vec<String>,
+) {
+    match crate::operation_fence::read(path) {
+        Ok(current)
+            if current.phase == crate::operation_fence::OperationFencePhase::Dispatching =>
+        {
+            record_not_dispatched_host_cleanup(path, record, cleanup_warnings);
+        }
+        Ok(_) if cleanup_warnings.is_empty() => {
+            if let Some(warning) = host_cleanup_recording_warning(
+                crate::operation_fence::mark_host_cleanup_complete(path, record),
+            ) {
+                cleanup_warnings.push(warning.to_string());
+            }
+        }
+        Err(_) => cleanup_warnings.push("operation_fence_cleanup_evidence_unavailable".to_string()),
+        _ => {}
+    }
+}
+
+fn cleanup_report_status(warnings: &[String]) -> &'static str {
+    if warnings.is_empty() {
+        "complete"
+    } else {
+        "warning"
+    }
+}
+
+#[cfg(test)]
+mod host_cleanup_recording_tests {
+    use super::{
+        cleanup_report_status, config_write_report, host_cleanup_recording_warning,
+        record_host_cleanup_after_staging,
+    };
+    use crate::operation_fence::{
+        mark_host_cleanup_complete, read, write_initial, OperationFenceOutcome,
+        OperationFencePhase, OperationFenceRecord,
+    };
+    use serde_json::{json, Value};
+
+    fn initial_fence() -> OperationFenceRecord {
+        OperationFenceRecord {
+            version: 1,
+            operation_id: "cleanup-test".to_string(),
+            runtime_generation: 1,
+            attempt_sequence: 1,
+            device_handle: "test-device".to_string(),
+            plan_digest: "a".repeat(64),
+            phase: OperationFencePhase::Dispatching,
+            outcome: None,
+            host_cleanup_complete: false,
+            target: None,
+            backup: None,
+        }
+    }
+
+    fn report(outcome: &str, warning: &'static str) -> Value {
+        let warnings = vec![warning.to_string()];
+        let artifact = json!({
+            "operation": "replace",
+            "sourceIdentity": { "kind": "generated_configuration" },
+            "sha256": "a".repeat(64),
+            "byteLength": 32,
+            "backupMode": "verified",
+            "backupWaiverDigest": null,
+        });
+        config_write_report(
+            &artifact,
+            outcome,
+            "device",
+            true,
+            false,
+            cleanup_report_status(&warnings),
+            &warnings,
+        )
+    }
+
+    #[test]
+    fn durable_host_cleanup_recording_is_reported_complete() {
+        assert!(host_cleanup_recording_warning(Ok(true)).is_none());
+        assert_eq!(cleanup_report_status(&[]), "complete");
+    }
+
+    #[test]
+    fn missing_remote_quiescence_keeps_cleanup_unresolved() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active-device-operation.marker");
+        let initial = initial_fence();
+        write_initial(&path, &initial).unwrap();
+
+        let warning =
+            host_cleanup_recording_warning(mark_host_cleanup_complete(&path, &initial)).unwrap();
+        let report = report("completion_uncertain", warning);
+
+        assert_eq!(warning, "operation_fence_reconciliation_incomplete");
+        assert_eq!(report["cleanup"]["status"], "warning");
+        assert_eq!(report["outcome"], "completion_uncertain");
+        assert!(
+            !crate::operation_fence::read(&path)
+                .unwrap()
+                .host_cleanup_complete
+        );
+    }
+
+    #[test]
+    fn not_dispatched_cleanup_is_durable_and_acknowledgeable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active-device-operation.marker");
+        let initial = initial_fence();
+        write_initial(&path, &initial).unwrap();
+        let mut warnings = Vec::new();
+
+        record_host_cleanup_after_staging(&path, &initial, &mut warnings);
+
+        let current = read(&path).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(current.phase, OperationFencePhase::RemoteQuiescent);
+        assert_eq!(current.outcome, Some(OperationFenceOutcome::NotDispatched));
+        assert!(current.host_cleanup_complete);
+        assert!(current.can_acknowledge_quiescence());
+    }
+
+    #[test]
+    fn failed_staging_cleanup_keeps_no_dispatch_fence_unresolved() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active-device-operation.marker");
+        let initial = initial_fence();
+        write_initial(&path, &initial).unwrap();
+        let mut warnings = vec!["staged_source_cleanup_failed".to_string()];
+
+        record_host_cleanup_after_staging(&path, &initial, &mut warnings);
+
+        let current = read(&path).unwrap();
+        assert_eq!(current.phase, OperationFencePhase::RemoteQuiescent);
+        assert_eq!(current.outcome, Some(OperationFenceOutcome::NotDispatched));
+        assert!(!current.host_cleanup_complete);
+        assert!(!current.can_acknowledge_quiescence());
+        assert_eq!(cleanup_report_status(&warnings), "warning");
+    }
+
+    #[test]
+    fn failed_durable_cleanup_recording_does_not_claim_completed_cleanup() {
+        let warning = host_cleanup_recording_warning(Err(std::io::Error::other(
+            "operation fence synchronization failed",
+        )))
+        .unwrap();
+        let report = report("partial_write_terminal", warning);
+
+        assert_eq!(warning, "operation_fence_cleanup_evidence_unavailable");
+        assert_eq!(report["cleanup"]["status"], "warning");
+        assert_eq!(report["outcome"], "partial_write_terminal");
+    }
 }
 
 fn qualification_failure(message: impl Into<String>, report: Value) -> StepFailure {
@@ -3908,7 +5095,7 @@ fn open_absolute_directory_nofollow(_path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn open_fake_config_create_parent_directory(
+fn open_fake_config_write_parent_directory(
     root: &FakeProtectedWriteRootAnchor,
     parent: &Path,
     create_missing: bool,
@@ -3971,7 +5158,7 @@ fn open_fake_config_create_parent_directory(
 }
 
 #[cfg(not(unix))]
-fn open_fake_config_create_parent_directory(
+fn open_fake_config_write_parent_directory(
     _root: &FakeProtectedWriteRootAnchor,
     _parent: &Path,
     _create_missing: bool,
@@ -3982,7 +5169,7 @@ fn open_fake_config_create_parent_directory(
     ))
 }
 
-fn execute_fake_retroarch_config_create(
+fn execute_fake_retroarch_config_write(
     sandbox: &SandboxRoots,
     root_anchor: Option<&FakeProtectedWriteRootAnchor>,
     destination: &str,
@@ -3992,7 +5179,7 @@ fn execute_fake_retroarch_config_create(
 ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
     #[cfg(unix)]
     {
-        return execute_fake_retroarch_config_create_unix(
+        return execute_fake_retroarch_config_write_unix(
             sandbox,
             root_anchor,
             destination,
@@ -4003,7 +5190,7 @@ fn execute_fake_retroarch_config_create(
     }
     #[cfg(not(unix))]
     {
-        execute_fake_retroarch_config_create_path(
+        execute_fake_retroarch_config_write_path(
             sandbox,
             destination,
             expected_parent_binding,
@@ -4014,7 +5201,7 @@ fn execute_fake_retroarch_config_create(
 }
 
 #[cfg(not(unix))]
-fn execute_fake_retroarch_config_create_path(
+fn execute_fake_retroarch_config_write_path(
     _sandbox: &SandboxRoots,
     _destination: &str,
     _expected_parent_binding: Option<&str>,
@@ -4023,7 +5210,7 @@ fn execute_fake_retroarch_config_create_path(
 ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
     Err(qualification_failure(
         "This host cannot safely simulate create-only configuration without descriptor-relative operations.",
-        config_create_report(
+        config_write_report(
             artifact,
             "simulation_unsupported_host",
             "dry_run_sandbox",
@@ -4036,7 +5223,7 @@ fn execute_fake_retroarch_config_create_path(
 }
 
 #[cfg(unix)]
-fn execute_fake_retroarch_config_create_unix(
+fn execute_fake_retroarch_config_write_unix(
     sandbox: &SandboxRoots,
     root_anchor: Option<&FakeProtectedWriteRootAnchor>,
     destination: &str,
@@ -4051,7 +5238,7 @@ fn execute_fake_retroarch_config_create_unix(
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
     let report = |outcome, may_have_changed, verified, cleanup_status| {
-        config_create_report(
+        config_write_report(
             artifact,
             outcome,
             "dry_run_sandbox",
@@ -4097,7 +5284,7 @@ fn execute_fake_retroarch_config_create_unix(
             false,
         )
     })?;
-    let parent_directory = open_fake_config_create_parent_directory(
+    let parent_directory = open_fake_config_write_parent_directory(
         root_anchor,
         parent,
         expected_parent_binding.is_none(),
@@ -4275,16 +5462,11 @@ fn execute_fake_retroarch_config_create_unix(
     ))
 }
 
-fn next_retroarch_config_create_stage_root() -> String {
-    static NEXT_STAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = NEXT_STAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!(
-        "/data/local/tmp/emuchef/configuration-create-{}-{sequence}",
-        std::process::id()
-    )
+fn next_retroarch_config_write_stage_root(operation_id: &str) -> String {
+    format!("/data/local/tmp/emuchef/configuration-write-{operation_id}")
 }
 
-fn cleanup_retroarch_config_create_stage<D: ExecutorDevice>(
+fn cleanup_retroarch_config_write_stage<D: ExecutorDevice>(
     device: &mut D,
     stage_root: &str,
     helper_path: &str,
@@ -4317,7 +5499,7 @@ fn cleanup_retroarch_config_create_stage<D: ExecutorDevice>(
     warnings
 }
 
-fn retroarch_config_create_artifact_bytes(artifact: &Value) -> Result<Vec<u8>, String> {
+fn retroarch_config_write_artifact_bytes(artifact: &Value) -> Result<Vec<u8>, String> {
     if artifact.get("type").and_then(Value::as_str) != Some("configuration_artifact")
         || artifact.get("schemaVersion").and_then(Value::as_u64) != Some(1)
     {
@@ -4372,7 +5554,7 @@ fn retroarch_config_create_artifact_bytes(artifact: &Value) -> Result<Vec<u8>, S
     Ok(bytes)
 }
 
-pub(crate) fn retroarch_config_create_artifact_for_review(step: &ExecutionStep) -> Option<&Value> {
+pub(crate) fn retroarch_config_write_artifact_for_review(step: &ExecutionStep) -> Option<&Value> {
     let crate::planner::ExecutionParamValue::Literal { value } = step.params.get("source")? else {
         return None;
     };
@@ -5885,6 +7067,29 @@ pub(crate) fn validate_supported_copy_plan(plan: &ExecutionPlan) -> Result<(), S
         .iter()
         .filter(|step| step.type_name == "copy_files")
     {
+        if is_retroarch_config_write_step(step) {
+            let artifact = retroarch_config_write_artifact_for_review(step);
+            let operation = artifact.and_then(|artifact| artifact["operation"].as_str());
+            let policy = step
+                .params
+                .get("copy_policy")
+                .and_then(|param| match param {
+                    crate::planner::ExecutionParamValue::Literal { value } => value.as_str(),
+                    _ => None,
+                });
+            let policy_matches = matches!(
+                (operation, policy),
+                (Some("create"), Some("create_only")) | (Some("replace"), Some("replace"))
+            );
+            if step.app_id.as_deref() != Some("retroarch") || artifact.is_none() || !policy_matches
+            {
+                return Err(format!(
+                    "copy_files step {} has an invalid reviewed RetroArch configuration operation",
+                    step.id
+                ));
+            }
+            continue;
+        }
         if step.params.get("copy_policy").is_some_and(|param| {
             matches!(
                 param,
@@ -5892,9 +7097,9 @@ pub(crate) fn validate_supported_copy_plan(plan: &ExecutionPlan) -> Result<(), S
                     if value.as_str() == Some("create_only")
             )
         }) {
-            if !is_retroarch_config_create_step(step)
+            if !is_retroarch_config_write_step(step)
                 || step.app_id.as_deref() != Some("retroarch")
-                || retroarch_config_create_artifact_for_review(step).is_none()
+                || retroarch_config_write_artifact_for_review(step).is_none()
             {
                 return Err(format!(
                     "copy_files step {} unsupported: create_only is reserved for the reviewed RetroArch configuration artifact",
@@ -6187,7 +7392,7 @@ pub(crate) fn reviewed_root_authorized(plan: &ExecutionPlan) -> bool {
     let app_data_write_authorized = plan.steps.iter().all(|step| {
         !plan_step_root_requirements(plan, step).app_data_write
             || plan.runtime_capabilities.app_data_write
-            || config_create_scoped_write_for_step(plan, step)
+            || config_write_scope_for_step(plan, step)
     });
     requirements.any()
         && (!requirements.root_shell || plan.runtime_capabilities.root_shell)
@@ -7295,6 +8500,15 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
         .map_err(map_adb_error)
     }
 
+    fn copy_commit_read_retroarch_config(
+        &mut self,
+        parent: &str,
+        parent_binding: &str,
+    ) -> Result<Vec<u8>, DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_read_retroarch_config(self, parent, parent_binding)
+            .map_err(map_adb_error)
+    }
+
     fn copy_commit_create_file_exclusive(
         &mut self,
         selected_root: &str,
@@ -7302,9 +8516,15 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
         stage_root: &str,
         helper_path: &str,
         relative_path: &str,
+        package_name: &str,
+        user_id: u32,
         expected_absence: &str,
         expected_source_sha256: &str,
-    ) -> Result<CopyCommitCreateFileOutcome, DeviceOperationError> {
+        expected_source_length: u64,
+        operation_id: &str,
+        before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        after_remote_quiescent: &mut dyn FnMut(CopyCommitRemoteOutcome) -> Result<(), String>,
+    ) -> Result<CopyCommitConfigurationWriteOutcome, DeviceOperationError> {
         adb::RealAdbDevice::copy_commit_create_file_exclusive(
             self,
             selected_root,
@@ -7312,8 +8532,51 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
             stage_root,
             helper_path,
             relative_path,
+            package_name,
+            user_id,
             expected_absence,
             expected_source_sha256,
+            expected_source_length,
+            operation_id,
+            before_helper_dispatch,
+            after_remote_quiescent,
+        )
+        .map_err(map_adb_error)
+    }
+
+    fn copy_commit_replace_retroarch_config(
+        &mut self,
+        selected_root: &str,
+        destination_binding: &str,
+        stage_root: &str,
+        helper_path: &str,
+        relative_path: &str,
+        package_name: &str,
+        user_id: u32,
+        expected_original_sha256: &str,
+        expected_original_length: u64,
+        expected_source_sha256: &str,
+        expected_source_length: u64,
+        operation_id: &str,
+        before_helper_dispatch: &mut dyn FnMut() -> Result<(), String>,
+        after_remote_quiescent: &mut dyn FnMut(CopyCommitRemoteOutcome) -> Result<(), String>,
+    ) -> Result<CopyCommitConfigurationWriteOutcome, DeviceOperationError> {
+        adb::RealAdbDevice::copy_commit_replace_retroarch_config(
+            self,
+            selected_root,
+            destination_binding,
+            stage_root,
+            helper_path,
+            relative_path,
+            package_name,
+            user_id,
+            expected_original_sha256,
+            expected_original_length,
+            expected_source_sha256,
+            expected_source_length,
+            operation_id,
+            before_helper_dispatch,
+            after_remote_quiescent,
         )
         .map_err(map_adb_error)
     }
@@ -7345,6 +8608,29 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
 
     fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::force_stop_app(self, package_name)
+            .map_err(|message| real_adb_error(self, message))
+    }
+
+    fn force_stop_app_for_user(
+        &mut self,
+        package_name: &str,
+        user_id: u32,
+    ) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::force_stop_app_for_user(self, package_name, user_id)
+            .map_err(|message| real_adb_error(self, message))
+    }
+
+    fn app_process_running(&mut self, package_name: &str) -> Result<bool, DeviceOperationError> {
+        adb::RealAdbDevice::app_process_running(self, package_name)
+            .map_err(|message| real_adb_error(self, message))
+    }
+
+    fn app_process_running_for_user(
+        &mut self,
+        package_name: &str,
+        user_id: u32,
+    ) -> Result<bool, DeviceOperationError> {
+        adb::RealAdbDevice::app_process_running_for_user(self, package_name, user_id)
             .map_err(|message| real_adb_error(self, message))
     }
 }
@@ -8093,14 +9379,13 @@ pub(crate) fn runtime_capability_enabled(
         "package_remove_for_user" => plan.runtime_capabilities.package_remove_for_user,
         "root_shell" => plan.runtime_capabilities.root_shell,
         "app_data_write" => {
-            plan.runtime_capabilities.app_data_write
-                || config_create_scoped_write_for_step(plan, step)
+            plan.runtime_capabilities.app_data_write || config_write_scope_for_step(plan, step)
         }
         _ => false,
     }
 }
 
-fn config_create_scoped_write_for_step(plan: &ExecutionPlan, step: &ExecutionStep) -> bool {
+fn config_write_scope_for_step(plan: &ExecutionPlan, step: &ExecutionStep) -> bool {
     let recipe_id = step.recipe_ref.as_str();
     if !matches!(
         recipe_id,
@@ -8164,12 +9449,12 @@ fn config_create_scoped_write_for_step(plan: &ExecutionPlan, step: &ExecutionSte
         .is_some_and(|destination| destination == expected_destination)
 }
 
-fn config_create_scoped_write_authorizes_destination(
+fn config_write_scope_authorizes_destination(
     plan: &ExecutionPlan,
     step: &ExecutionStep,
     destination: &str,
 ) -> bool {
-    if !config_create_scoped_write_for_step(plan, step) {
+    if !config_write_scope_for_step(plan, step) {
         return false;
     }
     let state = ExecutionState::from_plan(plan);

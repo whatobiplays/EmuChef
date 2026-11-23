@@ -3,6 +3,72 @@ export type RuntimeStatus =
   | { status: "starting" }
   | { status: "unsupported" | "failed"; error: ActionableError };
 
+export type OperationFencePhase =
+  | "dispatching"
+  | "commit_pending"
+  | "remote_quiescent";
+
+export type OperationFenceOutcome =
+  | "not_dispatched"
+  | "verified_write"
+  | "aborted_before_write"
+  | "partial_write_terminal";
+
+export type OperationFenceRecoveryStatus =
+  | "dispatch_unresolved"
+  | "write_unresolved"
+  | "not_dispatched"
+  | "write_verified"
+  | "write_aborted"
+  | "partial_write_terminal"
+  | "quiescence_outcome_missing";
+
+export interface OperationFenceTarget {
+  operation: "create" | "replace";
+  appId: string;
+  targetId: string;
+  packageId: string;
+  androidUserId: number;
+  sourceSha256: string;
+  originalFilePrecondition: OriginalFilePreconditionProjection;
+  backupMode: string;
+}
+
+export interface OperationFenceBackup {
+  operation: string;
+  packageId: string;
+  capturedAtUnixMs: number;
+  sha256: string;
+  length: number;
+}
+
+export interface OriginalFilePreconditionProjection {
+  status: string | null;
+  sha256: string | null;
+  byteLength: number | null;
+}
+
+export interface OperationFenceRecord {
+  version: number;
+  operationId: string;
+  runtimeGeneration: number;
+  attemptSequence: number;
+  deviceHandle: string;
+  planDigest: string;
+  phase: OperationFencePhase;
+  outcome: OperationFenceOutcome | null;
+  hostCleanupComplete: boolean;
+  target: OperationFenceTarget | null;
+  backup: OperationFenceBackup | null;
+}
+
+export interface OperationFenceRecoveryInspection {
+  record: OperationFenceRecord;
+  status: OperationFenceRecoveryStatus;
+  guidance: string;
+  canAcknowledge: boolean;
+}
+
 export interface ActionableError {
   code: string;
   message: string;
@@ -251,14 +317,24 @@ export interface CopyChanges {
   deletions: string[];
 }
 
-/** Frozen, create-only configuration details exposed by the reviewed plan. */
-export interface ConfigurationCreateReview {
+/** Frozen RetroArch configuration write details exposed by the reviewed plan. */
+export interface ConfigurationWriteReview {
+  operation: "create" | "replace";
   source: "EmuChef-generated" | "Uploaded file";
   sha256: string;
   byteLength: number;
   targetLabel: string;
   confirmedAbsent: boolean;
+  confirmedExisting: boolean;
   verificationScope: string;
+}
+export interface ConfigurationBackupWaiverReview {
+  failureOperationId: string;
+  failureReportSha256: string;
+  waiverSha256: string;
+  target: string;
+  sourceSha256: string;
+  originalFilePrecondition: OriginalFilePreconditionProjection;
 }
 export interface ReviewSummary {
   reviewHandle: string;
@@ -295,8 +371,8 @@ export interface ReviewSummary {
         deviceLocation?: string;
         /** Copy changes shown to the user before applying the reviewed action. */
         copyChanges?: CopyChanges | null;
-        /** Exact configuration artifact reviewed for create-only publication. */
-        configurationCreate?: ConfigurationCreateReview | null;
+        /** Exact configuration artifact reviewed for the write operation. */
+        configurationCreate?: ConfigurationWriteReview | null;
       }>;
     }>;
   }>;
@@ -310,6 +386,7 @@ export interface ReviewSummary {
     title: string;
     message: string;
   }>;
+  configurationBackupWaiver?: ConfigurationBackupWaiverReview | null;
   work: {
     actionCount: number;
     knownWaitSeconds?: number;
@@ -425,6 +502,8 @@ export interface ExecutionStep {
   note: string | null;
   status: StepExecutionStatus;
   message: string | null;
+  configurationBackupOperationId?: string | null;
+  configurationBackupFailureOperationId?: string | null;
 }
 
 export interface ExecutionRecipe {

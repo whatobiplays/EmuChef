@@ -32,6 +32,7 @@ import type {
   ReportExportResult,
   ReviewSummary,
   RuntimeStatus,
+  OperationFenceRecoveryInspection,
   LaunchResult,
   RecentConfiguration,
   SavedConfigurationDialogResult,
@@ -83,6 +84,10 @@ export const api = {
   runtimeStatus: () => invoke<RuntimeStatus>("get_runtime_status"),
   restartRuntime: (expectedGeneration?: number) =>
     invoke<RuntimeStatus>("restart_runtime", { expectedGeneration }),
+inspectOperationFence: () =>
+invoke<OperationFenceRecoveryInspection | null>("inspect_operation_fence"),
+acknowledgeOperationFence: (operationId: string) =>
+invoke<void>("acknowledge_operation_fence", { operationId }),
   catalog: () => invoke<CatalogSummary>("get_catalog"),
   adbStatus: () => invoke<AdbSetupStatus>("get_adb_setup_status"),
   openPlatformToolsPage: () => invoke<void>("open_platform_tools_download_page"),
@@ -153,6 +158,8 @@ export const api = {
     bindings: Record<string, unknown>;
     requestGeneration: number;
     mode: "real" | "dry_run";
+    backupFailureExecutionHandle?: string | null;
+    backupFailureOperationId?: string | null;
   }) => invoke<ReviewSummary>("prepare_execution_review", request),
   discardReview: (reviewHandle: string) => invoke<void>("discard_review", { reviewHandle }),
   startSimulatedExecution: (reviewHandle: string) =>
@@ -168,6 +175,12 @@ export const api = {
     invoke<ExecutionCancellation>("cancel_simulated_execution", { executionHandle }),
   executionCapabilities: () =>
     invoke<ExecutionCapabilities>("get_execution_capabilities"),
+  getConfigurationBackupPreference: () =>
+    invoke<boolean>("get_configuration_backup_preference"),
+  setConfigurationBackupPreference: (enabled: boolean) =>
+    invoke<boolean>("set_configuration_backup_preference", { enabled }),
+  openConfigurationBackupFolder: (operationId: string) =>
+    invoke<void>("open_configuration_backup_folder", { operationId }),
   phase6d6UiSmokeStatus: () =>
     invoke<Phase6d6UiSmokeStatus>("phase6d6_ui_smoke_status"),
   phase6d6LoadProjection: (bindingHandle: string) =>

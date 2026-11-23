@@ -3,10 +3,25 @@ use std::path::Path;
 
 use serde_json::Value;
 
-/// One catalog-resolved RetroArch configuration destination that a successful
-/// configuration-create write probe would authorize.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct RetroArchConfigCreateTarget {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetroArchConfigurationOperation {
+    Create,
+    Replace,
+}
+
+impl RetroArchConfigurationOperation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Replace => "replace",
+        }
+    }
+}
+
+/// One catalog-resolved RetroArch configuration destination and immutable
+/// operation precondition selected for the reviewed write.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RetroArchConfigWriteTarget {
     pub(crate) app_id: String,
     pub(crate) package_id: String,
     pub(crate) target_id: String,
@@ -14,46 +29,52 @@ pub(crate) struct RetroArchConfigCreateTarget {
     pub(crate) target_location: String,
     pub(crate) target_path: String,
     pub(crate) destination: String,
+    pub(crate) target_identity: Value,
     pub(crate) catalog_identity: String,
+    pub(crate) operation: RetroArchConfigurationOperation,
+    pub(crate) source_sha256: String,
+    pub(crate) original_file_precondition: Value,
+    pub(crate) backup_mode: String,
+    pub(crate) backup_waiver_digest: Option<String>,
 }
 
-const RETROARCH_CONFIG_CREATE_RECIPES: [&str; 2] =
+const RETROARCH_CONFIGURATION_WRITE_RECIPES: [&str; 2] =
     ["app.retroarch.configure", "app.retroarch.provision"];
 
-/// Resolve only the authored RetroArch create-only target from a planner-owned
-/// execution plan. The returned identity includes its catalog and package
-/// destination so evidence cannot authorize another App Target.
-pub(crate) fn resolve_retroarch_config_create_target(
+/// Resolve the exact authored RetroArch configuration target from the
+/// planner-owned execution plan. The identity includes catalog and package
+/// destination so authorization cannot apply to another App Target.
+pub(crate) fn resolve_retroarch_config_write_target(
     plan: &Value,
-) -> Result<Option<RetroArchConfigCreateTarget>, &'static str> {
+) -> Result<Option<RetroArchConfigWriteTarget>, &'static str> {
     let resolved_inputs = plan.get("resolved_inputs").and_then(Value::as_array);
     let steps = plan.get("steps").and_then(Value::as_array);
-    let selected_retroarch_config_create_recipes = plan
+    let selected_retroarch_config_write_recipes = plan
         .pointer("/source/selected_recipe_refs")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|recipe| RETROARCH_CONFIG_CREATE_RECIPES.contains(recipe))
+        .filter(|recipe| RETROARCH_CONFIGURATION_WRITE_RECIPES.contains(recipe))
         .collect::<Vec<_>>();
     let Some(resolved_inputs) = resolved_inputs else {
         let mut has_configuration_step = false;
         if let Some(steps) = steps {
             for step in steps {
-                if step_is_retroarch_config_create(plan, step)? {
+                if step_is_retroarch_config_write(plan, step)? {
                     has_configuration_step = true;
                     break;
                 }
             }
         }
-        return if !selected_retroarch_config_create_recipes.is_empty() || has_configuration_step {
+        return if !selected_retroarch_config_write_recipes.is_empty() || has_configuration_step {
             Err("retroarch_config_create_plan_invalid")
         } else {
             Ok(None)
         };
     };
     let steps = steps.ok_or("retroarch_config_create_plan_invalid")?;
-    for recipe_id in &selected_retroarch_config_create_recipes {
+    for recipe_id in &selected_retroarch_config_write_recipes {
         if !resolved_inputs.iter().any(|input| {
             input.get("recipeId").and_then(Value::as_str) == Some(recipe_id)
                 && input.get("inputId").and_then(Value::as_str) == Some("retroarch_cfg_source")
@@ -66,7 +87,7 @@ pub(crate) fn resolve_retroarch_config_create_target(
         let recipe_id = input
             .get("recipeId")
             .and_then(Value::as_str)
-            .filter(|id| RETROARCH_CONFIG_CREATE_RECIPES.contains(id));
+            .filter(|id| RETROARCH_CONFIGURATION_WRITE_RECIPES.contains(id));
         if input.get("inputId").and_then(Value::as_str) != Some("retroarch_cfg_source") {
             continue;
         }
@@ -89,7 +110,7 @@ pub(crate) fn resolve_retroarch_config_create_target(
     }
     let mut configuration_steps = Vec::new();
     for step in steps {
-        if step_is_retroarch_config_create(plan, step)? {
+        if step_is_retroarch_config_write(plan, step)? {
             configuration_steps.push(step);
         }
     }
@@ -129,6 +150,7 @@ pub(crate) fn resolve_retroarch_config_create_target(
         .filter(|value| {
             value.get("appId").and_then(Value::as_str) == Some("retroarch")
                 && value.get("targetId").and_then(Value::as_str) == Some("config")
+                && value.get("androidUserId").and_then(Value::as_u64) == Some(0)
                 && value
                     .get("target")
                     .and_then(|target| target.get("kind"))
@@ -165,10 +187,51 @@ pub(crate) fn resolve_retroarch_config_create_target(
         return Err("retroarch_config_create_target_invalid");
     }
     let destination = format!("/storage/emulated/0/Android/data/{package_id}/files/retroarch.cfg");
-    if !app_target_parameter_matches(literal_step_parameter(step, "dest"), &destination)
-        || literal_step_parameter(step, "copy_policy").and_then(Value::as_str)
-            != Some("create_only")
+    if !app_target_parameter_matches(literal_step_parameter(step, "dest"), &destination) {
+        return Err("retroarch_config_create_target_invalid");
+    }
+    let operation = match literal_step_parameter(step, "copy_policy").and_then(Value::as_str) {
+        Some("create_only") => RetroArchConfigurationOperation::Create,
+        Some("replace") => RetroArchConfigurationOperation::Replace,
+        _ => return Err("retroarch_config_create_target_invalid"),
+    };
+    let source_sha256 = source_artifact
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|digest| is_sha256_hex(digest))
+        .ok_or("retroarch_config_create_target_invalid")?
+        .to_string();
+    let precondition_key = match operation {
+        RetroArchConfigurationOperation::Create => "absencePrecondition",
+        RetroArchConfigurationOperation::Replace => "originalFilePrecondition",
+    };
+    let original_file_precondition = source_artifact
+        .get(precondition_key)
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or("retroarch_config_create_target_invalid")?;
+    let expected_precondition_status = match operation {
+        RetroArchConfigurationOperation::Create => "confirmed_absent",
+        RetroArchConfigurationOperation::Replace => "confirmed_existing",
+    };
+    if original_file_precondition
+        .get("status")
+        .and_then(Value::as_str)
+        != Some(expected_precondition_status)
     {
+        return Err("retroarch_config_create_target_invalid");
+    }
+    let backup_mode = source_artifact
+        .get("backupMode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "verified" | "disabled" | "waived"))
+        .ok_or("retroarch_config_create_target_invalid")?
+        .to_string();
+    let backup_waiver_digest = source_artifact
+        .get("backupWaiverDigest")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if (backup_mode == "waived") != backup_waiver_digest.is_some() {
         return Err("retroarch_config_create_target_invalid");
     }
     let catalog_identity = plan
@@ -176,7 +239,7 @@ pub(crate) fn resolve_retroarch_config_create_target(
         .filter(|value| value.is_object())
         .and_then(|value| serde_json::to_string(value).ok())
         .ok_or("retroarch_config_create_target_invalid")?;
-    Ok(Some(RetroArchConfigCreateTarget {
+    Ok(Some(RetroArchConfigWriteTarget {
         app_id: "retroarch".to_string(),
         package_id: package_id.to_string(),
         target_id: "config".to_string(),
@@ -184,8 +247,21 @@ pub(crate) fn resolve_retroarch_config_create_target(
         target_location: "external_app_data".to_string(),
         target_path: "files/retroarch.cfg".to_string(),
         destination,
+        target_identity: target_identity.clone(),
         catalog_identity,
+        operation,
+        source_sha256,
+        original_file_precondition,
+        backup_mode,
+        backup_waiver_digest,
     }))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn literal_step_parameter<'a>(step: &'a Value, name: &str) -> Option<&'a Value> {
@@ -324,7 +400,7 @@ fn plan_or_step_uses_retroarch_config_recipe(plan: &Value, step: &Value) -> bool
         || step
             .get("recipe_ref")
             .and_then(Value::as_str)
-            .is_some_and(|recipe| RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe))
+            .is_some_and(|recipe| RETROARCH_CONFIGURATION_WRITE_RECIPES.contains(&recipe))
     {
         return true;
     }
@@ -336,7 +412,7 @@ fn plan_or_step_uses_retroarch_config_recipe(plan: &Value, step: &Value) -> bool
         .filter_map(Value::as_array)
         .flatten()
         .filter_map(Value::as_str)
-        .any(|recipe| RETROARCH_CONFIG_CREATE_RECIPES.contains(&recipe))
+        .any(|recipe| RETROARCH_CONFIGURATION_WRITE_RECIPES.contains(&recipe))
     {
         return true;
     }
@@ -358,12 +434,12 @@ fn app_target_parameter_matches(value: Option<&Value>, destination: &str) -> boo
         || value.get("appTarget").and_then(Value::as_str) == Some("config")
 }
 
-fn step_is_retroarch_config_create(plan: &Value, step: &Value) -> Result<bool, &'static str> {
+fn step_is_retroarch_config_write(plan: &Value, step: &Value) -> Result<bool, &'static str> {
     let retroarch_app_step = step.get("app_id").and_then(Value::as_str) == Some("retroarch");
     let selected_retroarch_recipe = step
         .get("recipe_ref")
         .and_then(Value::as_str)
-        .filter(|recipe| RETROARCH_CONFIG_CREATE_RECIPES.contains(recipe))
+        .filter(|recipe| RETROARCH_CONFIGURATION_WRITE_RECIPES.contains(recipe))
         .is_some_and(|recipe| {
             plan.pointer("/source/selected_recipe_refs")
                 .and_then(Value::as_array)
@@ -586,7 +662,7 @@ mod tests {
 
     const TEST_KONKR_PROFILE_REF: &str = "konkr.pocket_advance";
 
-    fn retroarch_config_create_plan(recipe_id: &str, source: &str) -> Value {
+    fn retroarch_config_write_plan(recipe_id: &str, source: &str) -> Value {
         let package_id = "com.retroarch.aarch64";
         let source_kind = if source == "managed" {
             "generated"
@@ -619,10 +695,15 @@ mod tests {
                     "source": {"Literal": {"value": {
                         "type": "configuration_artifact",
                         "sourceIdentity": {"recipeId": recipe_id, "kind": source_kind},
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "absencePrecondition": {"status": "confirmed_absent"},
+                        "backupMode": "disabled",
+                        "backupWaiverDigest": null,
                         "targetIdentity": {
                             "appId": "retroarch",
                             "packageId": package_id,
                             "targetId": "config",
+                            "androidUserId": 0,
                             "target": {
                                 "kind": "file",
                                 "location": "external_app_data",
@@ -640,11 +721,11 @@ mod tests {
     #[test]
     fn retroarch_config_target_is_derived_for_both_profiles_sources_and_recipes() {
         for profile_ref in [TEST_KONKR_PROFILE_REF, "konkr.pocket_fit"] {
-            for recipe_id in RETROARCH_CONFIG_CREATE_RECIPES {
+            for recipe_id in RETROARCH_CONFIGURATION_WRITE_RECIPES {
                 for source in ["managed", "uploaded"] {
-                    let mut plan = retroarch_config_create_plan(recipe_id, source);
+                    let mut plan = retroarch_config_write_plan(recipe_id, source);
                     plan["source"]["device_profile_ref"] = json!(profile_ref);
-                    let target = resolve_retroarch_config_create_target(&plan)
+                    let target = resolve_retroarch_config_write_target(&plan)
                         .expect("authored configuration plan should validate")
                         .expect("selected configuration should require write evidence");
                     assert_eq!(target.app_id, "retroarch");
@@ -662,47 +743,47 @@ mod tests {
 
     #[test]
     fn configuration_admission_does_not_depend_on_profile_identity() {
-        let mut plan = retroarch_config_create_plan("app.retroarch.configure", "managed");
+        let mut plan = retroarch_config_write_plan("app.retroarch.configure", "managed");
         plan["source"]
             .as_object_mut()
             .unwrap()
             .remove("device_profile_ref");
 
-        assert!(resolve_retroarch_config_create_target(&plan)
+        assert!(resolve_retroarch_config_write_target(&plan)
             .unwrap()
             .is_some());
     }
 
     #[test]
     fn retroarch_configuration_target_is_gated_independent_of_profile() {
-        let mut plan = retroarch_config_create_plan("app.retroarch.provision", "managed");
+        let mut plan = retroarch_config_write_plan("app.retroarch.provision", "managed");
         plan["source"]["device_profile_ref"] = json!("konkr.pocket_fit");
 
-        assert!(resolve_retroarch_config_create_target(&plan)
+        assert!(resolve_retroarch_config_write_target(&plan)
             .unwrap()
             .is_some());
     }
 
     #[test]
     fn config_create_target_under_an_unlisted_recipe_fails_closed() {
-        let plan = retroarch_config_create_plan("app.retroarch.profile_specific_config", "managed");
+        let plan = retroarch_config_write_plan("app.retroarch.profile_specific_config", "managed");
 
-        assert!(resolve_retroarch_config_create_target(&plan).is_err());
+        assert!(resolve_retroarch_config_write_target(&plan).is_err());
     }
 
     #[test]
     fn selected_configuration_recipe_with_pruned_input_and_step_fails_closed() {
-        let mut plan = retroarch_config_create_plan("app.retroarch.provision", "managed");
+        let mut plan = retroarch_config_write_plan("app.retroarch.provision", "managed");
         plan["resolved_inputs"] = json!([]);
         plan["steps"] = json!([]);
 
-        assert!(resolve_retroarch_config_create_target(&plan).is_err());
+        assert!(resolve_retroarch_config_write_target(&plan).is_err());
     }
 
     #[test]
     fn only_explicit_none_can_opt_out_of_configuration_create_admission() {
         for missing_value in [false, true] {
-            let mut plan = retroarch_config_create_plan("app.retroarch.provision", "managed");
+            let mut plan = retroarch_config_write_plan("app.retroarch.provision", "managed");
             if missing_value {
                 plan["resolved_inputs"][0]
                     .as_object_mut()
@@ -714,7 +795,7 @@ mod tests {
             plan["steps"] = json!([]);
 
             assert_eq!(
-                resolve_retroarch_config_create_target(&plan),
+                resolve_retroarch_config_write_target(&plan),
                 Err("retroarch_config_create_plan_invalid"),
                 "a missing or null resolved source must not behave like explicit none"
             );
@@ -725,7 +806,7 @@ mod tests {
     fn unrelated_plan_without_profile_identity_does_not_require_configuration_write_evidence() {
         let plan = json!({"steps": []});
 
-        assert_eq!(resolve_retroarch_config_create_target(&plan), Ok(None));
+        assert_eq!(resolve_retroarch_config_write_target(&plan), Ok(None));
     }
 
     #[test]
@@ -743,7 +824,7 @@ mod tests {
                 }],
                 "steps": [{"recipe_ref": "app.retroarch.provision", "id": "install_retroarch"}]
             });
-            assert_eq!(resolve_retroarch_config_create_target(&plan), Ok(None));
+            assert_eq!(resolve_retroarch_config_write_target(&plan), Ok(None));
         }
     }
 
@@ -774,7 +855,7 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&plan),
+            resolve_retroarch_config_write_target(&plan),
             Err("retroarch_config_create_configuration_step_missing")
         );
     }
@@ -824,7 +905,7 @@ mod tests {
             });
 
             assert_eq!(
-                resolve_retroarch_config_create_target(&plan),
+                resolve_retroarch_config_write_target(&plan),
                 Err("retroarch_config_create_configuration_step_missing"),
                 "{step_type} can create retroarch.cfg below its destination"
             );
@@ -877,7 +958,7 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&plan),
+            resolve_retroarch_config_write_target(&plan),
             Err("retroarch_config_create_configuration_step_missing")
         );
     }
@@ -912,7 +993,7 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&plan),
+            resolve_retroarch_config_write_target(&plan),
             Err("retroarch_config_create_destination_unresolved")
         );
     }
@@ -945,7 +1026,7 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&plan),
+            resolve_retroarch_config_write_target(&plan),
             Err("retroarch_config_create_destination_unresolved")
         );
     }
@@ -992,7 +1073,7 @@ mod tests {
             }]
         });
 
-        assert_eq!(resolve_retroarch_config_create_target(&plan), Ok(None));
+        assert_eq!(resolve_retroarch_config_write_target(&plan), Ok(None));
     }
 
     #[test]
@@ -1025,7 +1106,7 @@ mod tests {
             }]
         });
 
-        assert_eq!(resolve_retroarch_config_create_target(&plan), Ok(None));
+        assert_eq!(resolve_retroarch_config_write_target(&plan), Ok(None));
     }
 
     #[test]
@@ -1059,7 +1140,7 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&plan),
+            resolve_retroarch_config_write_target(&plan),
             Err("retroarch_config_create_configuration_step_missing")
         );
     }
@@ -1112,7 +1193,7 @@ mod tests {
         for destination in &destinations {
             for extract_on in [Some("device"), Some("future_mode"), None] {
                 assert_eq!(
-                    resolve_retroarch_config_create_target(&archive_plan(
+                    resolve_retroarch_config_write_target(&archive_plan(
                         destination,
                         extract_on,
                         false
@@ -1125,7 +1206,7 @@ mod tests {
 
         for destination in &destinations {
             assert_eq!(
-                resolve_retroarch_config_create_target(&archive_plan(
+                resolve_retroarch_config_write_target(&archive_plan(
                     destination,
                     Some("host"),
                     false
@@ -1136,7 +1217,7 @@ mod tests {
         }
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&archive_plan(
+            resolve_retroarch_config_write_target(&archive_plan(
                 "/../storage/emulated/0/Android/data/com.retroarch.aarch64/files",
                 Some("device"),
                 false
@@ -1144,7 +1225,7 @@ mod tests {
             Err("retroarch_config_create_destination_escapes_root")
         );
         assert_eq!(
-            resolve_retroarch_config_create_target(&archive_plan(
+            resolve_retroarch_config_write_target(&archive_plan(
                 "/storage/emulated/0/Android/data/com.retroarch.aarch64",
                 Some("device"),
                 true
@@ -1208,7 +1289,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            resolve_retroarch_config_create_target(&conflicting_key),
+            resolve_retroarch_config_write_target(&conflicting_key),
             Err("retroarch_config_create_destination_unresolved")
         );
 
@@ -1222,7 +1303,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            resolve_retroarch_config_create_target(&malformed_reference),
+            resolve_retroarch_config_write_target(&malformed_reference),
             Err("retroarch_config_create_destination_unresolved")
         );
     }
@@ -1306,7 +1387,7 @@ mod tests {
         let malformed_input_id = "config--parent";
 
         assert_eq!(
-            resolve_retroarch_config_create_target(&make_plan(
+            resolve_retroarch_config_write_target(&make_plan(
                 &reference,
                 vec![valid_row.clone()],
                 recipe_id
@@ -1440,7 +1521,7 @@ mod tests {
 
         for (case, destination_ref, rows, step_recipe) in cases {
             assert_eq!(
-                resolve_retroarch_config_create_target(&make_plan(
+                resolve_retroarch_config_write_target(&make_plan(
                     &destination_ref,
                     rows,
                     step_recipe
@@ -1492,7 +1573,7 @@ mod tests {
             plan["steps"][0].as_object_mut().unwrap().remove("app_id");
 
             assert!(
-                resolve_retroarch_config_create_target(&plan).is_err(),
+                resolve_retroarch_config_write_target(&plan).is_err(),
                 "destination must not be treated as unrelated: {destination}"
             );
         }
@@ -1532,7 +1613,7 @@ mod tests {
                     plan["steps"][0].as_object_mut().unwrap().remove("app_id");
                 }
                 assert_eq!(
-                    resolve_retroarch_config_create_target(&plan),
+                    resolve_retroarch_config_write_target(&plan),
                     Err("retroarch_config_create_configuration_step_missing"),
                     "app_id_present={app_id_present} destination={destination}"
                 );
@@ -1541,31 +1622,31 @@ mod tests {
     }
     #[test]
     fn selected_configuration_create_fails_closed_on_pruned_or_mismatched_target() {
-        let mut missing_step = retroarch_config_create_plan("app.retroarch.configure", "managed");
+        let mut missing_step = retroarch_config_write_plan("app.retroarch.configure", "managed");
         missing_step["steps"] = json!([]);
         assert_eq!(
-            resolve_retroarch_config_create_target(&missing_step),
+            resolve_retroarch_config_write_target(&missing_step),
             Err("retroarch_config_create_configuration_step_missing")
         );
 
         let mut wrong_destination =
-            retroarch_config_create_plan("app.retroarch.provision", "uploaded");
+            retroarch_config_write_plan("app.retroarch.provision", "uploaded");
         wrong_destination["steps"][0]["params"]["dest"]["Literal"]["value"] =
             json!({"app_target": "other"});
         assert_eq!(
-            resolve_retroarch_config_create_target(&wrong_destination),
+            resolve_retroarch_config_write_target(&wrong_destination),
             Err("retroarch_config_create_target_invalid")
         );
 
-        let mut wrong_artifact = retroarch_config_create_plan("app.retroarch.configure", "managed");
+        let mut wrong_artifact = retroarch_config_write_plan("app.retroarch.configure", "managed");
         wrong_artifact["steps"][0]["params"]["source"]["Literal"]["value"]["sourceIdentity"]
             ["kind"] = json!("uploaded");
         assert_eq!(
-            resolve_retroarch_config_create_target(&wrong_artifact),
+            resolve_retroarch_config_write_target(&wrong_artifact),
             Err("retroarch_config_create_target_invalid")
         );
 
-        let mut mixed = retroarch_config_create_plan("app.retroarch.provision", "managed");
+        let mut mixed = retroarch_config_write_plan("app.retroarch.provision", "managed");
         mixed["resolved_inputs"] = json!([
             {
                 "recipeId": "app.retroarch.provision",
@@ -1579,8 +1660,63 @@ mod tests {
             }
         ]);
         assert_eq!(
-            resolve_retroarch_config_create_target(&mixed),
+            resolve_retroarch_config_write_target(&mixed),
             Err("retroarch_config_create_plan_ambiguous")
         );
+    }
+
+    #[test]
+    fn retroarch_configuration_replace_binds_existing_file_and_backup_mode() {
+        let mut plan = retroarch_config_write_plan("app.retroarch.configure", "uploaded");
+        plan["steps"][0]["params"]["copy_policy"]["Literal"]["value"] = json!("replace");
+        let artifact = &mut plan["steps"][0]["params"]["source"]["Literal"]["value"];
+        artifact["absencePrecondition"] = Value::Null;
+        artifact["originalFilePrecondition"] = json!({
+            "status": "confirmed_existing",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "byteLength": 42
+        });
+        artifact["backupMode"] = json!("verified");
+
+        let target = resolve_retroarch_config_write_target(&plan)
+            .expect("reviewed RetroArch configuration plan should be valid")
+            .expect("uploaded source should resolve to the native config target");
+
+        assert_eq!(target.operation, RetroArchConfigurationOperation::Replace);
+        assert_eq!(target.backup_mode, "verified");
+        assert_eq!(
+            target.original_file_precondition["status"],
+            "confirmed_existing"
+        );
+        assert_eq!(
+            target.original_file_precondition["sha256"],
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(target.original_file_precondition["byteLength"], 42);
+        assert_eq!(
+            target.source_sha256,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn retroarch_configuration_write_rejects_missing_or_mismatched_preconditions() {
+        let mut missing_hash = retroarch_config_write_plan("app.retroarch.configure", "managed");
+        missing_hash["steps"][0]["params"]["source"]["Literal"]["value"]["sha256"] = Value::Null;
+        assert!(resolve_retroarch_config_write_target(&missing_hash).is_err());
+
+        let mut replace_without_original =
+            retroarch_config_write_plan("app.retroarch.configure", "managed");
+        replace_without_original["steps"][0]["params"]["copy_policy"]["Literal"]["value"] =
+            json!("replace");
+        replace_without_original["steps"][0]["params"]["source"]["Literal"]["value"]
+            ["originalFilePrecondition"] = json!({ "status": "confirmed_absent" });
+        assert!(resolve_retroarch_config_write_target(&replace_without_original).is_err());
+
+        let mut invalid_waiver = retroarch_config_write_plan("app.retroarch.configure", "managed");
+        let artifact = &mut invalid_waiver["steps"][0]["params"]["source"]["Literal"]["value"];
+        artifact["backupMode"] = json!("waived");
+        artifact["backupWaiverDigest"] = Value::Null;
+        assert!(resolve_retroarch_config_write_target(&invalid_waiver).is_err());
     }
 }

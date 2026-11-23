@@ -104,11 +104,58 @@ where
 
 /// Run an interactive sidecar bound to trusted native startup identity.
 pub fn run_jsonl_sidecar_with_startup_policy<R, W>(
+    reader: R,
+    writer: W,
+    config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
+    runtime_generation: Option<u64>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_jsonl_sidecar_inner(
+        reader,
+        writer,
+        config,
+        restricted_build_identity,
+        runtime_generation,
+        None,
+    )
+}
+
+pub fn run_jsonl_sidecar_with_trusted_control<R, W>(
+    reader: R,
+    writer: W,
+    config: SidecarRuntimeConfig,
+    restricted_build_identity: Option<String>,
+    runtime_generation: u64,
+    key: [u8; 32],
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_jsonl_sidecar_inner(
+        reader,
+        writer,
+        config,
+        restricted_build_identity,
+        Some(runtime_generation),
+        Some(crate::trusted_control::TrustedControlVerifier::new(
+            key,
+            runtime_generation,
+        )),
+    )
+}
+
+fn run_jsonl_sidecar_inner<R, W>(
     mut reader: R,
     mut writer: W,
     config: SidecarRuntimeConfig,
     restricted_build_identity: Option<String>,
     runtime_generation: Option<u64>,
+    mut trusted_control: Option<crate::trusted_control::TrustedControlVerifier>,
 ) -> io::Result<()>
 where
     R: BufRead,
@@ -128,7 +175,24 @@ where
         }
 
         let response = match crate::raw_request::parse(line.trim_end_matches(['\r', '\n'])) {
-            Ok(request) => request::handle_sidecar_value(request, &mut sessions),
+            Ok(mut request) => {
+                let control = match trusted_control.as_mut() {
+                    Some(verifier) => verifier.verify_request(&mut request),
+                    None => crate::trusted_control::reject_unconfigured_control(&request),
+                };
+                match control {
+                    Ok(control) => {
+                        request::handle_sidecar_value_with_control(request, &mut sessions, control)
+                    }
+                    Err(error) => {
+                        let request_id = request
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string);
+                        envelope::with_id(envelope::failure(error), request_id)
+                    }
+                }
+            }
             Err(error) => envelope::with_id(
                 envelope::failure(error.api_error("Malformed JSON line")),
                 error.request_id(),

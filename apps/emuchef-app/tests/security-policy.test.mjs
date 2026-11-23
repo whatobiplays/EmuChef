@@ -257,7 +257,23 @@ test("support and cache IPC expose opaque logical entries without filesystem aut
   assert.match(support, /pub struct SupportStore/);
   assert.match(support, /fn canonical_cache_root/);
   assert.match(support, /fn delete_logical_entry/);
-  assert.doesNotMatch(types, /(?:cache|diagnostics)[\s\S]{0,800}\b(?:path|fileName|metadataPath|destination|rawBundle|url)\??:/i);
+const filesystemSafeProjections = [
+  "ValidationDiagnostic",
+  "CacheEntry",
+  "CacheInventory",
+  "SupportSubsystemStatus",
+  "SupportSnapshot",
+  "OperationFenceTarget",
+  "OperationFenceBackup",
+  "OperationFenceRecord",
+  "OperationFenceRecoveryInspection",
+  "OriginalFilePreconditionProjection",
+  "ConfigurationBackupWaiverReview",
+].map((name) => sourceSlice(types, `export interface ${name}`, "\n}"));
+assert.doesNotMatch(
+  filesystemSafeProjections.join("\n"),
+  /\b(?:path|targetPath|metadataPath|destination|fileName|rawBundle|url)\??:/i,
+);
 });
 
 test("end-user cache root is injected only from trusted app-data startup", () => {
@@ -406,12 +422,16 @@ test("real execution is default-disabled with compile-time-only enablement", () 
 
   const startCommand = sourceSlice(
     execution,
-    "pub fn start_real_execution",
-    "\nfn parse_real_start_request",
+"async fn start_real_execution_with_confirmation",
+"\nfn native_configuration_write_intent_for_current_session",
   );
   assert.match(startCommand, /if !cfg!\(feature = "real-execution"\)/);
-  assert.ok(startCommand.indexOf("if !cfg!") < startCommand.indexOf("parse_real_start_request"));
-  assert.ok(startCommand.indexOf("if !cfg!") < startCommand.indexOf("reserve_start"));
+assert.ok(
+  startCommand.indexOf("if !cfg!") < startCommand.indexOf("let request = parse_real_start_request"),
+);
+assert.ok(
+  startCommand.indexOf("if !cfg!") < startCommand.indexOf("ExecutionStartReservation::reserve"),
+);
 
   assert.doesNotMatch(
     `${execution}\n${packageJsonSource}`,
@@ -650,7 +670,11 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
     observation,
     /check_device_root_observation|checkDeviceRoot|["']checkRoot["']|probe_root|rootProbe|check_root|root_probe/,
   );
-  assert.doesNotMatch(execution, /DeviceQualificationSnapshotDto|qualification_revision/);
+assert.doesNotMatch(execution, /DeviceQualificationSnapshotDto/);
+assert.match(
+  execution,
+  /"qualificationRevision": qualification\.qualification_revision/,
+);
 });
 
 test("React cannot supply trusted real-execution or launch data", () => {
@@ -719,7 +743,11 @@ test("Tauri alone constructs the fixed real-mode sidecar request", () => {
   const realModeOccurrences = execution.match(/"mode": "real"/g) ?? [];
 
   assert.equal(realModeOccurrences.length, 1);
-  assert.match(trustedRequest, /runtime_request\(\s*runtime,\s*"startExecution",/s);
+  assert.match(trustedRequest, /request_with_trusted_claims\(\s*"startExecution",/s);
+  assert.match(
+    trustedRequest,
+    /authorization\.map\(NativeConfigurationWriteAuthorization::into_claim\)/,
+  );
   assert.match(trustedRequest, /"plan": review\.response\.get\("plan"\)/);
   assert.match(trustedRequest, /"planDigest": review\.plan_digest/);
   assert.match(trustedRequest, /"mode": "real"/);

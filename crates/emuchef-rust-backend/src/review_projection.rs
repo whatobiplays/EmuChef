@@ -82,7 +82,7 @@ pub(crate) struct ReviewAction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_changes: Option<ReviewCopyChanges>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub configuration_create: Option<ReviewConfigurationCreate>,
+    pub configuration_create: Option<ReviewConfigurationWrite>,
     pub requirement: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_location: Option<String>,
@@ -90,12 +90,14 @@ pub(crate) struct ReviewAction {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ReviewConfigurationCreate {
+pub(crate) struct ReviewConfigurationWrite {
+    pub operation: &'static str,
     pub source: &'static str,
     pub sha256: String,
     pub byte_length: usize,
     pub target_label: &'static str,
     pub confirmed_absent: bool,
+    pub confirmed_existing: bool,
     pub verification_scope: &'static str,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -323,7 +325,7 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     let permission_plan = (step.type_name == "grant_permissions")
         .then(|| crate::planner::validated_plan_permission_plan(plan, step).ok())
         .flatten();
-    let configuration_create = configuration_create_review(step);
+    let configuration_create = configuration_write_review(step);
     let title = if let Some((app, permission_plan)) = permission_plan {
         Some(format!(
             "Grant {} permissions to {}",
@@ -458,8 +460,13 @@ fn project_action(plan: &ExecutionPlan, step: &ExecutionStep, section: &str) -> 
     }
 }
 
-fn configuration_create_review(step: &ExecutionStep) -> Option<ReviewConfigurationCreate> {
-    let artifact = crate::executor::retroarch_config_create_artifact_for_review(step)?;
+fn configuration_write_review(step: &ExecutionStep) -> Option<ReviewConfigurationWrite> {
+    let artifact = crate::executor::retroarch_config_write_artifact_for_review(step)?;
+    let operation = match artifact.get("operation")?.as_str()? {
+        "create" => "create",
+        "replace" => "replace",
+        _ => return None,
+    };
     let source = match artifact.get("sourceIdentity")?.get("kind")?.as_str()? {
         "generated" => "EmuChef-generated",
         "uploaded" => "Uploaded file",
@@ -467,19 +474,28 @@ fn configuration_create_review(step: &ExecutionStep) -> Option<ReviewConfigurati
     };
     let sha256 = artifact.get("sha256")?.as_str()?.to_string();
     let byte_length = artifact.get("bytes")?.as_array()?.len();
-    let precondition = artifact.get("absencePrecondition")?;
-    let confirmed_absent = precondition.get("status")?.as_str()? == "confirmed_absent";
+    let precondition_key = match operation {
+        "create" => "absencePrecondition",
+        "replace" => "originalFilePrecondition",
+        _ => unreachable!(),
+    };
+    let precondition = artifact.get(precondition_key)?;
+    let precondition_status = precondition.get("status")?.as_str()?;
+    let confirmed_absent = operation == "create" && precondition_status == "confirmed_absent";
+    let confirmed_existing = operation == "replace" && precondition_status == "confirmed_existing";
     let verification_scope = match precondition.get("authority")?.as_str()? {
         "device" => "Device target checked during review",
         "dry_run_sandbox" => "Dry-run sandbox only; device target not checked",
         _ => return None,
     };
-    Some(ReviewConfigurationCreate {
+    Some(ReviewConfigurationWrite {
+        operation,
         source,
         sha256,
         byte_length,
         target_label: "RetroArch configuration file",
         confirmed_absent,
+        confirmed_existing,
         verification_scope,
     })
 }
@@ -852,6 +868,7 @@ mod tests {
         let sha256 = crate::runtime_configuration::sha256_hex(exact_bytes);
         let artifact = serde_json::json!({
             "type": "configuration_artifact",
+            "operation": "create",
             "schemaVersion": 1,
             "bytes": exact_bytes,
             "byteLength": exact_bytes.len(),

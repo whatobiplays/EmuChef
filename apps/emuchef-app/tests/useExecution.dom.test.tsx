@@ -177,12 +177,14 @@ function Harness({
   qualification,
   dispatch = vi.fn() as unknown as Dispatch<WorkflowAction>,
   onRuntimeSessionLost = vi.fn(),
+onExecutionTerminal = vi.fn(),
   setNotice = vi.fn(),
 }: {
   workflow: WorkflowState;
   qualification?: DeviceQualificationSnapshot;
   dispatch?: Dispatch<WorkflowAction>;
   onRuntimeSessionLost?: () => void;
+onExecutionTerminal?: () => void;
   setNotice?: (notice: string | null) => void;
 }) {
   const workflowRef = useRef(workflow);
@@ -195,6 +197,7 @@ function Harness({
     dispatch,
     mainRef,
     onRuntimeSessionLost,
+onExecutionTerminal,
     realExecutionCompiled: qualification !== undefined,
     qualification,
     runtimeGenerationRef,
@@ -235,6 +238,39 @@ function Harness({
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+test("refreshes recovery state once when an execution becomes terminal", async () => {
+const snapshot = deferred<ExecutionSnapshot>();
+const events = deferred<{ events: []; latestSequence: number; terminal: boolean }>();
+mockApi.getSimulatedExecution.mockReturnValue(snapshot.promise);
+mockApi.getSimulatedExecutionEvents.mockReturnValue(events.promise);
+const onExecutionTerminal = vi.fn();
+const { rerender } = render(
+<Harness
+onExecutionTerminal={onExecutionTerminal}
+qualification={supportedQualification()}
+workflow={activeSimulatedWorkflow("execution-terminal-refresh", 4)}
+/>,
+);
+expect(onExecutionTerminal).not.toHaveBeenCalled();
+
+rerender(
+<Harness
+onExecutionTerminal={onExecutionTerminal}
+qualification={supportedQualification()}
+workflow={terminalWorkflow("execution-terminal-refresh", 4)}
+/>,
+);
+await waitFor(() => expect(onExecutionTerminal).toHaveBeenCalledTimes(1));
+
+rerender(
+<Harness
+onExecutionTerminal={onExecutionTerminal}
+qualification={supportedQualification()}
+workflow={terminalWorkflow("execution-terminal-refresh", 4, 2)}
+/>,
+);
+expect(onExecutionTerminal).toHaveBeenCalledTimes(1);
 });
 
 describe("execution report export identity", () => {
