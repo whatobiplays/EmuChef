@@ -18,6 +18,7 @@ import type {
   BeginQualificationSessionRequest,
   QualificationModeStatus,
   QualificationRunRecordingResult,
+  QualificationCandidateSummary,
   QualificationSessionSnapshot,
   QualificationCheckpointOutcome,
   QualificationTargetCandidatePreview,
@@ -229,6 +230,11 @@ invoke<void>("acknowledge_operation_fence", { operationId }),
   recordQualificationRun: (candidateHandle: string) =>
     invoke<QualificationRunRecordingResult>("record_qualification_run", {
       candidateHandle,
+    }),
+  attachRomMergeEvidence: (candidateHandle: string, evidenceBytes: number[]) =>
+    invoke<QualificationCandidateSummary>("attach_rom_merge_evidence", {
+      candidateHandle,
+      evidenceBytes,
     }),
   startRealExecution: (reviewHandle: string, confirmation: RealExecutionConfirmation) =>
     invoke<RealExecutionSnapshot>("start_real_execution", {

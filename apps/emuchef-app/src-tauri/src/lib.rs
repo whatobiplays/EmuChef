@@ -159,6 +159,7 @@ pub fn run() {
             qualification_mode::record_qualification_checkpoint,
             qualification_mode::abandon_qualification_session,
             qualification_mode::record_qualification_run,
+            qualification_mode::attach_rom_merge_evidence,
             commands::describe_configuration,
             commands::prepare_execution_review,
 configuration_backup_preferences::get_configuration_backup_preference,

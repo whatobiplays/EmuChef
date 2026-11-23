@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "retroarch"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "retroarch": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["packageId", "source", "version", "sha256"],
+          "properties": {
+            "packageId": { "const": "com.retroarch.aarch64" },
+            "source": { "type": "string", "pattern": "^https://.+" },
+            "version": { "type": "string", "minLength": 1 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    }
+  }
+}

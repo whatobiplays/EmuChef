@@ -126,6 +126,7 @@ function RunCandidate({
       {!candidate.promotable && candidate.nonPromotableReason && (
         <p className="warning">{candidate.nonPromotableReason}</p>
       )}
+      <CandidateRomMergeAttachment candidate={candidate} controller={controller} />
       <div className="button-row">
         <button
           type="button"
@@ -144,6 +145,54 @@ function RunCandidate({
         </button>
       </div>
     </article>
+  );
+}
+
+function CandidateRomMergeAttachment({
+  candidate,
+  controller,
+}: {
+  candidate: QualificationCandidateSummary;
+  controller: DeviceQualificationModeController;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  if (!candidate.romMergeEvidenceRequired) return null;
+  if (candidate.romMergeEvidenceAttached) {
+    return <p role="status">ROM Merge evidence is attached to this candidate.</p>;
+  }
+
+  return (
+    <div className="qualification-rom-merge-attachment">
+      <label>
+        Attach ROM Merge evidence JSON
+        <input
+          type="file"
+          accept="application/json,.json"
+          disabled={controller.busy || !controller.status?.recordable}
+          onChange={async (event) => {
+            const input = event.currentTarget;
+            const file = input.files?.[0];
+            input.value = "";
+            setError(null);
+            if (!file) return;
+            if (file.size === 0 || file.size > 1024 * 1024) {
+              setError("Choose a nonempty JSON file no larger than 1 MiB.");
+              return;
+            }
+            try {
+              const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+              await controller.attachRomMergeEvidence(candidate.candidateHandle, bytes);
+            } catch {
+              setError("The selected ROM Merge evidence could not be read.");
+            }
+          }}
+        />
+      </label>
+      {error && <p className="error" role="status">{error}</p>}
+      <p className="disabled-reason">
+        Promotion requires the exact retained report and repository-pinned RetroArch APK identity.
+      </p>
+    </div>
   );
 }
 
@@ -365,6 +414,12 @@ export function DeviceQualificationOverlay({
             <p className="warning" role="status">
               This attempt can no longer be recorded as qualification evidence.
             </p>
+          )}
+          {controller.session.candidate && (
+            <CandidateRomMergeAttachment
+              candidate={controller.session.candidate}
+              controller={controller}
+            />
           )}
           <div className="button-row">
             {controller.session.candidate && (

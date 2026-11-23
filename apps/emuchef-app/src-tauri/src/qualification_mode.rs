@@ -164,6 +164,8 @@ pub(crate) struct QualificationCandidateSummaryDto {
     pub(crate) run_validity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) qualification_outcome: Option<String>,
+    pub(crate) rom_merge_evidence_required: bool,
+    pub(crate) rom_merge_evidence_attached: bool,
 }
 
 /// The complete qualification-mode status displayed by the development overlay.
@@ -844,6 +846,24 @@ pub fn record_qualification_run(
     })
 }
 
+#[tauri::command]
+pub fn attach_rom_merge_evidence(
+    candidate_handle: String,
+    evidence_bytes: Vec<u8>,
+    state: State<'_, AppState>,
+) -> Result<QualificationCandidateSummaryDto, String> {
+    let mode = QualificationModeState::current(&state.qualification_repository);
+    let _ = require_recordable_mode(&mode)?;
+    let repository = state
+        .qualification_repository
+        .get()
+        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    let candidate = repository
+        .attach_rom_merge_evidence(&candidate_handle, &evidence_bytes)
+        .map_err(|error| qualification_repository_command_error(&error))?;
+    candidate_summary_from_repository(candidate)
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TargetRegistrationCandidatePayload {
@@ -1079,6 +1099,8 @@ fn candidate_summary_from_repository(
         target,
         run_validity: candidate.run_validity,
         qualification_outcome: candidate.qualification_outcome,
+        rom_merge_evidence_required: candidate.rom_merge_evidence_required,
+        rom_merge_evidence_attached: candidate.rom_merge_evidence_attached,
     })
 }
 
@@ -2061,6 +2083,8 @@ mod tests {
                 "capturedAt": "2026-08-23T12:00:00Z",
                 "promotable": true,
                 "nonPromotableReason": null,
+        "romMergeEvidenceRequired": false,
+        "romMergeEvidenceAttached": false,
                 "target": {
                     "profileId": { "value": "ayaneo.pocket_s2", "source": "production_observation" },
                     "manufacturer": { "value": "AYANEO", "source": "production_observation" },
@@ -2090,6 +2114,14 @@ mod tests {
         assert!(encoded["resumableCandidates"][0]["candidateHandle"].is_string());
         assert!(encoded["resumableCandidates"][0]["capturedAt"].is_string());
         assert!(encoded["resumableCandidates"][0]["nonPromotableReason"].is_null());
+        assert_eq!(
+            encoded["resumableCandidates"][0]["romMergeEvidenceRequired"],
+            false
+        );
+        assert_eq!(
+            encoded["resumableCandidates"][0]["romMergeEvidenceAttached"],
+            false
+        );
         assert!(
             encoded["resumableCandidates"][0]["target"]["connectionType"]["source"].is_string()
         );
@@ -2192,6 +2224,7 @@ mod tests {
             build: None,
             payload: json!({ "target": target }),
             report: None,
+            rom_merge_evidence: None,
             promotable: false,
             non_promotable_reason: Some("source changed".to_string()),
         };

@@ -714,6 +714,8 @@ export interface QualificationCandidateSummary {
   target?: QualificationTargetCandidatePreview["target"];
   runValidity?: "valid" | "invalid";
   qualificationOutcome?: "passed" | "failed" | "not_observed";
+  romMergeEvidenceRequired?: boolean;
+  romMergeEvidenceAttached?: boolean;
 }
 
 export interface QualificationModeStatus {

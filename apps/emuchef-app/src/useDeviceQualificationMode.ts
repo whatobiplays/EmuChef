@@ -43,6 +43,7 @@ export interface DeviceQualificationModeController {
   recordCheckpoint: (checkpointId: string, outcome: QualificationCheckpointOutcome) => Promise<void>;
   abandonSession: () => Promise<void>;
   recordRun: (candidateHandle: string) => Promise<void>;
+  attachRomMergeEvidence: (candidateHandle: string, evidenceBytes: number[]) => Promise<void>;
   discardCandidate: (candidateHandle: string) => Promise<void>;
 }
 
@@ -402,6 +403,18 @@ export function useDeviceQualificationMode({
     }
   }, [enabled, refresh, runOperation, status?.enabled]);
 
+  const attachRomMergeEvidence = useCallback(async (
+    candidateHandle: string,
+    evidenceBytes: number[],
+  ) => {
+    if (!enabled || !status?.enabled) return;
+    const result = await runOperation(
+      () => api.attachRomMergeEvidence(candidateHandle, evidenceBytes),
+    );
+    if (result === null) return;
+    await refresh();
+  }, [enabled, refresh, runOperation, status?.enabled]);
+
   const discardCandidate = useCallback(async (candidateHandle: string) => {
     if (!enabled || !status?.enabled) return;
     const result = await runOperation(
@@ -436,6 +449,7 @@ export function useDeviceQualificationMode({
     recordCheckpoint,
     abandonSession,
     recordRun,
+    attachRomMergeEvidence,
     discardCandidate,
   };
 }

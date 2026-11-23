@@ -110,13 +110,11 @@ needs it. The evidence must identify:
    show that no root authority, OEM compiler, or OEM stage was used.
 4. The selected plan `konkr.pocket_advance.base`, selected recipe and required
    step, Merge policy, and the reviewed destination path and volume identity.
-   Before a future candidate is built, add and review a check that confirms the
-   executed plan has the same immutable ID and digest as the reviewed plan. It
-   must match the terminal result for `rom_copy` to the fully qualified step
-   `feature.copy_roms/copy_rom_library`. A skipped, missing, partial, or
-   unsuccessful required step is not qualified.
-   The current recipe-level validator does not establish required-step
-   completion or emulator usability; these checks are future prerequisites.
+   The canonical validator requires the executed plan to have the same
+   immutable ID and digest as the reviewed plan. It also requires a successful
+   terminal result for `feature.copy_roms/copy_rom_library`. A skipped,
+   missing, partial, cancelled, or unsuccessful required step is not qualified.
+   This step result does not establish emulator usability.
 5. Capture the source and destination in three independent manifests. For
    each file, record its relative path and SHA-256.
    - `S` records the reviewed ROM source snapshot before copying.
@@ -181,12 +179,33 @@ result cannot support a full-setup or release claim. Physical status is
    Record qualification run only for promotable candidates. Invalid/not_observed
    recovery candidates remain available as non-promotable audit records and may
    be discarded when they are no longer needed; they cannot be recorded as
-   canonical evidence.
+   canonical evidence. A passing KONKR `rom-library-sync` candidate also needs
+   its `rom-merge-evidence.json` attachment. Use the qualification-only
+   attachment control to supply the raw JSON bytes before recording the run.
+   The attachment digest protects the stored bytes. Capture origin and
+   collection method remain unverified.
 8. If the attempt cannot continue, use Abandon qualification attempt to close it as an invalid candidate. Abandoning never changes the product execution.
 9. Stop and commit the resulting immutable evidence bundle and matrix before another recordable promotion from a fresh build.
 10. Run `make device-qualification-check` and repository tests before committing/shipping evidence.
 
 ## Evidence record rules
+
+The ROM Merge artifact binds the candidate handle and session to the retained
+execution report, target, build, profile, reviewed plan, and terminal copy step.
+Its S, B, and A manifests contain unique relative paths and SHA-256 digests.
+Every source path must appear unchanged in A. Destination-only paths from B
+must remain unchanged in A, and A cannot contain paths absent from both S and
+B. The sentinel must be absent from S and retain its reviewed path and digest
+in B and A.
+
+The artifact also records the preinstalled RetroArch package, installed APK
+digest, and the fixed source, version, and digest from the repository pin file.
+The checked-in `rom-merge-apk-pin.json` currently has no approved pin. The
+attachment gate therefore rejects promotion until a separately reviewed fixed
+pin is present. Operator-supplied pin values do not establish that authority.
+The ROM Merge result qualifies only the copy workflow. KONKR support remains
+capped at `limited` until separate physical evidence shows RetroArch can see
+and load the copied ROM.
 
 Each evidence record is one physical run for one device target and one
 canonical workflow. The record is immutable after it is committed. Never edit

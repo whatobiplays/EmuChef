@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "candidateHandle",
+    "sessionId",
+    "executionReportSha256",
+    "deviceTargetId",
+    "deviceProfileId",
+    "androidApi",
+    "firmwareBuild",
+    "abiSocClass",
+    "connectionType",
+    "observedRootState",
+    "buildIdentity",
+    "reviewedPlanId",
+    "reviewedPlanDigest",
+    "terminalOperation",
+    "copyPolicy",
+    "strategyDigest",
+    "sourceSnapshot",
+    "destination",
+    "sentinel",
+    "retroArch",
+    "rootAuthorityUsed",
+    "oemCompilerUsed",
+    "oemStageUsed"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "candidateHandle": { "type": "string", "pattern": "^qualification-candidate-[0-9a-f]{32}$" },
+    "sessionId": { "type": "string", "pattern": "^qualification-session-[0-9a-f]{32}$" },
+    "executionReportSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "deviceTargetId": { "type": "string", "pattern": "^device-target-sha256:[0-9a-f]{64}$" },
+    "deviceProfileId": { "const": "konkr.pocket_advance" },
+    "androidApi": { "type": "integer", "minimum": 1 },
+    "firmwareBuild": { "type": "string", "minLength": 1 },
+    "abiSocClass": { "type": "string", "minLength": 1 },
+    "connectionType": { "type": "string", "minLength": 1 },
+    "observedRootState": { "type": "string", "minLength": 1 },
+    "buildIdentity": { "$ref": "execution-report.schema.json#/$defs/buildIdentity" },
+    "reviewedPlanId": { "type": "string", "minLength": 1 },
+    "reviewedPlanDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "terminalOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recipeId", "stepId", "outcome"],
+      "properties": {
+        "recipeId": { "const": "feature.copy_roms" },
+        "stepId": { "const": "feature.copy_roms/copy_rom_library" },
+        "outcome": { "const": "succeeded" }
+      }
+    },
+    "copyPolicy": { "const": "merge" },
+    "strategyDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sourceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceIdentity", "entries"],
+      "properties": {
+        "sourceIdentity": { "type": "string", "minLength": 1 },
+        "entries": { "$ref": "#/$defs/manifestEntries", "minItems": 1 }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "setupLocation", "volumeIdentity", "before", "after"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "setupLocation": { "type": "string", "minLength": 1 },
+        "volumeIdentity": { "type": "string", "minLength": 1 },
+        "before": { "$ref": "#/$defs/manifestEntries" },
+        "after": { "$ref": "#/$defs/manifestEntries" }
+      }
+    },
+    "sentinel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativePath", "expectedSha256"],
+      "properties": {
+        "relativePath": { "const": "qualification-sentinel.keep" },
+        "expectedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "retroArch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageId",
+        "installedVersion",
+        "pinnedSource",
+        "pinnedVersion",
+        "installedApkSha256",
+        "pinnedArtifactSha256"
+      ],
+      "properties": {
+        "packageId": { "const": "com.retroarch.aarch64" },
+        "installedVersion": { "type": "string", "minLength": 1 },
+        "pinnedSource": { "type": "string", "pattern": "^https://.+" },
+        "pinnedVersion": { "type": "string", "minLength": 1 },
+        "installedApkSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "pinnedArtifactSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "rootAuthorityUsed": { "const": false },
+    "oemCompilerUsed": { "const": false },
+    "oemStageUsed": { "const": false }
+  },
+  "$defs": {
+    "manifestEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relativePath", "sha256"],
+      "properties": {
+        "relativePath": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "manifestEntries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/manifestEntry" }
+    }
+  }
+}
